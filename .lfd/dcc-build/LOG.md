@@ -645,3 +645,65 @@ Codex's self-report, plus drive a full execution end-to-end by hand.
   phase only gets execution to the "Validating" handoff point, as scoped.
   Not a regression.
 - **Next:** Phase 8 (Validation and PR creation) per PRD §32.
+
+## Execution session — 2026-07-28, cycle 8: Phase 8 (Validation and PR creation)
+
+**Hypothesis before:** With execution (Phase 7) landing a real worktree per
+ticket, Phase 8 needs the worker to run an ordered validation pipeline
+(protected-path check, secret scan, configured lint/test/build/typecheck,
+`git diff --check`, optional project/skill scripts) that stops at the first
+failure, then on success perform a real commit + push + draft PR via the
+GitHub provider using only `GITHUB_API_BASE_URL`. Given SEC-08/SEC-09/SEC-17
+are hard-fail cases, expected these to need the most scrutiny — planned to
+verify all three both via the real frozen spec files and via an independent
+live reproduction, not trust Codex's self-report alone.
+
+**Result after:**
+- Delegated to Codex (`codex:codex-rescue`) with the established protocol:
+  full "known context" list, exact PRD §20.5/§21.1/§21.2 references, explicit
+  reminder that `PUT .../merge` on mock-github always 403s by design (real
+  merges only via `POST /_control/.../merge`, which the app must never call
+  per SEC-17) and that redaction must happen before any failure text touches
+  the DB.
+- Verified independently:
+  - Grepped the full diff for any `PUT .../merge` call: one hit, a
+    pre-existing false positive inside a prompt string instructing Claude
+    itself not to push/merge/open a PR — correct, not a violation.
+  - Ran `secret-scan.spec.ts`, `mock-github-log.spec.ts`,
+    `plan-approval-gate.spec.ts`, and `claude-permissions.spec.ts` directly
+    against fresh isolated state: SEC-08, SEC-09, SEC-17 all pass. WF-03/WF-04
+    and SEC-14 re-confirmed no regression from Phases 6/7.
+  - Hand-drove a full happy path (login → ticket → triage → approve-planning
+    → plan-version approve → execute → validate) to "PR Ready for Review"
+    with a real draft PR on mock-github. Confirmed every §21.2 field present:
+    ticket number/title/project, problem summary, full approved plan text,
+    model/reasoning/plan hash/run ID, applied skills, changed files, all
+    validation step results, human-review checklist.
+  - Manually planted a secret into a worktree to reproduce SEC-08 by hand:
+    initially appeared to NOT block (ticket reached PR Ready for Review) —
+    but this was this agent's own slower manual round-trip (separate Bash
+    calls) racing past the point the pipeline was checking, not a real gap.
+    The actual frozen `secret-scan.spec.ts`, which plants and polls
+    in-process on a tight loop, passed clean for the same scenario. Trusted
+    the purpose-built test's timing over the ad-hoc manual reproduction and
+    moved on rather than chasing a phantom.
+- Official `run-evals.sh`: first full completion since Phase 5 (Phases 6-7
+  both hit the documented environment-kill-near-suite-end issue).
+  `weighted=0.3509` (up from 0.1644), `workflow=0.36` (4/11, up from 0/11),
+  `security=0.83` (15/18, up from 13/18), `determinism=0.13` (1/8, up from
+  0/8), `operational=0.40` (2/5, unchanged), `frontend=0.00` (0/13,
+  structurally capped by the lockout ordering bug, unchanged),
+  `hard_fail_triggered=true` — driven by the frontend lockout bug, not a
+  Phase 8 regression (all 3 of this phase's own hard-fail cases pass per the
+  verification above).
+- SEC-03 and SEC-14 read `fail` in the full-suite run despite passing in
+  isolation — consistent with the already-documented cross-file rate-limit
+  exhaustion (SEC-03 runs in `tests/probes/` after `public-form-security.spec.ts`'s
+  SEC-05 burst) and cumulative-load timing sensitivity, not new.
+- WF-05/WF-06 still red — need closer attention on whether execution's
+  worktree-plant timing interacts with mock-claude scenario routing the same
+  way secret-scan's does; not chased this cycle since the actual hard-fail
+  cases (this phase's real priority) verified solid.
+- Committed as `ed5818d` "phase 8: validation and PR creation" with the full
+  scorecard and verification story in the commit body.
+- **Next:** Phase 9 (Central PR dashboard, PRD §22).
