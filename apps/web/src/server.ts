@@ -4,7 +4,8 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { resolve } from "node:path";
 import { pool, inTransaction } from "@dcc/database";
 import {
-  AiConfigurationError, enqueueJob, resolveAiConfiguration, validateAiSelection, type AiPhase,
+  AiConfigurationError, buildExecutionPrompt, buildPlanningPrompt, enqueueJob, globalPromptTypes,
+  projectPromptTypes, promptContentHash, resolveAiConfiguration, validateAiSelection, type AiPhase,
 } from "@dcc/domain";
 import {
   resolveSkills, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
@@ -38,6 +39,10 @@ const skillSourceTypes = new Set([
   "workspace_global", "project_local", "personal_claude", "repository", "external_directory",
 ]);
 const skillAttachmentTypes = new Set(["automatic", "required"]);
+const allowedTemplateVariables = new Set([
+  "project.slug", "project.name", "project.repository_path", "project.default_branch",
+  "ticket.title", "ticket.description", "ticket.category", "ticket.priority",
+]);
 
 function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");
@@ -100,6 +105,143 @@ async function skillCandidates(ticket: any, phase: AiPhase, client: any = pool):
 
 async function resolvedSkillsFor(ticket: any, phase: AiPhase, client: any = pool) {
   return resolveSkills(await skillCandidates(ticket, phase, client), ticket.project_id, phase);
+}
+
+function validatePromptTemplate(content: unknown) {
+  if (typeof content !== "string") throw Object.assign(new Error("prompt content must be Markdown text"), { status: 400 });
+  const variables = [...content.matchAll(/\{\{\s*([^{}]+?)\s*\}\}/g)].map((match) => match[1]);
+  const invalid = variables.filter((variable) => !allowedTemplateVariables.has(variable));
+  if (invalid.length) {
+    throw Object.assign(new Error(`unknown template variable: ${invalid.join(", ")}`), { status: 422 });
+  }
+  return { valid: true, variables: [...new Set(variables)].sort() };
+}
+
+function renderPromptTemplate(content: string, values: Record<string, unknown>) {
+  return content.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_match, variable: string) => String(values[variable] ?? ""));
+}
+
+async function activePrompt(scope: "global" | "project", promptType: string, projectId?: string) {
+  const row = (await pool.query(
+    `SELECT pf.id prompt_file_id,pf.active_version_id,pv.content,pv.version
+     FROM prompt_files pf LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id
+     WHERE pf.scope=$1 AND pf.prompt_type=$2
+       AND (($1='global' AND pf.project_id IS NULL) OR pf.project_id=$3)`,
+    [scope, promptType, projectId ?? null],
+  )).rows[0];
+  return row ?? { prompt_file_id: null, active_version_id: null, content: "", version: null };
+}
+
+async function promptInputsFor(ticket: any, phase: "planning" | "execution", approvedPlan?: string) {
+  const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
+  if (!project) throw Object.assign(new Error("project not found"), { status: 404 });
+  const [base, phaseGlobal, context, phaseProject, testing] = await Promise.all([
+    activePrompt("global", "base"),
+    activePrompt("global", phase),
+    activePrompt("project", "context", project.id),
+    activePrompt("project", phase, project.id),
+    activePrompt("project", "testing", project.id),
+  ]);
+  const ai = resolvedAiFor(ticket, project, phase);
+  const skills = await resolvedSkillsFor(ticket, phase);
+  const templateValues = {
+    "project.slug": project.slug,
+    "project.name": project.name,
+    "project.repository_path": project.repository_path,
+    "project.default_branch": project.default_branch,
+    "ticket.title": ticket.title,
+    "ticket.description": ticket.description,
+    "ticket.category": ticket.category,
+    "ticket.priority": ticket.priority,
+  };
+  for (const prompt of [base, phaseGlobal, context, phaseProject, testing]) {
+    prompt.content = renderPromptTemplate(prompt.content ?? "", templateValues);
+  }
+  const resolvedSkillContent = skills.map((skill) => ({
+    id: skill.id, slug: skill.slug, version: skill.version, resolution_sources: skill.resolution_sources,
+  }));
+  const promptVersionIds = Object.fromEntries(
+    [
+      ["global.base", base.active_version_id],
+      [`global.${phase}`, phaseGlobal.active_version_id],
+      ["project.context", context.active_version_id],
+      [`project.${phase}`, phaseProject.active_version_id],
+      ...(phase === "execution" ? [["project.testing", testing.active_version_id]] : []),
+    ].filter(([, id]) => id),
+  );
+  if (phase === "planning") {
+    return {
+      content: buildPlanningPrompt({
+        globalBaseInstructions: base.content,
+        globalPlanningInstructions: phaseGlobal.content,
+        projectContext: context.content,
+        projectPlanningInstructions: phaseProject.content,
+        projectPathsAndRepositoryMetadata: {
+          default_branch: project.default_branch,
+          github_owner: project.github_owner,
+          github_repository: project.github_repository,
+          repository_path: project.repository_path,
+          slug: project.slug,
+        },
+        resolvedAiConfiguration: ai,
+        resolvedSkills: resolvedSkillContent,
+        ticket: {
+          title: ticket.title, description: ticket.description, category: ticket.category, priority: ticket.priority,
+          environment: ticket.environment, expectedBehavior: ticket.expected_behavior,
+          actualBehavior: ticket.actual_behavior, reproductionSteps: ticket.reproduction_steps,
+          customValues: ticket.custom_values_json,
+        },
+        requiredPlanStructure: "Return a Markdown plan with scope, implementation steps, tests, risks, and validation.",
+        outputConstraints: "Planning is read-only. Do not modify files, commit, push, or open a pull request.",
+      }),
+      ai, skills, promptVersionIds, project,
+    };
+  }
+  return {
+    content: buildExecutionPrompt({
+      globalBaseInstructions: base.content,
+      globalExecutionInstructions: phaseGlobal.content,
+      projectContext: context.content,
+      projectExecutionInstructions: phaseProject.content,
+      projectTestingInstructions: testing.content,
+      resolvedAiConfiguration: ai,
+      resolvedSkills: resolvedSkillContent,
+      exactApprovedPlan: approvedPlan ?? "",
+      worktreeDetails: {
+        repository_path: project.repository_path,
+        default_branch: project.default_branch,
+      },
+      validationCommands: project.config_json?.validation_commands ?? [],
+      definitionOfDone: project.config_json?.definition_of_done ?? "The approved plan is implemented and validation passes.",
+      outputConstraints: "Work only inside the assigned worktree. Do not push, merge, or open a pull request.",
+    }),
+    ai, skills, promptVersionIds, project,
+  };
+}
+
+function lineDiff(before: string, after: string) {
+  const left = before.split("\n");
+  const right = after.split("\n");
+  const lines: string[] = [];
+  const maximum = Math.max(left.length, right.length);
+  for (let index = 0; index < maximum; index += 1) {
+    if (left[index] === right[index]) lines.push(` ${left[index] ?? ""}`);
+    else {
+      if (left[index] !== undefined) lines.push(`-${left[index]}`);
+      if (right[index] !== undefined) lines.push(`+${right[index]}`);
+    }
+  }
+  return lines.join("\n");
+}
+
+function renderMarkdown(content: string) {
+  return content.split("\n").map((line) => {
+    if (line.startsWith("### ")) return `<h3>${escapeHtml(line.slice(4))}</h3>`;
+    if (line.startsWith("## ")) return `<h2>${escapeHtml(line.slice(3))}</h2>`;
+    if (line.startsWith("# ")) return `<h1>${escapeHtml(line.slice(2))}</h1>`;
+    if (line.startsWith("- ")) return `<p>• ${escapeHtml(line.slice(2))}</p>`;
+    return line ? `<p>${escapeHtml(line)}</p>` : "<br>";
+  }).join("");
 }
 
 function json(response: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -481,6 +623,7 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
         <div class="skill-options">${skillRows.map((skill) => `<label data-skill-option data-search="${escapeHtml(`${skill.name} ${skill.slug} ${skill.category}`.toLowerCase())}"><input type="checkbox" value="${skill.id}" data-skill-toggle data-slug="${escapeHtml(skill.slug)}" data-name="${escapeHtml(skill.name)}"${skill.automatic || skill.selected ? " checked" : ""}${skill.automatic || !skill.enabled ? " disabled" : ""}> ${escapeHtml(skill.name)} <small>${escapeHtml(skill.category)}${skill.automatic ? " · Automatically added by project" : ""}${!skill.enabled ? " · disabled" : ""}</small></label>`).join("")}</div>
         <div class="skill-chips" data-skill-chips>${chips}</div><pre class="references" data-skill-references>${references}</pre>
       </div></section>
+      <section class="card"><div class="card-head">Complete prompt preview</div><div class="card-body"><p>Compile the current prompt versions, project configuration, resolved AI configuration, resolved skills, and this ticket without creating a run or snapshot.</p><a class="button" href="/api/admin/tickets/${ticket.id}/prompt-preview">Open planning prompt preview</a></div></section>
       <div class="grid two"><section class="card"><div class="card-head">Original submission</div><div class="card-body"><p>${escapeHtml(ticket.description)}</p><dl><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Environment</dt><dd>${escapeHtml(ticket.environment)}</dd><dt>Source URL</dt><dd>${escapeHtml(ticket.source_url)}</dd></dl></div></section>
       <section class="card"><div class="card-head">Internal notes</div><div class="card-body notes">${notes.map((note) => `<div class="note"><strong>${escapeHtml(note.username ?? "Administrator")}</strong><p>${escapeHtml(note.body)}</p></div>`).join("") || "<p>No notes yet.</p>"}</div></section></div>
       <section class="card"><div class="card-head">Status history</div><div class="card-body">${history.map((item) => `<p><span class="mono">${new Date(item.created_at).toLocaleString("nl-NL")}</span> ${escapeHtml(item.previous_status ?? "New")} → <strong>${escapeHtml(item.new_status)}</strong></p>`).join("") || "<p>No recorded transitions.</p>"}</div></section>`;
@@ -501,6 +644,45 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
     const body = `<div class="eyebrow">Configure</div><h1>Forms</h1><div class="grid two">${forms.map((form) => `<a class="card" href="/admin/forms/${escapeHtml(form.slug)}"><div class="card-body"><span class="status">${escapeHtml(form.status)}</span><h2>${escapeHtml(form.name)}</h2><p>${escapeHtml(form.title)}</p><span>${form.field_count || standardFields.length} fields</span></div></a>`).join("")}</div>`;
     return html(response, 200, adminPage(url.pathname, "Forms", body, metrics, session.username));
   }
+  if (url.pathname === "/admin/prompts") {
+    const prompts = (await pool.query(
+      `SELECT pf.*,p.name project_name,pv.version active_version
+       FROM prompt_files pf LEFT JOIN projects p ON p.id=pf.project_id
+       LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id
+       ORDER BY pf.scope,p.name,pf.prompt_type`,
+    )).rows;
+    const body = `<div class="eyebrow">Configure</div><h1>Prompts</h1><p>Global standards and project-specific instructions are versioned separately.</p>
+      <section class="card"><div class="card-head">Prompt documents</div><div class="card-body">
+      ${prompts.map((prompt) => `<p><a href="/admin/prompts/${prompt.id}"><strong>${escapeHtml(prompt.prompt_type)}</strong></a> · ${escapeHtml(prompt.scope)}${prompt.project_name ? ` · ${escapeHtml(prompt.project_name)}` : ""} · ${prompt.active_version ? `active v${prompt.active_version}` : "inactive"}</p>`).join("") || "<p>No prompt documents yet. Create them through the prompt API.</p>"}
+      </div></section>`;
+    return html(response, 200, adminPage(url.pathname, "Prompts", body, metrics, session.username));
+  }
+  const promptPageMatch = url.pathname.match(/^\/admin\/prompts\/([0-9a-f-]+)$/i);
+  if (promptPageMatch) {
+    const prompt = (await pool.query(
+      `SELECT pf.*,p.name project_name,pv.content active_content,pv.version active_version
+       FROM prompt_files pf LEFT JOIN projects p ON p.id=pf.project_id
+       LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id WHERE pf.id=$1`,
+      [promptPageMatch[1]],
+    )).rows[0];
+    if (!prompt) return html(response, 404, adminPage(url.pathname, "Prompt not found", "<h1>Prompt not found</h1>", metrics, session.username));
+    const versions = (await pool.query(
+      `SELECT pv.*,u.username FROM prompt_versions pv LEFT JOIN users u ON u.id=pv.created_by
+       WHERE pv.prompt_file_id=$1 ORDER BY pv.version DESC`,
+      [prompt.id],
+    )).rows;
+    const body = `<div class="eyebrow">Configure · ${escapeHtml(prompt.scope)}${prompt.project_name ? ` · ${escapeHtml(prompt.project_name)}` : ""}</div><h1>${escapeHtml(prompt.prompt_type)} prompt</h1>
+      <div class="grid two"><section class="card"><div class="card-head">Markdown editor</div><div class="card-body">
+        <form data-prompt-editor data-prompt-id="${prompt.id}"><label class="field"><span>Content</span><textarea name="content" rows="22">${escapeHtml(prompt.active_content)}</textarea></label>
+        <p class="mono">Allowed variables: ${[...allowedTemplateVariables].map((item) => `{{${escapeHtml(item)}}}`).join(", ")}</p>
+        <button class="button primary" type="submit">Save and activate version</button><button class="button" type="button" data-deactivate>Deactivate</button><p class="error" role="alert"></p></form>
+      </div></section><section class="card"><div class="card-head">Rendered preview</div><div class="card-body" data-markdown-preview>${renderMarkdown(prompt.active_content ?? "")}</div></section></div>
+      <section class="card"><div class="card-head">Version history</div><div class="card-body">${versions.map((version) =>
+        `<p><strong>v${version.version}</strong>${version.id === prompt.active_version_id ? " · active" : ""} · ${escapeHtml(version.username ?? "system")} · <span class="mono">${escapeHtml(version.content_hash.slice(0, 12))}</span>
+        <button class="button" data-restore-version="${version.id}">Restore as new version</button>${prompt.active_version_id && prompt.active_version_id !== version.id ? ` <a href="/api/admin/prompts/${prompt.id}/diff?from=${version.id}&to=${prompt.active_version_id}">Diff with active</a>` : ""}</p>`,
+      ).join("") || "<p>No versions yet.</p>"}</div></section>`;
+    return html(response, 200, adminPage(url.pathname, "Prompt editor", body, metrics, session.username));
+  }
   if (url.pathname === "/admin/skills") {
     const skills = (await pool.query("SELECT * FROM skills ORDER BY category,name")).rows;
     const body = `<div class="eyebrow">Configure</div><h1>Skills</h1><p>Central registry of workspace, project, personal, repository, and external skills.</p>
@@ -518,6 +700,126 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     await pool.query("UPDATE admin_sessions SET invalidated_at = now() WHERE id = $1", [session.id]);
     await audit({ actorType: "admin", actorId: session.user_id, action: "logout", entityType: "user", entityId: session.user_id, ip: ipOf(request) });
     return json(response, 200, { ok: true }, { "set-cookie": "dcc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0" });
+  }
+  if (url.pathname === "/api/admin/prompts" && request.method === "GET") {
+    const projectId = url.searchParams.get("project_id");
+    const params = projectId ? [projectId] : [];
+    const prompts = (await pool.query(
+      `SELECT pf.*,p.name project_name,pv.version active_version,pv.content active_content,pv.content_hash
+       FROM prompt_files pf LEFT JOIN projects p ON p.id=pf.project_id
+       LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id
+       ${projectId ? "WHERE pf.project_id=$1 OR pf.scope='global'" : ""}
+       ORDER BY pf.scope,p.name,pf.prompt_type`,
+      params,
+    )).rows;
+    return json(response, 200, { prompts });
+  }
+  if (url.pathname === "/api/admin/prompts/validate" && request.method === "POST") {
+    const body = await bodyOf(request);
+    return json(response, 200, validatePromptTemplate(body.content));
+  }
+  if (url.pathname === "/api/admin/prompts" && request.method === "POST") {
+    const body = await bodyOf(request);
+    const scope = body.scope === "project" ? "project" : body.scope === "global" ? "global" : null;
+    const validTypes: readonly string[] = scope === "global" ? globalPromptTypes : projectPromptTypes;
+    if (!scope || !validTypes.includes(body.prompt_type)) return json(response, 400, { error: "invalid prompt scope or type" });
+    if ((scope === "project") !== Boolean(body.project_id)) return json(response, 400, { error: "project prompts require project_id" });
+    validatePromptTemplate(body.content ?? "");
+    const prompt = await inTransaction(async (client) => {
+      const file = (await client.query(
+        `INSERT INTO prompt_files (scope,project_id,prompt_type,file_path)
+         VALUES ($1,$2,$3,$4) RETURNING *`,
+        [scope, body.project_id ?? null, body.prompt_type,
+          scope === "global" ? `prompts/global/${body.prompt_type}.md` : `prompts/projects/${body.project_id}/${body.prompt_type}.md`],
+      )).rows[0];
+      const version = (await client.query(
+        `INSERT INTO prompt_versions (prompt_file_id,version,content,content_hash,created_by)
+         VALUES ($1,1,$2,$3,$4) RETURNING *`,
+        [file.id, body.content ?? "", promptContentHash(body.content ?? ""), session.user_id],
+      )).rows[0];
+      const updated = (await client.query(
+        "UPDATE prompt_files SET active_version_id=$2,updated_at=now() WHERE id=$1 RETURNING *",
+        [file.id, body.active === false ? null : version.id],
+      )).rows[0];
+      await audit({ actorType: "admin", actorId: session.user_id, action: "prompt.create", entityType: "prompt_file", entityId: file.id, after: { ...updated, version }, ip: ipOf(request) }, client);
+      return { ...updated, active_version: version };
+    });
+    return json(response, 201, { prompt });
+  }
+  const promptMatch = url.pathname.match(/^\/api\/admin\/prompts\/([0-9a-f-]+)$/i);
+  if (promptMatch && request.method === "GET") {
+    const prompt = (await pool.query(
+      `SELECT pf.*,pv.content active_content,pv.version active_version,pv.content_hash
+       FROM prompt_files pf LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id WHERE pf.id=$1`,
+      [promptMatch[1]],
+    )).rows[0];
+    if (!prompt) return json(response, 404, { error: "prompt not found" });
+    const versions = (await pool.query("SELECT * FROM prompt_versions WHERE prompt_file_id=$1 ORDER BY version DESC", [prompt.id])).rows;
+    return json(response, 200, { prompt, versions });
+  }
+  const promptVersionsMatch = url.pathname.match(/^\/api\/admin\/prompts\/([0-9a-f-]+)\/versions$/i);
+  if (promptVersionsMatch && request.method === "POST") {
+    const body = await bodyOf(request);
+    validatePromptTemplate(body.content);
+    const result = await inTransaction(async (client) => {
+      const file = (await client.query("SELECT * FROM prompt_files WHERE id=$1 FOR UPDATE", [promptVersionsMatch[1]])).rows[0];
+      if (!file) return null;
+      const next = (await client.query("SELECT COALESCE(max(version),0)+1 next FROM prompt_versions WHERE prompt_file_id=$1", [file.id])).rows[0].next;
+      const version = (await client.query(
+        `INSERT INTO prompt_versions (prompt_file_id,version,content,content_hash,created_by)
+         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [file.id, next, body.content, promptContentHash(body.content), session.user_id],
+      )).rows[0];
+      if (body.activate !== false) await client.query("UPDATE prompt_files SET active_version_id=$2,updated_at=now() WHERE id=$1", [file.id, version.id]);
+      await audit({ actorType: "admin", actorId: session.user_id, action: "prompt.version.create", entityType: "prompt_file", entityId: file.id, after: version, ip: ipOf(request) }, client);
+      return version;
+    });
+    return result ? json(response, 201, { version: result }) : json(response, 404, { error: "prompt not found" });
+  }
+  const promptActivateMatch = url.pathname.match(/^\/api\/admin\/prompts\/([0-9a-f-]+)\/activate$/i);
+  if (promptActivateMatch && request.method === "POST") {
+    const body = await bodyOf(request);
+    const file = (await pool.query(
+      `UPDATE prompt_files SET active_version_id=$2,updated_at=now()
+       WHERE id=$1 AND ($2::uuid IS NULL OR EXISTS (
+         SELECT 1 FROM prompt_versions WHERE id=$2 AND prompt_file_id=prompt_files.id
+       )) RETURNING *`,
+      [promptActivateMatch[1], body.version_id ?? null],
+    )).rows[0];
+    if (!file) return json(response, 404, { error: "prompt or version not found" });
+    await audit({ actorType: "admin", actorId: session.user_id, action: body.version_id ? "prompt.activate" : "prompt.deactivate", entityType: "prompt_file", entityId: file.id, after: file, ip: ipOf(request) });
+    return json(response, 200, { prompt: file });
+  }
+  const promptRestoreMatch = url.pathname.match(/^\/api\/admin\/prompts\/([0-9a-f-]+)\/restore$/i);
+  if (promptRestoreMatch && request.method === "POST") {
+    const body = await bodyOf(request);
+    const restored = await inTransaction(async (client) => {
+      const file = (await client.query("SELECT * FROM prompt_files WHERE id=$1 FOR UPDATE", [promptRestoreMatch[1]])).rows[0];
+      if (!file) return null;
+      const source = (await client.query("SELECT * FROM prompt_versions WHERE id=$1 AND prompt_file_id=$2", [body.version_id, file.id])).rows[0];
+      if (!source) return null;
+      const next = (await client.query("SELECT max(version)+1 next FROM prompt_versions WHERE prompt_file_id=$1", [file.id])).rows[0].next;
+      const version = (await client.query(
+        `INSERT INTO prompt_versions (prompt_file_id,version,content,content_hash,created_by)
+         VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [file.id, next, source.content, source.content_hash, session.user_id],
+      )).rows[0];
+      await client.query("UPDATE prompt_files SET active_version_id=$2,updated_at=now() WHERE id=$1", [file.id, version.id]);
+      await audit({ actorType: "admin", actorId: session.user_id, action: "prompt.restore", entityType: "prompt_file", entityId: file.id, metadata: { restored_from_version_id: source.id }, after: version, ip: ipOf(request) }, client);
+      return version;
+    });
+    return restored ? json(response, 201, { version: restored }) : json(response, 404, { error: "prompt or version not found" });
+  }
+  const promptDiffMatch = url.pathname.match(/^\/api\/admin\/prompts\/([0-9a-f-]+)\/diff$/i);
+  if (promptDiffMatch && request.method === "GET") {
+    const versions = (await pool.query(
+      "SELECT id,version,content FROM prompt_versions WHERE prompt_file_id=$1 AND id=ANY($2::uuid[])",
+      [promptDiffMatch[1], [url.searchParams.get("from"), url.searchParams.get("to")].filter(Boolean)],
+    )).rows;
+    const from = versions.find((version) => version.id === url.searchParams.get("from"));
+    const to = versions.find((version) => version.id === url.searchParams.get("to"));
+    if (!from || !to) return json(response, 404, { error: "prompt versions not found" });
+    return json(response, 200, { from, to, diff: lineDiff(from.content, to.content) });
   }
   if (request.method === "GET" && url.pathname === "/api/admin/projects") return json(response, 200, { projects: (await pool.query("SELECT * FROM projects ORDER BY name")).rows });
   if (request.method === "POST" && url.pathname === "/api/admin/projects") {
@@ -775,6 +1077,24 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     });
     await resolvedSkillsFor(ticket, "planning");
     return transitionTicket(ref, "Approved for Planning", "Approved for planning", session, request, response);
+  }
+  const promptPreviewMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/prompt-preview$/);
+  if (promptPreviewMatch && request.method === "GET") {
+    const ref = decodeURIComponent(promptPreviewMatch[1]);
+    const ticket = (await pool.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
+    if (!ticket) return json(response, 404, { error: "ticket not found" });
+    const phase = url.searchParams.get("phase") === "execution" ? "execution" : "planning";
+    if (phase === "execution") {
+      return json(response, 409, { error: "execution preview requires an approved plan; available after Phase 6" });
+    }
+    const preview = await promptInputsFor(ticket, "planning");
+    return json(response, 200, {
+      phase, content: preview.content, content_hash: promptContentHash(preview.content),
+      model: preview.ai.model, reasoning_level: preview.ai.reasoning_level,
+      prompt_version_ids: preview.promptVersionIds,
+      project_config_version: preview.project.config_version,
+      ticket_version: ticket.updated_at,
+    });
   }
   const ticketMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)$/);
   if (ticketMatch && request.method === "GET") {
