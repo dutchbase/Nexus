@@ -4,7 +4,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { resolve } from "node:path";
 import { pool, inTransaction } from "@dcc/database";
 import {
-  AiConfigurationError, buildExecutionPrompt, buildPlanningPrompt, enqueueJob, globalPromptTypes,
+  AiConfigurationError, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob, globalPromptTypes,
   projectPromptTypes, promptContentHash, resolveAiConfiguration, validateAiSelection, type AiPhase,
 } from "@dcc/domain";
 import {
@@ -394,8 +394,8 @@ function validateFields(fields: any[], body: Record<string, any>) {
     if (typeof value === "string") {
       const limit = Math.min(Number(field.validation_json?.max_length ?? (field.field_type === "long_text" ? 10000 : 500)), 10000);
       if (value.length > limit) errors[field.field_key] = "too long";
-      if (field.field_type === "email" && value && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) errors[field.field_key] = "invalid email";
-      if (field.field_type === "url" && value) {
+      if (field.required && field.field_type === "email" && value && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) errors[field.field_key] = "invalid email";
+      if (field.required && field.field_type === "url" && value) {
         try { new URL(value); } catch { errors[field.field_key] = "invalid URL"; }
       }
     }
@@ -583,6 +583,27 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
     const body = `<div class="eyebrow">Work</div><h1>Tickets</h1><form class="toolbar" id="filters"><input class="search" data-ticket-filter name="search" placeholder="Search tickets" value="${escapeHtml(search)}"><select data-ticket-filter name="status"><option value="">All statuses</option>${[...validStatuses].map((status) => `<option${url.searchParams.get("status") === status ? " selected" : ""}>${status}</option>`).join("")}</select><a class="button" href="/admin/tickets">Reset</a><span aria-live="polite">${tickets.length} tickets</span></form><section class="card"><div class="list-head"><span>Ticket</span><span>Title</span><span>Project</span><span>Priority</span><span>Status</span><span>Updated</span></div>${rows}</section>`;
     return html(response, 200, adminPage(url.pathname, "Tickets", body, metrics, session.username));
   }
+  const planComparePageMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)\/plans\/compare$/);
+  if (planComparePageMatch) {
+    const ref = decodeURIComponent(planComparePageMatch[1]);
+    const ids = [url.searchParams.get("from"), url.searchParams.get("to")].filter(Boolean);
+    const rows = (await pool.query(
+      `SELECT pv.* FROM plan_versions pv JOIN plans p ON p.id=pv.plan_id
+       JOIN tickets t ON t.id=p.ticket_id
+       WHERE (t.id::text=$1 OR t.ticket_number=$1) AND pv.id=ANY($2::uuid[])`,
+      [ref, ids],
+    )).rows;
+    const from = rows.find((version) => version.id === ids[0]);
+    const to = rows.find((version) => version.id === ids[1]);
+    if (!from || !to) {
+      return html(response, 404, adminPage(url.pathname, "Versions not found", "<h1>Plan versions not found</h1>", metrics, session.username));
+    }
+    const body = `<div class="eyebrow">${escapeHtml(ref)} · Plan comparison</div>
+      <h1>Version ${from.version} → ${to.version}</h1>
+      <p><a class="button" href="/admin/tickets/${escapeHtml(ref)}/plans">Back to plans</a></p>
+      <section class="card"><div class="card-body"><pre>${escapeHtml(lineDiff(from.content_markdown, to.content_markdown))}</pre></div></section>`;
+    return html(response, 200, adminPage(url.pathname, "Plan comparison", body, metrics, session.username));
+  }
   const ticketPlansPageMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)\/plans$/);
   if (ticketPlansPageMatch) {
     const ref = decodeURIComponent(ticketPlansPageMatch[1]);
@@ -599,8 +620,12 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
        WHERE p.ticket_id=$1 ORDER BY pv.version DESC`,
       [ticket.id],
     )).rows;
+    const compare = versions.length > 1
+      ? `<a class="button" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans/compare?from=${versions[1].id}&to=${versions[0].id}">Compare latest versions</a>`
+      : "";
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · Plan review</div>
       <h1>Implementation plan</h1><p><a class="button" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}">Back to ticket</a></p>
+      <p>${compare}</p>
       ${versions.map((version) => `<section class="card"><div class="card-head">Version ${version.version} · ${escapeHtml(version.model)} / ${escapeHtml(version.reasoning_level)}</div>
         <div class="card-body">${renderMarkdown(version.content_markdown)}
         <details><summary>Raw Markdown</summary><pre>${escapeHtml(version.content_markdown)}</pre></details>
@@ -1168,6 +1193,175 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     )).rows;
     return json(response, 200, { plans });
   }
+  const planRevisionMatch = url.pathname.match(/^\/api\/admin\/plans\/([0-9a-f-]+)\/request-revision$/i);
+  if (planRevisionMatch && request.method === "POST") {
+    const body = await bodyOf(request);
+    if (typeof body.feedback !== "string" || !body.feedback.trim() || body.feedback.length > 10000) {
+      return json(response, 400, { error: "feedback is required" });
+    }
+    const result = await inTransaction(async (client) => {
+      const plan = (await client.query(
+        `SELECT p.*,t.status,t.id ticket_id
+         FROM plans p JOIN tickets t ON t.id=p.ticket_id
+         WHERE p.id=$1 FOR UPDATE OF p,t`,
+        [planRevisionMatch[1]],
+      )).rows[0];
+      if (!plan) return null;
+      if (plan.status !== "Plan Ready for Review") {
+        throw Object.assign(new Error(`revision cannot be requested from ${plan.status}`), { status: 409 });
+      }
+      const current = (await client.query(
+        "SELECT * FROM plan_versions WHERE id=$1 AND plan_id=$2",
+        [plan.current_version_id, plan.id],
+      )).rows[0];
+      if (!current) throw Object.assign(new Error("current plan version not found"), { status: 409 });
+      const feedback = (await client.query(
+        `INSERT INTO plan_review_feedback (plan_id,plan_version_id,feedback,created_by)
+         VALUES ($1,$2,$3,$4) RETURNING *`,
+        [plan.id, current.id, body.feedback.trim(), session.user_id],
+      )).rows[0];
+      await client.query(
+        "UPDATE tickets SET status='Plan Revision Requested',updated_at=now() WHERE id=$1",
+        [plan.ticket_id],
+      );
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_plan_version_id)
+         VALUES ($1,$2,'Plan Revision Requested','Plan revision requested','admin',$3,$4)`,
+        [plan.ticket_id, plan.status, session.user_id, current.id],
+      );
+      const job = await enqueueJob({
+        type: "planning.revise",
+        payload: {
+          ticket_id: plan.ticket_id,
+          plan_id: plan.id,
+          plan_version_id: current.id,
+          feedback_id: feedback.id,
+          ...(typeof body.mock_scenario_path === "string" ? { mock_scenario_path: body.mock_scenario_path } : {}),
+        },
+        idempotencyKey: `planning.revise:${plan.id}:${current.version + 1}`,
+        maxAttempts: 1,
+      }, client);
+      const ticket = (await client.query(
+        "UPDATE tickets SET status='Plan Revision Queued',updated_at=now() WHERE id=$1 RETURNING *",
+        [plan.ticket_id],
+      )).rows[0];
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_job_id,related_plan_version_id)
+         VALUES ($1,'Plan Revision Requested','Plan Revision Queued','Plan revision job queued','admin',$2,$3,$4)`,
+        [plan.ticket_id, session.user_id, job.id, current.id],
+      );
+      return { ticket, job, feedback };
+    });
+    return result ? json(response, 202, result) : json(response, 404, { error: "plan not found" });
+  }
+  const planFeedbackMatch = url.pathname.match(/^\/api\/admin\/plans\/([0-9a-f-]+)\/feedback$/i);
+  if (planFeedbackMatch && request.method === "GET") {
+    const feedback = (await pool.query(
+      "SELECT * FROM plan_review_feedback WHERE plan_id=$1 ORDER BY created_at",
+      [planFeedbackMatch[1]],
+    )).rows;
+    return json(response, 200, { feedback });
+  }
+  const planDiffMatch = url.pathname.match(/^\/api\/admin\/plans\/([0-9a-f-]+)\/diff$/i);
+  if (planDiffMatch && request.method === "GET") {
+    const ids = [url.searchParams.get("from"), url.searchParams.get("to")].filter(Boolean);
+    const versions = (await pool.query(
+      "SELECT id,version,content_markdown FROM plan_versions WHERE plan_id=$1 AND id=ANY($2::uuid[])",
+      [planDiffMatch[1], ids],
+    )).rows;
+    const from = versions.find((version) => version.id === ids[0]);
+    const to = versions.find((version) => version.id === ids[1]);
+    if (!from || !to) return json(response, 404, { error: "plan versions not found" });
+    return json(response, 200, { from, to, diff: lineDiff(from.content_markdown, to.content_markdown) });
+  }
+  const planApproveMatch = url.pathname.match(/^\/api\/admin\/plan-versions\/([0-9a-f-]+)\/approve$/i);
+  if (planApproveMatch && request.method === "POST") {
+    const body = await bodyOf(request);
+    const approved = await inTransaction(async (client) => {
+      const version = (await client.query(
+        `SELECT pv.*,p.ticket_id,p.current_version_id,t.updated_at ticket_version,t.project_id,
+                pr.config_version,ar.model,ar.reasoning_level,ar.skill_snapshot_id,ps.metadata_json
+         FROM plan_versions pv
+         JOIN plans p ON p.id=pv.plan_id
+         JOIN tickets t ON t.id=p.ticket_id
+         JOIN projects pr ON pr.id=t.project_id
+         LEFT JOIN agent_runs ar ON ar.id=pv.agent_run_id
+         LEFT JOIN prompt_snapshots ps ON ps.id=pv.prompt_snapshot_id
+         WHERE pv.id=$1 FOR UPDATE OF p,t`,
+        [planApproveMatch[1]],
+      )).rows[0];
+      if (!version) return null;
+      if (body.plan_version_id !== undefined && body.plan_version_id !== version.id) {
+        throw Object.assign(new Error("plan version id does not match"), { status: 409 });
+      }
+      if (body.content_hash !== undefined && body.content_hash !== version.content_hash) {
+        throw Object.assign(new Error("plan content hash does not match"), { status: 409 });
+      }
+      if (version.current_version_id !== version.id) {
+        throw Object.assign(new Error("only the current plan version can be approved"), { status: 409 });
+      }
+      const ticket = (await client.query(
+        `UPDATE tickets SET approved_plan_version_id=$2,approved_plan_hash=$3,
+           approved_ticket_version=$4,approved_project_config_version=$5,
+           approved_model_config_json=$6,approved_skill_snapshot_id=$7,
+           approved_prompt_versions_json=$8,plan_approved_at=now(),
+           status='Plan Approved',updated_at=now()
+         WHERE id=$1 RETURNING *`,
+        [version.ticket_id, version.id, version.content_hash, version.ticket_version, version.config_version,
+          { model: version.model, reasoning_level: version.reasoning_level }, version.skill_snapshot_id,
+          version.metadata_json?.promptVersionIds ?? {}],
+      )).rows[0];
+      await client.query("UPDATE plans SET potentially_stale=false,updated_at=now() WHERE id=$1", [version.plan_id]);
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_plan_version_id)
+         VALUES ($1,$2,'Plan Approved',$3,'admin',$4,$5)`,
+        [version.ticket_id, body.reconfirm ? "Plan Approved" : "Plan Ready for Review",
+          body.reconfirm ? "Approved plan reconfirmed" : "Plan approved", session.user_id, version.id],
+      );
+      return { ticket, plan_version: version };
+    });
+    return approved ? json(response, 200, approved) : json(response, 404, { error: "plan version not found" });
+  }
+  const executeMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/execute$/);
+  if (executeMatch && request.method === "POST") {
+    const body = await bodyOf(request);
+    const ref = decodeURIComponent(executeMatch[1]);
+    const ticket = (await pool.query(
+      "SELECT id FROM tickets WHERE id::text=$1 OR ticket_number=$1",
+      [ref],
+    )).rows[0];
+    if (!ticket) return json(response, 404, { error: "ticket not found" });
+    const gate = await checkPlanApprovalGate(pool, ticket.id);
+    if (!gate.valid) return json(response, 409, { error: gate.code, message: gate.message });
+    const result = await inTransaction(async (client) => {
+      const lockedGate = await checkPlanApprovalGate(client, ticket.id);
+      if (!lockedGate.valid) throw Object.assign(new Error(lockedGate.message), { status: 409 });
+      const attemptNumber = (await client.query(
+        "SELECT COALESCE(max(attempt_number),0)+1 next FROM execution_attempts WHERE ticket_id=$1",
+        [ticket.id],
+      )).rows[0].next;
+      const attempt = (await client.query(
+        `INSERT INTO execution_attempts (ticket_id,plan_version_id,attempt_number,validation_status)
+         VALUES ($1,$2,$3,'queued') RETURNING *`,
+        [ticket.id, lockedGate.planVersion.id, attemptNumber],
+      )).rows[0];
+      const job = await enqueueJob({
+        type: "execution.run",
+        payload: {
+          ticket_id: ticket.id, execution_attempt_id: attempt.id,
+          plan_version_id: lockedGate.planVersion.id,
+          ...(typeof body.mock_scenario_path === "string" ? { mock_scenario_path: body.mock_scenario_path } : {}),
+        },
+        idempotencyKey: `execution.run:${attempt.id}`, maxAttempts: 1,
+      }, client);
+      await client.query("UPDATE tickets SET status='Execution Queued',updated_at=now() WHERE id=$1", [ticket.id]);
+      return { attempt, job };
+    });
+    return json(response, 202, result);
+  }
   const promptPreviewMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/prompt-preview$/);
   if (promptPreviewMatch && request.method === "GET") {
     const ref = decodeURIComponent(promptPreviewMatch[1]);
@@ -1189,8 +1383,26 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
   const ticketMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)$/);
   if (ticketMatch && request.method === "GET") {
     const ref = decodeURIComponent(ticketMatch[1]);
-    const ticket = (await pool.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
+    let ticket = (await pool.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
     if (!ticket) return json(response, 404, { error: "ticket not found" });
+    if (ticket.status === "Submitted") {
+      // PRD §17.2 "Administrator opens triage": Submitted -> Triage fires
+      // as a side effect of an admin viewing the ticket.
+      ticket = await inTransaction(async (client) => {
+        const updated = (await client.query(
+          "UPDATE tickets SET status='Triage',updated_at=now() WHERE id=$1 AND status='Submitted' RETURNING *",
+          [ticket.id],
+        )).rows[0];
+        if (updated) {
+          await client.query(
+            `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
+             VALUES ($1,'Submitted','Triage','Administrator opened triage','admin',$2)`,
+            [ticket.id, session.user_id],
+          );
+        }
+        return updated ?? ticket;
+      });
+    }
     const [history, notes, attachments] = await Promise.all([
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at", [ticket.id]),
       pool.query("SELECT * FROM ticket_notes WHERE ticket_id=$1 ORDER BY created_at", [ticket.id]),

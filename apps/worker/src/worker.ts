@@ -23,7 +23,7 @@ import {
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 const workerId = `worker-${randomUUID()}`;
-const planningJobTypes = ["planning.generate"];
+const planningJobTypes = ["planning.generate", "planning.revise"];
 let stopping = false;
 
 process.on("SIGTERM", () => { stopping = true; });
@@ -219,24 +219,90 @@ async function storePlan(input: {
   });
 }
 
+async function storeRevisedPlan(input: {
+  ticket: any; plan: any; previousVersion: any; jobId: string; runId: string;
+  promptSnapshotId: string; markdown: string;
+}) {
+  const versionNumber = Number(input.previousVersion.version) + 1;
+  const planDirectory = path.resolve(
+    process.env.DCC_DATA_ROOT ?? REPO_ROOT,
+    "data", "tickets", input.ticket.ticket_number, "plans",
+  );
+  await mkdir(planDirectory, { recursive: true });
+  const planPath = path.join(planDirectory, `v${versionNumber}.md`);
+  // Exclusive creation is intentional: a revision can only create its new
+  // artifact and can never open an earlier plan file for writing.
+  await writeFile(planPath, input.markdown, { flag: "wx" });
+  return inTransaction(async (client) => {
+    const locked = (await client.query("SELECT * FROM plans WHERE id=$1 FOR UPDATE", [input.plan.id])).rows[0];
+    if (!locked || locked.current_version_id !== input.previousVersion.id) {
+      throw new Error("plan changed while revision was running");
+    }
+    const version = (await client.query(
+      `INSERT INTO plan_versions
+       (plan_id,version,content_markdown,content_hash,prompt_snapshot_id,agent_run_id)
+       VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [locked.id, versionNumber, input.markdown, hash(input.markdown), input.promptSnapshotId, input.runId],
+    )).rows[0];
+    await client.query(
+      "UPDATE plans SET current_version_id=$2,potentially_stale=false,updated_at=now() WHERE id=$1",
+      [locked.id, version.id],
+    );
+    const ticket = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
+    await client.query(
+      `UPDATE tickets SET status='Plan Ready for Review',approved_plan_version_id=NULL,
+       approved_plan_hash=NULL,approved_ticket_version=NULL,approved_project_config_version=NULL,
+       approved_model_config_json=NULL,approved_skill_snapshot_id=NULL,
+       approved_prompt_versions_json=NULL,plan_approved_at=NULL,updated_at=now()
+       WHERE id=$1`,
+      [input.ticket.id],
+    );
+    await client.query(
+      `INSERT INTO ticket_status_history
+       (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
+       VALUES ($1,$2,'Plan Ready for Review','Plan revision completed','worker',$3,$4,$5)`,
+      [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
+    );
+    return { version, planPath };
+  });
+}
+
 async function runPlanning(job: any) {
   await preflightClaudeAuthentication();
   const ticket = (await pool.query("SELECT * FROM tickets WHERE id=$1", [job.payload_json.ticket_id])).rows[0];
   if (!ticket) throw new Error("ticket not found");
-  if (ticket.status !== "Planning Queued") throw new Error(`ticket is not Planning Queued (status: ${ticket.status})`);
+  const revising = job.type === "planning.revise";
+  const expectedStatus = revising ? "Plan Revision Queued" : "Planning Queued";
+  if (ticket.status !== expectedStatus) throw new Error(`ticket is not ${expectedStatus} (status: ${ticket.status})`);
+  const revision = revising ? (await pool.query(
+    `SELECT p.*,pv.version previous_version,pv.content_markdown previous_markdown,
+            f.feedback,f.id feedback_id
+     FROM plans p
+     JOIN plan_versions pv ON pv.id=$2 AND pv.plan_id=p.id
+     JOIN plan_review_feedback f ON f.id=$3 AND f.plan_id=p.id AND f.plan_version_id=pv.id
+     WHERE p.id=$1 AND p.current_version_id=pv.id`,
+    [job.payload_json.plan_id, job.payload_json.plan_version_id, job.payload_json.feedback_id],
+  )).rows[0] : null;
+  if (revising && !revision) throw new Error("revision inputs are no longer current");
   const input = await planningInputs(ticket);
+  const revisionInstructions = revising ? await activePrompt("global", "plan-revision") : null;
+  if (revisionInstructions?.active_version_id) {
+    input.promptVersionIds["global.plan-revision"] = revisionInstructions.active_version_id;
+  }
   const repository = await validateProject({
     repositoryPath: input.project.repository_path, defaultBranch: input.project.default_branch, requireRemote: false,
   });
   if (!repository.valid) throw new Error(`repository is not available for planning: ${repository.errors.join("; ")}`);
 
   const runId = randomUUID();
-  const sessionId = randomUUID();
+  const sessionId = revising ? revision.planning_session_id : randomUUID();
+  if (!sessionId) throw new Error("original planning session is unavailable");
+  const runType = revising ? "plan_revision" : "planning.generate";
   await pool.query(
     `INSERT INTO agent_runs
      (id,ticket_id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
-     VALUES ($1,$2,$3,'planning.generate','running',NULL,$4,$5,$6,now(),$7)`,
-    [runId, ticket.id, input.project.id, input.ai.model, input.ai.reasoning_level,
+     VALUES ($1,$2,$3,$4,'running',NULL,$5,$6,$7,now(),$8)`,
+    [runId, ticket.id, input.project.id, runType, input.ai.model, input.ai.reasoning_level,
       input.project.repository_path, { job_id: job.id }],
   );
   await transitionToPlanning(ticket.id, job.id, runId);
@@ -246,12 +312,15 @@ async function runPlanning(job: any) {
     `INSERT INTO skill_snapshots (ticket_id,run_id,skills_json,content_hash) VALUES ($1,$2,$3,$4) RETURNING *`,
     [ticket.id, runId, JSON.stringify(copied.skills), copied.contentHash],
   )).rows[0];
+  const completePrompt = revising
+    ? `${input.content}\n\n## Plan revision instructions\n\n${revisionInstructions?.content ?? ""}\n\n## Previous approved-for-review plan\n\n${revision.previous_markdown}\n\n## Administrator feedback\n\n${revision.feedback}\n`
+    : input.content;
   const promptSnapshot = await snapshotPrompt({
-    ticketId: ticket.id, projectId: input.project.id, phase: "planning", content: input.content,
+    ticketId: ticket.id, projectId: input.project.id, phase: "planning", content: completePrompt,
     model: input.ai.model, reasoningLevel: input.ai.reasoning_level, skillSnapshotId: skillSnapshot.id,
     metadata: {
       promptVersionIds: input.promptVersionIds, projectConfigVersion: input.project.config_version,
-      ticketVersion: ticket.updated_at,
+      ticketVersion: ticket.updated_at, runType,
     },
   });
   await pool.query(
@@ -262,11 +331,13 @@ async function runPlanning(job: any) {
   const temporary = await mkdtemp(path.join(tmpdir(), "dcc-planning-"));
   try {
     const promptFile = path.join(temporary, "planning-prompt.md");
-    await writeFile(promptFile, input.content, { flag: "wx" });
+    await writeFile(promptFile, completePrompt, { flag: "wx" });
     const skillBundle = await materializeSkillBundle(runId, copied.skills, process.env.DCC_DATA_ROOT ?? REPO_ROOT);
     const scenarioKey = ["mock", "scenario", "path"].join("_");
     const result = await invokePlanningClaude({
-      task: `Create the implementation plan for ticket ${ticket.ticket_number}.`,
+      task: revising
+        ? `Return a complete revised implementation plan for ticket ${ticket.ticket_number}, applying the administrator feedback.`
+        : `Create the implementation plan for ticket ${ticket.ticket_number}.`,
       sessionId, model: input.ai.model, effort: input.ai.reasoning_level, promptFile,
       skillBundleDir: skillBundle, workingDirectory: input.project.repository_path,
       maxTurns: Number(input.project.config_json?.planning_max_turns ?? 20),
@@ -277,7 +348,18 @@ async function runPlanning(job: any) {
     // so observers cannot see a run before its matching invocation exists.
     await pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]);
     const markdown = parsePlanMarkdown(result.markdown);
-    await storePlan({ ticket, jobId: job.id, runId, sessionId, promptSnapshotId: promptSnapshot.id, markdown });
+    if (revising) {
+      await storeRevisedPlan({
+        ticket, plan: revision,
+        previousVersion: {
+          id: job.payload_json.plan_version_id,
+          version: revision.previous_version,
+        },
+        jobId: job.id, runId, promptSnapshotId: promptSnapshot.id, markdown,
+      });
+    } else {
+      await storePlan({ ticket, jobId: job.id, runId, sessionId, promptSnapshotId: promptSnapshot.id, markdown });
+    }
     await pool.query(
       `UPDATE agent_runs SET status='completed',finished_at=now(),exit_code=$2,metadata_json=metadata_json || $3::jsonb WHERE id=$1`,
       [runId, result.exitCode, JSON.stringify({ response: result.raw })],
