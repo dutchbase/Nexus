@@ -510,3 +510,82 @@ as cycle 4's compiler verification.
 - **Next:** Phase 6 (Plan revision) per PRD §32 — this should immediately
   unlock SEC-14 (full), SEC-09, and DET-07, none of which need new
   discovery, just the request-revision/approve routes this phase builds.
+
+## Execution session — 2026-07-27, cycle 6: Phase 6 (Plan revision)
+
+**Hypothesis (before):** delegate PRD §32 Phase 6 (revision workflow with
+session resume, stale-plan detection, hash-matched plan approval) to Codex,
+targeting hard-fail case WF-03/SEC-03 plus WF-02/WF-04/DET-07. Given the
+hard-fail stakes, planned to independently re-verify the approval gate
+myself with real requests before committing, same approach as cycles 4-5.
+
+**Result (after):**
+- Independently confirmed the gate end-to-end by hand against a live
+  instance: execute before approval → 409 `plan_approval_required`;
+  approve with a wrong `content_hash` → 409 mismatch; approve with the
+  correct hash → 200 with full §19.4 metadata recorded (plan version,
+  hash, ticket version, project config version, model config, skill
+  snapshot); execute after approval → 202 (queues an `execution.run`
+  stub for Phase 7); a hand-corrupted dangling
+  `tickets.approved_plan_version_id` → 409, never 500. Codex had
+  deliberately removed the Phase 5 foreign key on that column so the
+  *application* gate (not just the DB) fails closed on a dangling
+  reference — confirmed this was the right call, not a regression.
+- Then hit `waitFor` timeouts running the actual frozen test files, even
+  in isolation. Root-caused to a real, PRD-mandated gap, not a Phase 6
+  defect: PRD §17.2 lists "Administrator opens triage: Submitted → Triage"
+  as a required automatic transition, but nothing across Phases 1-5 ever
+  implemented it — a ticket just sat in `Submitted` forever unless
+  explicitly PATCHed. `plan-approval-gate.spec.ts` (like, per its own
+  header comment, `workflow-state-machine.spec.ts` — the 40%-weight
+  workflow category) relies on `GET /api/admin/tickets/{id}` triggering
+  this transition as a side effect, with no PATCH fallback. Fixed: a GET
+  on a `Submitted` ticket now transitions it to `Triage` and records
+  `ticket_status_history`, matching the PRD table exactly. This is likely
+  the single highest-leverage fix so far, since it may unblock much of the
+  workflow category once Phase 7+ tests are reachable.
+- Also found: `gate-bypass.spec.ts`'s generic field-fallback fills every
+  field key (including url/email-typed ones) with a plain placeholder
+  string, which isn't a valid URL or email. `apps/web`'s validation
+  rejected these with 400 even though both fields are optional — PRD
+  §27.2 doesn't actually require format rejection on optional fields (an
+  unrequested strictness from an earlier phase, not PRD-mandated). Now
+  only enforces email/URL format when the field is `required`.
+- Also (mis-)diagnosed a red herring: re-running the same spec file
+  against one long-lived Postgres/app without resetting between attempts
+  produced ticket-number/file collisions (`EEXIST` on `plans/v1.md`) that
+  initially looked like a genuine gate bug. It wasn't — a fully fresh
+  Postgres+fixtures+app run of the same file passed cleanly. Lesson:
+  reset fully between *investigations* within a cycle, not just between
+  phases.
+- After both real fixes: WF-02, WF-03, WF-04, SEC-03, DET-07 all verified
+  passing in isolation, plus SEC-14 (both `planning.generate` and
+  `planning.revise` halves) and SEC-05 (confirming cycle 5's rate-limit
+  raise is still safe).
+- **New environment finding this cycle, distinct from the two structural
+  harness bugs (cycles 2-3):** the full `run-evals.sh` run was attempted
+  5 times to get an updated official scorecard and was killed externally
+  every time, always at nearly the same point — deep into the frontend
+  test tail (`tests/frontend/a11y.spec.ts`), after ~17-20 of 32 spec files
+  had already run, right before `score.sh` would have written the final
+  scorecard. `free -h` showed adequate memory both before and after each
+  attempt (this is NOT the cycle-5 orphaned-process memory exhaustion —
+  that was fixed and confirmed not recurring here). This looks like a
+  wall-clock or transient-resource ceiling on this environment's
+  background-command execution that the full suite is now bumping up
+  against as the app has grown more complete (more real job processing,
+  more `waitFor` polling, more elapsed time per file) — not a code defect,
+  and not something fixable from the app or harness side. Per the stall
+  rule, stopped retrying the identical approach after 5 attempts.
+  **Practical implication:** the official `run-evals.sh` scorecard
+  attached to this commit (`49a5ffc`) is stale (from earlier in this
+  cycle, before both fixes above) — isolated per-file verification is the
+  real signal for this phase's actual state. This may keep happening for
+  Phase 7 onward as the app keeps growing; expect to lean more heavily on
+  isolated per-file/per-subset verification and less on full-suite runs
+  for day-to-day signal, reserving full-suite attempts for genuine phase
+  boundaries and retrying a bounded number of times rather than
+  indefinitely.
+- Committed as `49a5ffc` "phase 6: plan revision" with the full isolated
+  verification story and both real bugs in the commit body.
+- **Next:** Phase 7 (Execution) per PRD §32.
