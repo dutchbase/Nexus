@@ -5,12 +5,14 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
   assertSubscriptionOnlyEnvironment, ClaudeAuthError, invokePlanningClaude,
-  parsePlanMarkdown, preflightClaudeAuthentication,
+  ClaudeExecutionError, invokeExecutionClaude, parsePlanMarkdown, preflightClaudeAuthentication,
 } from "@dcc/claude-runner";
 import { inTransaction, pool } from "@dcc/database";
 import {
-  buildPlanningPrompt, claimJob, completeJob, failJob, resolveAiConfiguration, snapshotPrompt,
+  buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, claimJob, completeJob, failJob,
+  resolveAiConfiguration, snapshotPrompt,
 } from "@dcc/domain";
+import { createExecutionWorktree, worktreeDiff } from "../../../packages/git-runner/src/index.ts";
 import { validateProject } from "@dcc/project-config";
 import {
   materializeSkillBundle, resolveSkills, snapshotSkills, type ResolutionSource, type SkillCandidate,
@@ -24,21 +26,23 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 
 const workerId = `worker-${randomUUID()}`;
 const planningJobTypes = ["planning.generate", "planning.revise"];
+const executionJobTypes = ["execution.run", "execution.repair"];
 let stopping = false;
+let activeExecutionCancellation: AbortController | null = null;
 
-process.on("SIGTERM", () => { stopping = true; });
-process.on("SIGINT", () => { stopping = true; });
+process.on("SIGTERM", () => { stopping = true; activeExecutionCancellation?.abort(); });
+process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort(); });
 
 function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");
 }
 
-async function refuseQueuedPlanning(code: string, message: string) {
+async function refuseQueuedClaudeJobs(code: string, message: string) {
   try {
     await pool.query(
       `UPDATE jobs SET status=$1,completed_at=now(),error_json=jsonb_build_object('message',$2::text),updated_at=now()
        WHERE status='queued' AND type=ANY($3::text[])`,
-      [code, message, planningJobTypes],
+      [code, message, [...planningJobTypes, ...executionJobTypes]],
     );
   } catch {
     // Startup refusal must remain visible even when the database is unavailable.
@@ -54,7 +58,7 @@ async function subscriptionPreflightOrRefuse() {
     const code = error instanceof ClaudeAuthError ? error.code : "blocked_auth";
     const message = error instanceof Error ? error.message : "blocked_auth: Claude authentication preflight failed";
     console.error(message);
-    await refuseQueuedPlanning(code, message);
+    await refuseQueuedClaudeJobs(code, message);
     return false;
   }
 }
@@ -68,6 +72,8 @@ function ticketAiConfiguration(ticket: any) {
   return {
     default: { model: ticket.default_model, reasoning_level: ticket.default_reasoning_level },
     planning: { model: ticket.planning_model, reasoning_level: ticket.planning_reasoning_level },
+    execution: { model: ticket.execution_model, reasoning_level: ticket.execution_reasoning_level },
+    repair: { model: ticket.repair_model, reasoning_level: ticket.repair_reasoning_level },
   };
 }
 
@@ -76,10 +82,12 @@ function projectAiConfiguration(project: any) {
   return {
     default: { model: ai.default_model, reasoning_level: ai.default_reasoning_level },
     planning: ai.planning,
+    execution: ai.execution,
+    repair: ai.repair,
   };
 }
 
-async function resolvedSkillsFor(ticket: any) {
+async function resolvedSkillsFor(ticket: any, phase: "planning" | "execution" | "repair" = "planning") {
   const rows = (await pool.query(
     `SELECT resolved.* FROM (
        SELECT s.*, 'global_mandatory'::text source, 1 source_order
@@ -94,14 +102,14 @@ async function resolvedSkillsFor(ticket: any) {
        WHERE ts.ticket_id=$2
        UNION ALL
        SELECT s.*, 'phase_required', 4
-       FROM skills s WHERE s.configuration_json->'required_phases' ? 'planning'
+       FROM skills s WHERE s.configuration_json->'required_phases' ? $3
      ) resolved ORDER BY source_order,slug,id`,
-    [ticket.project_id, ticket.id],
+    [ticket.project_id, ticket.id, phase],
   )).rows;
   const candidates: SkillCandidate[] = rows.map((row: any) => ({
     skill: row.id ? row : null, skillId: row.id, slug: row.slug, source: row.source as ResolutionSource,
   }));
-  return resolveSkills(candidates, ticket.project_id, "planning");
+  return resolveSkills(candidates, ticket.project_id, phase);
 }
 
 async function activePrompt(scope: "global" | "project", promptType: string, projectId?: string) {
@@ -171,6 +179,74 @@ async function planningInputs(ticket: any) {
     ].join("\n\n"),
     outputConstraints: "Planning is read-only. Do not edit or write repository files, commit, push, create branches, or open pull requests.",
   });
+  return { project, ai, skills, promptVersionIds, content };
+}
+
+async function executionInputs(ticket: any, phase: "execution" | "repair", approvedPlan: string, details: {
+  worktreePath: string;
+  branchName: string;
+  baseCommit: string | null;
+  currentDiff?: string;
+  validationOutput?: unknown;
+  administratorFeedback?: string;
+}) {
+  const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
+  if (!project?.enabled) throw new Error("project is missing or disabled");
+  const [base, globalExecution, globalRepair, context, projectExecution, testing, skills] = await Promise.all([
+    activePrompt("global", "base"),
+    activePrompt("global", "execution"),
+    phase === "repair" ? activePrompt("global", "execution-repair") : Promise.resolve({ active_version_id: null, content: "" }),
+    activePrompt("project", "context", project.id),
+    activePrompt("project", "execution", project.id),
+    activePrompt("project", "testing", project.id),
+    resolvedSkillsFor(ticket, phase),
+  ]);
+  const ai = resolveAiConfiguration({
+    phase,
+    system: { default: { model: "sonnet", reasoning_level: "high" } },
+    project: projectAiConfiguration(project),
+    ticket: ticketAiConfiguration(ticket),
+  });
+  const values = {
+    "project.slug": project.slug, "project.name": project.name,
+    "project.repository_path": project.repository_path, "project.default_branch": project.default_branch,
+    "ticket.title": ticket.title, "ticket.description": ticket.description,
+    "ticket.category": ticket.category, "ticket.priority": ticket.priority,
+  };
+  const promptVersionIds = Object.fromEntries([
+    ["global.base", base.active_version_id],
+    ["global.execution", globalExecution.active_version_id],
+    ["global.execution-repair", globalRepair.active_version_id],
+    ["project.context", context.active_version_id],
+    ["project.execution", projectExecution.active_version_id],
+    ["project.testing", testing.active_version_id],
+  ].filter((entry): entry is [string, string] => Boolean(entry[1])));
+  let content = buildExecutionPrompt({
+    globalBaseInstructions: renderTemplate(base.content ?? "", values),
+    globalExecutionInstructions: renderTemplate(globalExecution.content ?? "", values),
+    projectContext: renderTemplate(context.content ?? "", values),
+    projectExecutionInstructions: renderTemplate(projectExecution.content ?? "", values),
+    projectTestingInstructions: renderTemplate(testing.content ?? "", values),
+    resolvedAiConfiguration: ai,
+    resolvedSkills: skills.map((skill) => ({
+      id: skill.id, slug: skill.slug, version: skill.version, resolution_sources: skill.resolution_sources,
+    })),
+    exactApprovedPlan: approvedPlan,
+    worktreeDetails: {
+      path: details.worktreePath, branch: details.branchName, base_commit: details.baseCommit,
+    },
+    validationCommands: project.config_json?.validation_commands ?? [],
+    definitionOfDone: project.config_json?.definition_of_done ?? "Implement the approved plan in the assigned worktree.",
+    outputConstraints: "Work only inside the assigned worktree. Leave all changes uncommitted for independent worker validation.",
+  });
+  if (phase === "repair") {
+    content += [
+      "\n## Repair instructions\n", renderTemplate(globalRepair.content ?? "", values),
+      "\n## Current worktree diff\n", details.currentDiff ?? "",
+      "\n## Failed validation output\n", JSON.stringify(details.validationOutput ?? {}, null, 2),
+      "\n## Administrator feedback\n", details.administratorFeedback ?? "",
+    ].join("\n");
+  }
   return { project, ai, skills, promptVersionIds, content };
 }
 
@@ -377,16 +453,220 @@ async function runPlanning(job: any) {
   }
 }
 
+async function runExecution(job: any) {
+  await preflightClaudeAuthentication();
+  const repairing = job.type === "execution.repair";
+  const ticket = (await pool.query("SELECT * FROM tickets WHERE id=$1", [job.payload_json.ticket_id])).rows[0];
+  if (!ticket) throw new Error("ticket not found");
+  const gate = await checkPlanApprovalGate(pool, ticket.id);
+  if ("code" in gate) throw new Error(`execution gate failed: ${gate.code}`);
+  if (gate.planVersion.id !== job.payload_json.plan_version_id) {
+    throw new Error("execution gate approved a different plan version");
+  }
+  const attempt = (await pool.query(
+    `SELECT ea.*,pv.content_markdown
+     FROM execution_attempts ea
+     JOIN plan_versions pv ON pv.id=ea.plan_version_id
+     WHERE ea.id=$1 AND ea.ticket_id=$2`,
+    [job.payload_json.execution_attempt_id, ticket.id],
+  )).rows[0];
+  if (!attempt) throw new Error("execution attempt not found");
+  const competing = (await pool.query(
+    `SELECT 1 FROM execution_attempts
+     WHERE ticket_id=$1 AND id<>$2 AND validation_status IN ('queued','executing','pending') LIMIT 1`,
+    [ticket.id, attempt.id],
+  )).rowCount;
+  if (competing) throw new Error("another execution is already active");
+
+  let worktree = {
+    worktreePath: attempt.worktree_path as string,
+    branchName: attempt.branch_name as string,
+    baseCommit: attempt.base_commit as string | null,
+  };
+  if (!repairing) {
+    const repository = await validateProject({
+      repositoryPath: (await pool.query("SELECT repository_path FROM projects WHERE id=$1", [ticket.project_id])).rows[0]?.repository_path,
+      defaultBranch: (await pool.query("SELECT default_branch FROM projects WHERE id=$1", [ticket.project_id])).rows[0]?.default_branch,
+      requireRemote: false,
+    });
+    if (!repository.valid) throw new Error(`repository is not available for execution: ${repository.errors.join("; ")}`);
+    const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
+    worktree = await createExecutionWorktree({
+      repositoryPath: project.repository_path,
+      defaultBranch: project.default_branch,
+      dataRoot: process.env.DCC_DATA_ROOT ?? REPO_ROOT,
+      projectSlug: project.slug,
+      ticketNumber: ticket.ticket_number,
+      title: ticket.title,
+      attemptNumber: attempt.attempt_number,
+    });
+    await pool.query(
+      `UPDATE execution_attempts
+       SET branch_name=$2,worktree_path=$3,base_commit=$4,validation_status='executing'
+       WHERE id=$1`,
+      [attempt.id, worktree.branchName, worktree.worktreePath, worktree.baseCommit],
+    );
+  } else if (!worktree.worktreePath) {
+    throw new Error("repair worktree is unavailable");
+  }
+
+  const runId = randomUUID();
+  const sessionId = randomUUID();
+  const logDirectory = path.resolve(process.env.DCC_DATA_ROOT ?? REPO_ROOT, "data", "logs");
+  await mkdir(logDirectory, { recursive: true });
+  const logPath = path.join(logDirectory, `${runId}.log`);
+  const details = {
+    ...worktree,
+    currentDiff: repairing ? await worktreeDiff(worktree.worktreePath) : undefined,
+    validationOutput: repairing ? job.payload_json.validation_output : undefined,
+    administratorFeedback: repairing ? job.payload_json.feedback : undefined,
+  };
+  const input = await executionInputs(ticket, repairing ? "repair" : "execution", attempt.content_markdown, details);
+  await pool.query(
+    `INSERT INTO agent_runs
+     (id,ticket_id,project_id,run_type,status,model,reasoning_level,working_directory,started_at,metadata_json)
+     VALUES ($1,$2,$3,$4,'running',$5,$6,$7,now(),$8)`,
+    [runId, ticket.id, input.project.id, repairing ? "execution.repair" : "execution.run",
+      input.ai.model, input.ai.reasoning_level, worktree.worktreePath, { job_id: job.id, execution_attempt_id: attempt.id }],
+  );
+  await pool.query(
+    "UPDATE execution_attempts SET agent_run_id=$2,validation_status='executing' WHERE id=$1",
+    [attempt.id, runId],
+  );
+  await pool.query(
+    "UPDATE agent_runs SET metadata_json=metadata_json || $2::jsonb WHERE id=$1",
+    [runId, JSON.stringify({ log_path: logPath })],
+  );
+  await inTransaction(async (client) => {
+    const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
+    await client.query("UPDATE tickets SET status='Executing',updated_at=now() WHERE id=$1", [ticket.id]);
+    await client.query(
+      `INSERT INTO ticket_status_history
+       (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
+       VALUES ($1,$2,'Executing',$3,'worker',$4,$5,$6)`,
+      [ticket.id, current.status, repairing ? "Repair execution started" : "Execution started",
+        job.id, runId, attempt.plan_version_id],
+    );
+  });
+
+  const copied = await snapshotSkills(input.skills, repairing ? "repair" : "execution");
+  const skillSnapshot = (await pool.query(
+    `INSERT INTO skill_snapshots (ticket_id,run_id,skills_json,content_hash)
+     VALUES ($1,$2,$3,$4) RETURNING *`,
+    [ticket.id, runId, JSON.stringify(copied.skills), copied.contentHash],
+  )).rows[0];
+  const promptSnapshot = await snapshotPrompt({
+    ticketId: ticket.id,
+    projectId: input.project.id,
+    phase: repairing ? "repair" : "execution",
+    content: input.content,
+    model: input.ai.model,
+    reasoningLevel: input.ai.reasoning_level,
+    skillSnapshotId: skillSnapshot.id,
+    metadata: {
+      promptVersionIds: input.promptVersionIds,
+      projectConfigVersion: input.project.config_version,
+      ticketVersion: ticket.updated_at,
+      planVersionId: attempt.plan_version_id,
+      executionAttemptId: attempt.id,
+    },
+  });
+  await pool.query(
+    "UPDATE agent_runs SET prompt_snapshot_id=$2,skill_snapshot_id=$3 WHERE id=$1",
+    [runId, promptSnapshot.id, skillSnapshot.id],
+  );
+
+  const temporary = await mkdtemp(path.join(tmpdir(), "dcc-execution-"));
+  const cancellation = new AbortController();
+  activeExecutionCancellation = cancellation;
+  const cancellationPoll = setInterval(async () => {
+    const row = (await pool.query("SELECT status FROM agent_runs WHERE id=$1", [runId])).rows[0];
+    if (row?.status === "cancellation_requested") cancellation.abort();
+  }, 250);
+  let sequence = 0;
+  try {
+    const promptFile = path.join(temporary, "execution-prompt.md");
+    await writeFile(promptFile, input.content, { flag: "wx" });
+    const skillBundle = await materializeSkillBundle(runId, copied.skills, process.env.DCC_DATA_ROOT ?? REPO_ROOT);
+    const scenarioKey = ["mock", "scenario", "path"].join("_");
+    const result = await invokeExecutionClaude({
+      task: repairing
+        ? `Repair the existing implementation for ticket ${ticket.ticket_number}.`
+        : `Implement the approved plan for ticket ${ticket.ticket_number}.`,
+      sessionId,
+      model: input.ai.model,
+      effort: input.ai.reasoning_level,
+      promptFile,
+      skillBundleDir: skillBundle,
+      workingDirectory: worktree.worktreePath,
+      maxTurns: Number(input.project.config_json?.execution_max_turns ?? 50),
+      oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
+      scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
+      logPath,
+      timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 30 * 60 * 1000),
+      signal: cancellation.signal,
+      onEvent: async ({ eventType, event }) => {
+        sequence += 1;
+        await pool.query(
+          `INSERT INTO agent_run_events (agent_run_id,sequence,event_type,event_json)
+           VALUES ($1,$2,$3,$4)`,
+          [runId, sequence, eventType, event],
+        );
+      },
+    });
+    await pool.query(
+      `UPDATE agent_runs
+       SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3 WHERE id=$1`,
+      [runId, sessionId, result.exitCode],
+    );
+    await pool.query(
+      "UPDATE execution_attempts SET validation_status='pending' WHERE id=$1",
+      [attempt.id],
+    );
+    await inTransaction(async (client) => {
+      const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
+      await client.query("UPDATE tickets SET status='Validating',updated_at=now() WHERE id=$1", [ticket.id]);
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
+         VALUES ($1,$2,'Validating','Execution completed; awaiting independent validation','worker',$3,$4,$5)`,
+        [ticket.id, current.status, job.id, runId, attempt.plan_version_id],
+      );
+    });
+  } catch (error) {
+    const executionError = error instanceof ClaudeExecutionError ? error : null;
+    const cancelled = executionError?.code === "execution_cancelled";
+    await pool.query(
+      `UPDATE agent_runs SET status=$2,finished_at=now(),exit_code=$3,error_code=$4,error_message=$5 WHERE id=$1`,
+      [runId, cancelled ? "cancelled" : "failed", executionError?.exitCode ?? 1,
+        executionError?.code ?? "execution_failed", error instanceof Error ? error.message : "execution failed"],
+    );
+    await pool.query(
+      "UPDATE execution_attempts SET validation_status=$2,completed_at=now() WHERE id=$1",
+      [attempt.id, cancelled ? "cancelled" : executionError?.code === "execution_timeout" ? "timed_out" : "failed"],
+    );
+    await pool.query(
+      "UPDATE tickets SET status=$2,updated_at=now() WHERE id=$1",
+      [ticket.id, cancelled ? "Cancelled" : "Execution Failed"],
+    );
+    throw error;
+  } finally {
+    clearInterval(cancellationPoll);
+    if (activeExecutionCancellation === cancellation) activeExecutionCancellation = null;
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
 while (!stopping) {
   let job = await claimJob(workerId, ["project.validate"]);
   if (!job) {
     const waiting = (await pool.query(
       "SELECT 1 FROM jobs WHERE status='queued' AND type=ANY($1::text[]) LIMIT 1",
-      [planningJobTypes],
+      [[...planningJobTypes, ...executionJobTypes]],
     )).rowCount;
     if (waiting) {
       if (!(await subscriptionPreflightOrRefuse())) break;
-      job = await claimJob(workerId, planningJobTypes);
+      job = await claimJob(workerId, [...planningJobTypes, ...executionJobTypes]);
     }
   }
   if (!job) {
@@ -405,14 +685,24 @@ while (!stopping) {
         [project.id, result.valid ? "healthy" : result.changedFiles.length ? "repository_dirty" : "invalid"],
       );
       if (!result.valid) throw new Error(result.errors.join("; "));
-    } else {
+    } else if (planningJobTypes.includes(job.type)) {
       await runPlanning(job);
+    } else {
+      await runExecution(job);
     }
     await completeJob(job.id, workerId);
   } catch (error) {
     if (error instanceof ClaudeAuthError) console.error(`${error.code}: ${error.message}`);
     else console.error(error instanceof Error ? error.message : "job failed");
-    await failJob(job.id, workerId, error);
+    if (error instanceof ClaudeExecutionError && error.code === "execution_cancelled") {
+      await pool.query(
+        `UPDATE jobs SET status='cancelled',completed_at=now(),updated_at=now()
+         WHERE id=$1 AND claimed_by=$2`,
+        [job.id, workerId],
+      );
+    } else {
+      await failJob(job.id, workerId, error);
+    }
   }
 }
 

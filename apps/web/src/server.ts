@@ -1,5 +1,5 @@
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { pool, inTransaction } from "@dcc/database";
@@ -1335,10 +1335,16 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     )).rows[0];
     if (!ticket) return json(response, 404, { error: "ticket not found" });
     const gate = await checkPlanApprovalGate(pool, ticket.id);
-    if (!gate.valid) return json(response, 409, { error: gate.code, message: gate.message });
+    if ("code" in gate) return json(response, 409, { error: gate.code, message: gate.message });
     const result = await inTransaction(async (client) => {
       const lockedGate = await checkPlanApprovalGate(client, ticket.id);
-      if (!lockedGate.valid) throw Object.assign(new Error(lockedGate.message), { status: 409 });
+      if ("code" in lockedGate) throw Object.assign(new Error(lockedGate.message), { status: 409 });
+      const active = (await client.query(
+        `SELECT 1 FROM execution_attempts
+         WHERE ticket_id=$1 AND validation_status IN ('queued','executing','pending') LIMIT 1`,
+        [ticket.id],
+      )).rowCount;
+      if (active) throw Object.assign(new Error("an execution is already active"), { status: 409 });
       const attemptNumber = (await client.query(
         "SELECT COALESCE(max(attempt_number),0)+1 next FROM execution_attempts WHERE ticket_id=$1",
         [ticket.id],
@@ -1357,10 +1363,105 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
         },
         idempotencyKey: `execution.run:${attempt.id}`, maxAttempts: 1,
       }, client);
+      const before = lockedGate.ticket.status;
       await client.query("UPDATE tickets SET status='Execution Queued',updated_at=now() WHERE id=$1", [ticket.id]);
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_job_id,related_plan_version_id)
+         VALUES ($1,$2,'Execution Queued','Execution job queued','admin',$3,$4,$5)`,
+        [ticket.id, before, session.user_id, job.id, lockedGate.planVersion.id],
+      );
       return { attempt, job };
     });
     return json(response, 202, result);
+  }
+  const runEventsMatch = url.pathname.match(/^\/api\/admin\/runs\/([0-9a-f-]+)\/events$/i);
+  if (runEventsMatch && request.method === "GET") {
+    const run = (await pool.query("SELECT * FROM agent_runs WHERE id=$1", [runEventsMatch[1]])).rows[0];
+    if (!run) return json(response, 404, { error: "run not found" });
+    const after = Math.max(0, Number(url.searchParams.get("after") ?? 0));
+    const events = (await pool.query(
+      `SELECT * FROM agent_run_events
+       WHERE agent_run_id=$1 AND sequence>$2 ORDER BY sequence LIMIT 500`,
+      [run.id, after],
+    )).rows;
+    return json(response, 200, { run, events });
+  }
+  const runLogMatch = url.pathname.match(/^\/api\/admin\/runs\/([0-9a-f-]+)\/log$/i);
+  if (runLogMatch && request.method === "GET") {
+    const row = (await pool.query(
+      `SELECT ar.id,ar.metadata_json->>'log_path' log_path FROM agent_runs ar
+       JOIN execution_attempts ea ON ea.agent_run_id=ar.id WHERE ar.id=$1`,
+      [runLogMatch[1]],
+    )).rows[0];
+    if (!row) return json(response, 404, { error: "execution log not found" });
+    const content = row.log_path ? await readFile(row.log_path, "utf8").catch(() => "") : "";
+    return json(response, 200, { run_id: row.id, content });
+  }
+  const runCancelMatch = url.pathname.match(/^\/api\/admin\/runs\/([0-9a-f-]+)\/cancel$/i);
+  const attemptCancelMatch = url.pathname.match(/^\/api\/admin\/execution-attempts\/([0-9a-f-]+)\/cancel$/i);
+  if ((runCancelMatch || attemptCancelMatch) && request.method === "POST") {
+    const run = (await pool.query(
+      runCancelMatch
+        ? "SELECT * FROM agent_runs WHERE id=$1"
+        : `SELECT ar.* FROM execution_attempts ea JOIN agent_runs ar ON ar.id=ea.agent_run_id WHERE ea.id=$1`,
+      [(runCancelMatch ?? attemptCancelMatch)![1]],
+    )).rows[0];
+    if (!run) return json(response, 404, { error: "active execution run not found" });
+    if (!["running", "cancellation_requested"].includes(run.status)) {
+      return json(response, 409, { error: "run is not active" });
+    }
+    const updated = (await pool.query(
+      `UPDATE agent_runs SET status='cancellation_requested'
+       WHERE id=$1 AND status IN ('running','cancellation_requested') RETURNING *`,
+      [run.id],
+    )).rows[0];
+    return json(response, 202, { run: updated });
+  }
+  const runRepairMatch = url.pathname.match(/^\/api\/admin\/runs\/([0-9a-f-]+)\/repair$/i);
+  if (runRepairMatch && request.method === "POST") {
+    const body = await bodyOf(request);
+    if (typeof body.feedback !== "string" || !body.feedback.trim() || body.feedback.length > 10000) {
+      return json(response, 400, { error: "feedback is required" });
+    }
+    const result = await inTransaction(async (client) => {
+      const source = (await client.query(
+        `SELECT ar.*,ea.id execution_attempt_id,ea.plan_version_id,ea.validation_status,
+                ea.worktree_path,t.status ticket_status
+         FROM agent_runs ar
+         JOIN execution_attempts ea ON ea.agent_run_id=ar.id
+         JOIN tickets t ON t.id=ea.ticket_id
+         WHERE ar.id=$1 FOR UPDATE OF ea,t`,
+        [runRepairMatch[1]],
+      )).rows[0];
+      if (!source) return null;
+      if (!source.worktree_path) throw Object.assign(new Error("repair worktree is unavailable"), { status: 409 });
+      const active = (await client.query(
+        `SELECT 1 FROM jobs WHERE status IN ('queued','running')
+         AND type='execution.repair' AND payload_json->>'execution_attempt_id'=$1`,
+        [source.execution_attempt_id],
+      )).rowCount;
+      if (active) throw Object.assign(new Error("a repair is already active"), { status: 409 });
+      const job = await enqueueJob({
+        type: "execution.repair",
+        payload: {
+          ticket_id: source.ticket_id,
+          execution_attempt_id: source.execution_attempt_id,
+          plan_version_id: source.plan_version_id,
+          feedback: body.feedback.trim(),
+          validation_output: source.metadata_json?.validation_output ?? {},
+          ...(typeof body.mock_scenario_path === "string" ? { mock_scenario_path: body.mock_scenario_path } : {}),
+        },
+        idempotencyKey: `execution.repair:${source.execution_attempt_id}:${randomUUID()}`,
+        maxAttempts: 1,
+      }, client);
+      await client.query(
+        "UPDATE tickets SET status='Execution Queued',updated_at=now() WHERE id=$1",
+        [source.ticket_id],
+      );
+      return { job, execution_attempt_id: source.execution_attempt_id };
+    });
+    return result ? json(response, 202, result) : json(response, 404, { error: "run not found" });
   }
   const promptPreviewMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/prompt-preview$/);
   if (promptPreviewMatch && request.method === "GET") {

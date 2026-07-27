@@ -10,6 +10,7 @@
     "@dcc/claude-runner": "workspace:*",
     "@dcc/database": "workspace:*",
     "@dcc/domain": "workspace:*",
+    "@dcc/git-runner": "workspace:*",
     "@dcc/project-config": "workspace:*",
     "@dcc/skill-registry": "workspace:*"
   }

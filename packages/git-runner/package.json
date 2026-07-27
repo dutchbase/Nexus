@@ -1,1 +1,1 @@
-{"name":"@dcc/git-runner","private":true,"type":"module"}
+{"name":"@dcc/git-runner","private":true,"type":"module","exports":"./src/index.ts"}

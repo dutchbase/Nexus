@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { assertSubscriptionOnlyEnvironment, ClaudeAuthError } from "./auth-guard.ts";
@@ -30,6 +30,16 @@ async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.P
     await stdoutFile.close().catch(() => undefined);
     await stderrFile.close().catch(() => undefined);
     await rm(directory, { recursive: true, force: true });
+  }
+}
+
+export class ClaudeExecutionError extends Error {
+  constructor(
+    message: string,
+    public exitCode: number,
+    public code: "execution_failed" | "execution_timeout" | "execution_cancelled",
+  ) {
+    super(message);
   }
 }
 
@@ -77,6 +87,91 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
     exitCode: Number(response.exit_code ?? result.exitCode ?? 0),
     raw: response,
   };
+}
+
+export type ExecutionInvocation = PlanningInvocation & {
+  logPath: string;
+  timeoutMs: number;
+  signal?: AbortSignal;
+  onEvent: (event: { eventType: string; event: unknown; raw: string }) => Promise<void>;
+};
+
+export function buildExecutionArguments(input: ExecutionInvocation) {
+  return [
+    "-p", input.task, "--session-id", input.sessionId, "--model", input.model, "--effort", input.effort,
+    "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep,Edit,Write,Bash",
+    "--append-system-prompt-file", input.promptFile, "--add-dir", input.skillBundleDir,
+    "--output-format", "stream-json", "--verbose", "--max-turns", String(input.maxTurns),
+  ];
+}
+
+export async function invokeExecutionClaude(input: ExecutionInvocation) {
+  assertSubscriptionOnlyEnvironment();
+  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken };
+  if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
+  await appendFile(input.logPath, "");
+  return new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
+    const child = spawn("claude", buildExecutionArguments(input), {
+      cwd: input.workingDirectory,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
+    let pending = "";
+    let stderr = "";
+    let eventWrites = Promise.resolve();
+    let terminationTimer: NodeJS.Timeout | undefined;
+    let outcome: "running" | "timeout" | "cancelled" = "running";
+    const stop = (reason: "timeout" | "cancelled") => {
+      if (outcome !== "running") return;
+      outcome = reason;
+      child.kill("SIGTERM");
+      terminationTimer = setTimeout(() => child.kill("SIGKILL"), 5000);
+    };
+    const timeout = setTimeout(() => stop("timeout"), input.timeoutMs);
+    const abort = () => stop("cancelled");
+    input.signal?.addEventListener("abort", abort, { once: true });
+    child.stdout.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      void appendFile(input.logPath, text);
+      pending += text;
+      const lines = pending.split(/\r?\n/);
+      pending = lines.pop() ?? "";
+      for (const raw of lines) {
+        if (!raw.trim()) continue;
+        eventWrites = eventWrites.then(async () => {
+          let event: any;
+          try { event = JSON.parse(raw); } catch { event = { type: "unparsed", text: raw }; }
+          await input.onEvent({ eventType: String(event?.type ?? "event"), event, raw });
+        });
+      }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      const text = chunk.toString("utf8");
+      stderr += text;
+      void appendFile(input.logPath, text);
+    });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      clearTimeout(timeout);
+      if (terminationTimer) clearTimeout(terminationTimer);
+      input.signal?.removeEventListener("abort", abort);
+      eventWrites.then(() => {
+        if (outcome === "cancelled") {
+          reject(new ClaudeExecutionError("Claude execution was cancelled", code ?? 1, "execution_cancelled"));
+        } else if (outcome === "timeout" || code === 124) {
+          reject(new ClaudeExecutionError("Claude execution timed out", 124, "execution_timeout"));
+        } else if (code !== 0) {
+          reject(new ClaudeExecutionError(
+            `Claude execution exited ${code}: ${stderr.trim() || "no error output"}`,
+            code ?? 1,
+            "execution_failed",
+          ));
+        } else {
+          resolve({ exitCode: code ?? 0, stderr });
+        }
+      }, reject);
+    });
+  });
 }
 
 const requiredPlanHeadings = [
