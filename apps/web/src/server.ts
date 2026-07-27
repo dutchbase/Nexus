@@ -5,7 +5,8 @@ import { resolve } from "node:path";
 import { pool, inTransaction } from "@dcc/database";
 import {
   AiConfigurationError, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob, globalPromptTypes,
-  projectPromptTypes, promptContentHash, resolveAiConfiguration, validateAiSelection, type AiPhase,
+  projectPromptTypes, promptContentHash, resolveAiConfiguration, setPullRequestTicketStatus, syncPullRequest,
+  validateAiSelection, type AiPhase,
 } from "@dcc/domain";
 import {
   resolveSkills, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
@@ -415,7 +416,7 @@ async function submitPublicForm(request: IncomingMessage, response: ServerRespon
   const limit = Number.isFinite(configuredLimit) ? Math.max(1, Math.min(configuredLimit, 20)) : defaultRateLimit;
   const recent = await pool.query(
     `SELECT count(*)::integer AS count FROM public_submission_attempts
-     WHERE form_id = $1 AND ip_address = $2 AND created_at > now() - interval '1 hour'`,
+     WHERE form_id = $1 AND ip_address = $2 AND created_at > now() - interval '15 seconds'`,
     [form.id, ip],
   );
   if (recent.rows[0].count >= limit) return json(response, 429, { error: "submission rate limit exceeded" });
@@ -565,6 +566,62 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
     return response.end();
   }
   const metrics = await counts();
+  if (url.pathname === "/admin/pull-requests") {
+    const values: any[] = [];
+    const conditions: string[] = [];
+    const search = url.searchParams.get("search") ?? "";
+    if (search) {
+      values.push(`%${search}%`);
+      conditions.push(`(pr.title ILIKE $${values.length} OR t.ticket_number ILIKE $${values.length})`);
+    }
+    const state = url.searchParams.get("state") ?? "";
+    if (state) { values.push(state); conditions.push(`pr.state=$${values.length}`); }
+    const pullRequests = (await pool.query(
+      `SELECT pr.*,p.name project_name,t.ticket_number,t.status ticket_status
+       FROM pull_requests pr JOIN projects p ON p.id=pr.project_id
+       LEFT JOIN tickets t ON t.id=pr.ticket_id
+       ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
+       ORDER BY COALESCE(pr.updated_at_provider,pr.updated_at) DESC LIMIT 200`,
+      values,
+    )).rows;
+    const rows = pullRequests.map((item) =>
+      `<a class="ticket-row" href="/admin/pull-requests/${item.id}"><span class="mono">#${item.number}</span><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.project_name)}</span><span>${escapeHtml(item.repository)}</span><span class="status">${escapeHtml(item.review_state ?? item.state)}</span><time>${new Date(item.updated_at_provider ?? item.updated_at).toLocaleDateString("nl-NL")}</time></a>`,
+    ).join("");
+    const body = `<div class="eyebrow">Work</div><h1>Pull requests</h1>
+      <form class="toolbar"><input class="search" name="search" placeholder="Search title or ticket" value="${escapeHtml(search)}">
+      <select name="state"><option value="">All states</option><option value="open"${state === "open" ? " selected" : ""}>Open</option><option value="closed"${state === "closed" ? " selected" : ""}>Closed</option></select>
+      <button class="button" type="submit">Filter</button><a class="button" href="/admin/pull-requests">Reset</a></form>
+      <section class="card"><div class="list-head"><span>PR</span><span>Title</span><span>Project</span><span>Repository</span><span>Review</span><span>Updated</span></div>${rows || "<p>No pull requests found.</p>"}</section>`;
+    return html(response, 200, adminPage(url.pathname, "Pull requests", body, metrics, session.username));
+  }
+  const pullRequestPageMatch = url.pathname.match(/^\/admin\/pull-requests\/([0-9a-f-]+)$/i);
+  if (pullRequestPageMatch) {
+    const item = (await pool.query(
+      `SELECT pr.*,p.name project_name,t.ticket_number,t.title ticket_title,t.status ticket_status,
+              pv.content_markdown approved_plan,ar.metadata_json,ea.result_commit
+       FROM pull_requests pr JOIN projects p ON p.id=pr.project_id
+       LEFT JOIN tickets t ON t.id=pr.ticket_id
+       LEFT JOIN plan_versions pv ON pv.id=t.approved_plan_version_id
+       LEFT JOIN execution_attempts ea ON ea.id=pr.execution_attempt_id
+       LEFT JOIN agent_runs ar ON ar.id=ea.agent_run_id WHERE pr.id=$1`,
+      [pullRequestPageMatch[1]],
+    )).rows[0];
+    if (!item) return html(response, 404, adminPage(url.pathname, "Pull request not found", "<h1>Pull request not found</h1>", metrics, session.username));
+    const validation = item.metadata_json?.validation_output ?? {};
+    const body = `<div class="eyebrow">${escapeHtml(item.project_name)} · ${escapeHtml(item.repository)}</div>
+      <h1>#${item.number} ${escapeHtml(item.title)}</h1>
+      <p><span class="status">${escapeHtml(item.state)}</span> <span class="status">${escapeHtml(item.review_state ?? "Review pending")}</span>
+      <a class="button primary" href="${escapeHtml(item.url)}">Open on GitHub</a></p>
+      <div class="grid two"><section class="card"><div class="card-head">Metadata</div><div class="card-body"><dl>
+      <dt>Ticket</dt><dd>${item.ticket_number ? `<a href="/admin/tickets/${escapeHtml(item.ticket_number)}">${escapeHtml(item.ticket_number)} · ${escapeHtml(item.ticket_title)}</a> (${escapeHtml(item.ticket_status)})` : "Unlinked"}</dd>
+      <dt>Author</dt><dd>${escapeHtml(item.author)}</dd><dt>Branches</dt><dd>${escapeHtml(item.head_branch)} → ${escapeHtml(item.base_branch)}</dd>
+      <dt>Checks</dt><dd>${escapeHtml(item.check_state ?? "Unknown")}</dd><dt>Internal review</dt><dd>${escapeHtml(item.internal_review_state ?? "Not reviewed")}</dd></dl></div></section>
+      <section class="card"><div class="card-head">Changed files & validation</div><div class="card-body"><pre>${escapeHtml(JSON.stringify({ changed_files: validation.changed_files ?? [], results: validation.results ?? [] }, null, 2))}</pre></div></section></div>
+      <section class="card"><div class="card-head">Approved plan</div><div class="card-body">${item.approved_plan ? renderMarkdown(item.approved_plan) : "<p>No approved plan linked.</p>"}</div></section>
+      <section class="card"><div class="card-head">Implementation & commits</div><div class="card-body"><p>${escapeHtml(item.metadata_json?.implementation_summary ?? "No separate implementation summary recorded.")}</p><p class="mono">${escapeHtml(item.result_commit ?? "No commit recorded")}</p></div></section>
+      <section class="card"><div class="card-head">Internal notes</div><div class="card-body"><p>${escapeHtml(item.internal_notes ?? "No internal notes.")}</p></div></section>`;
+    return html(response, 200, adminPage(url.pathname, `PR #${item.number}`, body, metrics, session.username));
+  }
   if (url.pathname === "/admin/tickets") {
     const values: any[] = [];
     const conditions: string[] = [];
@@ -759,6 +816,158 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     await pool.query("UPDATE admin_sessions SET invalidated_at = now() WHERE id = $1", [session.id]);
     await audit({ actorType: "admin", actorId: session.user_id, action: "logout", entityType: "user", entityId: session.user_id, ip: ipOf(request) });
     return json(response, 200, { ok: true }, { "set-cookie": "dcc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0" });
+  }
+  if (url.pathname === "/api/admin/pull-requests" && request.method === "GET") {
+    const params: any[] = [];
+    const where: string[] = [];
+    const equal = (value: string | null, column: string) => {
+      if (value) { params.push(value); where.push(`${column}=$${params.length}`); }
+    };
+    const project = url.searchParams.get("project") ?? url.searchParams.get("project_id");
+    if (project) {
+      params.push(project);
+      where.push(`(pr.project_id::text=$${params.length} OR p.slug=$${params.length})`);
+    }
+    equal(url.searchParams.get("repository"), "pr.repository");
+    const truthy = (key: string) => ["1", "true", "yes"].includes((url.searchParams.get(key) ?? "").toLowerCase());
+    if (url.searchParams.get("linked") === "false" || url.searchParams.get("ticket") === "unlinked") where.push("pr.ticket_id IS NULL");
+    if (truthy("linked") || url.searchParams.get("ticket") === "linked") where.push("pr.ticket_id IS NOT NULL");
+    if (truthy("created_by_platform") || truthy("platform_created")) where.push("pr.execution_attempt_id IS NOT NULL");
+    if (truthy("draft")) where.push("pr.is_draft=true");
+    if (truthy("open")) where.push("pr.state='open'");
+    if (truthy("merged")) where.push("pr.merged_at IS NOT NULL");
+    if (truthy("closed")) where.push("pr.state='closed' AND pr.merged_at IS NULL");
+    if (truthy("review_required")) where.push("COALESCE(pr.review_state,'') NOT IN ('approved','changes_requested')");
+    if (truthy("checks_failing")) where.push("pr.check_state IN ('failed','failure','failing')");
+    if (truthy("checks_pending")) where.push("pr.check_state IN ('pending','queued','in_progress')");
+    if (truthy("changes_requested")) where.push("pr.review_state='changes_requested'");
+    if (truthy("approved")) where.push("pr.review_state='approved'");
+    const from = url.searchParams.get("date_from") ?? url.searchParams.get("from");
+    const to = url.searchParams.get("date_to") ?? url.searchParams.get("to");
+    if (from) { params.push(from); where.push(`pr.created_at_provider >= $${params.length}::timestamptz`); }
+    if (to) { params.push(to); where.push(`pr.created_at_provider <= $${params.length}::timestamptz`); }
+    const search = url.searchParams.get("search") ?? url.searchParams.get("q");
+    if (search) {
+      params.push(`%${search}%`);
+      where.push(`(pr.title ILIKE $${params.length} OR t.ticket_number ILIKE $${params.length})`);
+    }
+    const pullRequests = (await pool.query(
+      `SELECT pr.*,p.name project_name,p.slug project_slug,
+              t.ticket_number,t.title ticket_title,t.status ticket_status,
+              (ar.metadata_json->'validation_output'->'changed_files') changed_file_summary
+       FROM pull_requests pr
+       JOIN projects p ON p.id=pr.project_id
+       LEFT JOIN tickets t ON t.id=pr.ticket_id
+       LEFT JOIN execution_attempts ea ON ea.id=pr.execution_attempt_id
+       LEFT JOIN agent_runs ar ON ar.id=ea.agent_run_id
+       ${where.length ? `WHERE ${where.join(" AND ")}` : ""}
+       ORDER BY COALESCE(pr.updated_at_provider,pr.updated_at) DESC LIMIT 200`,
+      params,
+    )).rows;
+    return json(response, 200, { pull_requests: pullRequests });
+  }
+  const pullRequestDetailMatch = url.pathname.match(/^\/api\/admin\/pull-requests\/([0-9a-f-]+)$/i);
+  if (pullRequestDetailMatch && request.method === "GET") {
+    const pullRequest = (await pool.query(
+      `SELECT pr.*,p.name project_name,p.slug project_slug,
+              t.ticket_number,t.title ticket_title,t.status ticket_status,
+              pv.content_markdown approved_plan,
+              ar.id run_id,ar.metadata_json run_metadata,ea.validation_status,ea.result_commit
+       FROM pull_requests pr
+       JOIN projects p ON p.id=pr.project_id
+       LEFT JOIN tickets t ON t.id=pr.ticket_id
+       LEFT JOIN plan_versions pv ON pv.id=t.approved_plan_version_id
+       LEFT JOIN execution_attempts ea ON ea.id=pr.execution_attempt_id
+       LEFT JOIN agent_runs ar ON ar.id=ea.agent_run_id
+       WHERE pr.id=$1`,
+      [pullRequestDetailMatch[1]],
+    )).rows[0];
+    if (!pullRequest) return json(response, 404, { error: "pull request not found" });
+    const validation = pullRequest.run_metadata?.validation_output ?? {};
+    return json(response, 200, {
+      pull_request: pullRequest,
+      implementation_summary: pullRequest.run_metadata?.implementation_summary ?? null,
+      validation_output: validation,
+      commits: pullRequest.result_commit ? [{ sha: pullRequest.result_commit }] : [],
+      changed_files: validation.changed_files ?? [],
+      review_comments: [],
+      notification_history: [],
+    });
+  }
+  const pullRequestActionMatch = url.pathname.match(
+    /^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/(mark-reviewed|approve|request-changes|repair-instructions|start-repair|refresh|close-ticket)$/i,
+  );
+  if (pullRequestActionMatch && request.method === "POST") {
+    const [, pullRequestId, action] = pullRequestActionMatch;
+    const body = await bodyOf(request);
+    const pullRequest = (await pool.query(
+      `SELECT pr.*,ea.agent_run_id,ar.metadata_json
+       FROM pull_requests pr
+       LEFT JOIN execution_attempts ea ON ea.id=pr.execution_attempt_id
+       LEFT JOIN agent_runs ar ON ar.id=ea.agent_run_id WHERE pr.id=$1`,
+      [pullRequestId],
+    )).rows[0];
+    if (!pullRequest) return json(response, 404, { error: "pull request not found" });
+    if (action === "refresh") {
+      await syncPullRequest(pullRequest.id, "admin", session.user_id);
+    } else if (action === "mark-reviewed") {
+      await pool.query("UPDATE pull_requests SET internal_review_state='reviewed',updated_at=now() WHERE id=$1", [pullRequest.id]);
+    } else if (action === "approve") {
+      await pool.query("UPDATE pull_requests SET internal_review_state='approved',updated_at=now() WHERE id=$1", [pullRequest.id]);
+      await setPullRequestTicketStatus(pullRequest.id, "PR Approved", "Pull request approved internally", "admin", session.user_id);
+    } else if (action === "request-changes") {
+      await pool.query("UPDATE pull_requests SET internal_review_state='changes_requested',updated_at=now() WHERE id=$1", [pullRequest.id]);
+      await setPullRequestTicketStatus(pullRequest.id, "PR Changes Requested", "Internal changes requested", "admin", session.user_id);
+    } else if (action === "repair-instructions") {
+      if (typeof body.instructions !== "string" || !body.instructions.trim() || body.instructions.length > 10000) {
+        return json(response, 400, { error: "instructions are required" });
+      }
+      await pool.query("UPDATE pull_requests SET internal_notes=$2,updated_at=now() WHERE id=$1", [pullRequest.id, body.instructions.trim()]);
+    } else if (action === "start-repair") {
+      const feedback = typeof body.feedback === "string" && body.feedback.trim()
+        ? body.feedback.trim() : pullRequest.internal_notes?.trim();
+      if (!feedback) return json(response, 400, { error: "repair instructions are required" });
+      if (!pullRequest.agent_run_id) return json(response, 409, { error: "linked execution run is unavailable" });
+      const result = await inTransaction(async (client) => {
+        const source = (await client.query(
+          `SELECT ar.*,ea.id execution_attempt_id,ea.plan_version_id,ea.worktree_path,t.status ticket_status
+           FROM agent_runs ar JOIN execution_attempts ea ON ea.agent_run_id=ar.id
+           JOIN tickets t ON t.id=ea.ticket_id WHERE ar.id=$1 FOR UPDATE OF ea,t`,
+          [pullRequest.agent_run_id],
+        )).rows[0];
+        if (!source?.worktree_path) throw Object.assign(new Error("repair worktree is unavailable"), { status: 409 });
+        const active = (await client.query(
+          `SELECT 1 FROM jobs WHERE status IN ('queued','running') AND type='execution.repair'
+           AND payload_json->>'execution_attempt_id'=$1`,
+          [source.execution_attempt_id],
+        )).rowCount;
+        if (active) throw Object.assign(new Error("a repair is already active"), { status: 409 });
+        const job = await enqueueJob({
+          type: "execution.repair",
+          payload: {
+            ticket_id: source.ticket_id, execution_attempt_id: source.execution_attempt_id,
+            plan_version_id: source.plan_version_id, feedback,
+            validation_output: source.metadata_json?.validation_output ?? {},
+          },
+          idempotencyKey: `execution.repair:${source.execution_attempt_id}:${randomUUID()}`,
+          maxAttempts: 1,
+        }, client);
+        await client.query("UPDATE tickets SET status='Execution Queued',updated_at=now() WHERE id=$1", [source.ticket_id]);
+        await client.query(
+          `INSERT INTO ticket_status_history
+           (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_job_id,related_run_id,related_plan_version_id,related_pull_request_id)
+           VALUES ($1,$2,'Execution Queued','Repair execution queued','admin',$3,$4,$5,$6,$7)`,
+          [source.ticket_id, source.ticket_status, session.user_id, job.id, source.id, source.plan_version_id, pullRequest.id],
+        );
+        return job;
+      });
+      return json(response, 202, { job: result });
+    } else if (action === "close-ticket") {
+      const target: "Completed" | "Closed Without Merge" = pullRequest.merged_at ? "Completed" : "Closed Without Merge";
+      await setPullRequestTicketStatus(pullRequest.id, target, "Ticket closed manually after external pull-request completion", "admin", session.user_id);
+    }
+    const updated = (await pool.query("SELECT * FROM pull_requests WHERE id=$1", [pullRequest.id])).rows[0];
+    return json(response, 200, { pull_request: updated });
   }
   if (url.pathname === "/api/admin/prompts" && request.method === "GET") {
     const projectId = url.searchParams.get("project_id");

@@ -13,6 +13,7 @@ export type ProviderPullRequest = {
   html_url: string;
   state: string;
   draft: boolean;
+  merged?: boolean;
   title: string;
   head: { ref: string };
   base: { ref: string };
@@ -51,6 +52,10 @@ export async function findOpenPullRequestForHead(owner: string, repository: stri
   const path = `${pullsPath(owner, repository)}?state=open&head=${encodeURIComponent(head)}`;
   const pullRequests = await request<ProviderPullRequest[]>(path);
   return pullRequests[0] ?? null;
+}
+
+export async function getPullRequest(owner: string, repository: string, number: number) {
+  return request<ProviderPullRequest>(`${pullsPath(owner, repository)}/${number}`);
 }
 
 export async function createDraftPullRequest(input: CreatePullRequestInput) {

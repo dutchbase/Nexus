@@ -10,7 +10,7 @@ import {
 import { inTransaction, pool } from "@dcc/database";
 import {
   buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, claimJob, completeJob, failJob,
-  resolveAiConfiguration, snapshotPrompt,
+  resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
 import {
   commitExecutionChanges, createExecutionWorktree, pushExecutionBranch, validateExecutionWorktree,
@@ -34,6 +34,7 @@ const executionJobTypes = ["execution.run", "execution.repair"];
 const publicationJobTypes = ["pull-request.retry"];
 let stopping = false;
 let activeExecutionCancellation: AbortController | null = null;
+let lastPullRequestSync = 0;
 
 process.on("SIGTERM", () => { stopping = true; activeExecutionCancellation?.abort(); });
 process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort(); });
@@ -803,9 +804,9 @@ async function publishExecutionAttempt(input: {
         `INSERT INTO pull_requests
          (project_id,ticket_id,execution_attempt_id,provider,repository,number,url,title,author,state,
           review_state,check_state,is_draft,head_branch,base_branch,head_sha,merge_commit_sha,
-          created_at_provider,updated_at_provider,merged_at,closed_at,last_synced_at)
+          created_at_provider,updated_at_provider,merged_at,closed_at,last_synced_at,changed_files)
          VALUES ($1,$2,$3,'github',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                 $17,$18,$19,$20,now())
+                 $17,$18,$19,$20,now(),$21)
          RETURNING *`,
         [
           input.project.id, input.ticket.id, input.attempt.id,
@@ -814,7 +815,7 @@ async function publishExecutionAttempt(input: {
           providerPr.state, providerPr.review_state ?? null, providerPr.check_state ?? null,
           providerPr.draft, providerPr.head.ref, providerPr.base.ref, commit,
           providerPr.merge_commit_sha ?? null, providerPr.created_at, providerPr.updated_at,
-          providerPr.merged_at ?? null, providerPr.closed_at ?? null,
+          providerPr.merged_at ?? null, providerPr.closed_at ?? null, input.changedFiles.length,
         ],
       )).rows[0];
     }
@@ -901,6 +902,10 @@ async function retryPublication(job: any) {
 }
 
 while (!stopping) {
+  if (Date.now() - lastPullRequestSync >= 2500) {
+    lastPullRequestSync = Date.now();
+    await syncOpenPullRequests();
+  }
   let job = await claimJob(workerId, ["project.validate", ...publicationJobTypes]);
   if (!job) {
     const waiting = (await pool.query(
