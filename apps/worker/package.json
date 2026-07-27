@@ -3,11 +3,14 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch --watch-path src src/worker.ts"
+    "dev": "tsx watch --watch-path src src/worker.ts",
+    "start": "tsx src/worker.ts"
   },
   "dependencies": {
+    "@dcc/claude-runner": "workspace:*",
     "@dcc/database": "workspace:*",
     "@dcc/domain": "workspace:*",
-    "@dcc/project-config": "workspace:*"
+    "@dcc/project-config": "workspace:*",
+    "@dcc/skill-registry": "workspace:*"
   }
 }

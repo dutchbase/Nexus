@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 import { mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
+
+// Resolved relative to this module's own file, not process.cwd() — the
+// worker runs with cwd=apps/worker (via `pnpm --filter worker dev`), so a
+// cwd-relative default would look for skills/data under apps/worker/
+// instead of the actual repo root.
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 export type SkillPhase = "planning" | "execution" | "repair";
 export type ResolutionSource = "global_mandatory" | "project_automatic" | "ticket_selected" | "phase_required";
@@ -111,7 +118,7 @@ async function filesUnderSkill(skillPath: string, skillsRoot: string) {
 export async function snapshotSkills(
   skills: ResolvedSkill[],
   phase: SkillPhase,
-  skillsRoot = process.env.DCC_SKILLS_ROOT ?? process.cwd(),
+  skillsRoot = process.env.DCC_SKILLS_ROOT ?? REPO_ROOT,
 ) {
   const snapshots: SnapshottedSkill[] = [];
   for (const skill of skills) {
@@ -135,7 +142,7 @@ export async function snapshotSkills(
 export async function materializeSkillBundle(
   runId: string,
   skills: SnapshottedSkill[],
-  dataRoot = process.env.DCC_DATA_ROOT ?? process.cwd(),
+  dataRoot = process.env.DCC_DATA_ROOT ?? REPO_ROOT,
 ) {
   if (!/^[0-9a-f-]{36}$/i.test(runId)) throw new Error("invalid run id");
   const bundle = path.resolve(dataRoot, "data", "skill-bundles", runId, ".claude", "skills");

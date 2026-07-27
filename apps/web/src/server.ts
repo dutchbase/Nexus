@@ -21,7 +21,7 @@ const lockoutWindowMinutes = 15;
 const sessionHours = 8;
 const maxJsonBytes = 1024 * 1024;
 const maxUploadBytes = 8 * 1024 * 1024;
-const defaultRateLimit = 5;
+const defaultRateLimit = 15;
 const dummyHash = await hashPassword(randomBytes(32).toString("hex"));
 const systemOnlyStatuses = new Set(["Planning", "Executing", "Validating", "PR Ready for Review", "Merged"]);
 const validStatuses = new Set([
@@ -365,8 +365,8 @@ async function login(request: IncomingMessage, response: ServerResponse) {
 }
 
 const standardFields = [
-  { field_key: "project_id", field_type: "project_selector", label: "Welk project betreft het?", required: true, position: 10 },
-  { field_key: "category", field_type: "category_selector", label: "Categorie", required: true, position: 20, options_json: ["Bug", "UI", "Feature", "Performance"] },
+  { field_key: "project_id", field_type: "project_selector", label: "Welk project betreft het?", required: false, position: 10 },
+  { field_key: "category", field_type: "category_selector", label: "Categorie", required: false, position: 20, options_json: ["Bug", "UI", "Feature", "Performance"] },
   { field_key: "title", field_type: "short_text", label: "Korte samenvatting", required: true, position: 30, validation_json: { max_length: 200 } },
   { field_key: "description", field_type: "long_text", label: "Wat gaat er mis of wat mist er?", required: true, position: 40, validation_json: { max_length: 10000 } },
   { field_key: "source_url", field_type: "url", label: "Op welke pagina gebeurt dit?", required: false, position: 50 },
@@ -423,9 +423,17 @@ async function submitPublicForm(request: IncomingMessage, response: ServerRespon
   if (typeof body.title !== "string" || !body.title.trim()) errors.title = "required";
   if (typeof body.description !== "string" || !body.description.trim()) errors.description = "required";
   if (Object.keys(errors).length) return json(response, 400, { error: "validation failed", fields: errors });
-  const projectId = form.fixed_project_id ?? body.project_id;
-  const project = (await pool.query("SELECT id FROM projects WHERE id = $1 AND enabled = true", [projectId])).rows[0];
-  if (!project) return json(response, 400, { error: "valid project is required" });
+  const requestedProjectId = form.fixed_project_id ?? body.project_id;
+  const project = requestedProjectId
+    ? (await pool.query("SELECT id FROM projects WHERE id = $1 AND enabled = true", [requestedProjectId])).rows[0]
+    : undefined;
+  if (requestedProjectId && !project) return json(response, 400, { error: "valid project is required" });
+  // No project selected and the form isn't fixed to one: triage assigns it
+  // later (PRD §17.1's Submitted -> Triage step), so default to the
+  // earliest enabled project rather than blocking submission outright.
+  const fallbackProject = project ?? (await pool.query("SELECT id FROM projects WHERE enabled = true ORDER BY created_at LIMIT 1")).rows[0];
+  if (!fallbackProject) return json(response, 400, { error: "no enabled project available" });
+  const projectId = fallbackProject.id;
   const ticket = await inTransaction(async (client) => {
     await client.query("INSERT INTO public_submission_attempts (form_id, ip_address, accepted) VALUES ($1,$2,true)", [form.id, ip]);
     const number = (await client.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
@@ -439,7 +447,7 @@ async function submitPublicForm(request: IncomingMessage, response: ServerRespon
        (ticket_number,form_id,project_id,title,description,category,priority,status,submitter_name,submitter_email,
         source_url,environment,expected_behavior,actual_behavior,reproduction_steps,custom_values_json)
        VALUES ($1,$2,$3,$4,$5,$6,$7,'Submitted',$8,$9,$10,$11,$12,$13,$14,$15) RETURNING *`,
-      [ticketNumber, form.id, project.id, body.title, body.description, body.category ?? null, body.priority ?? "normal",
+      [ticketNumber, form.id, projectId, body.title, body.description, body.category ?? null, body.priority ?? "normal",
         body.submitter_name ?? null, body.submitter_email ?? null, body.source_url ?? null, body.environment ?? null,
         body.expected_behavior ?? null, body.actual_behavior ?? null, body.reproduction_steps ?? null, customValues],
     );
@@ -575,6 +583,31 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
     const body = `<div class="eyebrow">Work</div><h1>Tickets</h1><form class="toolbar" id="filters"><input class="search" data-ticket-filter name="search" placeholder="Search tickets" value="${escapeHtml(search)}"><select data-ticket-filter name="status"><option value="">All statuses</option>${[...validStatuses].map((status) => `<option${url.searchParams.get("status") === status ? " selected" : ""}>${status}</option>`).join("")}</select><a class="button" href="/admin/tickets">Reset</a><span aria-live="polite">${tickets.length} tickets</span></form><section class="card"><div class="list-head"><span>Ticket</span><span>Title</span><span>Project</span><span>Priority</span><span>Status</span><span>Updated</span></div>${rows}</section>`;
     return html(response, 200, adminPage(url.pathname, "Tickets", body, metrics, session.username));
   }
+  const ticketPlansPageMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)\/plans$/);
+  if (ticketPlansPageMatch) {
+    const ref = decodeURIComponent(ticketPlansPageMatch[1]);
+    const ticket = (await pool.query(
+      "SELECT t.*,p.name project_name FROM tickets t JOIN projects p ON p.id=t.project_id WHERE t.id::text=$1 OR t.ticket_number=$1",
+      [ref],
+    )).rows[0];
+    if (!ticket) return html(response, 404, adminPage(url.pathname, "Ticket not found", "<h1>Ticket not found</h1>", metrics, session.username));
+    const versions = (await pool.query(
+      `SELECT pv.*,p.planning_session_id,ar.model,ar.reasoning_level,ps.content prompt_content
+       FROM plans p JOIN plan_versions pv ON pv.plan_id=p.id
+       JOIN agent_runs ar ON ar.id=pv.agent_run_id
+       JOIN prompt_snapshots ps ON ps.id=pv.prompt_snapshot_id
+       WHERE p.ticket_id=$1 ORDER BY pv.version DESC`,
+      [ticket.id],
+    )).rows;
+    const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · Plan review</div>
+      <h1>Implementation plan</h1><p><a class="button" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}">Back to ticket</a></p>
+      ${versions.map((version) => `<section class="card"><div class="card-head">Version ${version.version} · ${escapeHtml(version.model)} / ${escapeHtml(version.reasoning_level)}</div>
+        <div class="card-body">${renderMarkdown(version.content_markdown)}
+        <details><summary>Raw Markdown</summary><pre>${escapeHtml(version.content_markdown)}</pre></details>
+        <details><summary>Exact planning prompt</summary><pre>${escapeHtml(version.prompt_content)}</pre></details>
+        <p class="mono">Session ${escapeHtml(version.planning_session_id)} · SHA-256 ${escapeHtml(version.content_hash)}</p></div></section>`).join("") || "<p>No completed plan is available yet.</p>"}`;
+    return html(response, 200, adminPage(url.pathname, "Plan review", body, metrics, session.username));
+  }
   const ticketMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)$/);
   if (ticketMatch) {
     const ticket = (await pool.query(
@@ -624,6 +657,7 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
         <div class="skill-chips" data-skill-chips>${chips}</div><pre class="references" data-skill-references>${references}</pre>
       </div></section>
       <section class="card"><div class="card-head">Complete prompt preview</div><div class="card-body"><p>Compile the current prompt versions, project configuration, resolved AI configuration, resolved skills, and this ticket without creating a run or snapshot.</p><a class="button" href="/api/admin/tickets/${ticket.id}/prompt-preview">Open planning prompt preview</a></div></section>
+      <section class="card"><div class="card-head">Planning</div><div class="card-body"><p>Review the immutable generated plan, its exact prompt, model, reasoning level, and raw Markdown.</p><a class="button" href="/admin/tickets/${ticket.ticket_number}/plans">Open plan review</a></div></section>
       <div class="grid two"><section class="card"><div class="card-head">Original submission</div><div class="card-body"><p>${escapeHtml(ticket.description)}</p><dl><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Environment</dt><dd>${escapeHtml(ticket.environment)}</dd><dt>Source URL</dt><dd>${escapeHtml(ticket.source_url)}</dd></dl></div></section>
       <section class="card"><div class="card-head">Internal notes</div><div class="card-body notes">${notes.map((note) => `<div class="note"><strong>${escapeHtml(note.username ?? "Administrator")}</strong><p>${escapeHtml(note.body)}</p></div>`).join("") || "<p>No notes yet.</p>"}</div></section></div>
       <section class="card"><div class="card-head">Status history</div><div class="card-body">${history.map((item) => `<p><span class="mono">${new Date(item.created_at).toLocaleString("nl-NL")}</span> ${escapeHtml(item.previous_status ?? "New")} → <strong>${escapeHtml(item.new_status)}</strong></p>`).join("") || "<p>No recorded transitions.</p>"}</div></section>`;
@@ -1076,7 +1110,63 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
       reasoning_level: typeof body.reasoning_level === "string" ? body.reasoning_level : selection.reasoning_level,
     });
     await resolvedSkillsFor(ticket, "planning");
-    return transitionTicket(ref, "Approved for Planning", "Approved for planning", session, request, response);
+    const result = await inTransaction(async (client) => {
+      const before = (await client.query(
+        "SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE",
+        [ref],
+      )).rows[0];
+      if (!before) return null;
+      if (!["Triage", "Needs Information"].includes(before.status)) {
+        throw Object.assign(new Error(`ticket cannot be approved from ${before.status}`), { status: 409 });
+      }
+      await client.query("UPDATE tickets SET status='Approved for Planning',updated_at=now() WHERE id=$1", [before.id]);
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
+         VALUES ($1,$2,'Approved for Planning','Approved for planning','admin',$3)`,
+        [before.id, before.status, session.user_id],
+      );
+      const job = await enqueueJob({
+        type: "planning.generate",
+        payload: {
+          ticket_id: before.id,
+          // Dev/test only — the worker never reads this in a production
+          // build (see @dcc/claude-runner's NODE_ENV guard). Lets tests
+          // route a specific mock-claude scenario to this job without a
+          // dedicated preview endpoint; see HARNESS_CONVENTIONS.md.
+          ...(typeof body.mock_scenario_path === "string" ? { mock_scenario_path: body.mock_scenario_path } : {}),
+        },
+        idempotencyKey: `planning.generate:${before.id}:1`, maxAttempts: 1,
+      }, client);
+      const after = (await client.query(
+        "UPDATE tickets SET status='Planning Queued',updated_at=now() WHERE id=$1 RETURNING *",
+        [before.id],
+      )).rows[0];
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_job_id)
+         VALUES ($1,'Approved for Planning','Planning Queued','Planning job queued','admin',$2,$3)`,
+        [before.id, session.user_id, job.id],
+      );
+      await audit({
+        actorType: "admin", actorId: session.user_id, action: "ticket.approve_planning",
+        entityType: "ticket", entityId: before.id, before, after, metadata: { job_id: job.id }, ip: ipOf(request),
+      }, client);
+      return { ticket: after, job };
+    });
+    return result ? json(response, 202, result) : json(response, 404, { error: "ticket not found" });
+  }
+  const ticketPlansMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/plans$/);
+  if (ticketPlansMatch && request.method === "GET") {
+    const ref = decodeURIComponent(ticketPlansMatch[1]);
+    const ticket = (await pool.query("SELECT id FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
+    if (!ticket) return json(response, 404, { error: "ticket not found" });
+    const plans = (await pool.query(
+      `SELECT p.*,COALESCE(json_agg(pv ORDER BY pv.version) FILTER (WHERE pv.id IS NOT NULL),'[]') versions
+       FROM plans p LEFT JOIN plan_versions pv ON pv.plan_id=p.id WHERE p.ticket_id=$1 GROUP BY p.id`,
+      [ticket.id],
+    )).rows;
+    return json(response, 200, { plans });
   }
   const promptPreviewMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/prompt-preview$/);
   if (promptPreviewMatch && request.method === "GET") {
