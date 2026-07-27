@@ -440,3 +440,73 @@ self-report alone.
   DET-01/02/03/05, SEC-12, DET-06, DET-08, and OPS-04 all become reachable
   for the first time, since it's the phase that actually calls the Phase
   3/4 resolvers and compiler from a real job.
+
+## Execution session — 2026-07-27, cycle 5: Phase 5 (Claude planning)
+
+**Hypothesis (before):** delegate PRD §32 Phase 5 (subscription-only auth
+guard, CLI adapter, planning job, plan storage) to Codex, targeting two
+hard-fail cases (SEC-01, SEC-14) plus SEC-02 and DET-07. Given the hard-fail
+stakes, planned to independently re-verify both guards myself with a real
+worker instance rather than trust Codex's self-report alone — same approach
+as cycle 4's compiler verification.
+
+**Result (after — full detail in commit `bb2c35e`, summarized here):**
+- Independently confirmed both hard-fail guards work by starting a real
+  worker process against a real Postgres with mock-claude on `PATH`:
+  `ANTHROPIC_API_KEY` set → immediate `blocked_auth_configuration:
+  forbidden Claude authentication variable ANTHROPIC_API_KEY is set` and
+  exit, mock-claude never invoked; `CLAUDE_CODE_OAUTH_TOKEN` unset →
+  `blocked_auth: ...`; clean env → runs normally (no false-positive
+  refusal). SEC-01/SEC-02 confirmed independently before relying on the
+  full harness at all.
+- The full harness run then surfaced a cascade of real bugs, none of them
+  hard-fail-guard defects — found and fixed one at a time by reproducing
+  each directly against a running instance rather than guessing from
+  vitest's error text alone:
+  1. `pg` stopped being resolvable from the harness's own `helpers.ts`
+     (only declared in `packages/database`, never hoisted to root) —
+     Phase 5's new workspace package apparently changed pnpm's install
+     topology enough to stop whatever accidentally hoisted it before,
+     breaking ~20 previously-passing spec files at once. Fixed by adding
+     `pg` as a root devDependency directly.
+  2. `_pipeline.ts` (shared by SEC-01/02/09/14) submits tickets with no
+     `project_id`/`category`, expecting Triage to assign both — the app
+     hard-required both at submission. Relaxed to optional with a sensible
+     default (earliest enabled project; category deferred to triage)
+     rather than editing the frozen helper.
+  3. That relaxation left a stale `project.id` reference (should've been
+     the new `projectId` variable) that 500'd every submission — caught by
+     reproducing the exact request against a live instance and reading the
+     real Node stack trace, not just the client-facing error.
+  4. `packages/skill-registry` and `apps/worker` defaulted their
+     filesystem roots to `process.cwd()`, which is `apps/worker` under
+     `pnpm --filter worker dev/start` — every skill-bundle/plan-storage
+     path was silently wrong. Both now resolve from the defining module's
+     own file location instead of the caller's cwd.
+  5. `approve-planning` accepted `mock_scenario_path` in its request body
+     (the documented dev/test routing mechanism) but never forwarded it
+     into the job's `payload_json` — the worker side already read it
+     correctly, so this was a one-line gap that silently fell back to
+     mock-claude's generic default plan, which fails the strict
+     17-section parser. Traced by driving a full planning run by hand and
+     reading `agent_runs.error_json` directly.
+  - Also unrelated to app code: this agent's own accumulated manual
+    verification runs (many `nohup pnpm dev &` instances across cycles 2-5
+    without full cleanup) had built up ~127 orphaned Node processes,
+    exhausting memory and causing the harness's own long-running
+    background commands to get killed mid-run by the environment. Freed
+    ~4GB by killing them; noting this as an operational lesson for the
+    rest of this build, not a harness or app defect.
+- Final official scorecard: `weighted_score: 0.1644`, security 13/18 (up
+  from 10/18), operational 2/5. **SEC-01 and SEC-02 both pass.** SEC-14,
+  SEC-09, DET-07 correctly stay red — confirmed via manual reproduction
+  that SEC-14's `planning.generate` half (the actual read-only
+  `--permission-mode plan`/`--tools` assertion) already passes on its own;
+  the file only fails because its second half needs
+  `POST /api/admin/plans/{id}/request-revision`, and SEC-09/DET-07 need
+  `POST /api/admin/plan-versions/{id}/approve` — both explicitly Phase 6
+  scope per PRD §32 ("plan approval" is listed under Phase 6, not Phase 5).
+- Committed as `bb2c35e` "phase 5: claude planning".
+- **Next:** Phase 6 (Plan revision) per PRD §32 — this should immediately
+  unlock SEC-14 (full), SEC-09, and DET-07, none of which need new
+  discovery, just the request-revision/approve routes this phase builds.
