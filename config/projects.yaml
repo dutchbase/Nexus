@@ -1,0 +1,6 @@
+version: 1
+defaults:
+  ai:
+    model: sonnet
+    reasoning_level: high
+projects: {}

@@ -1,0 +1,9 @@
+{
+  "name": "@dcc/project-config",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "yaml": "^2.8.0"
+  }
+}

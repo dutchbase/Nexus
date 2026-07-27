@@ -1,0 +1,13 @@
+{
+  "name": "web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/server.ts"
+  },
+  "dependencies": {
+    "@dcc/database": "workspace:*",
+    "@dcc/domain": "workspace:*",
+    "@dcc/project-config": "workspace:*"
+  }
+}

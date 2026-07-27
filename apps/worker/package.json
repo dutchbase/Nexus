@@ -1,0 +1,13 @@
+{
+  "name": "worker",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/worker.ts"
+  },
+  "dependencies": {
+    "@dcc/database": "workspace:*",
+    "@dcc/domain": "workspace:*",
+    "@dcc/project-config": "workspace:*"
+  }
+}
