@@ -38,6 +38,9 @@ importers:
       '@dcc/project-config':
         specifier: workspace:*
         version: link:../../packages/project-config
+      '@dcc/skill-registry':
+        specifier: workspace:*
+        version: link:../../packages/skill-registry
 
   apps/worker:
     dependencies:

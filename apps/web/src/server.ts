@@ -3,7 +3,12 @@ import { mkdir, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { pool, inTransaction } from "@dcc/database";
-import { enqueueJob } from "@dcc/domain";
+import {
+  AiConfigurationError, enqueueJob, resolveAiConfiguration, validateAiSelection, type AiPhase,
+} from "@dcc/domain";
+import {
+  resolveSkills, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
+} from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
 import { adminPage, escapeHtml, loginPage, publicFormPage, submittedPage } from "./ui.ts";
 
@@ -29,9 +34,72 @@ const fieldTypes = new Set([
   "short_text", "long_text", "email", "url", "number", "dropdown", "radio", "checkbox", "multi_select",
   "project_selector", "category_selector", "environment_selector", "image_upload", "hidden", "static",
 ]);
+const skillSourceTypes = new Set([
+  "workspace_global", "project_local", "personal_claude", "repository", "external_directory",
+]);
+const skillAttachmentTypes = new Set(["automatic", "required"]);
 
 function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+function ticketAiConfiguration(ticket: any) {
+  return {
+    default: { model: ticket.default_model, reasoning_level: ticket.default_reasoning_level },
+    planning: { model: ticket.planning_model, reasoning_level: ticket.planning_reasoning_level },
+    execution: { model: ticket.execution_model, reasoning_level: ticket.execution_reasoning_level },
+    repair: { model: ticket.repair_model, reasoning_level: ticket.repair_reasoning_level },
+  };
+}
+
+function projectAiConfiguration(project: any) {
+  const ai = project.config_json?.ai ?? {};
+  return {
+    default: { model: ai.default_model, reasoning_level: ai.default_reasoning_level },
+    planning: ai.planning,
+    execution: ai.execution,
+    repair: ai.repair,
+  };
+}
+
+function resolvedAiFor(ticket: any, project: any, phase: AiPhase) {
+  return resolveAiConfiguration({
+    phase,
+    system: { default: { model: "sonnet", reasoning_level: "high" } },
+    project: projectAiConfiguration(project),
+    ticket: ticketAiConfiguration(ticket),
+  });
+}
+
+async function skillCandidates(ticket: any, phase: AiPhase, client: any = pool): Promise<SkillCandidate[]> {
+  const rows = (await client.query(
+    `SELECT resolved.* FROM (
+       SELECT s.*, 'global_mandatory'::text source, 1 source_order
+       FROM skills s WHERE COALESCE((s.configuration_json->>'mandatory')::boolean, false)
+       UNION ALL
+       SELECT s.*, 'project_automatic', 2
+       FROM project_skills ps JOIN skills s ON s.id=ps.skill_id
+       WHERE ps.project_id=$1 AND ps.attachment_type='automatic'
+       UNION ALL
+       SELECT s.*, 'ticket_selected', 3
+       FROM ticket_skills ts LEFT JOIN skills s ON s.id=ts.skill_id
+       WHERE ts.ticket_id=$2
+       UNION ALL
+       SELECT s.*, 'phase_required', 4
+       FROM skills s WHERE s.configuration_json->'required_phases' ? $3
+     ) resolved ORDER BY source_order, slug, id`,
+    [ticket.project_id, ticket.id, phase],
+  )).rows;
+  return rows.map((row: any) => ({
+    skill: row.id ? row : null,
+    skillId: row.id,
+    slug: row.slug,
+    source: row.source as ResolutionSource,
+  }));
+}
+
+async function resolvedSkillsFor(ticket: any, phase: AiPhase, client: any = pool) {
+  return resolveSkills(await skillCandidates(ticket, phase, client), ticket.project_id, phase);
 }
 
 function json(response: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
@@ -372,9 +440,47 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
       [decodeURIComponent(ticketMatch[1])],
     )).rows[0];
     if (!ticket) return html(response, 404, adminPage(url.pathname, "Ticket not found", "<h1>Ticket not found</h1>", metrics, session.username));
-    const notes = (await pool.query("SELECT n.*,u.username FROM ticket_notes n LEFT JOIN users u ON u.id=n.author_id WHERE ticket_id=$1 ORDER BY n.created_at DESC", [ticket.id])).rows;
-    const history = (await pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id])).rows;
+    const [notesResult, historyResult, skillsResult] = await Promise.all([
+      pool.query("SELECT n.*,u.username FROM ticket_notes n LEFT JOIN users u ON u.id=n.author_id WHERE ticket_id=$1 ORDER BY n.created_at DESC", [ticket.id]),
+      pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
+      pool.query(
+        `SELECT s.*,ps.id IS NOT NULL automatic,ts.id IS NOT NULL selected
+         FROM skills s
+         LEFT JOIN project_skills ps ON ps.skill_id=s.id AND ps.project_id=$1 AND ps.attachment_type='automatic'
+         LEFT JOIN ticket_skills ts ON ts.skill_id=s.id AND ts.ticket_id=$2
+         ORDER BY s.category,s.name`,
+        [ticket.project_id, ticket.id],
+      ),
+    ]);
+    const notes = notesResult.rows;
+    const history = historyResult.rows;
+    const skillRows = skillsResult.rows;
+    const chips = skillRows.filter((skill) => skill.automatic || skill.selected).map((skill) =>
+      `<span class="skill-chip" data-skill-chip="${skill.id}" data-slug="${escapeHtml(skill.slug)}">${escapeHtml(skill.name)}
+       ${skill.automatic ? '<small>auto</small>' : `<button type="button" aria-label="Remove ${escapeHtml(skill.name)}" data-remove-skill="${skill.id}">×</button>`}</span>`,
+    ).join("");
+    const references = skillRows.filter((skill) => skill.automatic || skill.selected).map((skill) => `- /${escapeHtml(skill.slug)}`).join("\n");
+    const modelOptions = ["fable", "opus", "sonnet", "haiku"].map((model) => `<option value="${model}"${ticket.default_model === model ? " selected" : ""}>${model[0].toUpperCase()}${model.slice(1)}</option>`).join("");
+    const reasoningOptions = [["low","Low"],["medium","Medium"],["high","High"],["xhigh","Extra high"],["max","Maximum"],["ultracode","Ultracode"]].map(([value,label]) => `<option value="${value}"${ticket.default_reasoning_level === value ? " selected" : ""}>${label}</option>`).join("");
+    const phaseConfiguration = (phase: "planning" | "execution" | "repair") => {
+      const selectedModel = ticket[`${phase}_model`];
+      const selectedReasoning = ticket[`${phase}_reasoning_level`];
+      const models = ["fable", "opus", "sonnet", "haiku"].map((model) => `<option value="${model}"${selectedModel === model ? " selected" : ""}>${model[0].toUpperCase()}${model.slice(1)}</option>`).join("");
+      const reasoning = [["low","Low"],["medium","Medium"],["high","High"],["xhigh","Extra high"],["max","Maximum"],["ultracode","Ultracode"]].map(([value,label]) => `<option value="${value}"${selectedReasoning === value ? " selected" : ""}>${label}</option>`).join("");
+      return `<fieldset><legend>${phase[0].toUpperCase()}${phase.slice(1)}</legend><div class="grid two"><label class="field"><span>Model</span><select name="${phase}_model">${models}</select></label><label class="field"><span>Reasoning level</span><select name="${phase}_reasoning_level">${reasoning}</select></label></div></fieldset>`;
+    };
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)}</div><h1>${escapeHtml(ticket.title)}</h1><span class="status">${escapeHtml(ticket.status)}</span>
+      <div class="tabs" role="tablist">${["Overview","AI & skills","Prompt","Plans","Runs","Validation","Pull request","Activity"].map((label,index) => `<button role="tab" aria-selected="${index === 0}" data-tab="${index}">${label}</button>`).join("")}</div>
+      <section class="card" data-tab-panel="1"><div class="card-head">AI configuration</div><div class="card-body">
+        <form id="ai-config" data-ticket-id="${ticket.id}"><label class="field"><span>Mode</span><select name="ai_configuration_mode"><option value="basic"${ticket.ai_configuration_mode !== "advanced" ? " selected" : ""}>Basic</option><option value="advanced"${ticket.ai_configuration_mode === "advanced" ? " selected" : ""}>Advanced</option></select></label>
+        <div class="grid two"><label class="field"><span>Default model</span><select name="default_model">${modelOptions}</select></label><label class="field"><span>Default reasoning level</span><select name="default_reasoning_level">${reasoningOptions}</select></label></div>
+        <div data-advanced-ai${ticket.ai_configuration_mode === "advanced" ? "" : " hidden"}>${phaseConfiguration("planning")}${phaseConfiguration("execution")}${phaseConfiguration("repair")}</div>
+        <button class="button primary" type="submit">Save AI configuration</button><p class="error" role="alert"></p></form>
+      </div></section>
+      <section class="card" data-tab-panel="1"><div class="card-head">Skills</div><div class="card-body"><label class="field"><span>Search and select skills</span><input data-skill-search placeholder="Search skills or categories"></label>
+        <div class="skill-options">${skillRows.map((skill) => `<label data-skill-option data-search="${escapeHtml(`${skill.name} ${skill.slug} ${skill.category}`.toLowerCase())}"><input type="checkbox" value="${skill.id}" data-skill-toggle data-slug="${escapeHtml(skill.slug)}" data-name="${escapeHtml(skill.name)}"${skill.automatic || skill.selected ? " checked" : ""}${skill.automatic || !skill.enabled ? " disabled" : ""}> ${escapeHtml(skill.name)} <small>${escapeHtml(skill.category)}${skill.automatic ? " · Automatically added by project" : ""}${!skill.enabled ? " · disabled" : ""}</small></label>`).join("")}</div>
+        <div class="skill-chips" data-skill-chips>${chips}</div><pre class="references" data-skill-references>${references}</pre>
+      </div></section>
       <div class="grid two"><section class="card"><div class="card-head">Original submission</div><div class="card-body"><p>${escapeHtml(ticket.description)}</p><dl><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Environment</dt><dd>${escapeHtml(ticket.environment)}</dd><dt>Source URL</dt><dd>${escapeHtml(ticket.source_url)}</dd></dl></div></section>
       <section class="card"><div class="card-head">Internal notes</div><div class="card-body notes">${notes.map((note) => `<div class="note"><strong>${escapeHtml(note.username ?? "Administrator")}</strong><p>${escapeHtml(note.body)}</p></div>`).join("") || "<p>No notes yet.</p>"}</div></section></div>
       <section class="card"><div class="card-head">Status history</div><div class="card-body">${history.map((item) => `<p><span class="mono">${new Date(item.created_at).toLocaleString("nl-NL")}</span> ${escapeHtml(item.previous_status ?? "New")} → <strong>${escapeHtml(item.new_status)}</strong></p>`).join("") || "<p>No recorded transitions.</p>"}</div></section>`;
@@ -394,6 +500,13 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
     const forms = (await pool.query("SELECT f.*,count(ff.id)::integer field_count FROM forms f LEFT JOIN form_fields ff ON ff.form_id=f.id GROUP BY f.id ORDER BY f.name")).rows;
     const body = `<div class="eyebrow">Configure</div><h1>Forms</h1><div class="grid two">${forms.map((form) => `<a class="card" href="/admin/forms/${escapeHtml(form.slug)}"><div class="card-body"><span class="status">${escapeHtml(form.status)}</span><h2>${escapeHtml(form.name)}</h2><p>${escapeHtml(form.title)}</p><span>${form.field_count || standardFields.length} fields</span></div></a>`).join("")}</div>`;
     return html(response, 200, adminPage(url.pathname, "Forms", body, metrics, session.username));
+  }
+  if (url.pathname === "/admin/skills") {
+    const skills = (await pool.query("SELECT * FROM skills ORDER BY category,name")).rows;
+    const body = `<div class="eyebrow">Configure</div><h1>Skills</h1><p>Central registry of workspace, project, personal, repository, and external skills.</p>
+      <section class="card"><div class="list-head skills-head"><span>Skill</span><span>Description</span><span>Category</span><span>Source</span><span>Version</span><span>State</span></div>
+      ${skills.map((skill) => `<div class="ticket-row skills-row"><strong>/${escapeHtml(skill.slug)}</strong><span>${escapeHtml(skill.description)}</span><span>${escapeHtml(skill.category)}</span><span>${escapeHtml(skill.source_type)}</span><span>${escapeHtml(skill.version)}</span><span class="status">${skill.enabled ? "Enabled" : "Disabled"}</span></div>`).join("")}</section>`;
+    return html(response, 200, adminPage(url.pathname, "Skills", body, metrics, session.username));
   }
   const dashboard = `<div class="eyebrow">Overview</div><h1>Things that need your attention.</h1><div class="grid two"><section class="card"><div class="card-head">Open tickets</div><div class="card-body"><h2>${metrics.tickets}</h2><a class="button" href="/admin/tickets">Open triage</a></div></section><section class="card"><div class="card-head">Job queue</div><div class="card-body"><h2>${metrics.jobs}</h2><p>Queued and running jobs</p></div></section></div>`;
   return html(response, 200, adminPage(url.pathname, "Dashboard", dashboard, metrics, session.username));
@@ -487,6 +600,93 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     await audit({ actorType: "admin", actorId: session.user_id, action: `form.${publishMatch[2]}`, entityType: "form", entityId: form.id, after: form, ip: ipOf(request) });
     return json(response, 200, { form });
   }
+  if (url.pathname === "/api/admin/skills" && request.method === "GET") {
+    return json(response, 200, { skills: (await pool.query("SELECT * FROM skills ORDER BY category,name")).rows });
+  }
+  if (url.pathname === "/api/admin/skills" && request.method === "POST") {
+    const body = await bodyOf(request);
+    if (typeof body.slug !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(body.slug)) return json(response, 400, { error: "invalid skill slug" });
+    if (typeof body.name !== "string" || !body.name.trim()) return json(response, 400, { error: "skill name is required" });
+    if (!skillSourceTypes.has(body.source_type)) return json(response, 400, { error: "unsupported skill source type" });
+    const skill = (await pool.query(
+      `INSERT INTO skills
+       (slug,name,description,category,source_type,filesystem_path,enabled,risk_level,version,content_hash,configuration_json)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11) RETURNING *`,
+      [body.slug, body.name.trim(), body.description ?? null, body.category ?? null, body.source_type,
+        body.filesystem_path ?? null, body.enabled ?? true, body.risk_level ?? "low", body.version ?? "1.0.0",
+        body.content_hash ?? null, body.configuration_json ?? {}],
+    )).rows[0];
+    await audit({ actorType: "admin", actorId: session.user_id, action: "skill.create", entityType: "skill", entityId: skill.id, after: skill, ip: ipOf(request) });
+    return json(response, 201, { skill });
+  }
+  const skillValidateMatch = url.pathname.match(/^\/api\/admin\/skills\/([0-9a-f-]+)\/validate$/i);
+  if (skillValidateMatch && request.method === "POST") {
+    const skill = (await pool.query("SELECT * FROM skills WHERE id=$1", [skillValidateMatch[1]])).rows[0];
+    if (!skill) return json(response, 404, { error: "skill not found" });
+    try {
+      const resolved = resolveSkills([{ skill, skillId: skill.id, slug: skill.slug, source: "ticket_selected" }], "", "planning");
+      const snapshot = await snapshotSkills(resolved, "planning");
+      const result = { valid: true, content_hash: snapshot.skills[0].content_hash, files: snapshot.skills[0].files.map((file) => file.path) };
+      await pool.query(
+        `UPDATE skills SET content_hash=$2,configuration_json=jsonb_set(configuration_json,'{last_validation_result}',$3::jsonb,true),updated_at=now() WHERE id=$1`,
+        [skill.id, result.content_hash, JSON.stringify(result)],
+      );
+      return json(response, 200, result);
+    } catch (error) {
+      return json(response, 422, { error: error instanceof Error ? error.message : "skill validation failed", valid: false });
+    }
+  }
+  const skillMatch = url.pathname.match(/^\/api\/admin\/skills\/([0-9a-f-]+)$/i);
+  if (skillMatch && request.method === "GET") {
+    const skill = (await pool.query("SELECT * FROM skills WHERE id=$1", [skillMatch[1]])).rows[0];
+    return skill ? json(response, 200, { skill }) : json(response, 404, { error: "skill not found" });
+  }
+  if (skillMatch && request.method === "PATCH") {
+    const body = await bodyOf(request);
+    if (body.source_type !== undefined && !skillSourceTypes.has(body.source_type)) return json(response, 400, { error: "unsupported skill source type" });
+    const allowed = ["name", "description", "category", "source_type", "filesystem_path", "enabled", "risk_level", "version", "configuration_json"];
+    const entries = Object.entries(body).filter(([key]) => allowed.includes(key));
+    if (!entries.length) return json(response, 400, { error: "no supported fields" });
+    const before = (await pool.query("SELECT * FROM skills WHERE id=$1", [skillMatch[1]])).rows[0];
+    if (!before) return json(response, 404, { error: "skill not found" });
+    const skill = (await pool.query(
+      `UPDATE skills SET ${entries.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now() WHERE id=$1 RETURNING *`,
+      [skillMatch[1], ...entries.map(([, value]) => value)],
+    )).rows[0];
+    await audit({ actorType: "admin", actorId: session.user_id, action: "skill.update", entityType: "skill", entityId: skill.id, before, after: skill, ip: ipOf(request) });
+    return json(response, 200, { skill });
+  }
+  if (skillMatch && request.method === "DELETE") {
+    const skill = (await pool.query("UPDATE skills SET enabled=false,updated_at=now() WHERE id=$1 RETURNING *", [skillMatch[1]])).rows[0];
+    return skill ? json(response, 200, { skill }) : json(response, 404, { error: "skill not found" });
+  }
+  const projectSkillsMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/skills$/i);
+  if (projectSkillsMatch && request.method === "PUT") {
+    const body = await bodyOf(request);
+    const attachments = Array.isArray(body.skills) ? body.skills : [];
+    for (const item of attachments) {
+      if (!item || typeof item.skill_id !== "string" || !skillAttachmentTypes.has(item.attachment_type ?? "automatic")) {
+        return json(response, 400, { error: "each project skill requires a skill_id and valid attachment_type" });
+      }
+    }
+    const rows = await inTransaction(async (client) => {
+      const project = (await client.query("SELECT id FROM projects WHERE id=$1 FOR UPDATE", [projectSkillsMatch[1]])).rows[0];
+      if (!project) return null;
+      await client.query("DELETE FROM project_skills WHERE project_id=$1", [project.id]);
+      for (const item of attachments) {
+        await client.query(
+          `INSERT INTO project_skills (project_id,skill_id,attachment_type,required,allow_ticket_override)
+           VALUES ($1,$2,$3,$4,$5)`,
+          [project.id, item.skill_id, item.attachment_type ?? "automatic", item.required ?? false, item.allow_ticket_override ?? false],
+        );
+      }
+      return (await client.query(
+        "SELECT ps.*,s.slug,s.name FROM project_skills ps JOIN skills s ON s.id=ps.skill_id WHERE ps.project_id=$1 ORDER BY s.name",
+        [project.id],
+      )).rows;
+    });
+    return rows ? json(response, 200, { skills: rows }) : json(response, 404, { error: "project not found" });
+  }
   if (url.pathname === "/api/admin/tickets" && request.method === "GET") {
     const params: any[] = [];
     const where: string[] = [];
@@ -510,13 +710,72 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     await audit({ actorType: "admin", actorId: session.user_id, action: "ticket.note.create", entityType: "ticket", entityId: ticket.id, after: note, ip: ipOf(request) });
     return json(response, 201, { note });
   }
+  const ticketSkillsMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/skills$/);
+  if (ticketSkillsMatch && request.method === "PUT") {
+    const body = await bodyOf(request);
+    const supplied = body.skill_ids ?? body.skills ?? body.skill_slugs ?? [];
+    if (!Array.isArray(supplied) || supplied.some((value: unknown) => typeof value !== "string")) {
+      return json(response, 400, { error: "skill_ids must be an array" });
+    }
+    const ref = decodeURIComponent(ticketSkillsMatch[1]);
+    const result = await inTransaction(async (client) => {
+      const ticket = (await client.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE", [ref])).rows[0];
+      if (!ticket) return null;
+      const skills = supplied.length ? (await client.query(
+        "SELECT * FROM skills WHERE id::text=ANY($1::text[]) OR slug=ANY($1::text[])",
+        [supplied],
+      )).rows : [];
+      for (const selected of supplied) {
+        const skill = skills.find((item: any) => item.id === selected || item.slug === selected);
+        if (!skill) throw new SkillResolutionError(selected, "missing");
+        if (!skill.enabled) throw new SkillResolutionError(skill.slug, "disabled");
+      }
+      await client.query("DELETE FROM ticket_skills WHERE ticket_id=$1", [ticket.id]);
+      for (const skill of skills) {
+        await client.query(
+          `INSERT INTO ticket_skills (ticket_id,skill_id,source,selected_by) VALUES ($1,$2,'manual',$3)
+           ON CONFLICT (ticket_id,skill_id) DO NOTHING`,
+          [ticket.id, skill.id, session.user_id],
+        );
+      }
+      return { ticket, skills: await resolvedSkillsFor(ticket, "planning", client) };
+    });
+    return result ? json(response, 200, result) : json(response, 404, { error: "ticket not found" });
+  }
+  const snapshotMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/skill-snapshots$/);
+  if (snapshotMatch && request.method === "POST") {
+    const body = await bodyOf(request);
+    const phase: AiPhase = ["planning", "execution", "repair"].includes(body.phase) ? body.phase : "planning";
+    const ref = decodeURIComponent(snapshotMatch[1]);
+    const ticket = (await pool.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
+    if (!ticket) return json(response, 404, { error: "ticket not found" });
+    const copied = await snapshotSkills(await resolvedSkillsFor(ticket, phase), phase);
+    const snapshot = (await pool.query(
+      `INSERT INTO skill_snapshots (ticket_id,run_id,skills_json,content_hash) VALUES ($1,$2,$3,$4) RETURNING *`,
+      [ticket.id, body.run_id ?? null, JSON.stringify(copied.skills), copied.contentHash],
+    )).rows[0];
+    return json(response, 201, { skill_snapshot: snapshot });
+  }
   const actionMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/(reject|cancel|archive)$/);
   if (actionMatch && request.method === "POST") {
     const statuses: Record<string, string> = { reject: "Rejected", cancel: "Cancelled", archive: "Archived" };
     return transitionTicket(decodeURIComponent(actionMatch[1]), statuses[actionMatch[2]], `${actionMatch[2]} by administrator`, session, request, response);
   }
   const approveMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/approve-planning$/);
-  if (approveMatch && request.method === "POST") return transitionTicket(decodeURIComponent(approveMatch[1]), "Approved for Planning", "Approved for planning", session, request, response);
+  if (approveMatch && request.method === "POST") {
+    const body = await bodyOf(request);
+    const ref = decodeURIComponent(approveMatch[1]);
+    const ticket = (await pool.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
+    if (!ticket) return json(response, 404, { error: "ticket not found" });
+    const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
+    const selection = resolvedAiFor(ticket, project, "planning");
+    validateAiSelection({
+      model: typeof body.model === "string" ? body.model : selection.model,
+      reasoning_level: typeof body.reasoning_level === "string" ? body.reasoning_level : selection.reasoning_level,
+    });
+    await resolvedSkillsFor(ticket, "planning");
+    return transitionTicket(ref, "Approved for Planning", "Approved for planning", session, request, response);
+  }
   const ticketMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)$/);
   if (ticketMatch && request.method === "GET") {
     const ref = decodeURIComponent(ticketMatch[1]);
@@ -533,12 +792,26 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     const ref = decodeURIComponent(ticketMatch[1]);
     const body = await bodyOf(request);
     if (body.status !== undefined && (!validStatuses.has(body.status) || systemOnlyStatuses.has(body.status))) return json(response, 422, { error: "status cannot be set manually" });
-    const allowed = ["title", "description", "category", "priority", "status", "project_id", "submitter_name", "submitter_email", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps"];
+    const allowed = [
+      "title", "description", "category", "priority", "status", "project_id", "submitter_name", "submitter_email",
+      "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps",
+      "ai_configuration_mode", "default_model", "default_reasoning_level", "planning_model",
+      "planning_reasoning_level", "execution_model", "execution_reasoning_level", "repair_model", "repair_reasoning_level",
+    ];
     const entries = Object.entries(body).filter(([key]) => allowed.includes(key));
     if (!entries.length) return json(response, 400, { error: "no supported fields" });
     const after = await inTransaction(async (client) => {
       const before = (await client.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE", [ref])).rows[0];
       if (!before) return null;
+      if (body.ai_configuration_mode !== undefined && !["basic", "advanced"].includes(body.ai_configuration_mode)) {
+        throw new AiConfigurationError(`Unsupported AI configuration mode "${body.ai_configuration_mode}"`);
+      }
+      const candidate = { ...before, ...Object.fromEntries(entries) };
+      const project = (await client.query("SELECT * FROM projects WHERE id=$1", [candidate.project_id])).rows[0];
+      for (const phase of (candidate.ai_configuration_mode === "advanced"
+        ? ["planning", "execution", "repair"] : ["planning"]) as AiPhase[]) {
+        resolvedAiFor(candidate, project, phase);
+      }
       const updated = (await client.query(`UPDATE tickets SET ${entries.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now() WHERE id=$1 RETURNING *`, [before.id, ...entries.map(([, value]) => value)])).rows[0];
       if (body.status && body.status !== before.status) await client.query(
         `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id) VALUES ($1,$2,$3,'Manual admin update','admin',$4)`,
@@ -589,7 +862,11 @@ async function route(request: IncomingMessage, response: ServerResponse) {
 const server = createServer((request, response) => {
   route(request, response).catch((error) => {
     console.error(error);
-    if (!response.headersSent) json(response, error?.status ?? 500, { error: error?.status === 413 ? "request too large" : error?.status === 400 ? error.message : "internal error" });
+    const status = Number(error?.status) || 500;
+    if (!response.headersSent) json(response, status, {
+      error: status === 413 ? "request too large" : status < 500 ? error.message : "internal error",
+      code: status < 500 ? error?.code : undefined,
+    });
     else response.end();
   });
 });

@@ -1,6 +1,70 @@
 import type pg from "pg";
 import { inTransaction, pool } from "@dcc/database";
 
+export const aiModels = ["fable", "opus", "sonnet", "haiku"] as const;
+export const reasoningLevels = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
+export type AiModel = typeof aiModels[number];
+export type ReasoningLevel = typeof reasoningLevels[number];
+export type AiPhase = "planning" | "execution" | "repair";
+export type AiSelection = { model?: string | null; reasoning_level?: string | null };
+export type AiConfiguration = {
+  default?: AiSelection;
+  planning?: AiSelection;
+  execution?: AiSelection;
+  repair?: AiSelection;
+};
+
+const supportedReasoning: Record<AiModel, readonly ReasoningLevel[]> = {
+  haiku: ["low", "medium", "high"],
+  sonnet: ["low", "medium", "high", "xhigh"],
+  opus: ["low", "medium", "high", "xhigh", "max"],
+  fable: reasoningLevels,
+};
+
+export class AiConfigurationError extends Error {
+  status = 422;
+  code = "invalid_ai_configuration";
+}
+
+export function validateAiSelection(selection: { model: string; reasoning_level: string }) {
+  if (!aiModels.includes(selection.model as AiModel)) {
+    throw new AiConfigurationError(`Unsupported model "${selection.model}"`);
+  }
+  if (!reasoningLevels.includes(selection.reasoning_level as ReasoningLevel)) {
+    throw new AiConfigurationError(`Unsupported reasoning level "${selection.reasoning_level}"`);
+  }
+  if (!supportedReasoning[selection.model as AiModel].includes(selection.reasoning_level as ReasoningLevel)) {
+    throw new AiConfigurationError(
+      `Invalid model/reasoning combination: ${selection.model} does not support ${selection.reasoning_level}`,
+    );
+  }
+  return selection as { model: AiModel; reasoning_level: ReasoningLevel };
+}
+
+function overlay(base: AiSelection, next?: AiSelection) {
+  return {
+    model: next?.model ?? base.model,
+    reasoning_level: next?.reasoning_level ?? base.reasoning_level,
+  };
+}
+
+export function resolveAiConfiguration(input: {
+  phase: AiPhase;
+  system: AiConfiguration;
+  project?: AiConfiguration;
+  ticket?: AiConfiguration;
+}) {
+  let result = overlay({}, input.system.default);
+  result = overlay(result, input.project?.default);
+  result = overlay(result, input.project?.[input.phase]);
+  result = overlay(result, input.ticket?.default);
+  result = overlay(result, input.ticket?.[input.phase]);
+  if (!result.model || !result.reasoning_level) {
+    throw new AiConfigurationError(`Incomplete AI configuration for ${input.phase}`);
+  }
+  return validateAiSelection({ model: result.model, reasoning_level: result.reasoning_level });
+}
+
 export type JobInput = {
   type: string;
   payload: Record<string, unknown>;

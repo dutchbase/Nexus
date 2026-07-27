@@ -51,6 +51,40 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
       apply(choice);matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{if((localStorage.getItem("dccTheme")||"auto")==="auto")apply("auto")});
       document.querySelectorAll("[data-theme-choice]").forEach(b=>b.addEventListener("click",()=>{localStorage.setItem("dccTheme",b.dataset.themeChoice);apply(b.dataset.themeChoice)}));
       ${path.startsWith("/admin/tickets") ? `document.querySelectorAll("[data-ticket-filter]").forEach(el=>el.addEventListener("change",()=>{const q=new URLSearchParams(new FormData(document.querySelector("#filters")));location.href="/admin/tickets?"+q}))` : ""}
+      ${/^\/admin\/tickets\/[^/]+$/.test(path) ? `
+        const csrf=sessionStorage.getItem("dccCsrf")||"";
+        const aiForm=document.querySelector("#ai-config");
+        if(aiForm){
+          const mode=aiForm.elements.ai_configuration_mode,advanced=document.querySelector("[data-advanced-ai]");
+          mode.addEventListener("change",()=>advanced.hidden=mode.value!=="advanced");
+          aiForm.addEventListener("submit",async(event)=>{
+            event.preventDefault();const payload=Object.fromEntries(new FormData(aiForm));
+            if(payload.ai_configuration_mode!=="advanced"){for(const phase of ["planning","execution","repair"]){delete payload[phase+"_model"];delete payload[phase+"_reasoning_level"]}}
+            const response=await fetch("/api/admin/tickets/"+aiForm.dataset.ticketId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
+            const result=await response.json();aiForm.querySelector(".error").textContent=response.ok?"Saved":result.error;
+          });
+        }
+        const toggles=[...document.querySelectorAll("[data-skill-toggle]")],chips=document.querySelector("[data-skill-chips]"),references=document.querySelector("[data-skill-references]");
+        const ticketId=aiForm?.dataset.ticketId;
+        function renderSkills(){
+          const selected=toggles.filter(input=>input.checked);
+          chips.replaceChildren(...selected.map(input=>{
+            const chip=document.createElement("span");chip.className="skill-chip";chip.dataset.skillChip=input.value;chip.dataset.slug=input.dataset.slug;chip.append(document.createTextNode(input.dataset.name+" "));
+            if(input.disabled){const tag=document.createElement("small");tag.textContent="auto";chip.append(tag)}
+            else{const remove=document.createElement("button");remove.type="button";remove.dataset.removeSkill=input.value;remove.setAttribute("aria-label","Remove "+input.dataset.name);remove.textContent="×";chip.append(remove)}
+            return chip;
+          }));
+          references.textContent=selected.map(input=>"- /"+input.dataset.slug).join("\\n");
+        }
+        async function persistSkills(){
+          const skill_ids=toggles.filter(input=>input.checked&&!input.disabled).map(input=>input.value);
+          const response=await fetch("/api/admin/tickets/"+ticketId+"/skills",{method:"PUT",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({skill_ids})});
+          if(!response.ok){const result=await response.json();alert(result.error)}
+        }
+        toggles.forEach(input=>input.addEventListener("change",()=>{renderSkills();persistSkills()}));
+        chips?.addEventListener("click",event=>{const button=event.target.closest("[data-remove-skill]");if(!button)return;const input=toggles.find(item=>item.value===button.dataset.removeSkill);if(input){input.checked=false;renderSkills();persistSkills()}});
+        document.querySelector("[data-skill-search]")?.addEventListener("input",event=>document.querySelectorAll("[data-skill-option]").forEach(option=>option.hidden=!option.dataset.search.includes(event.target.value.toLowerCase())));
+      ` : ""}
     `);
 }
 

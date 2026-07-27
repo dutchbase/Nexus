@@ -82,6 +82,19 @@ textarea { resize:vertical }
 .error { color:var(--t-danger);min-height:1.5em }
 .notes { display:grid;gap:10px }
 .note { border-left:3px solid var(--accent);padding:8px 12px;background:var(--surface2) }
+.tabs { display:flex;gap:4px;overflow-x:auto;margin-top:22px;border-bottom:1px solid var(--border) }
+.tabs button { min-height:44px;border:0;border-bottom:2px solid transparent;background:transparent;white-space:nowrap;cursor:pointer }
+.tabs button[aria-selected="true"] { border-bottom-color:var(--accent);font-weight:700 }
+fieldset { margin:16px 0;border:1px solid var(--border);border-radius:4px }
+.skill-options { display:grid;gap:6px;max-height:260px;overflow:auto;margin:12px 0 }
+.skill-options label { display:flex;gap:8px;align-items:center;padding:8px;background:var(--surface2);border-radius:4px }
+.skill-options input { width:auto }
+.skill-options small { margin-left:auto;color:var(--text3) }
+.skill-chips { display:flex;gap:6px;flex-wrap:wrap;margin:12px 0 }
+.skill-chip { display:inline-flex;align-items:center;gap:5px;padding:5px 8px;border-radius:99px;background:var(--accent-soft);font-weight:600 }
+.skill-chip button { border:0;background:transparent;cursor:pointer }
+.references { white-space:pre-wrap;padding:12px;background:var(--code-bg);border-radius:4px }
+.skills-head,.skills-row { grid-template-columns:1.2fr 2fr 1fr 1fr .7fr .7fr }
 @media(max-width:979px) {
   .sidebar { transform:translateX(-100%);transition:transform .22s ease }
   .sidebar.open { transform:translateX(0) }
