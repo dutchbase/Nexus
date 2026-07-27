@@ -187,3 +187,99 @@ later-phase endpoints to go green).
   worth a second look before Phase 11 hardening if time permits — flagging
   now rather than silently accepting it.
 - **Next:** Phase 2 (Forms and tickets) per PRD §32.
+
+## Execution session — 2026-07-27, cycle 2: Phase 2 (Forms and tickets)
+
+**Hypothesis (before):** delegate PRD §32 Phase 2 (form data model/builder,
+public forms with honeypot/size-limit protection, upload handling, ticket
+list/detail/notes/status workflow, admin shell) to Codex, extending Phase
+1's app rather than restructuring it, targeting SEC-04, SEC-18, FE-13,
+FE-01, FE-02.
+
+**Result (after):**
+- Codex built the feature set; same sandbox restrictions as Phase 1
+  (couldn't bind Postgres sockets, couldn't commit) — verified/committed
+  directly again, as expected and noted in Phase 1's entry.
+- Found and fixed a real bug during verification: both `apps/web` and
+  `apps/worker`'s `tsx watch` were watching the whole cwd by default,
+  including `apps/web/data/uploads/` where test file-uploads land. Every
+  upload during a run triggered a dev-server restart mid-flight. Scoped
+  both to `--watch-path src`.
+- Also found (not an app bug, an environment-management issue on this
+  execution agent's side): `run-evals.sh`'s cleanup only kills the top-level
+  `pnpm dev` process it PID-matched via `pgrep -f "pnpm dev"`, not the
+  nested process tree (`scripts/dev.ts` spawns two `pnpm --filter <app> dev`
+  children, each spawning a `tsx watch` grandchild). Across this agent's
+  several debugging run-evals.sh invocations, 7+ orphaned `tsx watch`
+  processes accumulated, fighting over port 3000 and producing
+  non-reproducible results between runs. Not fixable (harness file,
+  read-only) — this agent now kills any `server.ts`/`worker.ts` processes
+  and stops any stray `pg-ephemeral` cluster before every `run-evals.sh`
+  invocation to keep this from recurring.
+- **Real, unfixable-from-the-app-side harness defect found — flagging
+  loudly per goal.md's "say so if genuinely blocked" instruction, not
+  routing around it quietly:** every full `run-evals.sh` run reports
+  `frontend: 0/13`, and this is now confirmed structural, not a code
+  defect. `harness/tests/probes/zzz-auth-lockout.spec.ts` deliberately
+  drives the single shared `eval-admin` account into a login lockout and
+  never resets it — its own file header says this is safe because it's
+  "named `zzz-` so it sorts last within `tests/probes/`... making this the
+  final thing to run in any full eval pass." But `harness/score.sh` runs
+  `tests/frontend/*.spec.ts` in a **second, separate** `for` loop, after
+  the combined `tests/api/*.spec.ts tests/probes/*.spec.ts` loop finishes
+  — so "the final thing to run" is true only within that first loop; every
+  frontend spec file's `loginAsAdmin()` call runs afterward, against a
+  still-locked account, and times out after 30s waiting for a navigation
+  that never happens. This reproduced identically for both Phase 1 and
+  Phase 2 frontend cases (FE-01/FE-02 in Phase 2, and would affect FE-03
+  through FE-13 identically). It cannot be fixed from the application side
+  without weakening the lockout window/threshold specifically to dodge this
+  — which goal.md's enumerated cheat #3 (weakening auth/gate checks) warns
+  against in spirit, and which wouldn't reliably work regardless: the gap
+  between "account gets locked" (end of the probes loop) and "first
+  frontend test tries to log in" (start of the very next loop) is likely
+  just seconds, not enough for even a short lockout window to expire
+  naturally, while a window short enough to always expire in that gap
+  stops being a meaningful lockout for the probe's own 8-rapid-attempts
+  assertion. `harness/`, including this test file, is read-only to this
+  agent (hard-fail #10) — this is reported, not silently routed around.
+  - **Independent verification that the app itself is correct:** outside
+    of a full `run-evals.sh` run, this agent stood up a fresh Postgres +
+    migrations + fresh `create-admin.ts` account + fixtures + app, and ran
+    `npx playwright test harness/tests/frontend/shell.spec.ts` and
+    `.../public-form.spec.ts` directly (bypassing `tests/api`/`tests/probes`
+    entirely, so the account was never locked). All three Phase 2 frontend
+    targets passed: FE-01 and FE-02 (`shell.spec.ts`, both cases, 987ms–2.2s
+    each) and FE-13 (`public-form.spec.ts`, 2.1s). An earlier attempt at
+    this same isolated check appeared to fail identically to the full-run
+    symptom, which briefly looked like a *second*, independent frontend
+    bug — root-caused instead to this agent's own mistake (a shell
+    variable set via unescaped `$(date +%s)` command substitution in one
+    Bash tool call not surviving into the next, separate Bash call, so a
+    later manual login attempt used a different password than the account
+    was actually created with, and repeated wrong-password attempts against
+    the same long-lived manual test app self-triggered the very same
+    lockout). Re-ran clean with a fixed, known password throughout and both
+    cases passed. Documenting the false-alarm explicitly so a future cycle
+    doesn't waste time re-chasing a "second bug" that isn't there.
+  - **Practical implication for every future scorecard in this log:** the
+    `frontend` category will read `0/13` (contributing 0 to `weighted_score`
+    and putting `frontend` permanently under the 0.85 category floor) in
+    every official `run-evals.sh` run for the rest of this build, regardless
+    of frontend code quality, because of this ordering issue — not because
+    the routes/pages are wrong. This agent will keep building and
+    independently spot-verifying frontend cases in isolation (as done here)
+    and reporting real per-case pass/fail in commit messages and this log,
+    but the `weighted_score`/`hard_fail_triggered` numbers pulled from
+    `.last-scorecard.json` after a full run will always undercount
+    `frontend`. The stated stop condition (weighted ≥ 0.95, no category
+    < 0.85, zero hard fails, twice clean) is therefore **unreachable via
+    the official scoring path as currently frozen**, through no fault of
+    the application under test. Surfacing this now, after two phases,
+    rather than only at the very end of the build.
+- Committed as `4ab826d` "phase 2: forms and tickets" with the official
+  (harness-run, lockout-depressed) scorecard in the commit body, plus the
+  isolated FE-01/FE-02/FE-13 pass results noted explicitly.
+- **Next:** Phase 3 (AI configuration and skills) per PRD §32, continuing
+  to build and independently spot-verify frontend cases per phase even
+  though the full-run scorecard can't reflect them correctly.
