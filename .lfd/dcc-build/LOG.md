@@ -589,3 +589,59 @@ myself with real requests before committing, same approach as cycles 4-5.
 - Committed as `49a5ffc` "phase 6: plan revision" with the full isolated
   verification story and both real bugs in the commit body.
 - **Next:** Phase 7 (Execution) per PRD §32.
+
+## Execution session — 2026-07-28, cycle 7: Phase 7 (Execution)
+
+**Hypothesis (before):** delegate PRD §32 Phase 7 (worktree manager,
+execution job with the §20.3/§20.4 permission model, streaming, logs,
+cancellation, timeout, repair scaffolding) to Codex, targeting hard-fail
+case SEC-15 (no Claude-reachable git-publish/merge capability). Given the
+hard-fail stakes, planned to grep the actual diff myself before trusting
+Codex's self-report, plus drive a full execution end-to-end by hand.
+
+**Result (after):**
+- SEC-15 self-check: grepped the whole diff for
+  `git push|git commit|gh |.merge(` directly — one hit, a false positive
+  inside unrelated HTML template text. No real git-publish/merge
+  capability. `--tools` confirmed exactly `Read,Glob,Grep,Edit,Write,Bash`
+  (§20.4 verbatim, no git-specific tool grant).
+- Drove a full execution by hand against a live instance: ticket → Triage
+  (via the cycle-6 GET auto-transition) → approve-planning → plan-version
+  approve (hash-matched) → execute → the `execution.run` job completed and
+  produced a REAL worktree on disk at
+  `data/worktrees/va-jobs-platform/DCC-1000/1` (exact §20.2 path
+  convention) with a real git branch `feedback/DCC-1000-exec-test`
+  checked out, `base_commit` captured, and all 3 streamed mock-claude
+  events landed in `agent_run_events` in correct sequence order.
+  Re-confirmed the approval gate also holds at execution time (a fresh
+  unapproved ticket → execute → 409), not just at enqueue time.
+- **Could not get a fresh official scorecard this cycle.** First attempt
+  failed immediately (5 lines, `FATAL: could not start ephemeral
+  Postgres`) — not a new bug, just this agent's own cleanup between the
+  manual verification session and the harness run not having actually
+  stopped the ephemeral Postgres cluster first (a batched cleanup command
+  silently didn't run to completion; re-ran `pg-ephemeral.sh stop` alone
+  and confirmed the marker was gone before retrying). The second, genuine
+  attempt reproduced cycle 6's environment finding exactly: killed by the
+  environment deep in the frontend test tail (this time at
+  `all-routes.spec.ts`, even later than cycle 6's `a11y.spec.ts`) right
+  before scoring would have written the scorecard. Per cycle 6's own
+  stated policy (bounded attempts, isolated verification as primary
+  signal), stopped after 2 real attempts rather than retrying further.
+  **Correction to earlier framing this cycle:** a scorecard read
+  immediately after the first (failed) attempt showed `weighted=0.1644`
+  with `SEC-15: pass` and was mistakenly treated in the moment as
+  possible fresh signal — it was not; `run-evals.sh` FATAL'd before
+  reaching `score.sh` at all, so that file was stale, left over from
+  Phase 5's last real complete run (`SEC-15` has trivially passed since
+  Phase 1 anyway, since it only fails on the *presence* of forbidden
+  patterns — an absence is a free pass, not phase-specific evidence).
+  Flagging the correction explicitly rather than letting a wrong claim
+  stand uncorrected in this log.
+- Committed as `c65122f` "phase 7: execution" with the full isolated
+  verification story (and the corrected framing) in the commit body.
+- WF-05/WF-06/SEC-08/SEC-09 correctly still need Phase 8's actual
+  validation pipeline (lint/test/build/secret-scan, commit/push/PR) — this
+  phase only gets execution to the "Validating" handoff point, as scoped.
+  Not a regression.
+- **Next:** Phase 8 (Validation and PR creation) per PRD §32.
