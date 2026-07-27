@@ -2,6 +2,7 @@ import type pg from "pg";
 import { inTransaction, pool } from "@dcc/database";
 export * from "./prompts.ts";
 export * from "./plan-approval.ts";
+export * from "./pull-request.ts";
 
 export const aiModels = ["fable", "opus", "sonnet", "haiku"] as const;
 export const reasoningLevels = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;

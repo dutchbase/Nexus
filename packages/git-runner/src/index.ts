@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, realpath } from "node:fs/promises";
+import { mkdir, readFile, realpath } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -51,4 +51,218 @@ export async function createExecutionWorktree(input: {
 
 export async function worktreeDiff(worktreePath: string) {
   return (await exec("git", ["-C", worktreePath, "diff", "--no-ext-diff", "--binary"])).stdout;
+}
+
+export const DEFAULT_PROTECTED_PATHS = [".env", ".env.*", "secrets/**", "production-data/**", ".git/**"];
+const SECRET_PATTERNS = [
+  /AKIA[0-9A-Z]{16}/g,
+  /-----BEGIN (?:RSA |EC )?PRIVATE KEY-----/g,
+];
+
+export type ValidationResult = {
+  check: string;
+  status: "passed" | "skipped";
+  detail?: string;
+};
+
+export class WorktreeValidationError extends Error {
+  check: string;
+  results: ValidationResult[];
+  output?: string;
+
+  constructor(
+    check: string,
+    message: string,
+    results: ValidationResult[],
+    output?: string,
+  ) {
+    super(message);
+    this.name = "WorktreeValidationError";
+    this.check = check;
+    this.results = results;
+    this.output = output;
+  }
+}
+
+function globRegex(glob: string) {
+  let source = "^";
+  for (let index = 0; index < glob.length; index += 1) {
+    const character = glob[index];
+    if (character === "*" && glob[index + 1] === "*") {
+      source += ".*";
+      index += 1;
+    } else if (character === "*") {
+      source += "[^/]*";
+    } else if (character === "?") {
+      source += "[^/]";
+    } else {
+      source += character.replace(/[\\^$+?.()|[\]{}]/g, "\\$&");
+    }
+  }
+  return new RegExp(`${source}$`);
+}
+
+export function matchesProtectedPath(file: string, patterns = DEFAULT_PROTECTED_PATHS) {
+  const normalized = file.replaceAll("\\", "/").replace(/^\.\//, "");
+  return patterns.some((pattern) => globRegex(pattern.replaceAll("\\", "/")).test(normalized));
+}
+
+export function countCredentialShapes(content: string) {
+  return SECRET_PATTERNS.reduce((total, pattern) => {
+    pattern.lastIndex = 0;
+    return total + Array.from(content.matchAll(pattern)).length;
+  }, 0);
+}
+
+export function sanitizeValidationOutput(output: string) {
+  return output
+    .replace(/AKIA[0-9A-Z]{16}/g, "[REDACTED_CREDENTIAL]")
+    .replace(
+      /-----BEGIN (?:RSA |EC )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC )?PRIVATE KEY-----/g,
+      "[REDACTED_PRIVATE_KEY]",
+    );
+}
+
+async function git(worktreePath: string, args: string[]) {
+  return exec("git", ["-C", worktreePath, ...args], { maxBuffer: 16 * 1024 * 1024 });
+}
+
+export async function changedWorktreeFiles(worktreePath: string, baseCommit: string) {
+  const [baseDiff, working] = await Promise.all([
+    git(worktreePath, ["diff", "--name-only", "-z", baseCommit]),
+    git(worktreePath, ["ls-files", "-z", "--modified", "--others", "--exclude-standard", "--deleted"]),
+  ]);
+  return [...new Set(`${baseDiff.stdout}${working.stdout}`.split("\0").filter(Boolean))].sort();
+}
+
+async function runCommand(worktreePath: string, command: string) {
+  try {
+    const result = await exec("sh", ["-lc", command], {
+      cwd: worktreePath,
+      maxBuffer: 16 * 1024 * 1024,
+      env: { ...process.env },
+    });
+    return `${result.stdout}${result.stderr}`.trim();
+  } catch (error: any) {
+    const output = sanitizeValidationOutput(`${error?.stdout ?? ""}${error?.stderr ?? ""}`.trim());
+    throw Object.assign(new Error("command failed"), { output });
+  }
+}
+
+async function packageScripts(worktreePath: string) {
+  try {
+    const parsed = JSON.parse(await readFile(path.join(worktreePath, "package.json"), "utf8"));
+    return typeof parsed.scripts === "object" && parsed.scripts ? parsed.scripts as Record<string, string> : {};
+  } catch {
+    return {};
+  }
+}
+
+export async function validateExecutionWorktree(input: {
+  worktreePath: string;
+  baseCommit: string;
+  protectedPaths?: string[];
+  commands?: Partial<Record<"install" | "lint" | "typecheck" | "test" | "build", string>>;
+  projectValidationCommands?: string[];
+  skillValidationCommands?: string[];
+}) {
+  const results: ValidationResult[] = [];
+  const files = await changedWorktreeFiles(input.worktreePath, input.baseCommit);
+  results.push({ check: "changed-file inspection", status: "passed", detail: `${files.length} changed file(s)` });
+
+  const protectedMatches = files.filter((file) =>
+    matchesProtectedPath(file, input.protectedPaths?.length ? input.protectedPaths : DEFAULT_PROTECTED_PATHS));
+  if (protectedMatches.length) {
+    throw new WorktreeValidationError(
+      "protected-path inspection",
+      `protected-path inspection found ${protectedMatches.length} disallowed changed path(s)`,
+      results,
+    );
+  }
+  results.push({ check: "protected-path inspection", status: "passed" });
+
+  let secretCount = 0;
+  for (const file of files) {
+    try {
+      const content = await readFile(path.join(input.worktreePath, file), "utf8");
+      secretCount += countCredentialShapes(content);
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") {
+        throw new WorktreeValidationError("secret scan", "secret scan could not inspect a changed file", results);
+      }
+    }
+  }
+  if (secretCount) {
+    throw new WorktreeValidationError(
+      "secret scan", `secret scan found ${secretCount} credential-shaped pattern(s)`, results,
+    );
+  }
+  results.push({ check: "secret scan", status: "passed" });
+
+  const scripts = await packageScripts(input.worktreePath);
+  results.push({
+    check: "dependency validation",
+    status: "passed",
+    detail: Object.keys(scripts).length ? "project package scripts inspected" : "no package scripts configured",
+  });
+
+  const configured = input.commands ?? {};
+  const ordered: Array<[string, string | undefined]> = [
+    ["install", configured.install],
+    ["lint", configured.lint ?? (scripts.lint ? "npm run --silent lint" : undefined)],
+    ["typecheck", configured.typecheck ?? (scripts.typecheck ? "npm run --silent typecheck" : undefined)],
+    ["tests", configured.test ?? (scripts.test ? "npm run --silent test" : undefined)],
+    ["build", configured.build ?? (scripts.build ? "npm run --silent build" : undefined)],
+  ];
+  for (const [check, command] of ordered) {
+    if (!command?.trim()) {
+      results.push({ check, status: "skipped", detail: "not configured" });
+      continue;
+    }
+    try {
+      await runCommand(input.worktreePath, command);
+      results.push({ check, status: "passed" });
+    } catch (error: any) {
+      throw new WorktreeValidationError(check, `${check} validation failed`, results, error?.output);
+    }
+  }
+
+  try {
+    await git(input.worktreePath, ["diff", "--check", input.baseCommit]);
+    results.push({ check: "git diff --check", status: "passed" });
+  } catch {
+    throw new WorktreeValidationError("git diff --check", "git diff --check failed", results);
+  }
+
+  for (const [check, commands] of [
+    ["project-specific validation", input.projectValidationCommands],
+    ["selected-skill validation", input.skillValidationCommands],
+  ] as const) {
+    if (!commands?.length) {
+      results.push({ check, status: "skipped", detail: "not configured" });
+      continue;
+    }
+    for (const command of commands) {
+      try {
+        await runCommand(input.worktreePath, command);
+      } catch (error: any) {
+        throw new WorktreeValidationError(check, `${check} failed`, results, error?.output);
+      }
+    }
+    results.push({ check, status: "passed", detail: `${commands.length} command(s)` });
+  }
+  return { files, results };
+}
+
+export async function commitExecutionChanges(input: {
+  worktreePath: string;
+  message: string;
+}) {
+  await git(input.worktreePath, ["add", "--all"]);
+  await git(input.worktreePath, ["commit", "--allow-empty", "-m", input.message]);
+  return (await git(input.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+}
+
+export async function pushExecutionBranch(worktreePath: string, branchName: string) {
+  await git(worktreePath, ["push", "--set-upstream", "origin", branchName]);
 }

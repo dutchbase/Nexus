@@ -1459,7 +1459,49 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
         "UPDATE tickets SET status='Execution Queued',updated_at=now() WHERE id=$1",
         [source.ticket_id],
       );
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_job_id,related_run_id,related_plan_version_id)
+         VALUES ($1,$2,'Execution Queued','Repair execution queued','admin',$3,$4,$5,$6)`,
+        [source.ticket_id, source.ticket_status, session.user_id, job.id, source.id, source.plan_version_id],
+      );
       return { job, execution_attempt_id: source.execution_attempt_id };
+    });
+    return result ? json(response, 202, result) : json(response, 404, { error: "run not found" });
+  }
+  const runRetryMatch = url.pathname.match(/^\/api\/admin\/runs\/([0-9a-f-]+)\/retry$/i);
+  if (runRetryMatch && request.method === "POST") {
+    const result = await inTransaction(async (client) => {
+      const source = (await client.query(
+        `SELECT ar.id run_id,ea.*,t.status ticket_status
+         FROM agent_runs ar
+         JOIN execution_attempts ea ON ea.agent_run_id=ar.id
+         JOIN tickets t ON t.id=ea.ticket_id
+         WHERE ar.id=$1 FOR UPDATE OF ea,t`,
+        [runRetryMatch[1]],
+      )).rows[0];
+      if (!source) return null;
+      if (source.ticket_status !== "PR Creation Failed" || !source.result_commit) {
+        throw Object.assign(new Error("run has no failed publication to retry"), { status: 409 });
+      }
+      const job = await enqueueJob({
+        type: "pull-request.retry",
+        payload: { ticket_id: source.ticket_id, execution_attempt_id: source.id },
+        idempotencyKey: `pull-request.retry:${source.id}:${randomUUID()}`,
+        maxAttempts: 1,
+      }, client);
+      await client.query(
+        "UPDATE tickets SET status='Validating',updated_at=now() WHERE id=$1",
+        [source.ticket_id],
+      );
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_job_id,related_run_id,related_plan_version_id)
+         VALUES ($1,'PR Creation Failed','Validating','Pull-request publication retry queued',
+                 'admin',$2,$3,$4,$5)`,
+        [source.ticket_id, session.user_id, job.id, source.run_id, source.plan_version_id],
+      );
+      return { job, execution_attempt_id: source.id };
     });
     return result ? json(response, 202, result) : json(response, 404, { error: "run not found" });
   }

@@ -11,6 +11,7 @@
     "@dcc/database": "workspace:*",
     "@dcc/domain": "workspace:*",
     "@dcc/git-runner": "workspace:*",
+    "@dcc/github-provider": "workspace:*",
     "@dcc/project-config": "workspace:*",
     "@dcc/skill-registry": "workspace:*"
   }

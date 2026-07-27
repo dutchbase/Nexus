@@ -9,10 +9,14 @@ import {
 } from "@dcc/claude-runner";
 import { inTransaction, pool } from "@dcc/database";
 import {
-  buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, claimJob, completeJob, failJob,
+  buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, claimJob, completeJob, failJob,
   resolveAiConfiguration, snapshotPrompt,
 } from "@dcc/domain";
-import { createExecutionWorktree, worktreeDiff } from "../../../packages/git-runner/src/index.ts";
+import {
+  commitExecutionChanges, createExecutionWorktree, pushExecutionBranch, validateExecutionWorktree,
+  WorktreeValidationError, worktreeDiff,
+} from "../../../packages/git-runner/src/index.ts";
+import { createDraftPullRequest, findOpenPullRequestForHead } from "@dcc/github-provider";
 import { validateProject } from "@dcc/project-config";
 import {
   materializeSkillBundle, resolveSkills, snapshotSkills, type ResolutionSource, type SkillCandidate,
@@ -27,6 +31,7 @@ const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..
 const workerId = `worker-${randomUUID()}`;
 const planningJobTypes = ["planning.generate", "planning.revise"];
 const executionJobTypes = ["execution.run", "execution.repair"];
+const publicationJobTypes = ["pull-request.retry"];
 let stopping = false;
 let activeExecutionCancellation: AbortController | null = null;
 
@@ -633,6 +638,68 @@ async function runExecution(job: any) {
         [ticket.id, current.status, job.id, runId, attempt.plan_version_id],
       );
     });
+    const commands = input.project.config_json?.commands ?? {};
+    const skillValidationCommands = input.skills.flatMap((skill: any) => {
+      const configured = skill.configuration_json?.validation_scripts;
+      return Array.isArray(configured) ? configured.filter((value: unknown): value is string => typeof value === "string") : [];
+    });
+    let validation;
+    try {
+      validation = await validateExecutionWorktree({
+        worktreePath: worktree.worktreePath,
+        baseCommit: worktree.baseCommit ?? attempt.base_commit,
+        protectedPaths: input.project.config_json?.protected_paths,
+        commands: {
+          install: commands.install ?? input.project.config_json?.install_command,
+          lint: commands.lint ?? input.project.config_json?.lint_command,
+          typecheck: commands.typecheck ?? input.project.config_json?.typecheck_command,
+          test: commands.test ?? input.project.config_json?.test_command,
+          build: commands.build ?? input.project.config_json?.build_command,
+        },
+        projectValidationCommands: Array.isArray(input.project.config_json?.validation_commands)
+          ? input.project.config_json.validation_commands : [],
+        skillValidationCommands,
+      });
+    } catch (error) {
+      if (!(error instanceof WorktreeValidationError)) throw error;
+      const validationOutput = {
+        check: error.check, message: error.message, output: error.output ?? "", results: error.results,
+      };
+      await pool.query(
+        `UPDATE agent_runs
+         SET status='failed',error_code='validation_failed',error_message=$2,
+             metadata_json=metadata_json || jsonb_build_object('validation_output',$3::jsonb)
+         WHERE id=$1`,
+        [runId, error.message, JSON.stringify(validationOutput)],
+      );
+      await pool.query(
+        "UPDATE execution_attempts SET validation_status='failed',completed_at=now(),result_commit=NULL WHERE id=$1",
+        [attempt.id],
+      );
+      await inTransaction(async (client) => {
+        const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
+        await client.query("UPDATE tickets SET status='Validation Failed',updated_at=now() WHERE id=$1", [ticket.id]);
+        await client.query(
+          `INSERT INTO ticket_status_history
+           (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
+           VALUES ($1,$2,'Validation Failed',$3,'worker',$4,$5,$6)`,
+          [ticket.id, current.status, error.message, job.id, runId, attempt.plan_version_id],
+        );
+      });
+      return;
+    }
+    await pool.query(
+      `UPDATE agent_runs
+       SET metadata_json=metadata_json || jsonb_build_object('validation_output',$2::jsonb)
+       WHERE id=$1`,
+      [runId, JSON.stringify({ results: validation.results, changed_files: validation.files })],
+    );
+    await publishExecutionAttempt({
+      attempt: { ...attempt, ...worktree, worktree_path: worktree.worktreePath, branch_name: worktree.branchName },
+      ticket, project: input.project, runId, jobId: job.id,
+      planMarkdown: attempt.content_markdown, skills: copied.skills.map((skill) => skill.slug),
+      validationResults: validation.results, changedFiles: validation.files,
+    });
   } catch (error) {
     const executionError = error instanceof ClaudeExecutionError ? error : null;
     const cancelled = executionError?.code === "execution_cancelled";
@@ -645,10 +712,19 @@ async function runExecution(job: any) {
       "UPDATE execution_attempts SET validation_status=$2,completed_at=now() WHERE id=$1",
       [attempt.id, cancelled ? "cancelled" : executionError?.code === "execution_timeout" ? "timed_out" : "failed"],
     );
-    await pool.query(
-      "UPDATE tickets SET status=$2,updated_at=now() WHERE id=$1",
-      [ticket.id, cancelled ? "Cancelled" : "Execution Failed"],
-    );
+    await inTransaction(async (client) => {
+      const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
+      const nextStatus = cancelled ? "Cancelled" : "Execution Failed";
+      await client.query("UPDATE tickets SET status=$2,updated_at=now() WHERE id=$1", [ticket.id, nextStatus]);
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
+         VALUES ($1,$2,$3,$4,'worker',$5,$6,$7)`,
+        [ticket.id, current.status, nextStatus,
+          cancelled ? "Execution cancelled" : "Execution worker failed",
+          job.id, runId, attempt.plan_version_id],
+      );
+    });
     throw error;
   } finally {
     clearInterval(cancellationPoll);
@@ -657,8 +733,175 @@ async function runExecution(job: any) {
   }
 }
 
+async function publishExecutionAttempt(input: {
+  attempt: any;
+  ticket: any;
+  project: any;
+  runId: string;
+  jobId: string;
+  planMarkdown: string;
+  skills: string[];
+  validationResults: Array<{ check: string; status: "passed" | "skipped"; detail?: string }>;
+  changedFiles: string[];
+}) {
+  try {
+    let commit = input.attempt.result_commit as string | null;
+    if (!commit) {
+      commit = await commitExecutionChanges({
+        worktreePath: input.attempt.worktree_path,
+        message: `${input.ticket.ticket_number}: ${input.ticket.title}`,
+      });
+      await pool.query("UPDATE execution_attempts SET result_commit=$2,validation_status='validated' WHERE id=$1", [
+        input.attempt.id, commit,
+      ]);
+      await pool.query(
+        `INSERT INTO audit_events (actor_type,action,entity_type,entity_id,after_json)
+         VALUES ('worker','execution.commit','execution_attempt',$1,$2)`,
+        [input.attempt.id, { commit }],
+      );
+    }
+    await pushExecutionBranch(input.attempt.worktree_path, input.attempt.branch_name);
+    await pool.query(
+      `INSERT INTO audit_events (actor_type,action,entity_type,entity_id,after_json)
+       VALUES ('worker','execution.push','execution_attempt',$1,$2)`,
+      [input.attempt.id, { branch: input.attempt.branch_name }],
+    );
+
+    let stored = (await pool.query(
+      "SELECT * FROM pull_requests WHERE execution_attempt_id=$1",
+      [input.attempt.id],
+    )).rows[0];
+    if (!stored) {
+      const body = buildPullRequestBody({
+        ticketNumber: input.ticket.ticket_number,
+        ticketTitle: input.ticket.title,
+        project: input.project.name,
+        problemSummary: input.ticket.description ?? "",
+        approvedPlanSummary: input.planMarkdown.slice(0, 4000),
+        model: (await pool.query("SELECT model FROM agent_runs WHERE id=$1", [input.runId])).rows[0]?.model ?? "",
+        reasoningLevel: (await pool.query("SELECT reasoning_level FROM agent_runs WHERE id=$1", [input.runId])).rows[0]?.reasoning_level ?? "",
+        appliedSkills: input.skills,
+        changedFiles: input.changedFiles,
+        validationResults: input.validationResults,
+        knownLimitations: input.project.config_json?.known_limitations ?? "None known.",
+        planHash: input.ticket.approved_plan_hash ?? "",
+        executionRunId: input.runId,
+        internalTicketUrl: `${process.env.APP_BASE_URL ?? "http://127.0.0.1:3000"}/admin/tickets/${input.ticket.ticket_number}`,
+      });
+      const providerPr = await findOpenPullRequestForHead(
+        input.project.github_owner, input.project.github_repository, input.attempt.branch_name,
+      ) ?? await createDraftPullRequest({
+        owner: input.project.github_owner,
+        repository: input.project.github_repository,
+        title: `${input.ticket.ticket_number}: ${input.ticket.title}`,
+        body,
+        head: input.attempt.branch_name,
+        base: input.project.default_branch,
+        draft: true,
+      });
+      stored = (await pool.query(
+        `INSERT INTO pull_requests
+         (project_id,ticket_id,execution_attempt_id,provider,repository,number,url,title,author,state,
+          review_state,check_state,is_draft,head_branch,base_branch,head_sha,merge_commit_sha,
+          created_at_provider,updated_at_provider,merged_at,closed_at,last_synced_at)
+         VALUES ($1,$2,$3,'github',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                 $17,$18,$19,$20,now())
+         RETURNING *`,
+        [
+          input.project.id, input.ticket.id, input.attempt.id,
+          `${input.project.github_owner}/${input.project.github_repository}`,
+          providerPr.number, providerPr.html_url, providerPr.title, providerPr.user?.login ?? null,
+          providerPr.state, providerPr.review_state ?? null, providerPr.check_state ?? null,
+          providerPr.draft, providerPr.head.ref, providerPr.base.ref, commit,
+          providerPr.merge_commit_sha ?? null, providerPr.created_at, providerPr.updated_at,
+          providerPr.merged_at ?? null, providerPr.closed_at ?? null,
+        ],
+      )).rows[0];
+    }
+    await inTransaction(async (client) => {
+      const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
+      await client.query("UPDATE tickets SET status='PR Ready for Review',updated_at=now() WHERE id=$1", [input.ticket.id]);
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,
+          related_plan_version_id,related_pull_request_id)
+         VALUES ($1,$2,'PR Ready for Review','Draft pull request created','worker',$3,$4,$5,$6)`,
+        [input.ticket.id, current.status, input.jobId, input.runId, input.attempt.plan_version_id, stored.id],
+      );
+      await client.query(
+        `INSERT INTO notification_deliveries
+         (event_type,ticket_id,project_id,run_id,pull_request_id,idempotency_key,payload_json,status,attempt_count)
+         VALUES ('pull_request.ready',$1,$2,$3,$4,$5,$6,'queued',0)
+         ON CONFLICT (idempotency_key) DO NOTHING`,
+        [input.ticket.id, input.project.id, input.runId, stored.id,
+          `pull_request.ready:${stored.id}`, { ticket_number: input.ticket.ticket_number, pull_request_id: stored.id }],
+      );
+      await client.query(
+        "UPDATE execution_attempts SET validation_status='completed',completed_at=now() WHERE id=$1",
+        [input.attempt.id],
+      );
+    });
+  } catch {
+    await pool.query(
+      "UPDATE execution_attempts SET validation_status='pr_creation_failed',completed_at=now() WHERE id=$1",
+      [input.attempt.id],
+    );
+    await inTransaction(async (client) => {
+      const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
+      await client.query("UPDATE tickets SET status='PR Creation Failed',updated_at=now() WHERE id=$1", [input.ticket.id]);
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
+         VALUES ($1,$2,'PR Creation Failed','Worker-controlled push or pull-request creation failed',
+                 'worker',$3,$4,$5)`,
+        [input.ticket.id, current.status, input.jobId, input.runId, input.attempt.plan_version_id],
+      );
+    });
+  }
+}
+
+async function retryPublication(job: any) {
+  const row = (await pool.query(
+    `SELECT ea.*,t.ticket_number,t.title,t.description,t.approved_plan_hash,t.id ticket_id,
+            p.id project_id,p.name project_name,p.github_owner,p.github_repository,p.default_branch,p.config_json,
+            ar.id run_id,ar.model,ar.reasoning_level,ar.metadata_json,pv.content_markdown
+     FROM execution_attempts ea
+     JOIN tickets t ON t.id=ea.ticket_id
+     JOIN projects p ON p.id=t.project_id
+     JOIN agent_runs ar ON ar.id=ea.agent_run_id
+     JOIN plan_versions pv ON pv.id=ea.plan_version_id
+     WHERE ea.id=$1`,
+    [job.payload_json.execution_attempt_id],
+  )).rows[0];
+  if (!row?.result_commit || !row.worktree_path || !row.branch_name) {
+    throw new Error("publication retry has no preserved local commit");
+  }
+  const validation = row.metadata_json?.validation_output ?? {};
+  const skillSnapshot = (await pool.query(
+    `SELECT ss.skills_json FROM skill_snapshots ss WHERE ss.run_id=$1 ORDER BY ss.created_at DESC LIMIT 1`,
+    [row.run_id],
+  )).rows[0];
+  await publishExecutionAttempt({
+    attempt: row,
+    ticket: {
+      id: row.ticket_id, ticket_number: row.ticket_number, title: row.title,
+      description: row.description, approved_plan_hash: row.approved_plan_hash,
+    },
+    project: {
+      id: row.project_id, name: row.project_name, github_owner: row.github_owner,
+      github_repository: row.github_repository, default_branch: row.default_branch, config_json: row.config_json,
+    },
+    runId: row.run_id,
+    jobId: job.id,
+    planMarkdown: row.content_markdown,
+    skills: (skillSnapshot?.skills_json ?? []).map((skill: any) => skill.slug),
+    validationResults: validation.results ?? [],
+    changedFiles: validation.changed_files ?? [],
+  });
+}
+
 while (!stopping) {
-  let job = await claimJob(workerId, ["project.validate"]);
+  let job = await claimJob(workerId, ["project.validate", ...publicationJobTypes]);
   if (!job) {
     const waiting = (await pool.query(
       "SELECT 1 FROM jobs WHERE status='queued' AND type=ANY($1::text[]) LIMIT 1",
@@ -685,6 +928,8 @@ while (!stopping) {
         [project.id, result.valid ? "healthy" : result.changedFiles.length ? "repository_dirty" : "invalid"],
       );
       if (!result.valid) throw new Error(result.errors.join("; "));
+    } else if (publicationJobTypes.includes(job.type)) {
+      await retryPublication(job);
     } else if (planningJobTypes.includes(job.type)) {
       await runPlanning(job);
     } else {

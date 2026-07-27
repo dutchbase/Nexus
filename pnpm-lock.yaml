@@ -59,6 +59,9 @@ importers:
       '@dcc/git-runner':
         specifier: workspace:*
         version: link:../../packages/git-runner
+      '@dcc/github-provider':
+        specifier: workspace:*
+        version: link:../../packages/github-provider
       '@dcc/project-config':
         specifier: workspace:*
         version: link:../../packages/project-config

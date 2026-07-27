@@ -1,1 +1,1 @@
-{"name":"@dcc/github-provider","private":true,"type":"module"}
+{"name":"@dcc/github-provider","private":true,"type":"module","exports":"./src/index.ts"}
