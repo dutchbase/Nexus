@@ -283,3 +283,100 @@ FE-01, FE-02.
 - **Next:** Phase 3 (AI configuration and skills) per PRD §32, continuing
   to build and independently spot-verify frontend cases per phase even
   though the full-run scorecard can't reflect them correctly.
+
+## Execution session — 2026-07-27, cycle 3: Phase 3 (AI configuration and skills)
+
+**Hypothesis (before):** delegate PRD §32 Phase 3 (per-ticket model/reasoning
+config with precedence + validation, skill registry, project automatic
+skills, ticket skill multi-select, resolution/dedup, snapshots, run bundle)
+to Codex, extending Phases 1-2, targeting DET-06, DET-08, OPS-03, OPS-04
+(DET-09 explicitly deferred to Phase 7's `runs` table).
+
+**Result (after):**
+- Codex built the feature set (migration 003, `packages/skill-registry`,
+  config resolver in `packages/domain`, registry/config UI and APIs in
+  `apps/web`, filesystem `skills/` tree). Same sandbox restrictions as
+  Phases 1-2 (no Postgres socket, no commit) — verified/committed directly.
+  `pnpm install`/typecheck/lint all clean, no regressions in Phase 1/2's
+  10/18 security or 1/5 operational counts.
+- All 4 target cases still read `fail` in the official scorecard, but
+  investigation showed 3 different root causes, none of them a real Phase 3
+  defect:
+  1. **OPS-03 — harness/PRD contradiction, reported not fixed.**
+     `ai-config-validation.spec.ts`'s failing sub-test runs `select * from
+     agent_runs ... order by created_at`, but PRD §26.1's own `agent_runs`
+     column list (lines 2503-2523) has no `created_at` — only
+     `started_at`/`finished_at`. `HARNESS_CONVENTIONS.md`'s Database section
+     requires migrations to produce "exactly the tables/columns named in
+     PRD §26" — adding a `created_at` the PRD doesn't list would itself
+     violate that rule just to satisfy a test whose own assumption is the
+     thing that's wrong. Not edited (read-only, hard-fail #10); reported
+     here per goal.md's instruction to say so rather than route around it.
+  2. **DET-06/DET-08/OPS-04 — genuinely forward-dependent on Phase 5,
+     confirmed not a regression.** Isolated re-run (fresh Postgres + app +
+     fixtures, running only `skill-resolution.spec.ts` and
+     `skill-snapshot-immutability.spec.ts` directly) showed: one of
+     `skill-resolution.spec.ts`'s two tests — the one `OPS-04` actually maps
+     to — **passes standalone**. The other (`DET-08`'s own test) times out
+     waiting on a job/plan that never completes, and
+     `skill-snapshot-immutability.spec.ts` (`DET-06`) fails with `relation
+     "plan_versions" does not exist`. Both need Phase 5's planning-job
+     machinery to exercise their full path, exactly as Codex's own report
+     flagged going in. Because `aggregate-score.js` scores per spec *file*
+     (a file counts as passing only if every test in it passes, documented
+     in `score.sh`'s own header), `OPS-04` still reads `fail` in the
+     scorecard even though its specific assertion already passes, because
+     it shares a file with `DET-08`'s not-yet-buildable test. This is
+     expected incremental scoring per goal.md's "early phases lock green
+     before later ones start" — Phase 3 supplies the resolver/snapshot/
+     bundle infrastructure; Phase 5+ has to call it before these go fully
+     green.
+- **Second structural harness finding this cycle — same pattern as cycle
+  2's auth-lockout bug, different shared resource, flagged loudly per
+  goal.md rather than silently worked around:** the public-form submission
+  rate limiter (`defaultRateLimit = 5`/hour by default, hard-capped at 20
+  even if a form configures higher, both in `apps/web/src/server.ts`) is
+  deliberately exhausted by `public-form-security.spec.ts`'s `SEC-05` test
+  ("returns 429 once a burst... exceeds the... limit", 25 rapid submissions)
+  near the end of that file — the test file's own comment says this is
+  safe because it's "the LAST describe block in this file." But
+  `score.sh` runs every `tests/api/*.spec.ts` file against one long-lived
+  app process in a single shared alphabetical sequence, not per-file
+  isolation, and the rate limit is keyed on `(form_id, ip_address)` with a
+  1-hour window that won't naturally expire mid-run. Every file that sorts
+  after `public-form-security` and needs a fresh ticket submission —
+  confirmed for `skill-resolution.spec.ts` and
+  `skill-snapshot-immutability.spec.ts` this cycle (both hit `429
+  submission rate limit exceeded` in the full run, then passed/progressed
+  once tested with a rate limit that hadn't been pre-exhausted) — inherits
+  a permanently-429'd shared IP for the rest of that run.
+  - **This one cannot be fixed by raising the limit, unlike a simple
+    misconfiguration.** Tried raising `defaultRateLimit` 5→100 and the
+    per-form ceiling 20→200 (a legitimate, PRD-silent-on-the-exact-number
+    tunable, not a literal-matching cheat) and reverted it: `SEC-05` (a
+    case that *currently passes*) only passes because its 25-request burst
+    exceeds the limit — any value high enough to stop blocking later files
+    is also high enough that `SEC-05`'s own burst no longer crosses it,
+    which would trade one broken case for another rather than fixing
+    anything. There is no static threshold that satisfies both "SEC-05's
+    burst must exceed it" and "every later file's normal submissions must
+    stay under it" simultaneously, for the same reason the lockout window
+    can't be tuned around cycle 2's finding.
+  - **Practical implication:** this will very likely also affect
+    `workflow-state-machine.spec.ts` (`WF-01`, the workflow category, 40%
+    weight — the single largest category) once Phase 5-8 build out the
+    full happy path it drives end-to-end, since that file sorts
+    alphabetically after `public-form-security.spec.ts` too. Combined with
+    cycle 2's frontend-lockout finding, **two of five scoring categories
+    (frontend 20%, and likely workflow's largest case 40%) are at risk of
+    being structurally unmeasurable via a full `run-evals.sh` run**,
+    independent of applic­ation code quality. This agent will keep
+    independently spot-verifying affected cases in isolation per phase (as
+    done here and in cycle 2) and reporting real pass/fail in commit
+    messages and this log, but the official scorecard's `weighted_score`
+    will keep undercounting both categories. Surfacing this now, while
+    only 3 of 11 phases are built, rather than at the end.
+- Committed as `8a19008` "phase 3: AI configuration and skills" with the
+  official scorecard, the OPS-03 harness/PRD contradiction, and the
+  isolated DET-06/DET-08/OPS-04 findings all in the commit body.
+- **Next:** Phase 4 (Prompt system) per PRD §32.
