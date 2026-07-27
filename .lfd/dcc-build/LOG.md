@@ -380,3 +380,63 @@ to Codex, extending Phases 1-2, targeting DET-06, DET-08, OPS-03, OPS-04
   official scorecard, the OPS-03 harness/PRD contradiction, and the
   isolated DET-06/DET-08/OPS-04 findings all in the commit body.
 - **Next:** Phase 4 (Prompt system) per PRD §32.
+
+## Execution session — 2026-07-27, cycle 4: Phase 4 (Prompt system)
+
+**Hypothesis (before):** delegate PRD §32 Phase 4 — global/project prompt
+documents with a Markdown editor, and critically the deterministic prompt
+compiler (§14.5/§14.6 section order, §14.7 snapshot fields, §27.3 injection
+preamble) — to Codex, extending Phases 1-3. Per the working rules' tiering
+guidance this is a "get it right the expensive way" piece (DET-01 is
+hard-fail), so briefed Codex with extra precision and planned to
+independently re-verify the compiler myself rather than trust its
+self-report alone.
+
+**Result (after):**
+- Codex flagged, correctly, that `prompt-determinism.spec.ts` (DET-01/02/
+  03/05, SEC-12) drives real planning+execution jobs that don't exist until
+  Phase 5/7 — same forward-dependency shape as Phase 3's DET-06/DET-08. It
+  built the compiler as pure, testable infrastructure
+  (`packages/domain/src/prompts.ts`: `buildPlanningPrompt`,
+  `buildExecutionPrompt`, `snapshotPrompt`) plus its own 4-test vitest suite,
+  self-reporting byte-identical output and correct section order.
+- **Independent re-verification (this agent, not Codex) found a real bug
+  Codex's own tests missed.** Wrote a standalone script importing the
+  compiler functions directly with synthetic inputs (not going through the
+  app/DB at all — genuinely isolated), called each 3x including one input
+  round-tripped through `JSON.parse(JSON.stringify(...))` to rule out
+  object-identity reliance, and checked byte-identical output, sha256 hash
+  equality, and exact §14.5/§14.6 section order via the *same* regex
+  patterns `prompt-determinism.spec.ts` uses. Determinism and ordering
+  both passed cleanly on the first run. But `prompt-determinism.spec.ts`
+  also requires a delimiter-shaped line (fenced code block, `---`,
+  `BEGIN/END TICKET` marker, etc.) within a 15-line window immediately
+  before AND after wherever the ticket title/description text appears —
+  and Codex's original field order in `ticketMarkdown()` put Category,
+  Priority, Environment, Expected/Actual behavior, and Reproduction steps
+  *before* Title and Description, pushing the opening `BEGIN TICKET
+  CONTENT` delimiter more than 15 lines away from the title. This is
+  exactly the kind of thing a same-inputs-twice determinism check doesn't
+  catch (the output was perfectly deterministic, just structurally wrong
+  relative to a different assertion) — worth noting as a reminder that
+  "deterministic" and "correct" are separate properties to verify
+  independently, even for the same function.
+  - **Fix:** restructured `ticketMarkdown()` to give title/description
+    their own tight delimiter pair nested inside the outer BEGIN/END
+    block, so the lookback/lookahead window finds a boundary regardless of
+    how many other ticket fields are present around them. Re-ran the
+    isolated verification script clean after the fix (before-window and
+    after-window both now find a delimiter), and re-ran Codex's own
+    `prompts.test.ts` (still 4/4) to confirm the restructuring didn't
+    regress anything it was already checking.
+- Ran the full `run-evals.sh`: scorecard unchanged from Phase 3
+  (`weighted_score: 0.1211`, same per-category counts) — expected, not a
+  regression, since none of this phase's targets can reach a real pass
+  without Phase 5/7's job machinery calling the compiler for real.
+- Committed as `0311e79` "phase 4: prompt system" with the official
+  scorecard and the full independent-verification story (including the bug
+  found and fixed) in the commit body.
+- **Next:** Phase 5 (Claude planning) per PRD §32 — this is where
+  DET-01/02/03/05, SEC-12, DET-06, DET-08, and OPS-04 all become reachable
+  for the first time, since it's the phase that actually calls the Phase
+  3/4 resolvers and compiler from a real job.
