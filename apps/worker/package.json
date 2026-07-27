@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "dev": "tsx watch src/worker.ts"
+    "dev": "tsx watch --watch-path src src/worker.ts"
   },
   "dependencies": {
     "@dcc/database": "workspace:*",
