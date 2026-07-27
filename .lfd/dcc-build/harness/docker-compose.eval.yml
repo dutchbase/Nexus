@@ -1,0 +1,30 @@
+version: "3.9"
+
+# Ephemeral Postgres for eval runs. Preferred when Docker is available on the
+# execution host. If it is not (this design environment has no `docker`
+# binary), `pg-ephemeral.sh` falls back to a local initdb/pg_ctl cluster with
+# an identical contract (prints DATABASE_URL, localhost-only, throwaway data
+# dir). run-evals.sh picks whichever is available automatically.
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: "no"
+    environment:
+      POSTGRES_USER: dcc_eval
+      POSTGRES_PASSWORD: dcc_eval
+      POSTGRES_DB: dcc_eval
+    ports:
+      - "${PG_EVAL_PORT:-55432}:5432"
+    tmpfs:
+      - /var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U dcc_eval -d dcc_eval"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+    networks:
+      - dcc-eval-net
+
+networks:
+  dcc-eval-net:
+    driver: bridge
