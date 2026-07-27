@@ -118,3 +118,72 @@ Also verified, without finding further defects:
   worktree and confirm it reproduces the clean all-failing baseline
   documented above before writing any code, then proceed phase-by-phase per
   PRD §32.
+
+## Execution session — 2026-07-27, cycle 1: Phase 1 (Foundation)
+
+**Hypothesis (before):** confirm Stage 0 baseline matches goal.md's expected
+"clean all-failing, not a crash" result, then delegate PRD §32 Phase 1
+(monorepo, Postgres migrations, admin auth, audit log, project config
+loader/validation, worker skeleton, transactional job queue) to Codex per
+working-rule #4, targeting eval cases SEC-10 (admin login/argon2id/lockout),
+SEC-11 (CSRF required on mutations), OPS-05 (PRD §10 scripts exist and run
+clean) — the only Phase-1-scoped cases in `eval-cases.json` (WF-11, SEC-04,
+SEC-09, OPS-02 touch job-queue/project-validation foundations but need
+later-phase endpoints to go green).
+
+**Result (after):**
+- Baseline confirmed exact match to goal.md's Stage 0 spec:
+  `weighted_score: 0.0222`, `hard_fail_triggered: true`, well-formed
+  scorecard, exit non-zero, no crash.
+- Delegated Phase 1 to `codex:codex-rescue` (background). Codex built the
+  scaffold, migrations, auth/CSRF/audit-log, job queue, etc., but reported
+  it could not verify against the real harness or commit: its managed
+  sandbox denies TCP/Unix-socket binding (ephemeral Postgres couldn't
+  start) and its linked worktree Git index was mounted read-only to it. This
+  execution agent (running with real, unsandboxed Bash) does not have
+  either restriction, so verification and commit were finished directly
+  instead of round-tripping back through Codex — noted here since it's a
+  deviation from "Codex does the execution," driven by an environment
+  constraint on Codex's sandbox rather than a quality problem with its code.
+- Verification surfaced two real bugs, both fixed directly (small,
+  mechanical — not re-delegated per rule #4's "inadequate result" bar,
+  since the application code itself was fine):
+  1. `pnpm-workspace.yaml` had a broken placeholder
+     (`allowBuilds:\n  esbuild: set this to true or false`) instead of a
+     real boolean — pnpm's own auto-scaffold for an unapproved native build
+     script (esbuild's postinstall), left unfinished. Every `pnpm install`
+     regenerated the same broken placeholder until it was set to
+     `allowBuilds: { esbuild: true }`, matching pnpm 11's actual expected
+     shape (an `onlyBuiltDependencies` array, which was tried first, is not
+     what this pnpm version reads — confirmed by a `[WARN] ... no longer
+     read` on the equivalent `package.json#pnpm` field too).
+  2. Root `package.json` had no `vitest`/`@playwright/test` devDependency
+     anywhere in the workspace, so `harness/score.sh`'s `npx --yes vitest
+     run` / `npx --yes playwright test` calls failed with a plain
+     `vitest: not found` shell error for every spec file. Added both as
+     root devDependencies (`vitest ^2.1.0`, `@playwright/test ^1.48.0`);
+     `pnpm install` resolved and installed them cleanly (network access
+     from this environment is fine — only Codex's own sandbox was
+     restricted).
+- After both fixes, `run-evals.sh` runs end-to-end (Postgres up, migrations
+  run, `create-admin.ts` succeeds, fixtures seed, app boots, all 32 spec
+  files execute, clean teardown). Scorecard: `weighted_score: 0.0656`,
+  `hard_fail_triggered: true`. Category breakdown: workflow 0/11,
+  security 5/18 (0.28), determinism 0/8, frontend 0/13, operational 1/5
+  (0.20). Target cases SEC-10/SEC-11/OPS-05 all `pass`, plus SEC-15/16/17
+  (grep probes for mock-service leakage / git-push / api.anthropic.com)
+  pass on the clean tree. `hard_fail_triggered` stays `true` only because
+  SEC-01 (worker must block a job when forbidden Claude-auth env vars are
+  set) needs Phase 5's planning-job worker logic — expected at this point,
+  not a regression.
+- Committed as `478c69d` "phase 1: foundation" with the scorecard in the
+  commit body.
+- **Observation, not yet acted on:** `packages/database/native/argon2-helper.c`
+  — Codex implemented Argon2id via a hand-written native C addon rather
+  than an existing npm package (e.g. `argon2`/`@node-rs/argon2`). SEC-10's
+  real-hash-and-verify round-trip passes, so it's functionally correct, but
+  hand-rolled crypto is exactly the kind of thing ponytail rung 5
+  ("already-installed dependency solves it") argues against, and it's
+  worth a second look before Phase 11 hardening if time permits — flagging
+  now rather than silently accepting it.
+- **Next:** Phase 2 (Forms and tickets) per PRD §32.
