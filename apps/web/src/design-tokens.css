@@ -65,9 +65,10 @@ textarea { resize:vertical }
 .button.primary { border-color:var(--accent);background:var(--accent);color:var(--accent-fg);font-weight:700 }
 .toolbar { display:flex;gap:10px;align-items:center;flex-wrap:wrap }
 .toolbar .search { flex:1 1 240px }
-.list-head,.ticket-row { display:grid;grid-template-columns:110px minmax(220px,3fr) 1.2fr 1fr 1.1fr 1.3fr .8fr;gap:12px;padding:13px 18px;align-items:center }
+.list-head,.ticket-row { display:grid;grid-template-columns:110px minmax(220px,3fr) 1.2fr 1fr 1.3fr .8fr;gap:12px;padding:13px 18px;align-items:center }
 .list-head { background:var(--surface2);font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3) }
 .ticket-row { border-top:1px solid var(--border) }
+.tickets7.list-head,.tickets7.ticket-row { grid-template-columns:110px minmax(220px,3fr) 1.2fr 1fr 1.1fr 1.3fr .8fr }
 .mono { font-family:ui-monospace,SFMono-Regular,monospace }
 .status { display:inline-flex;width:max-content;border-radius:99px;padding:3px 8px;background:var(--accent-soft);font-size:11px;font-weight:700 }
 .public { max-width:720px;margin:0 auto;padding:38px 18px 72px }
