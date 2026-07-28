@@ -27,6 +27,7 @@ import * as skillsPage from "./pages/skills.ts";
 import * as notificationsPage from "./pages/notifications.ts";
 import * as queuePage from "./pages/queue.ts";
 import * as auditPage from "./pages/audit.ts";
+import * as operatePage from "./pages/operate.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const production = process.env.NODE_ENV === "production";
@@ -556,7 +557,7 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
   }
   const metrics = await counts();
   const pageModules = [
-    dashboardPage, ticketsPage, runsPage, prsPage, projectsPage, formsPage, promptsPage, skillsPage, notificationsPage, queuePage, auditPage,
+    dashboardPage, ticketsPage, runsPage, prsPage, projectsPage, formsPage, promptsPage, skillsPage, notificationsPage, queuePage, auditPage, operatePage,
   ];
   for (const pageModule of pageModules) {
     const result = await pageModule.render(url, session, metrics);
