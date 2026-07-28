@@ -341,6 +341,38 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(response.ok)location.reload();else alert((await response.json()).error);
         }));
       `:""}
+      ${path==="/admin/pull-requests"?`
+        const csrf=sessionStorage.getItem("dccCsrf")||"";
+        document.querySelector("[data-sync-prs]")?.addEventListener("click",async(event)=>{
+          const button=event.currentTarget;button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/sync",{method:"POST",headers:{"x-csrf-token":csrf}});
+            if(response.ok)alert("Sync started. Refresh in a few seconds to see updates.");else alert((await response.json()).error);
+          }finally{button.disabled=false}
+        });
+      `:""}
+      ${/^\/admin\/pull-requests\/[^/]+(\/\d+)?$/.test(path)?`
+        const csrf=sessionStorage.getItem("dccCsrf")||"";
+        const prId=document.querySelector("[data-pr-id]")?.dataset.prId;
+        async function prAction(action,payload){
+          const response=await fetch("/api/admin/pull-requests/"+prId+"/"+action,{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload||{})});
+          if(response.ok)location.reload();else{const result=await response.json();alert(result.error)}
+        }
+        document.querySelector("[data-pr-refresh]")?.addEventListener("click",()=>prAction("refresh"));
+        document.querySelector("[data-pr-mark-reviewed]")?.addEventListener("click",()=>prAction("mark-reviewed"));
+        document.querySelector("[data-pr-approve]")?.addEventListener("click",()=>prAction("approve"));
+        document.querySelector("[data-pr-request-changes]")?.addEventListener("click",()=>prAction("request-changes"));
+        document.querySelector("[data-pr-close-ticket]")?.addEventListener("click",()=>{if(confirm("Close the linked ticket? This cannot be undone from here."))prAction("close-ticket")});
+        document.querySelector("[data-pr-save-instructions]")?.addEventListener("click",()=>{
+          const instructions=document.querySelector("[data-pr-repair-text]").value.trim();
+          if(!instructions){alert("Instructions are required");return}
+          prAction("repair-instructions",{instructions});
+        });
+        document.querySelector("[data-pr-start-repair]")?.addEventListener("click",()=>{
+          const feedback=document.querySelector("[data-pr-repair-text]").value.trim();
+          prAction("start-repair",feedback?{feedback}:{});
+        });
+      `:""}
       ${path==="/admin/skills"?`
         const csrf=sessionStorage.getItem("dccCsrf")||"",modal=document.querySelector("[data-register-skill-modal]"),form=document.querySelector("[data-register-skill-form]");
         const searchInput=document.querySelector("[data-skill-search-list]"),categoryChips=document.querySelectorAll("[data-category]");

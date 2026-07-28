@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 import { pool, inTransaction } from "@dcc/database";
 import {
   AiConfigurationError, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob, globalPromptTypes,
-  enqueueNotification, projectPromptTypes, promptContentHash, resolveAiConfiguration, setPullRequestTicketStatus, syncPullRequest,
+  enqueueNotification, projectPromptTypes, promptContentHash, resolveAiConfiguration, setPullRequestTicketStatus, syncOpenPullRequests, syncPullRequest,
   validateAiSelection, type AiPhase,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
@@ -721,6 +721,14 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
       [delivery.id, result.ok ? "sent" : "failed", result.responseStatus, redactNotificationError(result.errorMessage)],
     )).rows[0];
     return json(response, 200, { delivery: updated });
+  }
+  if (url.pathname === "/api/admin/pull-requests/sync" && request.method === "POST") {
+    // ponytail: the worker already re-syncs every open pull request on a 2.5s
+    // timer loop (apps/worker/src/worker.ts) — there is no job type or table
+    // to enqueue into. Running the same sync function inline here just makes
+    // "Sync all" a manual nudge instead of waiting for the next tick.
+    syncOpenPullRequests().catch((error) => console.error(`Manual pull-request sync failed: ${error instanceof Error ? error.message : "unknown error"}`));
+    return json(response, 202, { ok: true, note: "Sync started. The worker also syncs open pull requests automatically every few seconds." });
   }
   const pullRequestActionMatch = url.pathname.match(
     /^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/(mark-reviewed|approve|request-changes|repair-instructions|start-repair|refresh|close-ticket)$/i,
