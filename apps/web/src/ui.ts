@@ -136,6 +136,48 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(response.ok){notesForm.reset();location.reload()}else{notesForm.querySelector(".error").textContent=result.error}
         })}
       ` : ""}
+      ${/^\/admin\/tickets\/[^/]+\/plans\/\d+$/.test(path) ? `
+        const csrf=sessionStorage.getItem("dccCsrf")||"";
+        const diffPanel=document.querySelector("[data-diff-panel]");
+        document.querySelector("#tab-2")?.addEventListener("click",async()=>{
+          if(!diffPanel||diffPanel.dataset.loaded||!diffPanel.dataset.diffFrom)return;
+          diffPanel.dataset.loaded="1";
+          const response=await fetch("/api/admin/plans/"+diffPanel.dataset.planId+"/diff?from="+diffPanel.dataset.diffFrom+"&to="+diffPanel.dataset.diffTo);
+          const result=await response.json();
+          diffPanel.querySelector("[data-diff-content]").textContent=response.ok?result.diff:result.error;
+        });
+        document.querySelector("[data-approve-plan-version]")?.addEventListener("click",async(event)=>{
+          if(!confirm("Approve this plan version?"))return;
+          const button=event.currentTarget;
+          const response=await fetch("/api/admin/plan-versions/"+button.dataset.approvePlanVersion+"/approve",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({plan_version_id:button.dataset.approvePlanVersion,content_hash:button.dataset.contentHash})});
+          if(response.ok)location.reload();else alert((await response.json()).error);
+        });
+        document.querySelector("[data-reject-plan-version]")?.addEventListener("click",async(event)=>{
+          if(!confirm("Reject this plan version?"))return;
+          const button=event.currentTarget;
+          const response=await fetch("/api/admin/plan-versions/"+button.dataset.rejectPlanVersion+"/reject",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({plan_version_id:button.dataset.rejectPlanVersion})});
+          if(response.ok)location.href="/admin/tickets/"+(window.location.pathname.match(/\\/tickets\\/([^\\/]+)/)||[])[1];else alert((await response.json()).error);
+        });
+        const revisionDialog=document.querySelector("[data-revision-dialog]");
+        document.querySelector("[data-open-revision-dialog]")?.addEventListener("click",()=>revisionDialog.showModal());
+        revisionDialog?.querySelector("[data-close-dialog]")?.addEventListener("click",()=>revisionDialog.close());
+        revisionDialog?.addEventListener("keydown",event=>{
+          if(event.key!=="Tab")return;
+          const focusables=[...revisionDialog.querySelectorAll("button,a[href],input,select,textarea,[tabindex]")].filter(el=>!el.disabled);
+          if(!focusables.length)return;
+          const first=focusables[0],last=focusables[focusables.length-1];
+          if(event.shiftKey&&(document.activeElement===first||!revisionDialog.contains(document.activeElement))){event.preventDefault();last.focus()}
+          else if(!event.shiftKey&&(document.activeElement===last||!revisionDialog.contains(document.activeElement))){event.preventDefault();first.focus()}
+        });
+        revisionDialog?.querySelector("[data-submit-revision]")?.addEventListener("click",async()=>{
+          const feedback=revisionDialog.querySelector("[data-revision-feedback]").value.trim();
+          if(!feedback){revisionDialog.querySelector(".error").textContent="Feedback is required";return}
+          const response=await fetch("/api/admin/plans/"+revisionDialog.dataset.planId+"/request-revision",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({feedback})});
+          const result=await response.json();
+          if(response.ok)location.href="/admin/tickets/"+(window.location.pathname.match(/\\/tickets\\/([^\\/]+)/)||[])[1];
+          else revisionDialog.querySelector(".error").textContent=result.error;
+        });
+      ` : ""}
       ${/^\/admin\/prompts\/[^/]+$/.test(path) ? `
         const csrf=sessionStorage.getItem("dccCsrf")||"",editor=document.querySelector("[data-prompt-editor]");
         const save=async(payload,path="versions")=>{

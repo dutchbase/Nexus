@@ -1378,6 +1378,44 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     });
     return approved ? json(response, 200, approved) : json(response, 404, { error: "plan version not found" });
   }
+  const planRejectMatch = url.pathname.match(/^\/api\/admin\/plan-versions\/([0-9a-f-]+)\/reject$/i);
+  if (planRejectMatch && request.method === "POST") {
+    const body = await bodyOf(request);
+    const rejected = await inTransaction(async (client) => {
+      const version = (await client.query(
+        `SELECT pv.*,p.ticket_id,p.current_version_id,t.status
+         FROM plan_versions pv
+         JOIN plans p ON p.id=pv.plan_id
+         JOIN tickets t ON t.id=p.ticket_id
+         WHERE pv.id=$1 FOR UPDATE OF p,t`,
+        [planRejectMatch[1]],
+      )).rows[0];
+      if (!version) return null;
+      if (body.plan_version_id !== undefined && body.plan_version_id !== version.id) {
+        throw Object.assign(new Error("plan version id does not match"), { status: 409 });
+      }
+      if (version.current_version_id !== version.id) {
+        throw Object.assign(new Error("only the current plan version can be rejected"), { status: 409 });
+      }
+      const ticket = (await client.query(
+        "UPDATE tickets SET status='Rejected',updated_at=now() WHERE id=$1 RETURNING *",
+        [version.ticket_id],
+      )).rows[0];
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_plan_version_id)
+         VALUES ($1,$2,'Rejected',$3,'admin',$4,$5)`,
+        [version.ticket_id, version.status, typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : "Plan rejected", session.user_id, version.id],
+      );
+      await audit({
+        actorType: "admin", actorId: session.user_id, action: "plan_version.reject",
+        entityType: "plan_version", entityId: version.id, before: { status: version.status }, after: { status: "Rejected" },
+        metadata: { ticket_id: version.ticket_id, reason: body.reason ?? null }, ip: ipOf(request),
+      }, client);
+      return { ticket, plan_version: version };
+    });
+    return rejected ? json(response, 200, rejected) : json(response, 404, { error: "plan version not found" });
+  }
   const executeMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/execute$/);
   if (executeMatch && request.method === "POST") {
     const body = await bodyOf(request);

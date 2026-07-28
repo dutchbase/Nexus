@@ -41,6 +41,51 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <section class="card"><div class="card-body"><pre>${escapeHtml(lineDiff(from.content_markdown, to.content_markdown))}</pre></div></section>`;
     return { status: 200, title: "Plan comparison", body };
   }
+  const planVersionPageMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)\/plans\/(\d+)$/);
+  if (planVersionPageMatch) {
+    const ref = decodeURIComponent(planVersionPageMatch[1]);
+    const ticket = (await pool.query(
+      "SELECT t.*,p.name project_name,p.slug project_slug FROM tickets t JOIN projects p ON p.id=t.project_id WHERE t.id::text=$1 OR t.ticket_number=$1",
+      [ref],
+    )).rows[0];
+    if (!ticket) return { status: 404, title: "Ticket not found", body: "<h1>Ticket not found</h1>" };
+    const versions = (await pool.query(
+      `SELECT pv.*,p.planning_session_id,ar.model,ar.reasoning_level,ps.content prompt_content
+       FROM plans p JOIN plan_versions pv ON pv.plan_id=p.id
+       JOIN agent_runs ar ON ar.id=pv.agent_run_id
+       JOIN prompt_snapshots ps ON ps.id=pv.prompt_snapshot_id
+       WHERE p.ticket_id=$1 ORDER BY pv.version DESC`,
+      [ticket.id],
+    )).rows;
+    const target = versions.find((version) => version.version === Number(planVersionPageMatch[2]));
+    if (!target) return { status: 404, title: "Plan version not found", body: "<h1>Plan version not found</h1>" };
+    const previous = versions.find((version) => version.version === target.version - 1);
+    const versionsRail = versions.map((version) => `<a class="ticket-row"${version.id === target.id ? ' style="background:var(--accent-soft);border-left:2px solid var(--accent)"' : ""} href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans/${version.version}"><span class="mono">v${version.version}</span><span>${escapeHtml(version.model)} · ${escapeHtml(version.reasoning_level)}</span></a>`).join("");
+    const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)} <span class="status">${escapeHtml(ticket.status)}</span></div>
+      <h1>Plan review · v${target.version}</h1>
+      <div class="toolbar"><a class="button" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans">Back to plans</a>
+        <button class="button" type="button" data-open-revision-dialog>Request revision</button>
+        <button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reject-plan-version="${target.id}">Reject</button>
+        <button class="button primary" type="button" data-approve-plan-version="${target.id}" data-content-hash="${escapeHtml(target.content_hash)}">Approve this version</button></div>
+      <div class="grid two">
+        <section class="card"><div class="tabs" role="tablist"><button type="button" role="tab" id="tab-0" aria-controls="panel-0" aria-selected="true">Rendered</button><button type="button" role="tab" id="tab-1" aria-controls="panel-1" aria-selected="false">Raw Markdown</button><button type="button" role="tab" id="tab-2" aria-controls="panel-2" aria-selected="false">Diff${previous ? ` v${previous.version} → v${target.version}` : ""}</button></div>
+          <div class="card-body">
+            <div role="tabpanel" id="panel-0" aria-labelledby="tab-0">${renderMarkdown(target.content_markdown)}</div>
+            <div role="tabpanel" id="panel-1" aria-labelledby="tab-1" hidden><pre>${escapeHtml(target.content_markdown)}</pre></div>
+            <div role="tabpanel" id="panel-2" aria-labelledby="tab-2" hidden data-diff-panel data-plan-id="${target.plan_id}"${previous ? ` data-diff-from="${previous.id}" data-diff-to="${target.id}"` : ""}><pre data-diff-content>${previous ? "Loading…" : "No previous version to compare."}</pre></div>
+            <p class="mono">SHA-256 ${escapeHtml(target.content_hash)}</p>
+          </div></section>
+        <div class="grid rail">
+          <section class="card"><div class="card-head">Versions</div>${versionsRail}</section>
+          <section class="card"><div class="card-head">Run snapshot</div><div class="card-body"><dl><dt>Model</dt><dd>${escapeHtml(target.model)}</dd><dt>Reasoning level</dt><dd>${escapeHtml(target.reasoning_level)}</dd><dt>Session</dt><dd class="mono">${escapeHtml(target.planning_session_id)}</dd></dl></div></section>
+          <section class="card"><div class="card-head">Exact planning prompt</div><div class="card-body"><details><summary>View prompt</summary><pre>${escapeHtml(target.prompt_content)}</pre></details></div></section>
+        </div>
+      </div>
+      <dialog data-revision-dialog aria-label="Request revision" data-plan-id="${target.plan_id}"><div class="card-head">Request revision</div>
+        <div class="card-body"><label class="field"><span>What must change in the next revision?</span><textarea data-revision-feedback rows="6" placeholder="What must change in the next revision?"></textarea></label>
+        <p class="error" role="alert"></p><button class="button" type="button" data-close-dialog>Cancel</button> <button class="button primary" type="button" data-submit-revision>Submit feedback &amp; queue revision</button></div></dialog>`;
+    return { status: 200, title: `Plan review · v${target.version}`, body };
+  }
   const ticketPlansPageMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)\/plans$/);
   if (ticketPlansPageMatch) {
     const ref = decodeURIComponent(ticketPlansPageMatch[1]);
@@ -63,7 +108,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · Plan review</div>
       <h1>Implementation plan</h1><p><a class="button" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}">Back to ticket</a></p>
       <p>${compare}</p>
-      ${versions.map((version) => `<section class="card"><div class="card-head">Version ${version.version} · ${escapeHtml(version.model)} / ${escapeHtml(version.reasoning_level)}</div>
+      ${versions.map((version) => `<section class="card"><div class="card-head">Version ${version.version} · ${escapeHtml(version.model)} / ${escapeHtml(version.reasoning_level)} · <a href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans/${version.version}">Open review page</a></div>
         <div class="card-body">${renderMarkdown(version.content_markdown)}
         <details><summary>Raw Markdown</summary><pre>${escapeHtml(version.content_markdown)}</pre></details>
         <details><summary>Exact planning prompt</summary><pre>${escapeHtml(version.prompt_content)}</pre></details>
