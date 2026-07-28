@@ -168,6 +168,99 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           });
         });
       `:""}
+      ${path==="/admin/forms/new"?`
+        const csrf=sessionStorage.getItem("dccCsrf")||"",form=document.querySelector("[data-new-form-form]");
+        const nameInput=form?.querySelector('[name="name"]'),slugInput=form?.querySelector('[name="slug"]');
+        nameInput?.addEventListener("input",()=>{if(!slugInput?.value)slugInput.value=nameInput.value.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")});
+        form?.addEventListener("submit",async(event)=>{
+          event.preventDefault();const payload=Object.fromEntries(new FormData(form));
+          if(!payload.fixed_project_id)delete payload.fixed_project_id;
+          const response=await fetch("/api/admin/forms",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
+          const result=await response.json();
+          if(response.ok)location.href="/admin/forms/"+result.form.slug;else form.querySelector(".error").textContent=result.error;
+        });
+      `:""}
+      ${/^\/admin\/forms\/[^/]+$/.test(path)&&path!=="/admin/forms/new"?`
+        const csrf=sessionStorage.getItem("dccCsrf")||"";
+        const fieldsApp=document.querySelector("[data-fields-app]");
+        if(fieldsApp){
+          const formId=fieldsApp.dataset.formId;
+          const fieldTypes=JSON.parse(document.querySelector("[data-field-types]").textContent);
+          let fields=JSON.parse(document.querySelector("[data-fields-json]").textContent);
+          let selected=null;
+          const list=fieldsApp.querySelector("[data-field-list]"),settingsBox=fieldsApp.querySelector("[data-field-settings]"),errorBox=fieldsApp.querySelector("[data-fields-error]");
+          const optionTypes=new Set(["dropdown","radio","multi_select","category_selector","environment_selector"]);
+          function typeLabel(value){return (fieldTypes.find(t=>t[0]===value)||[value,value])[1]}
+          function renderList(){
+            list.replaceChildren();
+            fields.forEach((field,index)=>{
+              const row=document.createElement("div");
+              row.style.cssText="display:flex;align-items:center;gap:10px;padding:10px 4px;border-bottom:1px solid var(--border);cursor:pointer";
+              if(index===selected)row.style.cssText+="background:var(--accent-soft);border-left:2px solid var(--accent)";
+              row.innerHTML='<span class="mono" style="width:20px;color:var(--text3)">'+(index+1)+'</span>'
+                +'<span style="flex:1"><strong>'+field.label.replace(/</g,"&lt;")+'</strong><br><span class="mono" style="font-size:11px;color:var(--text3)">'+field.field_key.replace(/</g,"&lt;")+' · '+typeLabel(field.field_type)+'</span></span>'
+                +'<span class="status" style="background:'+(field.required?"var(--accent-soft)":"var(--s-muted)")+'">'+(field.required?"Required":"Optional")+'</span>';
+              const up=document.createElement("button");up.type="button";up.className="button";up.textContent="↑";up.disabled=index===0;up.addEventListener("click",e=>{e.stopPropagation();moveField(index,-1)});
+              const down=document.createElement("button");down.type="button";down.className="button";down.textContent="↓";down.disabled=index===fields.length-1;down.addEventListener("click",e=>{e.stopPropagation();moveField(index,1)});
+              const remove=document.createElement("button");remove.type="button";remove.className="button";remove.textContent="×";remove.addEventListener("click",e=>{e.stopPropagation();removeField(index)});
+              row.append(up,down,remove);
+              row.addEventListener("click",()=>{selected=index;renderList();renderSettings()});
+              list.append(row);
+            });
+          }
+          function renderSettings(){
+            if(selected===null||!fields[selected]){settingsBox.innerHTML="<p>Select a field to edit.</p>";return}
+            const field=fields[selected];
+            settingsBox.innerHTML='<label class="field"><span>Label</span><input data-f-label value="'+field.label.replace(/"/g,"&quot;")+'"></label>'
+              +'<label class="field"><span>Field key</span><input data-f-key class="mono" value="'+field.field_key.replace(/"/g,"&quot;")+'"></label>'
+              +'<label class="field"><span>Type</span><select data-f-type>'+fieldTypes.map(t=>'<option value="'+t[0]+'"'+(t[0]===field.field_type?" selected":"")+'>'+t[1]+'</option>').join("")+'</select></label>'
+              +(optionTypes.has(field.field_type)?'<label class="field"><span>Options (one per line)</span><textarea data-f-options rows="4">'+(field.options_json||[]).join("\\n").replace(/</g,"&lt;")+'</textarea></label>':"")
+              +'<label style="display:flex;gap:9px;align-items:center;font-size:13px;margin:10px 0"><input type="checkbox" data-f-required'+(field.required?" checked":"")+'> Required</label>'
+              +'<p style="font-size:12px;color:var(--text3)">Every field is validated server-side. Uploads are image-only, renamed randomly and capped at 8 MB; SVG is rejected.</p>';
+            settingsBox.querySelector("[data-f-label]").addEventListener("input",e=>{field.label=e.target.value;save();renderList()});
+            settingsBox.querySelector("[data-f-key]").addEventListener("change",e=>{field.field_key=e.target.value;save();renderList()});
+            settingsBox.querySelector("[data-f-type]").addEventListener("change",e=>{field.field_type=e.target.value;save();renderSettings();renderList()});
+            settingsBox.querySelector("[data-f-required]").addEventListener("change",e=>{field.required=e.target.checked;save();renderList()});
+            settingsBox.querySelector("[data-f-options]")?.addEventListener("change",e=>{field.options_json=e.target.value.split("\\n").map(v=>v.trim()).filter(Boolean);save()});
+          }
+          function moveField(index,dir){
+            const target=index+dir;if(target<0||target>=fields.length)return;
+            [fields[index],fields[target]]=[fields[target],fields[index]];
+            if(selected===index)selected=target;else if(selected===target)selected=index;
+            save();renderList();renderSettings();
+          }
+          function removeField(index){
+            fields.splice(index,1);
+            if(selected===index)selected=null;else if(selected!==null&&selected>index)selected-=1;
+            save();renderList();renderSettings();
+          }
+          fieldsApp.querySelector("[data-add-field]").addEventListener("click",()=>{
+            fields.push({field_key:"new_field_"+(fields.length+1),field_type:"short_text",label:"New field",required:false,position:(fields.length+1)*10,options_json:[]});
+            selected=fields.length-1;save();renderList();renderSettings();
+          });
+          async function save(){
+            const payload={fields:fields.map((f,i)=>({...f,position:(i+1)*10}))};
+            const response=await fetch("/api/admin/forms/"+formId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
+            if(!response.ok){const result=await response.json();errorBox.textContent=result.error}else errorBox.textContent=""
+          }
+          renderList();
+        }
+        const settingsForm=document.querySelector("[data-form-settings]");
+        settingsForm?.addEventListener("submit",async(event)=>{
+          event.preventDefault();const data=new FormData(settingsForm);
+          const payload={name:data.get("name"),title:data.get("title"),slug:data.get("slug"),fixed_project_id:data.get("fixed_project_id")||null,
+            settings_json:{rate_limit:Number(data.get("rate_limit"))||15,captcha_mode:data.get("captcha_mode"),completion_message:data.get("completion_message"),
+              notify_on_submission:settingsForm.elements.notify_on_submission.checked,allow_image_attachments:settingsForm.elements.allow_image_attachments.checked}};
+          const response=await fetch("/api/admin/forms/"+fieldsApp?.dataset.formId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
+          const result=await response.json();
+          if(response.ok)location.reload();else settingsForm.querySelector(".error").textContent=result.error;
+        });
+        document.querySelector("[data-publish-toggle]")?.addEventListener("click",async(event)=>{
+          const button=event.currentTarget,action=button.dataset.status==="published"?"unpublish":"publish";
+          const response=await fetch("/api/admin/forms/"+button.dataset.formId+"/"+action,{method:"POST",headers:{"x-csrf-token":csrf}});
+          if(response.ok)location.reload();else alert((await response.json()).error);
+        });
+      `:""}
     `);
 }
 

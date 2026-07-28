@@ -488,7 +488,7 @@ async function replaceFields(client: any, formId: string, fields: any[]) {
        (form_id,field_key,field_type,label,description,placeholder,required,position,validation_json,options_json)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
       [formId, field.field_key, field.field_type, field.label, field.description, field.placeholder,
-        field.required, field.position, field.validation_json, field.options_json],
+        field.required, field.position, JSON.stringify(field.validation_json ?? {}), JSON.stringify(field.options_json ?? [])],
     );
   }
 }
