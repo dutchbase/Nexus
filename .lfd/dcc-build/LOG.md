@@ -991,3 +991,40 @@ operator as the one remaining lever that requires a harness change (fixing
 
 Committed as `5eb0873` "phase 11: hardening — fix 5 root causes clearing
 all remaining WF/DET/OPS gaps". Phase 11 marked complete.
+
+## Harness scoring-accuracy fixes — operator-level (outside execution-agent scope)
+
+Three bugs in the frozen harness itself were fixed directly by the operator
+(not the autonomous execution agent, which correctly reported these without
+patching per its read-only constraint on `harness/`):
+
+1. **Frontend category (20% weight) was permanently 0/13.** `score.sh` ran
+   `tests/probes/zzz-auth-lockout.spec.ts` (which deliberately locks the
+   shared `eval-admin` account as its own SEC-10 test) before
+   `tests/frontend/*.spec.ts`, so every frontend spec's login hit an
+   already-locked account. Fixed by reordering `score.sh` so probes run
+   last across the whole suite. Commit: `e393c45`. Additionally, fixed
+   LD_LIBRARY_PATH requirement for Playwright's headless Chromium to find
+   `libasound.so.2`. Commit: `915a89a`.
+2. **DET-08/DET-09/OPS-04 flaked under full-suite runs** because
+   `run-snapshot-immutability.spec.ts` runs immediately after
+   `public-form-security.spec.ts`'s deliberate rate-limit burst (SEC-05),
+   inside the app's rate-limit window essentially every time. Fixed by
+   adding a 20s pause in `score.sh` after that one file. Commit:
+   `d038e07`.
+3. **`run-evals.sh` leaked orphaned `pnpm dev` process trees** across
+   manual verification sessions — `cleanup()` only killed one
+   `pgrep`-matched PID, never the full spawn tree. Fixed by pattern-killing
+   every known layer directly. Commit: `affa46a`.
+
+Integrity manifest regenerated via `freeze-integrity.sh` to reflect these
+changes. Commit: `5ab4843`.
+
+Two consecutive full `run-evals.sh` runs post-fix:
+- Run 1: `weighted_score=0.7987`, `hard_fail_triggered=false`,
+  categories: `{"determinism": 0.75, "frontend": 0.2308, "operational": 0.8, "security": 1.0, "workflow": 1.0}`
+- Run 2: `weighted_score=0.8462`, `hard_fail_triggered=false`,
+  categories: `{"determinism": 1.0, "frontend": 0.2308, "operational": 1.0, "security": 1.0, "workflow": 1.0}`
+
+This is the new accurate scoring baseline. Frontend now scores non-zero for
+the first time in the build's history.
