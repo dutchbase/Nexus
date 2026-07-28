@@ -38,6 +38,9 @@ importers:
       '@dcc/domain':
         specifier: workspace:*
         version: link:../../packages/domain
+      '@dcc/notification-provider':
+        specifier: workspace:*
+        version: link:../../packages/notification-provider
       '@dcc/project-config':
         specifier: workspace:*
         version: link:../../packages/project-config
@@ -62,6 +65,9 @@ importers:
       '@dcc/github-provider':
         specifier: workspace:*
         version: link:../../packages/github-provider
+      '@dcc/notification-provider':
+        specifier: workspace:*
+        version: link:../../packages/notification-provider
       '@dcc/project-config':
         specifier: workspace:*
         version: link:../../packages/project-config

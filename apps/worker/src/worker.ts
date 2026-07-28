@@ -10,8 +10,9 @@ import {
 import { inTransaction, pool } from "@dcc/database";
 import {
   buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, claimJob, completeJob, failJob,
-  resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
+  enqueueNotification, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
+import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
   commitExecutionChanges, createExecutionWorktree, pushExecutionBranch, validateExecutionWorktree,
   WorktreeValidationError, worktreeDiff,
@@ -35,6 +36,7 @@ const publicationJobTypes = ["pull-request.retry"];
 let stopping = false;
 let activeExecutionCancellation: AbortController | null = null;
 let lastPullRequestSync = 0;
+let lastNotificationDelivery = 0;
 
 process.on("SIGTERM", () => { stopping = true; activeExecutionCancellation?.abort(); });
 process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort(); });
@@ -267,6 +269,7 @@ async function transitionToPlanning(ticketId: string, jobId: string, runId: stri
        VALUES ($1,$2,'Planning','Planning job started','worker',$3,$4)`,
       [ticketId, ticket.status, jobId, runId],
     );
+    await enqueueNotification(client, "planning.started", ticketId, runId, { runId });
   });
 }
 
@@ -297,6 +300,7 @@ async function storePlan(input: {
        VALUES ($1,$2,'Plan Ready for Review','Planning completed','worker',$3,$4,$5)`,
       [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
     );
+    await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId });
     return { plan, version, planPath };
   });
 }
@@ -345,6 +349,7 @@ async function storeRevisedPlan(input: {
        VALUES ($1,$2,'Plan Ready for Review','Plan revision completed','worker',$3,$4,$5)`,
       [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
     );
+    await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId });
     return { version, planPath };
   });
 }
@@ -553,6 +558,7 @@ async function runExecution(job: any) {
       [ticket.id, current.status, repairing ? "Repair execution started" : "Execution started",
         job.id, runId, attempt.plan_version_id],
     );
+    await enqueueNotification(client, "execution.started", ticket.id, runId, { runId });
   });
 
   const copied = await snapshotSkills(input.skills, repairing ? "repair" : "execution");
@@ -638,6 +644,7 @@ async function runExecution(job: any) {
          VALUES ($1,$2,'Validating','Execution completed; awaiting independent validation','worker',$3,$4,$5)`,
         [ticket.id, current.status, job.id, runId, attempt.plan_version_id],
       );
+      await enqueueNotification(client, "execution.completed", ticket.id, runId, { runId });
     });
     const commands = input.project.config_json?.commands ?? {};
     const skillValidationCommands = input.skills.flatMap((skill: any) => {
@@ -829,14 +836,9 @@ async function publishExecutionAttempt(input: {
          VALUES ($1,$2,'PR Ready for Review','Draft pull request created','worker',$3,$4,$5,$6)`,
         [input.ticket.id, current.status, input.jobId, input.runId, input.attempt.plan_version_id, stored.id],
       );
-      await client.query(
-        `INSERT INTO notification_deliveries
-         (event_type,ticket_id,project_id,run_id,pull_request_id,idempotency_key,payload_json,status,attempt_count)
-         VALUES ('pull_request.ready',$1,$2,$3,$4,$5,$6,'queued',0)
-         ON CONFLICT (idempotency_key) DO NOTHING`,
-        [input.ticket.id, input.project.id, input.runId, stored.id,
-          `pull_request.ready:${stored.id}`, { ticket_number: input.ticket.ticket_number, pull_request_id: stored.id }],
-      );
+      await enqueueNotification(client, "pr.ready_for_review", input.ticket.id, stored.id, {
+        runId: input.runId, pullRequestId: stored.id,
+      });
       await client.query(
         "UPDATE execution_attempts SET validation_status='completed',completed_at=now() WHERE id=$1",
         [input.attempt.id],
@@ -901,10 +903,52 @@ async function retryPublication(job: any) {
   });
 }
 
+async function deliverDueNotification() {
+  const delivery = await inTransaction(async (client) => {
+    const row = (await client.query(
+      `SELECT nd.*,np.type provider_type,np.configuration_encrypted_json
+       FROM notification_deliveries nd JOIN notification_providers np ON np.id=nd.provider_id
+       WHERE np.enabled=true AND nd.status IN ('queued','failed') AND nd.next_attempt_at<=now()
+       ORDER BY nd.next_attempt_at,nd.created_at FOR UPDATE OF nd SKIP LOCKED LIMIT 1`,
+    )).rows[0];
+    if (!row) return null;
+    await client.query("UPDATE notification_deliveries SET status='sending',updated_at=now() WHERE id=$1", [row.id]);
+    return row;
+  });
+  if (!delivery) return;
+  try {
+    const provider = createNotificationProvider(delivery.provider_type, delivery.configuration_encrypted_json ?? {});
+    const result = await provider.send(delivery.payload_json);
+    await pool.query(
+      `UPDATE notification_deliveries
+       SET attempt_count=COALESCE(attempt_count,0)+1,status=$2,response_status=$3,error_message=$4,
+           sent_at=CASE WHEN $2='sent' THEN now() ELSE sent_at END,
+           next_attempt_at=CASE WHEN $2='failed' THEN now() + interval '2 seconds' * power(2,LEAST(COALESCE(attempt_count,0),8)) ELSE next_attempt_at END,
+           updated_at=now() WHERE id=$1`,
+      [delivery.id, result.ok ? "sent" : "failed", result.responseStatus, redactNotificationError(result.errorMessage)],
+    );
+  } catch (error) {
+    await pool.query(
+      `UPDATE notification_deliveries SET attempt_count=COALESCE(attempt_count,0)+1,status='failed',
+       error_message=$2,next_attempt_at=now() + interval '2 seconds' * power(2,LEAST(COALESCE(attempt_count,0),8)),
+       updated_at=now() WHERE id=$1`,
+      [delivery.id, redactNotificationError(error instanceof Error ? error.message : "Notification delivery failed")],
+    );
+  }
+}
+
 while (!stopping) {
   if (Date.now() - lastPullRequestSync >= 2500) {
     lastPullRequestSync = Date.now();
     await syncOpenPullRequests();
+  }
+  if (Date.now() - lastNotificationDelivery >= 1000) {
+    lastNotificationDelivery = Date.now();
+    try {
+      await deliverDueNotification();
+    } catch (error) {
+      console.error(`Notification delivery pass failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
   }
   let job = await claimJob(workerId, ["project.validate", ...publicationJobTypes]);
   if (!job) {

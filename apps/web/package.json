@@ -8,6 +8,7 @@
   "dependencies": {
     "@dcc/database": "workspace:*",
     "@dcc/domain": "workspace:*",
+    "@dcc/notification-provider": "workspace:*",
     "@dcc/project-config": "workspace:*",
     "@dcc/skill-registry": "workspace:*"
   }

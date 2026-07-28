@@ -12,6 +12,7 @@
     "@dcc/domain": "workspace:*",
     "@dcc/git-runner": "workspace:*",
     "@dcc/github-provider": "workspace:*",
+    "@dcc/notification-provider": "workspace:*",
     "@dcc/project-config": "workspace:*",
     "@dcc/skill-registry": "workspace:*"
   }

@@ -5,9 +5,10 @@ import { resolve } from "node:path";
 import { pool, inTransaction } from "@dcc/database";
 import {
   AiConfigurationError, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob, globalPromptTypes,
-  projectPromptTypes, promptContentHash, resolveAiConfiguration, setPullRequestTicketStatus, syncPullRequest,
+  enqueueNotification, projectPromptTypes, promptContentHash, resolveAiConfiguration, setPullRequestTicketStatus, syncPullRequest,
   validateAiSelection, type AiPhase,
 } from "@dcc/domain";
+import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
   resolveSkills, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
 } from "../../../packages/skill-registry/src/index.ts";
@@ -465,6 +466,7 @@ async function submitPublicForm(request: IncomingMessage, response: ServerRespon
       );
     }
     await audit({ actorType: "public", action: "ticket.create", entityType: "ticket", entityId: result.rows[0].id, after: result.rows[0], ip }, client);
+    await enqueueNotification(client, "ticket.created", result.rows[0].id, result.rows[0].id);
     return result.rows[0];
   });
   json(response, 201, { ticket_number: ticket.ticket_number, ticket: { id: ticket.id, ticket_number: ticket.ticket_number } });
@@ -697,7 +699,7 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
       [decodeURIComponent(ticketMatch[1])],
     )).rows[0];
     if (!ticket) return html(response, 404, adminPage(url.pathname, "Ticket not found", "<h1>Ticket not found</h1>", metrics, session.username));
-    const [notesResult, historyResult, skillsResult] = await Promise.all([
+    const [notesResult, historyResult, skillsResult, notificationsResult] = await Promise.all([
       pool.query("SELECT n.*,u.username FROM ticket_notes n LEFT JOIN users u ON u.id=n.author_id WHERE ticket_id=$1 ORDER BY n.created_at DESC", [ticket.id]),
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
       pool.query(
@@ -707,6 +709,12 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
          LEFT JOIN ticket_skills ts ON ts.skill_id=s.id AND ts.ticket_id=$2
          ORDER BY s.category,s.name`,
         [ticket.project_id, ticket.id],
+      ),
+      pool.query(
+        `SELECT nd.*,np.name provider,np.configuration_encrypted_json->>'recipient' recipient
+         FROM notification_deliveries nd LEFT JOIN notification_providers np ON np.id=nd.provider_id
+         WHERE nd.ticket_id=$1 ORDER BY nd.created_at DESC`,
+        [ticket.id],
       ),
     ]);
     const notes = notesResult.rows;
@@ -742,7 +750,10 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
       <section class="card"><div class="card-head">Planning</div><div class="card-body"><p>Review the immutable generated plan, its exact prompt, model, reasoning level, and raw Markdown.</p><a class="button" href="/admin/tickets/${ticket.ticket_number}/plans">Open plan review</a></div></section>
       <div class="grid two"><section class="card"><div class="card-head">Original submission</div><div class="card-body"><p>${escapeHtml(ticket.description)}</p><dl><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Environment</dt><dd>${escapeHtml(ticket.environment)}</dd><dt>Source URL</dt><dd>${escapeHtml(ticket.source_url)}</dd></dl></div></section>
       <section class="card"><div class="card-head">Internal notes</div><div class="card-body notes">${notes.map((note) => `<div class="note"><strong>${escapeHtml(note.username ?? "Administrator")}</strong><p>${escapeHtml(note.body)}</p></div>`).join("") || "<p>No notes yet.</p>"}</div></section></div>
-      <section class="card"><div class="card-head">Status history</div><div class="card-body">${history.map((item) => `<p><span class="mono">${new Date(item.created_at).toLocaleString("nl-NL")}</span> ${escapeHtml(item.previous_status ?? "New")} → <strong>${escapeHtml(item.new_status)}</strong></p>`).join("") || "<p>No recorded transitions.</p>"}</div></section>`;
+      <section class="card"><div class="card-head">Status history</div><div class="card-body">${history.map((item) => `<p><span class="mono">${new Date(item.created_at).toLocaleString("nl-NL")}</span> ${escapeHtml(item.previous_status ?? "New")} → <strong>${escapeHtml(item.new_status)}</strong></p>`).join("") || "<p>No recorded transitions.</p>"}</div></section>
+      <section class="card"><div class="card-head">Notification history</div><div class="card-body">${notificationsResult.rows.map((item) =>
+        `<p><strong>${escapeHtml(item.event_type)}</strong> · ${escapeHtml(item.provider ?? "Unknown provider")} · ${escapeHtml(item.recipient ?? "default recipient")} · ${escapeHtml(item.status)} · attempts ${item.attempt_count ?? 0}${item.response_status ? ` · HTTP ${item.response_status}` : ""}${item.sent_at ? ` · ${new Date(item.sent_at).toLocaleString("nl-NL")}` : ""}${item.error_message ? `<br><span class="error">${escapeHtml(item.error_message)}</span>` : ""}</p>`,
+      ).join("") || "<p>No notifications yet.</p>"}</div></section>`;
     return html(response, 200, adminPage(url.pathname, ticket.ticket_number, body, metrics, session.username));
   }
   const formPageMatch = url.pathname.match(/^\/admin\/forms\/([^/]+)$/);
@@ -884,6 +895,13 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     )).rows[0];
     if (!pullRequest) return json(response, 404, { error: "pull request not found" });
     const validation = pullRequest.run_metadata?.validation_output ?? {};
+    const notifications = (await pool.query(
+      `SELECT nd.*,np.name provider,np.configuration_encrypted_json->>'recipient' recipient
+       FROM notification_deliveries nd LEFT JOIN notification_providers np ON np.id=nd.provider_id
+       WHERE nd.pull_request_id=$1 OR (nd.pull_request_id IS NULL AND nd.ticket_id=$2)
+       ORDER BY nd.created_at DESC`,
+      [pullRequest.id, pullRequest.ticket_id],
+    )).rows;
     return json(response, 200, {
       pull_request: pullRequest,
       implementation_summary: pullRequest.run_metadata?.implementation_summary ?? null,
@@ -891,8 +909,30 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
       commits: pullRequest.result_commit ? [{ sha: pullRequest.result_commit }] : [],
       changed_files: validation.changed_files ?? [],
       review_comments: [],
-      notification_history: [],
+      notification_history: notifications,
     });
+  }
+  const notificationRetryMatch = url.pathname.match(/^\/api\/admin\/notifications\/deliveries\/([0-9a-f-]+)\/retry$/i);
+  if (notificationRetryMatch && request.method === "POST") {
+    const delivery = (await pool.query(
+      `SELECT nd.*,np.type provider_type,np.configuration_encrypted_json
+       FROM notification_deliveries nd LEFT JOIN notification_providers np ON np.id=nd.provider_id
+       WHERE nd.id=$1`,
+      [notificationRetryMatch[1]],
+    )).rows[0];
+    if (!delivery) return json(response, 404, { error: "notification delivery not found" });
+    const provider = createNotificationProvider(delivery.provider_type ?? "webhook", delivery.configuration_encrypted_json ?? {});
+    const result = await provider.send(delivery.payload_json);
+    const updated = (await pool.query(
+      `UPDATE notification_deliveries
+       SET attempt_count=COALESCE(attempt_count,0)+1,status=$2,response_status=$3,error_message=$4,
+           sent_at=CASE WHEN $2='sent' THEN now() ELSE sent_at END,
+           next_attempt_at=CASE WHEN $2='failed' THEN now() + interval '2 seconds' * power(2,LEAST(COALESCE(attempt_count,0),8)) ELSE next_attempt_at END,
+           updated_at=now()
+       WHERE id=$1 RETURNING *`,
+      [delivery.id, result.ok ? "sent" : "failed", result.responseStatus, redactNotificationError(result.errorMessage)],
+    )).rows[0];
+    return json(response, 200, { delivery: updated });
   }
   const pullRequestActionMatch = url.pathname.match(
     /^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/(mark-reviewed|approve|request-changes|repair-instructions|start-repair|refresh|close-ticket)$/i,
@@ -1759,12 +1799,21 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
         return updated ?? ticket;
       });
     }
-    const [history, notes, attachments] = await Promise.all([
+    const [history, notes, attachments, notifications] = await Promise.all([
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at", [ticket.id]),
       pool.query("SELECT * FROM ticket_notes WHERE ticket_id=$1 ORDER BY created_at", [ticket.id]),
       pool.query("SELECT a.*,u.media_type,u.size_bytes FROM attachments a JOIN uploads u ON u.id=a.upload_id WHERE a.ticket_id=$1", [ticket.id]),
+      pool.query(
+        `SELECT nd.*,np.name provider,np.configuration_encrypted_json->>'recipient' recipient
+         FROM notification_deliveries nd LEFT JOIN notification_providers np ON np.id=nd.provider_id
+         WHERE nd.ticket_id=$1 ORDER BY nd.created_at`,
+        [ticket.id],
+      ),
     ]);
-    return json(response, 200, { ticket, status_history: history.rows, notes: notes.rows, attachments: attachments.rows });
+    return json(response, 200, {
+      ticket, status_history: history.rows, notes: notes.rows, attachments: attachments.rows,
+      notification_history: notifications.rows,
+    });
   }
   if (ticketMatch && request.method === "PATCH") {
     const ref = decodeURIComponent(ticketMatch[1]);
