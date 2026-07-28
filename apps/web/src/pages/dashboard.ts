@@ -38,7 +38,7 @@ function runRow(runId: string, type: string, ticketNum: string, model: string, e
       <div style="height:3px;background:var(--surface2);border-radius:99px;overflow:hidden">
         <div style="width:${pct}%;height:100%;background:var(--t-run)"></div>
       </div>
-      <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text3);white-space:nowrap">${escapeHtml(model)} · turn ${turns}/${maxTurns} · ${escapeHtml(elapsed)}</div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text3);white-space:nowrap">${escapeHtml(model)} · ${escapeHtml(effort)} · turn ${turns}/${maxTurns} · ${escapeHtml(elapsed)}</div>
     </div>
   </div>`;
 }
@@ -167,7 +167,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       ${kpiTile("Awaiting triage", awaitingCount, "", "text", "/admin/tickets?status=Triage")}
       ${kpiTile("Plans to review", plansCount, "", "warn", "/admin/tickets?status=Plan%20Ready%20for%20Review")}
       ${kpiTile("Active runs", runsCount, "", "run", "/admin/runs")}
-      ${kpiTile("PRs to review", prsCount, "", "text", "/admin/prs")}
+      ${kpiTile("PRs to review", prsCount, "", "text", "/admin/pull-requests")}
       ${kpiTile("Failed jobs", jobsCount, "", "danger", "/admin/queue")}
     </div>
 
