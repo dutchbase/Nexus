@@ -667,7 +667,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
       `INSERT INTO notification_providers (name,type,enabled,configuration_encrypted_json) VALUES ($1,$2,$3,$4) RETURNING *`,
       [body.name, body.type, body.enabled ?? true, providerConfigFrom(body)],
     );
-    await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.create", entityType: "notification_provider", entityId: result.rows[0].id, after: result.rows[0], ip: ipOf(request) });
+    await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.create", entityType: "notification_provider", entityId: result.rows[0].id, after: { ...result.rows[0], configuration_encrypted_json: redactProviderConfig(result.rows[0].configuration_encrypted_json) }, ip: ipOf(request) });
     return json(response, 201, { provider: { ...result.rows[0], configuration_encrypted_json: redactProviderConfig(result.rows[0].configuration_encrypted_json) } });
   }
   const providerMatch = url.pathname.match(/^\/api\/admin\/notifications\/providers\/([0-9a-f-]+)$/i);
@@ -680,7 +680,12 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
       `UPDATE notification_providers SET name=COALESCE($2,name),enabled=COALESCE($3,enabled),configuration_encrypted_json=$4,updated_at=now() WHERE id=$1 RETURNING *`,
       [before.id, body.name ?? null, body.enabled ?? null, configuration],
     )).rows[0];
-    await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.update", entityType: "notification_provider", entityId: after.id, before, after, ip: ipOf(request) });
+    await audit({
+      actorType: "admin", actorId: session.user_id, action: "notification_provider.update", entityType: "notification_provider", entityId: after.id,
+      before: { ...before, configuration_encrypted_json: redactProviderConfig(before.configuration_encrypted_json) },
+      after: { ...after, configuration_encrypted_json: redactProviderConfig(after.configuration_encrypted_json) },
+      ip: ipOf(request),
+    });
     return json(response, 200, { provider: { ...after, configuration_encrypted_json: redactProviderConfig(after.configuration_encrypted_json) } });
   }
   const providerTestMatch = url.pathname.match(/^\/api\/admin\/notifications\/providers\/([0-9a-f-]+)\/test$/i);
