@@ -447,13 +447,15 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         });
         if(stream){
           const poll=async()=>{
-            const response=await fetch("/api/admin/runs/"+runId+"/events?after="+lastSeq);
-            if(!response.ok)return clearInterval(pollId);
-            const{run,events}=await response.json();
-            if(!events||!events.length)return;
-            for(const event of events){stream.textContent+=event.message+"\\n";lastSeq=Math.max(lastSeq,event.sequence)}
-            stream.scrollTop=stream.scrollHeight;
-            if(!["running","queued"].includes(run.status))clearInterval(pollId);
+            try{
+              const response=await fetch("/api/admin/runs/"+runId+"/events?after="+lastSeq);
+              if(!response.ok)return clearInterval(pollId);
+              const{run,events}=await response.json();
+              if(!events||!events.length)return;
+              for(const event of events){stream.textContent+=event.sequence+" "+event.event_type+" "+JSON.stringify(event.event_json)+"\\n";lastSeq=Math.max(lastSeq,event.sequence)}
+              stream.scrollTop=stream.scrollHeight;
+              if(!["running","queued"].includes(run.status))clearInterval(pollId);
+            }catch(e){clearInterval(pollId)}
           };
           const pollId=setInterval(poll,5000);
           poll();

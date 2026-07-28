@@ -18,7 +18,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   const runPageMatch = url.pathname.match(/^\/admin\/runs\/([0-9a-f-]+)$/i);
   if (runPageMatch) {
     const run = (await pool.query(
-      `SELECT ar.*,t.ticket_number,p.name project_name FROM agent_runs ar
+      `SELECT ar.*,t.ticket_number,t.status ticket_status,p.name project_name FROM agent_runs ar
        LEFT JOIN tickets t ON t.id=ar.ticket_id LEFT JOIN projects p ON p.id=ar.project_id WHERE ar.id=$1`,
       [runPageMatch[1]],
     )).rows[0];
@@ -26,8 +26,8 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const meta = run.metadata_json ?? {};
     const isActive = ["running", "queued"].includes(run.status);
     const canCancel = ["running", "cancellation_requested"].includes(run.status);
-    const canRepair = run.status === "validation_failed";
-    const canRetry = run.status === "pr_creation_failed";
+    const canRepair = run.error_code === "validation_failed";
+    const canRetry = run.ticket_status === "PR Creation Failed";
     const statusLine = run.status === "timed_out"
       ? `Timed out at ${escapeHtml(meta.turn ?? "?")}/${escapeHtml(meta.max_turns ?? "?")} turns`
       : `${escapeHtml(run.status)}${meta.turn != null ? ` · turn ${escapeHtml(meta.turn)}/${escapeHtml(meta.max_turns ?? "?")}` : ""}`;
