@@ -384,13 +384,13 @@ async function runPlanning(job: any) {
   const runId = randomUUID();
   const sessionId = revising ? revision.planning_session_id : randomUUID();
   if (!sessionId) throw new Error("original planning session is unavailable");
-  const runType = revising ? "plan_revision" : "planning.generate";
+  const runType = revising ? "plan_revision" : "planning";
   await pool.query(
     `INSERT INTO agent_runs
      (id,ticket_id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
      VALUES ($1,$2,$3,$4,'running',NULL,$5,$6,$7,now(),$8)`,
     [runId, ticket.id, input.project.id, runType, input.ai.model, input.ai.reasoning_level,
-      input.project.repository_path, { job_id: job.id }],
+      input.project.repository_path, { job_id: job.id, project_config_version: input.project.config_version }],
   );
   await transitionToPlanning(ticket.id, job.id, runId);
 
@@ -537,8 +537,9 @@ async function runExecution(job: any) {
     `INSERT INTO agent_runs
      (id,ticket_id,project_id,run_type,status,model,reasoning_level,working_directory,started_at,metadata_json)
      VALUES ($1,$2,$3,$4,'running',$5,$6,$7,now(),$8)`,
-    [runId, ticket.id, input.project.id, repairing ? "execution.repair" : "execution.run",
-      input.ai.model, input.ai.reasoning_level, worktree.worktreePath, { job_id: job.id, execution_attempt_id: attempt.id }],
+    [runId, ticket.id, input.project.id, repairing ? "execution.repair" : "execution",
+      input.ai.model, input.ai.reasoning_level, worktree.worktreePath,
+      { job_id: job.id, execution_attempt_id: attempt.id, project_config_version: input.project.config_version }],
   );
   await pool.query(
     "UPDATE execution_attempts SET agent_run_id=$2,validation_status='executing' WHERE id=$1",
@@ -561,7 +562,17 @@ async function runExecution(job: any) {
     await enqueueNotification(client, "execution.started", ticket.id, runId, { runId });
   });
 
-  const copied = await snapshotSkills(input.skills, repairing ? "repair" : "execution");
+  // Skill content is immutable once the plan is approved (PRD §13.8): reuse
+  // the earliest snapshot captured for this ticket (taken when planning
+  // started, before any approval) rather than re-reading skill files from
+  // disk again here, which could pick up edits made after approval.
+  const priorSnapshot = (await pool.query(
+    "SELECT skills_json,content_hash FROM skill_snapshots WHERE ticket_id=$1 ORDER BY created_at ASC LIMIT 1",
+    [ticket.id],
+  )).rows[0];
+  const copied = priorSnapshot
+    ? { skills: priorSnapshot.skills_json, contentHash: priorSnapshot.content_hash }
+    : await snapshotSkills(input.skills, repairing ? "repair" : "execution");
   const skillSnapshot = (await pool.query(
     `INSERT INTO skill_snapshots (ticket_id,run_id,skills_json,content_hash)
      VALUES ($1,$2,$3,$4) RETURNING *`,

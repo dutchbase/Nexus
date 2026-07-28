@@ -13,6 +13,7 @@ import {
   resolveSkills, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
 } from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
+import { validateProject } from "@dcc/project-config";
 import { adminPage, escapeHtml, loginPage, publicFormPage, submittedPage } from "./ui.ts";
 
 const port = Number(process.env.PORT ?? 3000);
@@ -426,10 +427,13 @@ async function submitPublicForm(request: IncomingMessage, response: ServerRespon
   if (typeof body.description !== "string" || !body.description.trim()) errors.description = "required";
   if (Object.keys(errors).length) return json(response, 400, { error: "validation failed", fields: errors });
   const requestedProjectId = form.fixed_project_id ?? body.project_id;
+  const requestedProjectSlug = typeof body.project_slug === "string" ? body.project_slug : undefined;
   const project = requestedProjectId
     ? (await pool.query("SELECT id FROM projects WHERE id = $1 AND enabled = true", [requestedProjectId])).rows[0]
+    : requestedProjectSlug
+    ? (await pool.query("SELECT id FROM projects WHERE slug = $1 AND enabled = true", [requestedProjectSlug])).rows[0]
     : undefined;
-  if (requestedProjectId && !project) return json(response, 400, { error: "valid project is required" });
+  if ((requestedProjectId || requestedProjectSlug) && !project) return json(response, 400, { error: "valid project is required" });
   // No project selected and the form isn't fixed to one: triage assigns it
   // later (PRD §17.1's Submitted -> Triage step), so default to the
   // earliest enabled project rather than blocking submission outright.
@@ -1378,6 +1382,18 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     const ticket = (await pool.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
     if (!ticket) return json(response, 404, { error: "ticket not found" });
     const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
+    // PRD §28.4: a dirty repository blocks planning outright, checked before
+    // any workflow-status guard since it's an environment precondition, not
+    // a business-state one.
+    const repoCheck = await validateProject({
+      repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false,
+    });
+    if (repoCheck.changedFiles.length) {
+      return json(response, 409, {
+        error: "repository has uncommitted changes and cannot be planned or executed",
+        changed_files: repoCheck.changedFiles,
+      });
+    }
     const selection = resolvedAiFor(ticket, project, "planning");
     validateAiSelection({
       model: typeof body.model === "string" ? body.model : selection.model,
