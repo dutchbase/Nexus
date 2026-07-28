@@ -121,6 +121,20 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         toggles.forEach(input=>input.addEventListener("change",()=>{renderSkills();persistSkills()}));
         chips?.addEventListener("click",event=>{const button=event.target.closest("[data-remove-skill]");if(!button)return;const input=toggles.find(item=>item.value===button.dataset.removeSkill);if(input){input.checked=false;renderSkills();persistSkills()}});
         document.querySelector("[data-skill-search]")?.addEventListener("input",event=>document.querySelectorAll("[data-skill-option]").forEach(option=>option.hidden=!option.dataset.search.includes(event.target.value.toLowerCase())));
+        const ticketNumber=window.location.pathname.match(/\\/tickets\\/([^\\/]+)/)?.[1]||"";
+        async function ticketAction(endpoint){const response=await fetch("/api/admin/tickets/"+ticketNumber+"/"+endpoint,{method:"POST",headers:{"x-csrf-token":csrf}});if(response.ok)location.reload();else{const result=await response.json();alert(result.error)}}
+        document.querySelector("[data-approve-planning]")?.addEventListener("click",()=>ticketAction("approve-planning"));
+        document.querySelector("[data-reject-ticket]")?.addEventListener("click",()=>ticketAction("reject"));
+        document.querySelector("[data-cancel-ticket]")?.addEventListener("click",()=>ticketAction("cancel"));
+        document.querySelector("[data-archive-ticket]")?.addEventListener("click",()=>ticketAction("archive"));
+        const notesForm=document.querySelector("[data-notes-form]");
+        if(notesForm){notesForm.addEventListener("submit",async(event)=>{
+          event.preventDefault();const body=(notesForm.querySelector('[name="body"]')||{}).value?.trim();
+          if(!body)return;
+          const response=await fetch("/api/admin/tickets/"+ticketNumber+"/notes",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({body})});
+          const result=await response.json();
+          if(response.ok){notesForm.reset();location.reload()}else{notesForm.querySelector(".error").textContent=result.error}
+        })}
       ` : ""}
       ${/^\/admin\/prompts\/[^/]+$/.test(path) ? `
         const csrf=sessionStorage.getItem("dccCsrf")||"",editor=document.querySelector("[data-prompt-editor]");
