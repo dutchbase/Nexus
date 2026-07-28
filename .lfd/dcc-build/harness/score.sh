@@ -68,6 +68,7 @@ shopt -s nullglob
 for f in "$SCRIPT_DIR"/tests/api/*.spec.ts; do
   run_spec_file "$f" vitest
 done
+export LD_LIBRARY_PATH="/home/linuxbrew/.linuxbrew/lib:${LD_LIBRARY_PATH:-}"
 for f in "$SCRIPT_DIR"/tests/frontend/*.spec.ts; do
   run_spec_file "$f" playwright
 done
