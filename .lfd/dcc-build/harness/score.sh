@@ -65,11 +65,14 @@ run_spec_file() {
 }
 
 shopt -s nullglob
-for f in "$SCRIPT_DIR"/tests/api/*.spec.ts "$SCRIPT_DIR"/tests/probes/*.spec.ts; do
+for f in "$SCRIPT_DIR"/tests/api/*.spec.ts; do
   run_spec_file "$f" vitest
 done
 for f in "$SCRIPT_DIR"/tests/frontend/*.spec.ts; do
   run_spec_file "$f" playwright
+done
+for f in "$SCRIPT_DIR"/tests/probes/*.spec.ts; do
+  run_spec_file "$f" vitest
 done
 shopt -u nullglob
 
