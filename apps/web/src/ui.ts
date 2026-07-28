@@ -124,9 +124,9 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         const ticketNumber=window.location.pathname.match(/\\/tickets\\/([^\\/]+)/)?.[1]||"";
         async function ticketAction(endpoint){const response=await fetch("/api/admin/tickets/"+ticketNumber+"/"+endpoint,{method:"POST",headers:{"x-csrf-token":csrf}});if(response.ok)location.reload();else{const result=await response.json();alert(result.error)}}
         document.querySelector("[data-approve-planning]")?.addEventListener("click",()=>ticketAction("approve-planning"));
-        document.querySelector("[data-reject-ticket]")?.addEventListener("click",()=>ticketAction("reject"));
-        document.querySelector("[data-cancel-ticket]")?.addEventListener("click",()=>ticketAction("cancel"));
-        document.querySelector("[data-archive-ticket]")?.addEventListener("click",()=>ticketAction("archive"));
+        document.querySelector("[data-reject-ticket]")?.addEventListener("click",()=>{if(confirm("Reject this ticket?"))ticketAction("reject")});
+        document.querySelector("[data-cancel-ticket]")?.addEventListener("click",()=>{if(confirm("Cancel this ticket? In-flight work stops."))ticketAction("cancel")});
+        document.querySelector("[data-archive-ticket]")?.addEventListener("click",()=>{if(confirm("Archive this ticket?"))ticketAction("archive")});
         const notesForm=document.querySelector("[data-notes-form]");
         if(notesForm){notesForm.addEventListener("submit",async(event)=>{
           event.preventDefault();const body=(notesForm.querySelector('[name="body"]')||{}).value?.trim();
