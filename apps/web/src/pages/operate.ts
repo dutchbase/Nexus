@@ -2,14 +2,7 @@ import { statfsSync } from "node:fs";
 import { resolve } from "node:path";
 import { escapeHtml, pool, shortRef } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
-
-// Mirrors packages/claude-runner/src/auth-guard.ts forbiddenClaudeAuthVariables.
-// Duplicated rather than imported — apps/web has no dependency on @dcc/claude-runner
-// (worker-only package) and this list is display-only here.
-const forbiddenClaudeAuthVariables = [
-  "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK",
-  "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
-] as const;
+import { forbiddenClaudeAuthVariables } from "../../../../packages/claude-runner/src/auth-guard.ts";
 
 // Coarse relative-duration label — same rule as queue.ts (minutes below an
 // hour, hours above); duplicated because these are the only two callers.
