@@ -422,6 +422,43 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(response.ok){location.href="/admin/skills"}else{const result=await response.json();alert(result.error)}
         });
       `:""}
+      ${/^\/admin\/runs\/[^/]+$/.test(path)?`
+        const csrf=sessionStorage.getItem("dccCsrf")||"";
+        const runId=window.location.pathname.split("/").pop();
+        const stream=document.querySelector("[data-run-stream]");
+        let lastSeq=0;
+        const repairDialog=document.querySelector("[data-repair-dialog]");
+        document.querySelector("[data-run-cancel]")?.addEventListener("click",async(event)=>{
+          if(!confirm("Cancel this run?"))return;
+          const response=await fetch("/api/admin/runs/"+runId+"/cancel",{method:"POST",headers:{"x-csrf-token":csrf}});
+          if(response.ok)location.reload();else{const result=await response.json();alert(result.error)}
+        });
+        document.querySelector("[data-run-repair]")?.addEventListener("click",()=>repairDialog?.showModal());
+        repairDialog?.querySelector("[data-close-dialog]")?.addEventListener("click",()=>repairDialog.close());
+        repairDialog?.querySelector("[data-submit-repair]")?.addEventListener("click",async()=>{
+          const feedback=repairDialog.querySelector("[data-repair-feedback]").value.trim();
+          if(!feedback){alert("Instructions are required");return}
+          const response=await fetch("/api/admin/runs/"+runId+"/repair",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({feedback})});
+          if(response.ok){repairDialog.close();location.reload()}else{const result=await response.json();alert(result.error)}
+        });
+        document.querySelector("[data-run-retry]")?.addEventListener("click",async()=>{
+          const response=await fetch("/api/admin/runs/"+runId+"/retry",{method:"POST",headers:{"x-csrf-token":csrf}});
+          if(response.ok)location.reload();else{const result=await response.json();alert(result.error)}
+        });
+        if(stream){
+          const poll=async()=>{
+            const response=await fetch("/api/admin/runs/"+runId+"/events?after="+lastSeq);
+            if(!response.ok)return clearInterval(pollId);
+            const{run,events}=await response.json();
+            if(!events||!events.length)return;
+            for(const event of events){stream.textContent+=event.message+"\\n";lastSeq=Math.max(lastSeq,event.sequence)}
+            stream.scrollTop=stream.scrollHeight;
+            if(!["running","queued"].includes(run.status))clearInterval(pollId);
+          };
+          const pollId=setInterval(poll,5000);
+          poll();
+        }
+      `:""}
     `);
 }
 
