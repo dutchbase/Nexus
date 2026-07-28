@@ -151,13 +151,21 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const data=new FormData(form);const payload=Object.fromEntries(data);
           const validation_commands={};
           document.querySelectorAll("[data-cmd]").forEach(input=>{validation_commands[input.dataset.cmd]=input.value});
-          payload.config_json={validation_commands};
+          payload.config_json={validation_commands,branch_prefix:payload.branch_prefix||""};
+          delete payload.branch_prefix;
           const response=await fetch("/api/admin/projects/"+projectId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
           if(response.ok){alert("Project saved")}else{const result=await response.json();alert(result.error)}
         });
         document.querySelector("[data-validate-button]")?.addEventListener("click",async()=>{
           const response=await fetch("/api/admin/projects/"+projectId+"/validate",{method:"POST",headers:{"x-csrf-token":csrf}});
           if(response.ok){alert("Validation started");setTimeout(()=>location.reload(),2000)}else{const result=await response.json();alert(result.error)}
+        });
+        document.querySelectorAll("[data-skill-checkbox]").forEach(checkbox=>{
+          checkbox.addEventListener("change",async()=>{
+            const skill_ids=[...document.querySelectorAll("[data-skill-checkbox]:checked")].map(c=>c.value);
+            const response=await fetch("/api/admin/projects/"+projectId+"/skills",{method:"PUT",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({skills:skill_ids.map(id=>({skill_id:id,attachment_type:"automatic"}))})});
+            if(!response.ok){const result=await response.json();alert(result.error);checkbox.checked=!checkbox.checked}
+          });
         });
       `:""}
     `);
