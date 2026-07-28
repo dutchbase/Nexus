@@ -67,6 +67,10 @@ run_spec_file() {
 shopt -s nullglob
 for f in "$SCRIPT_DIR"/tests/api/*.spec.ts; do
   run_spec_file "$f" vitest
+  if [ "$(basename "$f")" = "public-form-security.spec.ts" ]; then
+    echo "[score] pausing 20s after public-form-security.spec.ts's deliberate rate-limit burst so the next file's normal form submissions aren't caught in the same window" >&2
+    sleep 20
+  fi
 done
 export LD_LIBRARY_PATH="/home/linuxbrew/.linuxbrew/lib:${LD_LIBRARY_PATH:-}"
 for f in "$SCRIPT_DIR"/tests/frontend/*.spec.ts; do
