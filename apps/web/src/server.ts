@@ -25,6 +25,7 @@ import * as formsPage from "./pages/forms.ts";
 import * as promptsPage from "./pages/prompts.ts";
 import * as skillsPage from "./pages/skills.ts";
 import * as notificationsPage from "./pages/notifications.ts";
+import * as queuePage from "./pages/queue.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const production = process.env.NODE_ENV === "production";
@@ -554,7 +555,7 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
   }
   const metrics = await counts();
   const pageModules = [
-    dashboardPage, ticketsPage, runsPage, prsPage, projectsPage, formsPage, promptsPage, skillsPage, notificationsPage,
+    dashboardPage, ticketsPage, runsPage, prsPage, projectsPage, formsPage, promptsPage, skillsPage, notificationsPage, queuePage,
   ];
   for (const pageModule of pageModules) {
     const result = await pageModule.render(url, session, metrics);
@@ -1092,6 +1093,19 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
       )).rows;
     });
     return rows ? json(response, 200, { skills: rows }) : json(response, 404, { error: "project not found" });
+  }
+  if (url.pathname === "/api/admin/jobs" && request.method === "GET") {
+    const params: any[] = [];
+    const where: string[] = [];
+    const status = url.searchParams.get("status");
+    if (status) { params.push(status); where.push(`status=$${params.length}`); }
+    const type = url.searchParams.get("type");
+    if (type) { params.push(type); where.push(`type=$${params.length}`); }
+    const jobs = (await pool.query(
+      `SELECT * FROM jobs ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC LIMIT 200`,
+      params,
+    )).rows;
+    return json(response, 200, { jobs });
   }
   if (url.pathname === "/api/admin/tickets" && request.method === "GET") {
     const params: any[] = [];
