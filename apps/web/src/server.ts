@@ -2043,4 +2043,4 @@ const server = createServer((request, response) => {
     else response.end();
   });
 });
-server.listen(port, "127.0.0.1", () => console.log(`web listening on ${port}`));
+server.listen(port, process.env.HOST ?? "0.0.0.0", () => console.log(`web listening on ${port}`));
