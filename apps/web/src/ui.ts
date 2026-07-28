@@ -327,8 +327,8 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const response=await fetch("/api/admin/skills/"+skillId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
           if(response.ok){alert("Skill saved")}else{const result=await response.json();alert(result.error)}
         });
-        document.querySelector("[data-delete-skill]")?.addEventListener("click",async()=>{
-          if(!confirm("Delete this skill?"))return;
+        document.querySelector("[data-disable-skill]")?.addEventListener("click",async()=>{
+          if(!confirm("Disable this skill? It stops being offered on tickets."))return;
           const skillId=window.location.pathname.split("/").pop();
           const response=await fetch("/api/admin/skills/"+skillId,{method:"DELETE",headers:{"x-csrf-token":csrf}});
           if(response.ok){location.href="/admin/skills"}else{const result=await response.json();alert(result.error)}
