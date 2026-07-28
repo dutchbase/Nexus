@@ -285,6 +285,55 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(response.ok)location.reload();else alert((await response.json()).error);
         }));
       `:""}
+      ${path==="/admin/skills"?`
+        const csrf=sessionStorage.getItem("dccCsrf")||"",modal=document.querySelector("[data-register-skill-modal]"),form=document.querySelector("[data-register-skill-form]");
+        const searchInput=document.querySelector("[data-skill-search-list]"),categoryChips=document.querySelectorAll("[data-category]");
+        let activeCategory="all";
+        document.querySelector("[data-register-skill]")?.addEventListener("click",()=>modal.showModal());
+        modal?.querySelector("[data-close-modal]")?.addEventListener("click",()=>modal.close());
+        form?.addEventListener("submit",async(event)=>{
+          event.preventDefault();const data=new FormData(form);const payload=Object.fromEntries(data);payload.enabled=form.elements.enabled.checked;
+          const response=await fetch("/api/admin/skills",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
+          if(response.ok){modal.close();location.reload()}else{const result=await response.json();form.querySelector(".error").textContent=result.error}
+        });
+        categoryChips.forEach(chip=>chip.addEventListener("click",()=>{
+          activeCategory=chip.dataset.category;
+          categoryChips.forEach(c=>c.style.background=c===chip?"var(--accent-soft)":"transparent");
+          categoryChips.forEach(c=>c.style.color=c===chip?"var(--accent)":"inherit");
+          filterRows();
+        }));
+        searchInput?.addEventListener("input",filterRows);
+        function filterRows(){
+          const search=(searchInput?.value||"").toLowerCase();
+          document.querySelectorAll("[data-skill-row]").forEach(row=>{
+            const matchesSearch=row.textContent.toLowerCase().includes(search);
+            const matchesCategory=activeCategory==="all"||row.dataset.skillRow===activeCategory;
+            row.style.display=matchesSearch&&matchesCategory?"":"none";
+          });
+        }
+        document.querySelector("[data-validate-all]")?.addEventListener("click",async()=>{alert("Validation started")});
+      `:""}
+      ${/^\/admin\/skills\/[^/]+$/.test(path)?`
+        const csrf=sessionStorage.getItem("dccCsrf")||"";
+        document.querySelector("[data-validate-skill]")?.addEventListener("click",async()=>{
+          const skillId=window.location.pathname.split("/").pop();
+          const response=await fetch("/api/admin/skills/"+skillId+"/validate",{method:"POST",headers:{"x-csrf-token":csrf}});
+          if(response.ok){alert("Validation completed")}else{const result=await response.json();alert(result.error)}
+        });
+        document.querySelector("[data-save-skill]")?.addEventListener("click",async()=>{
+          const skillId=window.location.pathname.split("/").pop();
+          const description=document.querySelector("[data-skill-description]")?.value||"";
+          const payload={description};
+          const response=await fetch("/api/admin/skills/"+skillId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
+          if(response.ok){alert("Skill saved")}else{const result=await response.json();alert(result.error)}
+        });
+        document.querySelector("[data-delete-skill]")?.addEventListener("click",async()=>{
+          if(!confirm("Delete this skill?"))return;
+          const skillId=window.location.pathname.split("/").pop();
+          const response=await fetch("/api/admin/skills/"+skillId,{method:"DELETE",headers:{"x-csrf-token":csrf}});
+          if(response.ok){location.href="/admin/skills"}else{const result=await response.json();alert(result.error)}
+        });
+      `:""}
     `);
 }
 
