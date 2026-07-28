@@ -1028,3 +1028,104 @@ Two consecutive full `run-evals.sh` runs post-fix:
 
 This is the new accurate scoring baseline. Frontend now scores non-zero for
 the first time in the build's history.
+
+## Frontend completion cycle — FE-01/02/05–12, plus three defects it exposed
+
+The frontend category had been structurally pinned at 0/13 for the whole
+build by a harness bug (probes locking the shared `eval-admin` account
+before the frontend specs ran), fixed at operator level earlier the same
+day. That fix made the category score for the first time — 3/13 — and this
+cycle closed the remaining 10 cases.
+
+**Hypothesis before the change:** the 10 failures were plain missing UI, so
+the work would be markup/CSS in `apps/web/src/ui.ts` and `server.ts` with no
+backend involvement.
+
+**Result:** mostly true, but verifying against the *full* suite rather than
+in isolation surfaced three real defects that had nothing to do with the UI.
+All 13 frontend specs passed in isolation well before the suite agreed.
+
+### Frontend work (commit `5b44012`)
+
+- **FE-01/FE-02** — the sidebar's open-ticket badge counted every
+  non-terminal status, so it passed 14 as soon as the suite submitted its
+  own tickets. Narrowed to tickets actually awaiting a person (Triage /
+  Needs Information). `aria-current` already handled sub-routes correctly.
+- **FE-05..FE-08** — the 8 tab buttons were decorative; they now drive real
+  `role="tabpanel"` panels. Added the `+ Add skill` picker, `Start
+  execution` (disabled until a plan is approved), the automatic/manual chip
+  `title` convention from handoff §5.5, and the "resolved references
+  injected into the prompt" panel that regenerates on every selection change
+  and matches the Prompt tab line-for-line.
+- **FE-09** — `Preview prompt` opens a native `<dialog>` with a real focus
+  trap, Escape-to-close and focus restore. `<dialog>`'s built-in modality
+  covers scrim and inertness, so only the Tab-cycling handler was written.
+- **FE-10/FE-11** — hamburger plus a closing scrim for the off-canvas drawer
+  below 980px, and 44px minimum touch targets.
+- **FE-12** — added `/admin/runs`, `/admin/runs/{id}`, `/admin/projects`,
+  `/admin/projects/{slug}` (dirty-repository banner) and
+  `/admin/notifications` (deliveries tab). All 22 documented routes render.
+
+### Defect 1 — commit-time TOCTOU in the execution pipeline (SEC-08, hard-fail)
+
+`validateExecutionWorktree()` scanned the working tree, then
+`commitExecutionChanges()` ran `git add --all` and committed whatever was on
+disk *at that moment*. Anything appearing between the two was committed
+unscanned. Under full-suite load the window opened wide enough for SEC-08's
+planted AWS key to be committed outright (observed as commit `aad428e` in a
+probe worktree). The gates now re-run over the staged set inside
+`commitExecutionChanges()`, so what is actually being committed is what gets
+scanned. The worker routes that trip to `Validation Failed` with
+`result_commit` left null.
+
+This is a genuine security hole, not a test artifact: the pre-commit scan
+was advisory, and any file arriving late — from a slow Claude write, a
+watcher, anything — would have reached the PR unscanned.
+
+### Defect 2 — a notification retry erased the 504 (FE-12)
+
+Retrying a delivery wrote `response_status` unconditionally, nulling the 504
+that `ND-8841`'s row is supposed to display. `notifications.spec.ts` runs
+before the frontend specs and retries that exact delivery, so by the time
+FE-12 read the deliveries tab the status was gone — which is precisely why
+FE-12 passed in isolation and failed in the full run. Retries now preserve a
+known status instead of overwriting it with null. `error_message` is still
+overwritten, which is correct: a retry really did produce a new error.
+
+### Defect 3 — colliding short references (FE-12)
+
+PRD §26 gives neither `agent_runs` nor `notification_deliveries` a
+sequential number column, so the human reference (`RUN-0898`, `ND-8841`)
+has to derive from the uuid — and a 4-hex suffix genuinely collides. At 50
+runs, two rows both rendered as `RUN-0898`, and the newer one shadowed the
+seeded timed-out run. Within a rendered list the earliest row now keeps the
+short reference and later collisions widen until distinct, so no two visible
+rows ever share a label.
+
+### Regression caught by the harness (commit `fb38f73`)
+
+The Defect-1 fix added `result_commit=NULL` to the worker's failure path.
+Correct for a blocked commit (there is none to keep), wrong for a failed
+*push*: PRD §28.9 requires the local commit to survive so a retry redoes
+only the push without re-invoking Claude. WF-08 caught it. Now cleared only
+on the validation-blocked path.
+
+Worth recording that WF-07/WF-08 were already intermittently failing before
+this cycle (see the 07:22 run, `workflow=0.8182`, and the flakiness noted
+earlier in this log) — the regression above was real and independent, not
+the origin of that pattern.
+
+### Result
+
+Two consecutive full `run-evals.sh` runs from a clean checkout, fresh
+Postgres and fixtures each time:
+
+- Run 1: `weighted_score=1.0`, `hard_fail_triggered=false`,
+  `pass_bar_met=true`, categories all `1.0` (workflow 11/11, security 18/18,
+  determinism 8/8 applicable, frontend 13/13, operational 5/5)
+- Run 2: identical
+
+This meets `goal.md`'s stop condition in full: weighted ≥ 0.95, no category
+below 0.85, zero hard fails, green twice consecutively from a clean
+checkout. No harness or eval file was modified. The frontend category
+reached 13/13 for the first time in the build's history.
