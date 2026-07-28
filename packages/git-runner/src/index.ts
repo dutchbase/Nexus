@@ -257,8 +257,34 @@ export async function validateExecutionWorktree(input: {
 export async function commitExecutionChanges(input: {
   worktreePath: string;
   message: string;
+  protectedPaths?: string[];
 }) {
   await git(input.worktreePath, ["add", "--all"]);
+  // validateExecutionWorktree() scanned the working tree at validation time,
+  // but anything landing between then and here would otherwise be committed
+  // unscanned. Re-scan exactly what is staged, so the secret/protected-path
+  // gates hold against the content actually being committed.
+  const staged = (await git(input.worktreePath, ["diff", "--cached", "--name-only", "-z"]))
+    .stdout.split("\0").filter(Boolean);
+  const protectedMatches = staged.filter((file) =>
+    matchesProtectedPath(file, input.protectedPaths?.length ? input.protectedPaths : DEFAULT_PROTECTED_PATHS));
+  if (protectedMatches.length) {
+    throw new WorktreeValidationError(
+      "protected-path inspection",
+      `protected-path inspection found ${protectedMatches.length} disallowed staged path(s)`,
+      [],
+    );
+  }
+  let secretCount = 0;
+  for (const file of staged) {
+    const content = (await git(input.worktreePath, ["show", `:${file}`])).stdout;
+    secretCount += countCredentialShapes(content);
+  }
+  if (secretCount) {
+    throw new WorktreeValidationError(
+      "secret scan", `secret scan found ${secretCount} credential-shaped pattern(s) in the staged commit`, [],
+    );
+  }
   await git(input.worktreePath, ["commit", "--allow-empty", "-m", input.message]);
   return (await git(input.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
 }

@@ -45,11 +45,23 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
   }).join("")}</div>`).join("");
   return document(title, `<div class="shell"><aside class="sidebar"><div class="brand"><span class="brand-mark">D</span><div><div class="brand-title">Development hub</div><div class="brand-sub">Internet Nederland</div></div></div>
     <nav class="nav" aria-label="Primary">${nav}</nav><footer class="sidebar-footer"><div class="theme"><button data-theme-choice="light">Light</button><button data-theme-choice="auto">Auto</button><button data-theme-choice="dark">Dark</button></div><p>${escapeHtml(username)} · administrator</p></footer></aside>
-    <div class="content"><header class="header"><span class="eyebrow">Development Control Center</span><span>/</span><span>${escapeHtml(title)}</span><span class="worker">● worker-01 healthy</span><a class="button" href="/f/website-feedback">Public form</a></header><main class="main">${body}</main></div></div>`, `
+    <button class="scrim" type="button" data-scrim hidden aria-label="Close navigation menu"></button>
+    <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-label="Open navigation menu"><span></span><span></span><span></span></button><span class="eyebrow">Development Control Center</span><span>/</span><span>${escapeHtml(title)}</span><span class="worker">● worker-01 healthy</span><a class="button" href="/f/website-feedback">Public form</a></header><main class="main">${body}</main></div></div>`, `
       const choice=localStorage.getItem("dccTheme")||"auto";
       const apply=(value)=>{const dark=value==="dark"||(value==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light";document.querySelectorAll("[data-theme-choice]").forEach(b=>b.classList.toggle("selected",b.dataset.themeChoice===value))};
       apply(choice);matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{if((localStorage.getItem("dccTheme")||"auto")==="auto")apply("auto")});
       document.querySelectorAll("[data-theme-choice]").forEach(b=>b.addEventListener("click",()=>{localStorage.setItem("dccTheme",b.dataset.themeChoice);apply(b.dataset.themeChoice)}));
+      const sidebar=document.querySelector(".sidebar"),scrim=document.querySelector("[data-scrim]");
+      document.querySelector("[data-nav-open]")?.addEventListener("click",()=>{sidebar.classList.add("open");scrim.hidden=false});
+      scrim?.addEventListener("click",()=>{sidebar.classList.remove("open");scrim.hidden=true});
+      document.querySelectorAll("[role=tablist]").forEach(list=>{
+        const tabs=[...list.querySelectorAll("[role=tab]")];
+        list.addEventListener("click",event=>{
+          const tab=event.target.closest("[role=tab]");if(!tab)return;
+          tabs.forEach(item=>item.setAttribute("aria-selected",String(item===tab)));
+          tabs.forEach(item=>{const panel=document.getElementById(item.getAttribute("aria-controls")||"");if(panel)panel.hidden=item!==tab});
+        });
+      });
       ${path.startsWith("/admin/tickets") ? `document.querySelectorAll("[data-ticket-filter]").forEach(el=>el.addEventListener("change",()=>{const q=new URLSearchParams(new FormData(document.querySelector("#filters")));location.href="/admin/tickets?"+q}))` : ""}
       ${/^\/admin\/tickets\/[^/]+$/.test(path) ? `
         const csrf=sessionStorage.getItem("dccCsrf")||"";
@@ -64,18 +76,43 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             const result=await response.json();aiForm.querySelector(".error").textContent=response.ok?"Saved":result.error;
           });
         }
-        const toggles=[...document.querySelectorAll("[data-skill-toggle]")],chips=document.querySelector("[data-skill-chips]"),references=document.querySelector("[data-skill-references]");
+        const toggles=[...document.querySelectorAll("[data-skill-toggle]")],chips=document.querySelector("[data-skill-chips]"),references=document.querySelector("[data-skill-references]"),refCount=document.querySelector("[data-ref-count]"),promptSkills=document.querySelector("[data-prompt-skills]");
         const ticketId=aiForm?.dataset.ticketId;
+        document.querySelector("[data-add-skill]")?.addEventListener("click",()=>{const picker=document.querySelector("[data-skill-picker]");picker.hidden=!picker.hidden});
         function renderSkills(){
           const selected=toggles.filter(input=>input.checked);
           chips.replaceChildren(...selected.map(input=>{
-            const chip=document.createElement("span");chip.className="skill-chip";chip.dataset.skillChip=input.value;chip.dataset.slug=input.dataset.slug;chip.append(document.createTextNode(input.dataset.name+" "));
-            if(input.disabled){const tag=document.createElement("small");tag.textContent="auto";chip.append(tag)}
+            const auto=input.dataset.auto!==undefined;
+            const chip=document.createElement("span");chip.className="skill-chip";chip.dataset.skillChip=input.value;chip.dataset.slug=input.dataset.slug;
+            chip.title=(auto?"Automatically added by project":"Selected on this ticket")+" · "+input.dataset.path;
+            chip.append(document.createTextNode(input.dataset.name+" "));
+            if(auto){const tag=document.createElement("small");tag.textContent="auto";chip.append(tag)}
             else{const remove=document.createElement("button");remove.type="button";remove.dataset.removeSkill=input.value;remove.setAttribute("aria-label","Remove "+input.dataset.name);remove.textContent="×";chip.append(remove)}
             return chip;
           }));
-          references.textContent=selected.map(input=>"- /"+input.dataset.slug).join("\\n");
+          const lines=selected.map(input=>"- "+input.dataset.slug+": "+input.dataset.path).join("\\n");
+          references.textContent="Use the following skills:\\n"+lines;
+          if(refCount)refCount.textContent=String(selected.length);
+          if(promptSkills)promptSkills.textContent=lines;
         }
+        const previewDialog=document.querySelector("[data-preview-dialog]");
+        document.querySelector("[data-open-preview]")?.addEventListener("click",async()=>{
+          previewDialog.showModal();
+          try{const response=await fetch("/api/admin/tickets/"+ticketId+"/prompt-preview");const result=await response.json();previewDialog.querySelector("pre").textContent=result.content??result.error??""}catch{}
+        });
+        previewDialog?.querySelector("[data-close-dialog]")?.addEventListener("click",()=>previewDialog.close());
+        previewDialog?.addEventListener("keydown",event=>{
+          if(event.key!=="Tab")return;
+          const focusables=[...previewDialog.querySelectorAll("button,a[href],input,select,textarea,[tabindex]")].filter(el=>!el.disabled);
+          if(!focusables.length)return;
+          const first=focusables[0],last=focusables[focusables.length-1];
+          if(event.shiftKey&&(document.activeElement===first||!previewDialog.contains(document.activeElement))){event.preventDefault();last.focus()}
+          else if(!event.shiftKey&&(document.activeElement===last||!previewDialog.contains(document.activeElement))){event.preventDefault();first.focus()}
+        });
+        document.querySelector("[data-start-execution]")?.addEventListener("click",async()=>{
+          const response=await fetch("/api/admin/tickets/"+ticketId+"/execute",{method:"POST",headers:{"x-csrf-token":csrf}});
+          if(response.ok)location.reload();else alert((await response.json()).error);
+        });
         async function persistSkills(){
           const skill_ids=toggles.filter(input=>input.checked&&!input.disabled).map(input=>input.value);
           const response=await fetch("/api/admin/tickets/"+ticketId+"/skills",{method:"PUT",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({skill_ids})});

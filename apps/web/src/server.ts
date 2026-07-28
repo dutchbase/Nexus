@@ -552,9 +552,31 @@ async function transitionTicket(ticketRef: string, status: string, reason: strin
   return result ? json(response, 200, { ticket: result }) : json(response, 404, { error: "ticket not found" });
 }
 
+// Human-readable short reference for uuid-keyed rows (e.g. RUN-0898, ND-8841):
+// the last 4 hex characters of the uuid, uppercased. Purely presentational.
+const shortRef = (prefix: string, id: string, length = 4) => `${prefix}-${id.replace(/-/g, "").slice(-length).toUpperCase()}`;
+
+// PRD §26 gives agent_runs / notification_deliveries no sequential number
+// column, so their human reference has to come from the uuid — and a 4-hex
+// suffix does collide once a list holds enough rows. Within one rendered list,
+// the earliest row keeps the short reference and later collisions widen until
+// they are distinct, so no two visible rows ever share a label.
+function shortRefs(prefix: string, rows: Array<{ id: string }>) {
+  const labels = new Map<string, string>();
+  const taken = new Set<string>();
+  for (const row of [...rows].reverse()) {
+    let length = 4;
+    let label = shortRef(prefix, row.id, length);
+    while (taken.has(label) && length < 32) label = shortRef(prefix, row.id, (length += 2));
+    taken.add(label);
+    labels.set(row.id, label);
+  }
+  return labels;
+}
+
 async function counts() {
   const row = (await pool.query(`SELECT
-    (SELECT count(*)::integer FROM tickets WHERE status NOT IN ('Completed','Rejected','Cancelled','Archived')) tickets,
+    (SELECT count(*)::integer FROM tickets WHERE status IN ('Triage','Needs Information')) tickets,
     (SELECT count(*)::integer FROM agent_runs WHERE status IN ('running','queued')) runs,
     (SELECT count(*)::integer FROM jobs WHERE status IN ('queued','running')) jobs,
     (SELECT count(*)::integer FROM pull_requests WHERE state = 'open') prs,
@@ -703,7 +725,7 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
       [decodeURIComponent(ticketMatch[1])],
     )).rows[0];
     if (!ticket) return html(response, 404, adminPage(url.pathname, "Ticket not found", "<h1>Ticket not found</h1>", metrics, session.username));
-    const [notesResult, historyResult, skillsResult, notificationsResult] = await Promise.all([
+    const [notesResult, historyResult, skillsResult, notificationsResult, runsResult, prsResult] = await Promise.all([
       pool.query("SELECT n.*,u.username FROM ticket_notes n LEFT JOIN users u ON u.id=n.author_id WHERE ticket_id=$1 ORDER BY n.created_at DESC", [ticket.id]),
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
       pool.query(
@@ -720,15 +742,18 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
          WHERE nd.ticket_id=$1 ORDER BY nd.created_at DESC`,
         [ticket.id],
       ),
+      pool.query("SELECT * FROM agent_runs WHERE ticket_id=$1 ORDER BY started_at DESC NULLS LAST", [ticket.id]),
+      pool.query("SELECT * FROM pull_requests WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
     ]);
     const notes = notesResult.rows;
     const history = historyResult.rows;
     const skillRows = skillsResult.rows;
-    const chips = skillRows.filter((skill) => skill.automatic || skill.selected).map((skill) =>
-      `<span class="skill-chip" data-skill-chip="${skill.id}" data-slug="${escapeHtml(skill.slug)}">${escapeHtml(skill.name)}
+    const selectedSkills = skillRows.filter((skill) => skill.automatic || skill.selected);
+    const chips = selectedSkills.map((skill) =>
+      `<span class="skill-chip" data-skill-chip="${skill.id}" data-slug="${escapeHtml(skill.slug)}" title="${skill.automatic ? "Automatically added by project" : "Selected on this ticket"} · ${escapeHtml(skill.filesystem_path)}">${escapeHtml(skill.name)}
        ${skill.automatic ? '<small>auto</small>' : `<button type="button" aria-label="Remove ${escapeHtml(skill.name)}" data-remove-skill="${skill.id}">×</button>`}</span>`,
     ).join("");
-    const references = skillRows.filter((skill) => skill.automatic || skill.selected).map((skill) => `- /${escapeHtml(skill.slug)}`).join("\n");
+    const referenceLines = selectedSkills.map((skill) => `- ${skill.slug}: ${skill.filesystem_path}`).join("\n");
     const modelOptions = ["fable", "opus", "sonnet", "haiku"].map((model) => `<option value="${model}"${ticket.default_model === model ? " selected" : ""}>${model[0].toUpperCase()}${model.slice(1)}</option>`).join("");
     const reasoningOptions = [["low","Low"],["medium","Medium"],["high","High"],["xhigh","Extra high"],["max","Maximum"],["ultracode","Ultracode"]].map(([value,label]) => `<option value="${value}"${ticket.default_reasoning_level === value ? " selected" : ""}>${label}</option>`).join("");
     const phaseConfiguration = (phase: "planning" | "execution" | "repair") => {
@@ -738,26 +763,49 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
       const reasoning = [["low","Low"],["medium","Medium"],["high","High"],["xhigh","Extra high"],["max","Maximum"],["ultracode","Ultracode"]].map(([value,label]) => `<option value="${value}"${selectedReasoning === value ? " selected" : ""}>${label}</option>`).join("");
       return `<fieldset><legend>${phase[0].toUpperCase()}${phase.slice(1)}</legend><div class="grid two"><label class="field"><span>Model</span><select name="${phase}_model">${models}</select></label><label class="field"><span>Reasoning level</span><select name="${phase}_reasoning_level">${reasoning}</select></label></div></fieldset>`;
     };
-    const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)}</div><h1>${escapeHtml(ticket.title)}</h1><span class="status">${escapeHtml(ticket.status)}</span>
-      <div class="tabs" role="tablist">${["Overview","AI & skills","Prompt","Plans","Runs","Validation","Pull request","Activity"].map((label,index) => `<button role="tab" aria-selected="${index === 0}" data-tab="${index}">${label}</button>`).join("")}</div>
-      <section class="card" data-tab-panel="1"><div class="card-head">AI configuration</div><div class="card-body">
+    const execRuns = runsResult.rows.filter((run) => run.run_type === "execution");
+    const panel = (index: number, content: string) => `<div role="tabpanel" id="panel-${index}" aria-labelledby="tab-${index}"${index === 0 ? "" : " hidden"}>${content}</div>`;
+    const overviewPanel = `<div class="grid two"><section class="card"><div class="card-head">Original submission</div><div class="card-body"><p>${escapeHtml(ticket.description)}</p><dl><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Environment</dt><dd>${escapeHtml(ticket.environment)}</dd><dt>Source URL</dt><dd>${escapeHtml(ticket.source_url)}</dd></dl></div></section>
+      <section class="card"><div class="card-head">Internal notes</div><div class="card-body notes">${notes.map((note) => `<div class="note"><strong>${escapeHtml(note.username ?? "Administrator")}</strong><p>${escapeHtml(note.body)}</p></div>`).join("") || "<p>No notes yet.</p>"}</div></section></div>`;
+    const aiPanel = `<section class="card"><div class="card-head">AI configuration</div><div class="card-body">
         <form id="ai-config" data-ticket-id="${ticket.id}"><label class="field"><span>Mode</span><select name="ai_configuration_mode"><option value="basic"${ticket.ai_configuration_mode !== "advanced" ? " selected" : ""}>Basic</option><option value="advanced"${ticket.ai_configuration_mode === "advanced" ? " selected" : ""}>Advanced</option></select></label>
         <div class="grid two"><label class="field"><span>Default model</span><select name="default_model">${modelOptions}</select></label><label class="field"><span>Default reasoning level</span><select name="default_reasoning_level">${reasoningOptions}</select></label></div>
         <div data-advanced-ai${ticket.ai_configuration_mode === "advanced" ? "" : " hidden"}>${phaseConfiguration("planning")}${phaseConfiguration("execution")}${phaseConfiguration("repair")}</div>
         <button class="button primary" type="submit">Save AI configuration</button><p class="error" role="alert"></p></form>
       </div></section>
-      <section class="card" data-tab-panel="1"><div class="card-head">Skills</div><div class="card-body"><label class="field"><span>Search and select skills</span><input data-skill-search placeholder="Search skills or categories"></label>
-        <div class="skill-options">${skillRows.map((skill) => `<label data-skill-option data-search="${escapeHtml(`${skill.name} ${skill.slug} ${skill.category}`.toLowerCase())}"><input type="checkbox" value="${skill.id}" data-skill-toggle data-slug="${escapeHtml(skill.slug)}" data-name="${escapeHtml(skill.name)}"${skill.automatic || skill.selected ? " checked" : ""}${skill.automatic || !skill.enabled ? " disabled" : ""}> ${escapeHtml(skill.name)} <small>${escapeHtml(skill.category)}${skill.automatic ? " · Automatically added by project" : ""}${!skill.enabled ? " · disabled" : ""}</small></label>`).join("")}</div>
-        <div class="skill-chips" data-skill-chips>${chips}</div><pre class="references" data-skill-references>${references}</pre>
+      <section class="card"><div class="card-head">Skills</div><div class="card-body">
+        <div class="skill-chips" data-skill-chips>${chips}</div>
+        <button class="button" type="button" data-add-skill>+ Add skill</button>
+        <div class="skill-options" data-skill-picker hidden><label class="field"><span>Search and select skills</span><input data-skill-search placeholder="Search skills or categories"></label>
+        ${skillRows.map((skill) => `<label data-skill-option data-search="${escapeHtml(`${skill.name} ${skill.slug} ${skill.category}`.toLowerCase())}"><input type="checkbox" value="${skill.id}" data-skill-toggle data-slug="${escapeHtml(skill.slug)}" data-name="${escapeHtml(skill.name)}" data-path="${escapeHtml(skill.filesystem_path)}"${skill.automatic ? " data-auto" : ""}${skill.automatic || skill.selected ? " checked" : ""}${skill.automatic || !skill.enabled ? " disabled" : ""}> ${escapeHtml(skill.name)} <small>${escapeHtml(skill.category)}${skill.automatic ? " · Automatically added by project" : ""}${!skill.enabled ? " · disabled" : ""}</small></label>`).join("")}</div>
       </div></section>
-      <section class="card"><div class="card-head">Complete prompt preview</div><div class="card-body"><p>Compile the current prompt versions, project configuration, resolved AI configuration, resolved skills, and this ticket without creating a run or snapshot.</p><a class="button" href="/api/admin/tickets/${ticket.id}/prompt-preview">Open planning prompt preview</a></div></section>
-      <section class="card"><div class="card-head">Planning</div><div class="card-body"><p>Review the immutable generated plan, its exact prompt, model, reasoning level, and raw Markdown.</p><a class="button" href="/admin/tickets/${ticket.ticket_number}/plans">Open plan review</a></div></section>
-      <div class="grid two"><section class="card"><div class="card-head">Original submission</div><div class="card-body"><p>${escapeHtml(ticket.description)}</p><dl><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Environment</dt><dd>${escapeHtml(ticket.environment)}</dd><dt>Source URL</dt><dd>${escapeHtml(ticket.source_url)}</dd></dl></div></section>
-      <section class="card"><div class="card-head">Internal notes</div><div class="card-body notes">${notes.map((note) => `<div class="note"><strong>${escapeHtml(note.username ?? "Administrator")}</strong><p>${escapeHtml(note.body)}</p></div>`).join("") || "<p>No notes yet.</p>"}</div></section></div>
-      <section class="card"><div class="card-head">Status history</div><div class="card-body">${history.map((item) => `<p><span class="mono">${new Date(item.created_at).toLocaleString("nl-NL")}</span> ${escapeHtml(item.previous_status ?? "New")} → <strong>${escapeHtml(item.new_status)}</strong></p>`).join("") || "<p>No recorded transitions.</p>"}</div></section>
+      <section class="card"><div class="card-head">Resolved references injected into the prompt (<span data-ref-count>${selectedSkills.length}</span>)</div><div class="card-body"><pre class="references" data-skill-references>Use the following skills:
+${escapeHtml(referenceLines)}</pre></div></section>`;
+    const promptPanel = `<section class="card"><div class="card-head">Assembled prompt</div><div class="card-body"><p>Compiled from the current prompt versions, project configuration, resolved AI configuration, resolved skills, and this ticket — without creating a run or snapshot.</p>
+      <pre class="references">Use the following skills:
+<span data-prompt-skills>${escapeHtml(referenceLines)}</span></pre>
+      <a class="button" href="/api/admin/tickets/${ticket.id}/prompt-preview">Open full planning prompt preview</a></div></section>`;
+    const plansPanel = `<section class="card"><div class="card-head">Planning</div><div class="card-body"><p>Review the immutable generated plan, its exact prompt, model, reasoning level, and raw Markdown.</p><a class="button" href="/admin/tickets/${ticket.ticket_number}/plans">Open plan review</a></div></section>`;
+    const runsPanel = `<section class="card"><div class="card-head">Runs</div>${runsResult.rows.map((run) =>
+      `<a class="ticket-row" href="/admin/runs/${run.id}"><span class="mono">${shortRef("RUN", run.id)}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}</span><span class="status">${escapeHtml(run.status)}</span><time>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : ""}</time></a>`,
+    ).join("") || '<div class="card-body"><p>No runs yet.</p></div>'}</section>`;
+    const validationPanel = `<section class="card"><div class="card-head">Validation</div><div class="card-body">${execRuns.map((run) =>
+      `<p><span class="status">${escapeHtml(run.status)}</span> ${run.error_code === "validation_failed" ? "<strong>Validation failed</strong> — " : ""}${escapeHtml(run.error_message ?? "")}</p>`,
+    ).join("") || "<p>Greyed out until an execution attempt exists.</p>"}</div></section>`;
+    const prPanel = `<section class="card"><div class="card-head">Pull request</div>${prsResult.rows.map((item) =>
+      `<a class="ticket-row" href="/admin/pull-requests/${item.id}"><span class="mono">#${item.number}</span><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.head_branch)}</span><span class="status">${escapeHtml(item.review_state ?? item.state)}</span><time>${new Date(item.created_at).toLocaleDateString("nl-NL")}</time></a>`,
+    ).join("") || '<div class="card-body"><p>No pull request yet — the worker opens a draft PR after a validated execution.</p></div>'}</section>`;
+    const activityPanel = `<section class="card"><div class="card-head">Status history</div><div class="card-body">${history.map((item) => `<p><span class="mono">${new Date(item.created_at).toLocaleString("nl-NL")}</span> ${escapeHtml(item.previous_status ?? "New")} → <strong>${escapeHtml(item.new_status)}</strong></p>`).join("") || "<p>No recorded transitions.</p>"}</div></section>
       <section class="card"><div class="card-head">Notification history</div><div class="card-body">${notificationsResult.rows.map((item) =>
         `<p><strong>${escapeHtml(item.event_type)}</strong> · ${escapeHtml(item.provider ?? "Unknown provider")} · ${escapeHtml(item.recipient ?? "default recipient")} · ${escapeHtml(item.status)} · attempts ${item.attempt_count ?? 0}${item.response_status ? ` · HTTP ${item.response_status}` : ""}${item.sent_at ? ` · ${new Date(item.sent_at).toLocaleString("nl-NL")}` : ""}${item.error_message ? `<br><span class="error">${escapeHtml(item.error_message)}</span>` : ""}</p>`,
       ).join("") || "<p>No notifications yet.</p>"}</div></section>`;
+    const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)}</div><h1>${escapeHtml(ticket.title)}</h1>
+      <div class="toolbar"><span class="status">${escapeHtml(ticket.status)}</span>
+        <button class="button" type="button" data-open-preview>Preview prompt</button>
+        <button class="button primary" type="button" data-start-execution${ticket.status === "Plan Approved" ? "" : " disabled"}>Start execution</button></div>
+      <dialog data-preview-dialog aria-label="Prompt preview"><div class="card-head">Prompt preview</div><pre class="references">Loading…</pre><button class="button" type="button" data-close-dialog>Close</button></dialog>
+      <div class="tabs" role="tablist">${["Overview", "AI & skills", "Prompt", "Plans", "Runs", "Validation", "Pull request", "Activity"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
+      ${[overviewPanel, aiPanel, promptPanel, plansPanel, runsPanel, validationPanel, prPanel, activityPanel].map((content, index) => panel(index, content)).join("")}`;
     return html(response, 200, adminPage(url.pathname, ticket.ticket_number, body, metrics, session.username));
   }
   const formPageMatch = url.pathname.match(/^\/admin\/forms\/([^/]+)$/);
@@ -820,6 +868,88 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
       <section class="card"><div class="list-head skills-head"><span>Skill</span><span>Description</span><span>Category</span><span>Source</span><span>Version</span><span>State</span></div>
       ${skills.map((skill) => `<div class="ticket-row skills-row"><strong>/${escapeHtml(skill.slug)}</strong><span>${escapeHtml(skill.description)}</span><span>${escapeHtml(skill.category)}</span><span>${escapeHtml(skill.source_type)}</span><span>${escapeHtml(skill.version)}</span><span class="status">${skill.enabled ? "Enabled" : "Disabled"}</span></div>`).join("")}</section>`;
     return html(response, 200, adminPage(url.pathname, "Skills", body, metrics, session.username));
+  }
+  if (url.pathname === "/admin/runs") {
+    const runs = (await pool.query(
+      `SELECT ar.*,t.ticket_number,p.name project_name FROM agent_runs ar
+       LEFT JOIN tickets t ON t.id=ar.ticket_id LEFT JOIN projects p ON p.id=ar.project_id
+       ORDER BY ar.started_at DESC NULLS LAST LIMIT 200`,
+    )).rows;
+    const runLabels = shortRefs("RUN", runs);
+    const rows = runs.map((run) =>
+      `<a class="ticket-row" href="/admin/runs/${run.id}"><span class="mono">${runLabels.get(run.id)}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.ticket_number ?? "")} · ${escapeHtml(run.project_name ?? "")}</span><span>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}</span><span class="status">${escapeHtml(run.status)}</span><time>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : ""}</time></a>`,
+    ).join("");
+    const body = `<div class="eyebrow">Work</div><h1>Runs</h1><section class="card"><div class="list-head"><span>Run</span><span>Type</span><span>Ticket</span><span>AI</span><span>Status</span><span>Started</span></div>${rows || '<div class="card-body"><p>No runs recorded.</p></div>'}</section>`;
+    return html(response, 200, adminPage(url.pathname, "Runs", body, metrics, session.username));
+  }
+  const runPageMatch = url.pathname.match(/^\/admin\/runs\/([0-9a-f-]+)$/i);
+  if (runPageMatch) {
+    const run = (await pool.query(
+      `SELECT ar.*,t.ticket_number,p.name project_name FROM agent_runs ar
+       LEFT JOIN tickets t ON t.id=ar.ticket_id LEFT JOIN projects p ON p.id=ar.project_id WHERE ar.id=$1`,
+      [runPageMatch[1]],
+    )).rows[0];
+    if (!run) return html(response, 404, adminPage(url.pathname, "Run not found", "<h1>Run not found</h1>", metrics, session.username));
+    const meta = run.metadata_json ?? {};
+    const statusLine = run.status === "timed_out"
+      ? `Timed out at ${escapeHtml(meta.turn ?? "?")}/${escapeHtml(meta.max_turns ?? "?")} turns`
+      : `${escapeHtml(run.status)}${meta.turn != null ? ` · turn ${escapeHtml(meta.turn)}/${escapeHtml(meta.max_turns ?? "?")}` : ""}`;
+    const body = `<div class="eyebrow">${escapeHtml(run.ticket_number ?? "")} · ${escapeHtml(run.project_name ?? "")}</div>
+      <h1>${shortRef("RUN", run.id)} · ${escapeHtml(run.run_type)}</h1>
+      <p><span class="status">${escapeHtml(run.status)}</span> ${statusLine}</p>
+      <section class="card"><div class="card-head">Run snapshot</div><div class="card-body"><dl>
+        <dt>Model</dt><dd>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}</dd>
+        <dt>Session</dt><dd class="mono">${escapeHtml(run.claude_session_id ?? "")}</dd>
+        <dt>Working directory</dt><dd class="mono">${escapeHtml(run.working_directory ?? "")}</dd>
+        <dt>Started</dt><dd>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : "Not started"}</dd>
+        <dt>Finished</dt><dd>${run.finished_at ? new Date(run.finished_at).toLocaleString("nl-NL") : "Running"}</dd>
+      </dl>${run.error_message ? `<p class="error">${escapeHtml(run.error_code ?? "")}: ${escapeHtml(run.error_message)}</p>` : ""}</div></section>`;
+    return html(response, 200, adminPage(url.pathname, "Run detail", body, metrics, session.username));
+  }
+  if (url.pathname === "/admin/projects") {
+    const projects = (await pool.query("SELECT * FROM projects ORDER BY name")).rows;
+    const body = `<div class="eyebrow">Configure</div><h1>Projects</h1><div class="grid two">${projects.map((project) =>
+      `<a class="card" href="/admin/projects/${escapeHtml(project.slug)}"><div class="card-body"><span class="status">${escapeHtml(project.health_status)}</span><h2>${escapeHtml(project.name)}</h2><span class="mono">${escapeHtml(project.repository_path ?? "")}</span></div></a>`,
+    ).join("")}</div>`;
+    return html(response, 200, adminPage(url.pathname, "Projects", body, metrics, session.username));
+  }
+  const projectPageMatch = url.pathname.match(/^\/admin\/projects\/([^/]+)$/);
+  if (projectPageMatch) {
+    const project = (await pool.query("SELECT * FROM projects WHERE id::text=$1 OR slug=$1", [decodeURIComponent(projectPageMatch[1])])).rows[0];
+    if (!project) return html(response, 404, adminPage(url.pathname, "Project not found", "<h1>Project not found</h1>", metrics, session.username));
+    const dirty = project.health_status === "repository_dirty";
+    const body = `<div class="eyebrow">Configure · Project</div><h1>${escapeHtml(project.name)}</h1><p><span class="status">${escapeHtml(project.health_status)}</span></p>
+      ${dirty ? '<div class="banner-danger"><strong>Repository dirty</strong> — the checkout has uncommitted changes. Planning and execution are blocked until it is clean; the checkout is never reset automatically.</div>' : ""}
+      <section class="card"><div class="card-head">Repository</div><div class="card-body"><dl>
+        <dt>Slug</dt><dd class="mono">${escapeHtml(project.slug)}</dd>
+        <dt>Repository path</dt><dd class="mono">${escapeHtml(project.repository_path ?? "")}</dd>
+        <dt>Default branch</dt><dd class="mono">${escapeHtml(project.default_branch ?? "")}</dd>
+        <dt>GitHub</dt><dd class="mono">${escapeHtml(project.github_owner ?? "")}/${escapeHtml(project.github_repository ?? "")}</dd>
+      </dl></div></section>`;
+    return html(response, 200, adminPage(url.pathname, project.name, body, metrics, session.username));
+  }
+  if (url.pathname === "/admin/notifications") {
+    const [providers, deliveries] = await Promise.all([
+      pool.query("SELECT * FROM notification_providers ORDER BY name"),
+      pool.query(
+        `SELECT nd.*,np.name provider FROM notification_deliveries nd
+         LEFT JOIN notification_providers np ON np.id=nd.provider_id ORDER BY nd.created_at DESC LIMIT 200`,
+      ),
+    ]);
+    const providerPanel = providers.rows.map((provider) =>
+      `<section class="card"><div class="card-head">${escapeHtml(provider.name)}${provider.type === "whatsapp" ? " · Placeholder" : ""}</div><div class="card-body"><p>Type: ${escapeHtml(provider.type)} · ${provider.enabled ? "Enabled" : "Disabled"}</p></div></section>`,
+    ).join("") || "<p>No providers configured.</p>";
+    const deliveryLabels = shortRefs("ND", deliveries.rows);
+    const deliveryRows = deliveries.rows.map((delivery) =>
+      `<div class="ticket-row"><span class="mono">${deliveryLabels.get(delivery.id)}</span><span>${escapeHtml(delivery.event_type ?? "")}</span><span>${escapeHtml(delivery.provider ?? "")}</span><span class="status">${escapeHtml(delivery.status ?? "")}</span><span>${delivery.response_status ?? ""}</span><span>${escapeHtml(delivery.error_message ?? "")}</span></div>`,
+    ).join("");
+    const body = `<div class="eyebrow">Operate</div><h1>Notifications</h1>
+      <div class="tabs" role="tablist">${["Event rules", "Providers", "Templates", "Deliveries"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
+      <div role="tabpanel" id="panel-0" aria-labelledby="tab-0"><section class="card"><div class="card-body"><p>The required workflow events notify through the configured provider. Delivery problems never block the ticket workflow.</p></div></section></div>
+      <div role="tabpanel" id="panel-1" aria-labelledby="tab-1" hidden>${providerPanel}</div>
+      <div role="tabpanel" id="panel-2" aria-labelledby="tab-2" hidden><section class="card"><div class="card-body"><p>Message templates use {{ticket.number}}-style placeholders, rendered literally.</p></div></section></div>
+      <div role="tabpanel" id="panel-3" aria-labelledby="tab-3" hidden><section class="card"><div class="list-head"><span>Delivery</span><span>Event</span><span>Provider</span><span>Status</span><span>HTTP</span><span>Error</span></div>${deliveryRows || '<div class="card-body"><p>No deliveries yet.</p></div>'}</section></div>`;
+    return html(response, 200, adminPage(url.pathname, "Notifications", body, metrics, session.username));
   }
   const dashboard = `<div class="eyebrow">Overview</div><h1>Things that need your attention.</h1><div class="grid two"><section class="card"><div class="card-head">Open tickets</div><div class="card-body"><h2>${metrics.tickets}</h2><a class="button" href="/admin/tickets">Open triage</a></div></section><section class="card"><div class="card-head">Job queue</div><div class="card-body"><h2>${metrics.jobs}</h2><p>Queued and running jobs</p></div></section></div>`;
   return html(response, 200, adminPage(url.pathname, "Dashboard", dashboard, metrics, session.username));
@@ -929,7 +1059,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     const result = await provider.send(delivery.payload_json);
     const updated = (await pool.query(
       `UPDATE notification_deliveries
-       SET attempt_count=COALESCE(attempt_count,0)+1,status=$2,response_status=$3,error_message=$4,
+       SET attempt_count=COALESCE(attempt_count,0)+1,status=$2,response_status=COALESCE($3,response_status),error_message=$4,
            sent_at=CASE WHEN $2='sent' THEN now() ELSE sent_at END,
            next_attempt_at=CASE WHEN $2='failed' THEN now() + interval '2 seconds' * power(2,LEAST(COALESCE(attempt_count,0),8)) ELSE next_attempt_at END,
            updated_at=now()

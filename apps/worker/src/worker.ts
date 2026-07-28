@@ -769,6 +769,7 @@ async function publishExecutionAttempt(input: {
       commit = await commitExecutionChanges({
         worktreePath: input.attempt.worktree_path,
         message: `${input.ticket.ticket_number}: ${input.ticket.title}`,
+        protectedPaths: input.project.config_json?.protected_paths,
       });
       await pool.query("UPDATE execution_attempts SET result_commit=$2,validation_status='validated' WHERE id=$1", [
         input.attempt.id, commit,
@@ -855,20 +856,33 @@ async function publishExecutionAttempt(input: {
         [input.attempt.id],
       );
     });
-  } catch {
+  } catch (error) {
+    // A commit-time secret/protected-path trip is a validation failure, not a
+    // PR-creation failure — the diff was never safe to commit in the first place.
+    const blocked = error instanceof WorktreeValidationError;
+    const status = blocked ? "Validation Failed" : "PR Creation Failed";
     await pool.query(
-      "UPDATE execution_attempts SET validation_status='pr_creation_failed',completed_at=now() WHERE id=$1",
-      [input.attempt.id],
+      `UPDATE execution_attempts SET validation_status=$2,completed_at=now(),result_commit=NULL WHERE id=$1`,
+      [input.attempt.id, blocked ? "failed" : "pr_creation_failed"],
     );
+    if (blocked) {
+      await pool.query(
+        `UPDATE agent_runs SET status='failed',error_code='validation_failed',error_message=$2 WHERE id=$1`,
+        [input.runId, error.message],
+      );
+    }
     await inTransaction(async (client) => {
       const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
-      await client.query("UPDATE tickets SET status='PR Creation Failed',updated_at=now() WHERE id=$1", [input.ticket.id]);
+      await client.query("UPDATE tickets SET status=$2,updated_at=now() WHERE id=$1", [input.ticket.id, status]);
       await client.query(
         `INSERT INTO ticket_status_history
          (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
-         VALUES ($1,$2,'PR Creation Failed','Worker-controlled push or pull-request creation failed',
-                 'worker',$3,$4,$5)`,
-        [input.ticket.id, current.status, input.jobId, input.runId, input.attempt.plan_version_id],
+         VALUES ($1,$2,$3,$4,'worker',$5,$6,$7)`,
+        [
+          input.ticket.id, current.status, status,
+          blocked ? "Commit-time secret/protected-path scan blocked the commit" : "Worker-controlled push or pull-request creation failed",
+          input.jobId, input.runId, input.attempt.plan_version_id,
+        ],
       );
     });
   }
@@ -932,7 +946,7 @@ async function deliverDueNotification() {
     const result = await provider.send(delivery.payload_json);
     await pool.query(
       `UPDATE notification_deliveries
-       SET attempt_count=COALESCE(attempt_count,0)+1,status=$2,response_status=$3,error_message=$4,
+       SET attempt_count=COALESCE(attempt_count,0)+1,status=$2,response_status=COALESCE($3,response_status),error_message=$4,
            sent_at=CASE WHEN $2='sent' THEN now() ELSE sent_at END,
            next_attempt_at=CASE WHEN $2='failed' THEN now() + interval '2 seconds' * power(2,LEAST(COALESCE(attempt_count,0),8)) ELSE next_attempt_at END,
            updated_at=now() WHERE id=$1`,
