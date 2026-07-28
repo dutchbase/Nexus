@@ -97,6 +97,7 @@ fieldset { margin:16px 0;border:1px solid var(--border);border-radius:4px }
 .references { white-space:pre-wrap;padding:12px;background:var(--code-bg);border-radius:4px }
 .skills-head,.skills-row { grid-template-columns:1.2fr 2fr 1fr 1fr .7fr .7fr }
 .queue-head,.queue-row { grid-template-columns:105px 1.3fr 1fr .7fr .7fr .8fr .9fr }
+.audit-head,.audit-row { grid-template-columns:110px 110px minmax(180px,1.4fr) 1.2fr 110px }
 .hamburger { display:none }
 .scrim { position:fixed;inset:0;background:var(--overlay);z-index:55;border:0;padding:0 }
 button[disabled],.button[disabled] { cursor:not-allowed;color:var(--text3) }
