@@ -133,6 +133,33 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         document.querySelectorAll("[data-restore-version]").forEach(button=>button.addEventListener("click",()=>save({version_id:button.dataset.restoreVersion},"restore")));
         editor?.elements.content.addEventListener("input",event=>{document.querySelector("[data-markdown-preview]").textContent=event.target.value});
       ` : ""}
+      ${path==="/admin/projects"?`
+        const csrf=sessionStorage.getItem("dccCsrf")||"",modal=document.querySelector("[data-add-project-modal]"),form=document.querySelector("[data-add-project-form]");
+        const nameInput=form?.querySelector('[name="name"]'),slugInput=form?.querySelector('[name="slug"]');
+        nameInput?.addEventListener("input",()=>{if(!slugInput?.value)slugInput.value=nameInput.value.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")});
+        document.querySelector("[data-add-project-button]")?.addEventListener("click",()=>modal.showModal());
+        modal?.querySelector("[data-close-modal]")?.addEventListener("click",()=>modal.close());
+        form?.addEventListener("submit",async(event)=>{
+          event.preventDefault();const data=new FormData(form);const payload=Object.fromEntries(data);
+          const response=await fetch("/api/admin/projects",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
+          if(response.ok){modal.close();location.reload()}else{const result=await response.json();form.querySelector(".error").textContent=result.error}
+        });
+      `:""}
+      ${/^\/admin\/projects\/[^/]+$/.test(path)?`
+        const csrf=sessionStorage.getItem("dccCsrf")||"",form=document.querySelector("[data-project-form]"),projectId=form?.dataset.projectId;
+        document.querySelector("[data-save-button]")?.addEventListener("click",async()=>{
+          const data=new FormData(form);const payload=Object.fromEntries(data);
+          const validation_commands={};
+          document.querySelectorAll("[data-cmd]").forEach(input=>{validation_commands[input.dataset.cmd]=input.value});
+          payload.config_json={validation_commands};
+          const response=await fetch("/api/admin/projects/"+projectId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
+          if(response.ok){alert("Project saved")}else{const result=await response.json();alert(result.error)}
+        });
+        document.querySelector("[data-validate-button]")?.addEventListener("click",async()=>{
+          const response=await fetch("/api/admin/projects/"+projectId+"/validate",{method:"POST",headers:{"x-csrf-token":csrf}});
+          if(response.ok){alert("Validation started");setTimeout(()=>location.reload(),2000)}else{const result=await response.json();alert(result.error)}
+        });
+      `:""}
     `);
 }
 
