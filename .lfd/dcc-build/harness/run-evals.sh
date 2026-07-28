@@ -35,6 +35,16 @@ cleanup() {
     return
   fi
   log "cleanup: stopping services"
+  # `pnpm dev` (backgrounded via a subshell, so $APP_PID from a later
+  # pgrep match was never reliable) spawns scripts/dev.ts, which spawns
+  # `pnpm --filter web dev` and `pnpm --filter worker dev`, which each
+  # spawn a `tsx watch` leaf (which tsx re-execs to full node with --require/--import).
+  # Killing $APP_PID alone left this whole tree orphaned. Pattern-kill every known
+  # layer directly instead (using script paths, not the tsx wrapper command).
+  pkill -f "src/server.ts" 2>/dev/null
+  pkill -f "src/worker.ts" 2>/dev/null
+  pkill -f "pnpm --filter web dev" 2>/dev/null
+  pkill -f "pnpm --filter worker dev" 2>/dev/null
   [ -n "$APP_PID" ] && kill "$APP_PID" 2>/dev/null
   [ -n "$MOCK_GITHUB_PID" ] && kill "$MOCK_GITHUB_PID" 2>/dev/null
   "$SCRIPT_DIR/pg-ephemeral.sh" stop 2>/dev/null || true
