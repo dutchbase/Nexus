@@ -5,19 +5,118 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   if (url.pathname === "/admin/tickets") {
     const values: any[] = [];
     const conditions: string[] = [];
-    for (const [key, column] of [["project", "p.slug"], ["status", "t.status"], ["priority", "t.priority"], ["category", "t.category"], ["form", "f.slug"]] as const) {
+    for (const [key, column] of [["project_id", "t.project_id"], ["status", "t.status"], ["priority", "t.priority"], ["category", "t.category"], ["form", "f.slug"]] as const) {
       const value = url.searchParams.get(key);
       if (value) { values.push(value); conditions.push(`${column} = $${values.length}`); }
     }
     const search = url.searchParams.get("search");
     if (search) { values.push(`%${search}%`); conditions.push(`(t.ticket_number ILIKE $${values.length} OR t.title ILIKE $${values.length} OR t.description ILIKE $${values.length})`); }
-    const tickets = (await pool.query(
-      `SELECT t.*,p.name project_name,f.name form_name FROM tickets t JOIN projects p ON p.id=t.project_id LEFT JOIN forms f ON f.id=t.form_id
-       ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY t.updated_at DESC LIMIT 200`,
-      values,
-    )).rows;
-    const rows = tickets.map((ticket) => `<a class="ticket-row" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}"><span class="mono">${escapeHtml(ticket.ticket_number)}</span><strong>${escapeHtml(ticket.title)}</strong><span>${escapeHtml(ticket.project_name)}</span><span>${escapeHtml(ticket.priority)}</span><span class="status">${escapeHtml(ticket.status)}</span><time>${new Date(ticket.updated_at).toLocaleDateString("nl-NL")}</time></a>`).join("");
-    const body = `<div class="eyebrow">Work</div><h1>Tickets</h1><form class="toolbar" id="filters"><input class="search" data-ticket-filter name="search" placeholder="Search tickets" value="${escapeHtml(search)}"><select data-ticket-filter name="status"><option value="">All statuses</option>${[...validStatuses].map((status) => `<option${url.searchParams.get("status") === status ? " selected" : ""}>${status}</option>`).join("")}</select><a class="button" href="/admin/tickets">Reset</a><span aria-live="polite">${tickets.length} tickets</span></form><section class="card"><div class="list-head"><span>Ticket</span><span>Title</span><span>Project</span><span>Priority</span><span>Status</span><span>Updated</span></div>${rows}</section>`;
+    const [ticketsResult, projectsResult] = await Promise.all([
+      pool.query(
+        `SELECT t.*,p.name project_name,f.name form_name FROM tickets t JOIN projects p ON p.id=t.project_id LEFT JOIN forms f ON f.id=t.form_id
+         ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY t.updated_at DESC LIMIT 200`,
+        values,
+      ),
+      pool.query("SELECT id, slug, name FROM projects ORDER BY name"),
+    ]);
+    const tickets = ticketsResult.rows;
+    const projects = projectsResult.rows;
+    const view = url.searchParams.get("view");
+
+    if (view === "board") {
+      // Board view: group tickets into 6 status columns
+      const boardColumns = {
+        "Triage": ["Submitted", "Triage", "Needs Information"],
+        "Planning": ["Approved for Planning", "Planning Queued", "Planning", "Plan Revision Requested", "Plan Revision Queued"],
+        "Plan review": ["Plan Ready for Review", "Plan Approved"],
+        "Execution": ["Execution Queued", "Executing", "Validating", "Validation Failed", "Execution Failed", "PR Creation Failed"],
+        "PR review": ["PR Ready for Review", "PR Changes Requested", "PR Approved"],
+        "Done": ["Merged", "Completed", "Rejected", "Cancelled", "Archived", "Closed Without Merge"],
+      };
+
+      const groupedByStatus: Record<string, typeof tickets> = {};
+      for (const column of Object.values(boardColumns)) {
+        for (const status of column) {
+          groupedByStatus[status] = [];
+        }
+      }
+      for (const ticket of tickets) {
+        if (groupedByStatus[ticket.status]) groupedByStatus[ticket.status].push(ticket);
+      }
+
+      const boardColumnsHtml = Object.entries(boardColumns).map(([columnName, statuses]) => {
+        const columnTickets = statuses.flatMap(status => groupedByStatus[status] || []);
+        const cardsHtml = columnTickets.map((ticket) =>
+          `<a class="ticket-row" style="display:block;border-left:2px solid var(--accent);padding:10px 12px;text-decoration:none;margin-bottom:8px" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}">
+            <span class="mono" style="font-size:11px">${escapeHtml(ticket.ticket_number)}</span>
+            <span style="display:block;font-weight:600;margin:4px 0">${escapeHtml(ticket.title)}</span>
+            <span style="display:block;font-size:12px;color:var(--text2)">${escapeHtml(ticket.project_name)} · <span class="mono">${escapeHtml(ticket.default_model || "—")} · ${escapeHtml(ticket.default_reasoning_level || "—")}</span></span>
+          </a>`
+        ).join("");
+        return `<div style="flex:1;min-width:230px;background:var(--surface2);border:1px solid var(--border);border-radius:4px;min-height:120px;display:flex;flex-direction:column;padding:12px">
+          <div style="font-weight:700;font-size:11px;text-transform:uppercase;color:var(--text3);margin-bottom:8px">${escapeHtml(columnName)}</div>
+          <div style="flex:1;overflow-y:auto">${cardsHtml || '<div style="text-align:center;color:var(--text3);font-size:11.5px;padding:8px">Empty</div>'}</div>
+        </div>`;
+      }).join("");
+
+      const body = `<div class="eyebrow">Work · intake</div><h1>Tickets</h1>
+        <div class="toolbar">
+          <a class="button" href="/admin/tickets">Table</a>
+          <a class="button" style="background:var(--accent-soft);color:var(--accent)">Board</a>
+        </div>
+        <form class="toolbar" id="filters" style="margin-top:16px">
+          <input class="search" data-ticket-filter name="search" placeholder="Search ticket number or title…" value="${escapeHtml(search || "")}">
+          <select data-ticket-filter name="project_id">
+            <option value="">All projects</option>
+            ${projects.map((p) => `<option value="${p.id}"${url.searchParams.get("project_id") === p.id ? " selected" : ""}>${p.name}</option>`).join("")}
+          </select>
+          <select data-ticket-filter name="priority">
+            <option value="">All priorities</option>
+            <option value="critical"${url.searchParams.get("priority") === "critical" ? " selected" : ""}>Critical</option>
+            <option value="high"${url.searchParams.get("priority") === "high" ? " selected" : ""}>High</option>
+            <option value="medium"${url.searchParams.get("priority") === "medium" ? " selected" : ""}>Medium</option>
+            <option value="low"${url.searchParams.get("priority") === "low" ? " selected" : ""}>Low</option>
+          </select>
+          <select data-ticket-filter name="status">
+            <option value="">All statuses</option>
+            ${[...validStatuses].map((status) => `<option${url.searchParams.get("status") === status ? " selected" : ""}>${status}</option>`).join("")}
+          </select>
+          <a class="button" href="/admin/tickets">Reset</a>
+          <span aria-live="polite" style="margin-left:auto">${tickets.length} of 14</span>
+        </form>
+        <div style="display:flex;gap:12px;flex-wrap:wrap;margin-top:16px;overflow-x:auto">${boardColumnsHtml}</div>`;
+      return { status: 200, title: "Tickets", body };
+    }
+
+    // Table view
+    const rows = tickets.map((ticket) => `<a class="ticket-row" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}"><span class="mono">${escapeHtml(ticket.ticket_number)}</span><strong>${escapeHtml(ticket.title)}</strong><span>${escapeHtml(ticket.project_name)}</span><span>${escapeHtml(ticket.priority || "—")}</span><span class="mono">${escapeHtml(ticket.default_model || "—")} · ${escapeHtml(ticket.default_reasoning_level || "—")}</span><span class="status">${escapeHtml(ticket.status)}</span><time>${new Date(ticket.updated_at).toLocaleDateString("nl-NL")}</time></a>`).join("");
+    const emptyState = tickets.length === 0 ? `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No tickets match these filters.</div>` : "";
+    const body = `<div class="eyebrow">Work · intake</div><h1>Tickets</h1>
+      <div class="toolbar">
+        <a class="button" style="background:var(--accent-soft);color:var(--accent)">Table</a>
+        <a class="button" href="/admin/tickets?view=board">Board</a>
+      </div>
+      <form class="toolbar" id="filters" style="margin-top:16px">
+        <input class="search" data-ticket-filter name="search" placeholder="Search ticket number or title…" value="${escapeHtml(search || "")}">
+        <select data-ticket-filter name="project_id">
+          <option value="">All projects</option>
+          ${projects.map((p) => `<option value="${p.id}"${url.searchParams.get("project_id") === p.id ? " selected" : ""}>${p.name}</option>`).join("")}
+        </select>
+        <select data-ticket-filter name="priority">
+          <option value="">All priorities</option>
+          <option value="critical"${url.searchParams.get("priority") === "critical" ? " selected" : ""}>Critical</option>
+          <option value="high"${url.searchParams.get("priority") === "high" ? " selected" : ""}>High</option>
+          <option value="medium"${url.searchParams.get("priority") === "medium" ? " selected" : ""}>Medium</option>
+          <option value="low"${url.searchParams.get("priority") === "low" ? " selected" : ""}>Low</option>
+        </select>
+        <select data-ticket-filter name="status">
+          <option value="">All statuses</option>
+          ${[...validStatuses].map((status) => `<option${url.searchParams.get("status") === status ? " selected" : ""}>${status}</option>`).join("")}
+        </select>
+        <a class="button" href="/admin/tickets">Reset</a>
+        <span aria-live="polite" style="margin-left:auto">${tickets.length} of 14</span>
+      </form>
+      <section class="card">${emptyState || `<div class="list-head"><span>Ticket</span><span>Title</span><span>Project</span><span>Priority</span><span>AI config</span><span>Status</span><span>Updated</span></div>${rows}`}</section>`;
     return { status: 200, title: "Tickets", body };
   }
   const planComparePageMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)\/plans\/compare$/);
