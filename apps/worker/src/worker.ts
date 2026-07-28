@@ -861,9 +861,13 @@ async function publishExecutionAttempt(input: {
     // PR-creation failure — the diff was never safe to commit in the first place.
     const blocked = error instanceof WorktreeValidationError;
     const status = blocked ? "Validation Failed" : "PR Creation Failed";
+    // A blocked commit never produced one; a failed *push* must keep its local
+    // commit (PRD §28.9) so the retry can resume without re-invoking Claude.
     await pool.query(
-      `UPDATE execution_attempts SET validation_status=$2,completed_at=now(),result_commit=NULL WHERE id=$1`,
-      [input.attempt.id, blocked ? "failed" : "pr_creation_failed"],
+      blocked
+        ? `UPDATE execution_attempts SET validation_status='failed',completed_at=now(),result_commit=NULL WHERE id=$1`
+        : `UPDATE execution_attempts SET validation_status='pr_creation_failed',completed_at=now() WHERE id=$1`,
+      [input.attempt.id],
     );
     if (blocked) {
       await pool.query(
