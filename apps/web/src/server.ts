@@ -263,6 +263,30 @@ function ipOf(request: IncomingMessage) {
   return request.socket.remoteAddress ?? "unknown";
 }
 
+// A stored literal secret (e.g. a pasted authorization header) is never echoed back;
+// a *reference* (env var name) is not itself a secret and stays visible per §23.5.
+function redactProviderConfig(configuration: Record<string, unknown> | null | undefined) {
+  const { authorization_header, ...rest } = configuration ?? {};
+  return { ...rest, has_authorization_header: Boolean(authorization_header) };
+}
+
+function providerConfigFrom(body: Record<string, unknown>, existing: Record<string, unknown> = {}) {
+  const configuration: Record<string, unknown> = { ...existing };
+  if (body.base_url !== undefined) configuration.base_url = body.base_url || null;
+  if (body.endpoint !== undefined) configuration.endpoint = body.endpoint || null;
+  if (body.timeout_seconds !== undefined) configuration.timeout_seconds = Number(body.timeout_seconds) || 10;
+  if (body.max_attempts !== undefined) configuration.max_attempts = Number(body.max_attempts) || 5;
+  if (body.auth_type !== undefined || body.secret_reference !== undefined) {
+    const existingAuth = (existing.authentication ?? {}) as Record<string, unknown>;
+    configuration.authentication = {
+      type: body.auth_type ?? existingAuth.type ?? "none",
+      secret_reference: body.secret_reference ?? existingAuth.secret_reference ?? null,
+    };
+  }
+  if (body.authorization_header) configuration.authorization_header = body.authorization_header;
+  return configuration;
+}
+
 async function audit(values: {
   actorType: string; actorId?: string | null; action: string; entityType?: string;
   entityId?: string | null; before?: unknown; after?: unknown; metadata?: unknown; ip?: string | null;
@@ -629,6 +653,47 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
       review_comments: [],
       notification_history: notifications,
     });
+  }
+  if (url.pathname === "/api/admin/notifications/providers" && request.method === "GET") {
+    const providers = (await pool.query("SELECT * FROM notification_providers ORDER BY name")).rows;
+    return json(response, 200, {
+      providers: providers.map((provider) => ({ ...provider, configuration_encrypted_json: redactProviderConfig(provider.configuration_encrypted_json) })),
+    });
+  }
+  if (url.pathname === "/api/admin/notifications/providers" && request.method === "POST") {
+    const body = await bodyOf(request);
+    if (!body.name || !body.type) return json(response, 400, { error: "name and type are required" });
+    const result = await pool.query(
+      `INSERT INTO notification_providers (name,type,enabled,configuration_encrypted_json) VALUES ($1,$2,$3,$4) RETURNING *`,
+      [body.name, body.type, body.enabled ?? true, providerConfigFrom(body)],
+    );
+    await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.create", entityType: "notification_provider", entityId: result.rows[0].id, after: result.rows[0], ip: ipOf(request) });
+    return json(response, 201, { provider: { ...result.rows[0], configuration_encrypted_json: redactProviderConfig(result.rows[0].configuration_encrypted_json) } });
+  }
+  const providerMatch = url.pathname.match(/^\/api\/admin\/notifications\/providers\/([0-9a-f-]+)$/i);
+  if (providerMatch && request.method === "PATCH") {
+    const before = (await pool.query("SELECT * FROM notification_providers WHERE id=$1", [providerMatch[1]])).rows[0];
+    if (!before) return json(response, 404, { error: "notification provider not found" });
+    const body = await bodyOf(request);
+    const configuration = providerConfigFrom(body, before.configuration_encrypted_json ?? {});
+    const after = (await pool.query(
+      `UPDATE notification_providers SET name=COALESCE($2,name),enabled=COALESCE($3,enabled),configuration_encrypted_json=$4,updated_at=now() WHERE id=$1 RETURNING *`,
+      [before.id, body.name ?? null, body.enabled ?? null, configuration],
+    )).rows[0];
+    await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.update", entityType: "notification_provider", entityId: after.id, before, after, ip: ipOf(request) });
+    return json(response, 200, { provider: { ...after, configuration_encrypted_json: redactProviderConfig(after.configuration_encrypted_json) } });
+  }
+  const providerTestMatch = url.pathname.match(/^\/api\/admin\/notifications\/providers\/([0-9a-f-]+)\/test$/i);
+  if (providerTestMatch && request.method === "POST") {
+    const provider = (await pool.query("SELECT * FROM notification_providers WHERE id=$1", [providerTestMatch[1]])).rows[0];
+    if (!provider) return json(response, 404, { error: "notification provider not found" });
+    const delivery = (await pool.query(
+      `INSERT INTO notification_deliveries (provider_id,event_type,payload_json,status,attempt_count,next_attempt_at)
+       VALUES ($1,'provider.test',$2,'queued',0,now()) RETURNING *`,
+      [provider.id, { event: "provider.test", occurredAt: new Date().toISOString(), provider: provider.name }],
+    )).rows[0];
+    await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.test", entityType: "notification_provider", entityId: provider.id, after: delivery, ip: ipOf(request) });
+    return json(response, 202, { delivery });
   }
   const notificationRetryMatch = url.pathname.match(/^\/api\/admin\/notifications\/deliveries\/([0-9a-f-]+)\/retry$/i);
   if (notificationRetryMatch && request.method === "POST") {

@@ -261,6 +261,30 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(response.ok)location.reload();else alert((await response.json()).error);
         });
       `:""}
+      ${path==="/admin/notifications"?`
+        const csrf=sessionStorage.getItem("dccCsrf")||"";
+        const providerForm=document.querySelector("[data-webhook-provider-form]");
+        providerForm?.addEventListener("submit",async(event)=>{
+          event.preventDefault();
+          const data=new FormData(providerForm);const providerId=providerForm.dataset.providerId;
+          const payload={name:data.get("name"),type:"webhook",enabled:providerForm.elements.enabled.checked,
+            base_url:data.get("base_url"),endpoint:data.get("endpoint"),auth_type:data.get("auth_type"),
+            secret_reference:data.get("secret_reference"),timeout_seconds:data.get("timeout_seconds"),max_attempts:data.get("max_attempts")};
+          const response=await fetch(providerId?"/api/admin/notifications/providers/"+providerId:"/api/admin/notifications/providers",
+            {method:providerId?"PATCH":"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
+          const result=await response.json();
+          if(response.ok)location.reload();else providerForm.querySelector(".error").textContent=result.error;
+        });
+        providerForm?.querySelector("[data-test-provider]")?.addEventListener("click",async()=>{
+          const providerId=providerForm.dataset.providerId;if(!providerId)return;
+          const response=await fetch("/api/admin/notifications/providers/"+providerId+"/test",{method:"POST",headers:{"x-csrf-token":csrf}});
+          if(response.ok)alert("Test notification queued");else alert((await response.json()).error);
+        });
+        document.querySelectorAll("[data-retry-delivery]").forEach(button=>button.addEventListener("click",async()=>{
+          const response=await fetch("/api/admin/notifications/deliveries/"+button.dataset.retryDelivery+"/retry",{method:"POST",headers:{"x-csrf-token":csrf}});
+          if(response.ok)location.reload();else alert((await response.json()).error);
+        }));
+      `:""}
     `);
 }
 
