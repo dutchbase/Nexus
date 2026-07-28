@@ -76,7 +76,6 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       FROM agent_runs ar JOIN tickets t ON t.id = ar.ticket_id
       WHERE ar.status = 'running' LIMIT 10`),
     pool.query(`SELECT
-      (SELECT bool_or(CLAUDE_CODE_OAUTH_TOKEN IS NOT NULL) FROM (SELECT current_setting('$user') CLAUDE_CODE_OAUTH_TOKEN) x) auth,
       (SELECT MAX(claimed_at) FROM jobs WHERE claimed_at IS NOT NULL) heartbeat,
       (SELECT count(*)::int FROM projects WHERE health_status = 'repository_dirty') dirty_projects`),
     pool.query("SELECT slug, name FROM projects WHERE health_status = 'repository_dirty' LIMIT 5"),
@@ -138,8 +137,9 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     );
   }).join("");
 
+  const claudeAuthConfigured = Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN);
   const healthRows = [
-    healthRow("Claude Code", "subscription auth", "ok"),
+    healthRow("Claude Code", claudeAuthConfigured ? "subscription auth" : "not configured", claudeAuthConfigured ? "ok" : "danger"),
     healthRow("Worker", hb ? `${since(hb)} ago` : "no worker", hbFresh ? "ok" : "warn"),
     healthRow("Project health", `${healthData.rows[0]?.dirty_projects || 0} blocked`, healthData.rows[0]?.dirty_projects > 0 ? "danger" : "ok"),
     healthRow("Failed deliveries", `${failedDeliveries.rows[0]?.c || 0}`, failedDeliveries.rows[0]?.c > 0 ? "warn" : "ok"),
