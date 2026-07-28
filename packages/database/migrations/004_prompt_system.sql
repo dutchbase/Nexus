@@ -46,7 +46,7 @@ BEGIN
       WHEN 'base' THEN 'Inspect the current implementation first. Preserve the existing architecture. Do not access secrets or modify files outside the repository.'
       WHEN 'planning' THEN 'Produce a precise, read-only implementation plan. Implement nothing during planning and report uncertainty.'
       WHEN 'plan-revision' THEN 'Revise only the parts of the plan affected by review feedback while preserving accepted decisions.'
-      WHEN 'execution' THEN 'Implement only the exact approved plan. Do not commit, push, merge, or open a pull request.'
+      WHEN 'execution' THEN 'Implement precisely what the approved plan specifies, and nothing more. Do not commit, push, merge, or open a pull request.'
       WHEN 'execution-repair' THEN 'Repair only the reported execution or validation failure and preserve unrelated working changes.'
       WHEN 'validation' THEN 'Run the configured validation commands and report every failure accurately.'
       ELSE 'Prepare pull-request metadata for administrator review. Do not create, approve, or merge a pull request.'
@@ -75,7 +75,7 @@ BEGIN
       WHEN 'context' THEN COALESCE(NEW.description, NEW.name)
       WHEN 'planning' THEN 'Inspect this project''s entry points, architecture, APIs, database conventions, risks, and migration policy.'
       WHEN 'execution' THEN 'Follow this project''s existing architecture, filesystem boundaries, API conventions, and design-system rules.'
-      WHEN 'testing' THEN 'Use the project-configured test and validation commands. Do not weaken or remove existing tests.'
+      WHEN 'testing' THEN 'Use the project-configured testing and verification commands. Do not weaken or remove existing tests.'
       ELSE 'Summarize the implemented scope, validation results, risks, and reviewer notes.'
     END;
     INSERT INTO prompt_files (scope,project_id,prompt_type,file_path)
@@ -107,7 +107,7 @@ BEGIN
         WHEN 'context' THEN COALESCE(existing_project.description, existing_project.name)
         WHEN 'planning' THEN 'Inspect this project''s entry points, architecture, APIs, database conventions, risks, and migration policy.'
         WHEN 'execution' THEN 'Follow this project''s existing architecture, filesystem boundaries, API conventions, and design-system rules.'
-        WHEN 'testing' THEN 'Use the project-configured test and validation commands. Do not weaken or remove existing tests.'
+        WHEN 'testing' THEN 'Use the project-configured testing and verification commands. Do not weaken or remove existing tests.'
         ELSE 'Summarize the implemented scope, validation results, risks, and reviewer notes.'
       END;
       INSERT INTO prompt_files (scope,project_id,prompt_type,file_path)

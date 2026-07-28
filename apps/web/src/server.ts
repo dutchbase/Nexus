@@ -1360,6 +1360,10 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
          VALUES ($1,$2,'Approved for Planning','Approved for planning','admin',$3)`,
         [before.id, before.status, session.user_id],
       );
+      const priorAttempts = (await client.query(
+        "SELECT count(*)::int AS c FROM jobs WHERE type='planning.generate' AND payload_json->>'ticket_id'=$1",
+        [before.id],
+      )).rows[0].c;
       const job = await enqueueJob({
         type: "planning.generate",
         payload: {
@@ -1370,7 +1374,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
           // dedicated preview endpoint; see HARNESS_CONVENTIONS.md.
           ...(typeof body.mock_scenario_path === "string" ? { mock_scenario_path: body.mock_scenario_path } : {}),
         },
-        idempotencyKey: `planning.generate:${before.id}:1`, maxAttempts: 1,
+        idempotencyKey: `planning.generate:${before.id}:${priorAttempts + 1}`, maxAttempts: 1,
       }, client);
       const after = (await client.query(
         "UPDATE tickets SET status='Planning Queued',updated_at=now() WHERE id=$1 RETURNING *",
