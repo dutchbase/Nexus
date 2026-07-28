@@ -848,3 +848,57 @@ in packages/domain/src/prompts.ts's assemble() calls, or a test-timing issue.
   gaps (WF-05/06/07/08, execution-validation.spec.ts / pr-creation.spec.ts
   — repair-flow and PR-retry edge cases not yet covered).
 - **Next:** Phase 10 (Notifications, PRD §23).
+
+## Execution session — 2026-07-28, cycle 11: Phase 10 (Notifications)
+
+**Hypothesis before:** PRD §23 is a large spec (provider interface, 6+
+required events, templates, delivery rules with backoff, notification
+history in UI), but `notifications.spec.ts` (OPS-01) only actually checks
+behavior against ONE pre-seeded delivery row (ND-8841) plus a manual retry
+endpoint — expected the eval-tested surface to be much narrower than the
+full PRD scope, and planned to build a real but proportionate
+implementation rather than either gold-plating or minimally gaming just
+the retry endpoint.
+
+**Result after:**
+- Delegated to Codex: provider interface (`packages/notification-provider`,
+  data-driven webhook implementation reading endpoint/method/headers/auth
+  from `configuration_encrypted_json`; WhatsApp provider refuses cleanly
+  since PRD says its API contract is still TBD), pure event-payload
+  builder matching §23.4's exact JSON shape, event emission at all 6
+  required transition points, a periodic delivery pass in the worker's
+  existing main loop (same shape as Phase 9's PR-sync pass) with
+  exponential backoff, and the manual retry route.
+- Caught and had Codex fix a pre-existing naming inconsistency while
+  investigating: Phase 8's PR-creation code inserted a
+  `notification_deliveries` row with `event_type='pull_request.ready'`,
+  which doesn't match PRD §23.2's dotted-event-name convention
+  (`pr.ready_for_review`) — confirmed the correct convention from the
+  fixture seed data's own `plan.ready_for_review` event name. Renamed.
+- Independently verified (Codex's own sandbox can't bind Postgres
+  sockets, same limitation every phase): `notifications.spec.ts` run in
+  isolation against fresh state — 4/4 pass, including the seeded ND-8841
+  row and its manual retry (attempt_count 3->4, WhatsApp provider's clean
+  refusal recorded as the new error message). Live end-to-end check
+  beyond just the eval file: submitted a fresh ticket, confirmed a
+  `ticket.created` delivery row was created and an actual delivery
+  attempt was made against the seeded (non-existent-in-this-harness)
+  webhook endpoint at 127.0.0.1:8992, failing gracefully without
+  crashing the worker (confirmed the worker process stayed alive and
+  kept processing afterward — this was the main risk given the mock
+  target genuinely doesn't exist in this environment).
+- Official `run-evals.sh`: `weighted=0.5783` (up from 0.5683),
+  `hard_fail_triggered=false` (unchanged), `operational=0.60` (3/5, up
+  from 2/5 — OPS-01 now passes), `workflow=0.6364` (7/11, unchanged),
+  `security=1.0` (18/18, unchanged), `determinism=0.625` (5/9,
+  unchanged), `frontend=0.00` (0/13, structurally capped, unchanged).
+- Committed as `50a76f1` "phase 10: notifications" with the full
+  verification story in the commit body.
+- **Next:** Phase 11 (Hardening, PRD §28.7-28.12 + operational scripts).
+  Remaining gaps toward the stop-condition bar: workflow (WF-05/06/07/08
+  — repair-flow and PR-retry edge cases in execution-validation.spec.ts /
+  pr-creation.spec.ts), determinism (DET-02/03/06 — still unexamined this
+  cycle), operational (OPS-02/OPS-04 — project-validation.spec.ts /
+  skill-resolution.spec.ts), and the frontend category's structural 0.00
+  floor which remains unreachable from the app side regardless of code
+  quality (already reported to the operator in Phases 2-3).
