@@ -204,7 +204,10 @@ export function parsePlanMarkdown(markdown: string) {
   const headings = markdown.split(/\r?\n/).filter((line) => /^#{1,2} /.test(line.trim())).map((line) => line.trim());
   const mismatchIndex = headings.length !== requiredPlanHeadings.length
     ? Math.min(headings.length, requiredPlanHeadings.length)
-    : requiredPlanHeadings.findIndex((heading, index) => headings[index] !== heading);
+    // ponytail: startsWith, not ===, so a heading like "# Implementation
+    // Plan — DCC-1001: ..." (model adds a descriptive suffix) still counts —
+    // only order/count/prefix are structural, trailing text is harmless.
+    : requiredPlanHeadings.findIndex((heading, index) => !headings[index]?.startsWith(heading));
   if (mismatchIndex !== -1) {
     // ponytail: name the actual mismatch instead of a generic message, so a
     // failed run is diagnosable without re-running the (costly) CLI call.
