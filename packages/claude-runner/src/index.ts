@@ -48,10 +48,14 @@ export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = pro
   const result = await runClaude(["auth", "status"], { env });
   let status: any = null;
   try { status = JSON.parse(result.stdout.trim()); } catch { /* handled below */ }
-  if (result.exitCode !== 0 || status?.authenticated !== true || status?.method !== "subscription") {
+  // ponytail: `claude auth status` reports loggedIn/authMethod, not the
+  // authenticated/method fields this code originally expected — that
+  // mismatch made every subscription-token login fail preflight.
+  const isSubscriptionAuth = status?.authMethod === "subscription" || status?.authMethod === "oauth_token";
+  if (result.exitCode !== 0 || status?.loggedIn !== true || !isSubscriptionAuth) {
     throw new ClaudeAuthError("blocked_auth", "blocked_auth: Claude is unauthenticated or is not using subscription authentication");
   }
-  return status as { authenticated: true; method: "subscription"; account?: string };
+  return status as { loggedIn: true; authMethod: "subscription" | "oauth_token"; apiProvider?: string };
 }
 
 export type PlanningInvocation = {
