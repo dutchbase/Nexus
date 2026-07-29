@@ -3,7 +3,8 @@
   "private": true,
   "scripts": {
     "dev": "tsx scripts/dev.ts",
-    "admin:create": "tsx scripts/create-admin.ts"
+    "admin:create": "tsx scripts/create-admin.ts",
+    "projects:import": "tsx scripts/import-projects.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.48.0",
