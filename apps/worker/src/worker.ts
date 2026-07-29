@@ -459,6 +459,20 @@ async function runPlanning(job: any) {
         error instanceof Error && error.message.startsWith("invalid_plan_structure") ? "invalid_plan_structure" : "planning_failed",
         error instanceof Error ? error.message : "planning failed"],
     );
+    // ponytail: transitionToPlanning() moves the ticket to Planning before
+    // invocation; without reverting here on failure the ticket gets stuck
+    // there forever, since retries require status===expectedStatus.
+    await inTransaction(async (client) => {
+      const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
+      if (current?.status !== "Planning") return;
+      await client.query("UPDATE tickets SET status=$2,updated_at=now() WHERE id=$1", [ticket.id, expectedStatus]);
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
+         VALUES ($1,'Planning',$2,'Planning job failed','worker',$3,$4)`,
+        [ticket.id, expectedStatus, job.id, runId],
+      );
+    });
     throw error;
   } finally {
     await rm(temporary, { recursive: true, force: true });
