@@ -538,7 +538,7 @@ async function transitionTicket(ticketRef: string, status: string, reason: strin
 
 async function counts() {
   const row = (await pool.query(`SELECT
-    (SELECT count(*)::integer FROM tickets WHERE status IN ('Triage','Needs Information')) tickets,
+    (SELECT count(*)::integer FROM tickets WHERE status IN ('Submitted','Triage','Needs Information')) tickets,
     (SELECT count(*)::integer FROM agent_runs WHERE status IN ('running','queued')) runs,
     (SELECT count(*)::integer FROM jobs WHERE status IN ('queued','running')) jobs,
     (SELECT count(*)::integer FROM pull_requests WHERE state = 'open') prs,
