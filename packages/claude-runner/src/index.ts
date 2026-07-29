@@ -198,9 +198,18 @@ const requiredPlanHeadings = [
 
 export function parsePlanMarkdown(markdown: string) {
   const headings = markdown.split(/\r?\n/).filter((line) => /^#{1,2} /.test(line.trim())).map((line) => line.trim());
-  if (headings.length !== requiredPlanHeadings.length ||
-      requiredPlanHeadings.some((heading, index) => headings[index] !== heading)) {
-    throw new Error("invalid_plan_structure: expected the complete ordered 17-section implementation plan");
+  const mismatchIndex = headings.length !== requiredPlanHeadings.length
+    ? Math.min(headings.length, requiredPlanHeadings.length)
+    : requiredPlanHeadings.findIndex((heading, index) => headings[index] !== heading);
+  if (mismatchIndex !== -1) {
+    // ponytail: name the actual mismatch instead of a generic message, so a
+    // failed run is diagnosable without re-running the (costly) CLI call.
+    throw new Error(
+      `invalid_plan_structure: expected the complete ordered 17-section implementation plan ` +
+      `(got ${headings.length} headings, expected ${requiredPlanHeadings.length}; ` +
+      `first mismatch at position ${mismatchIndex + 1}: expected "${requiredPlanHeadings[mismatchIndex] ?? "<end>"}", ` +
+      `got "${headings[mismatchIndex] ?? "<end>"}")`,
+    );
   }
   return markdown.endsWith("\n") ? markdown : `${markdown}\n`;
 }
