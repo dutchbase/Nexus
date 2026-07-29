@@ -206,7 +206,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <dialog data-revision-dialog aria-label="Request revision" data-plan-id="${target.plan_id}"><div class="card-head">Request revision</div>
         <div class="card-body"><label class="field"><span>What must change in the next revision?</span><textarea data-revision-feedback rows="6" placeholder="What must change in the next revision?"></textarea></label>
         <p class="error" role="alert"></p><button class="button" type="button" data-close-dialog>Cancel</button> <button class="button primary" type="button" data-submit-revision>Submit feedback &amp; queue revision</button></div></dialog>`;
-    return { status: 200, title: `Plan review · v${target.version}`, body };
+    return { status: 200, title: `${ticket.ticket_number} · Plan review`, body };
   }
   const ticketPlansPageMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)\/plans$/);
   if (ticketPlansPageMatch) {

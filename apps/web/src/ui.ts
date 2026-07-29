@@ -46,14 +46,14 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
     return `<a class="nav-item${active ? " active" : ""}" href="${href}"${active ? ' aria-current="page"' : ""}><span>${name}</span>${count ? `<span class="badge">${counts[count] ?? 0}</span>` : ""}</a>`;
   }).join("")}</div>`).join("");
 
-  // Derive breadcrumb section and leaf from path and groups
-  // Check longer paths first to avoid "/admin" matching "/admin/tickets"
+  // Derive breadcrumb section: group label for list pages, item label for detail pages
   let section = "";
   let bestMatch = "";
   for (const [groupLabel, items] of groups) {
-    for (const [, href] of items) {
+    for (const [itemLabel, href] of items) {
       if ((path === href || path.startsWith(`${href}/`)) && href.length > bestMatch.length) {
-        section = groupLabel;
+        // For detail pages (deeper), use item label; for list pages (equal), use group label
+        section = path === href ? groupLabel : itemLabel;
         bestMatch = href;
       }
     }
