@@ -66,7 +66,10 @@ export type PlanningInvocation = {
 export function buildPlanningArguments(input: PlanningInvocation) {
   return [
     "-p", input.task, "--session-id", input.sessionId, "--model", input.model, "--effort", input.effort,
-    "--permission-mode", "plan", "--tools", "Read,Glob,Grep,Bash",
+    // ponytail: plan mode concludes by calling ExitPlanMode; without it in
+    // --tools the agent has no way to formally finish and falls back to
+    // writing a stray local file instead of returning the plan markdown.
+    "--permission-mode", "plan", "--tools", "Read,Glob,Grep,Bash,ExitPlanMode",
     "--append-system-prompt-file", input.promptFile, "--add-dir", input.skillBundleDir,
     "--output-format", "json", "--max-turns", String(input.maxTurns),
   ];
