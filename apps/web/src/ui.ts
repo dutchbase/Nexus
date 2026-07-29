@@ -47,15 +47,16 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
   }).join("")}</div>`).join("");
 
   // Derive breadcrumb section and leaf from path and groups
+  // Check longer paths first to avoid "/admin" matching "/admin/tickets"
   let section = "";
+  let bestMatch = "";
   for (const [groupLabel, items] of groups) {
     for (const [, href] of items) {
-      if (path === href || path.startsWith(`${href}/`)) {
+      if ((path === href || path.startsWith(`${href}/`)) && href.length > bestMatch.length) {
         section = groupLabel;
-        break;
+        bestMatch = href;
       }
     }
-    if (section) break;
   }
 
   const breadcrumb = section ? `<span class="eyebrow">${section}</span><span>/</span><span>${escapeHtml(title)}</span>` : `<span class="eyebrow">Development Control Center</span><span>/</span><span>${escapeHtml(title)}</span>`;
