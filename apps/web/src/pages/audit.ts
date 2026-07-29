@@ -46,12 +46,12 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
 
   const rows = events.rows.map((event) => {
     const tone = auditTone(event.action);
-    return `<div class="audit-row" style="display:grid;grid-template-columns:110px 110px minmax(180px,1.4fr) 1.2fr 110px;gap:12px;padding:13px 18px;border-bottom:1px solid var(--border);align-items:center">
+    return `<div class="ticket-row audit-row">
       <span style="font-size:12px;color:var(--text2)">${escapeHtml(formatTime(event.created_at))}</span>
       <span style="font-size:12px;color:var(--text2)">${escapeHtml(actorLabel(event))}</span>
-      <span style="font-size:12px;font-family:monospace;color:var(--t-${tone});font-weight:500">${escapeHtml(event.action)}</span>
+      <span class="mono" style="font-size:12px;color:var(--t-${tone});font-weight:500">${escapeHtml(event.action)}</span>
       <span style="font-size:12px;color:var(--text2)">${event.entity_type ? escapeHtml(`${event.entity_type}${event.entity_id ? "#" + event.entity_id.slice(0, 8) : ""}`) : "—"}</span>
-      <span style="font-size:12px;color:var(--text3);text-align:right;font-family:monospace">${event.ip_address ? escapeHtml(event.ip_address) : "—"}</span>
+      <span class="mono" style="font-size:12px;color:var(--text3);text-align:right">${event.ip_address ? escapeHtml(event.ip_address) : "—"}</span>
     </div>`;
   }).join("");
 
@@ -65,7 +65,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <span style="margin-left:auto;font-size:12px;color:var(--text3);font-variant-numeric:tabular-nums">${events.rows.length} shown</span>
     </form>
     <section class="card">
-      <div class="list-head" style="display:grid;grid-template-columns:110px 110px minmax(180px,1.4fr) 1.2fr 110px;gap:12px;padding:10px 18px;border-bottom:1px solid var(--border);background:var(--surface2)">
+      <div class="list-head audit-head">
         <span style="font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)">When</span>
         <span style="font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)">Actor</span>
         <span style="font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)">Action</span>

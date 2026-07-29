@@ -10,9 +10,9 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     )).rows;
     const runLabels = shortRefs("RUN", runs);
     const rows = runs.map((run) =>
-      `<a class="ticket-row" href="/admin/runs/${run.id}"><span class="mono">${runLabels.get(run.id)}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.ticket_number ?? "")} · ${escapeHtml(run.project_name ?? "")}</span><span>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}</span><span class="status">${escapeHtml(run.status)}</span><time>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : ""}</time></a>`,
+      `<a class="ticket-row runs-row" href="/admin/runs/${run.id}"><span class="mono">${runLabels.get(run.id)}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.ticket_number ?? "")} · ${escapeHtml(run.project_name ?? "")}</span><span>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}</span><span class="status">${escapeHtml(run.status)}</span><time>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : ""}</time></a>`,
     ).join("");
-    const body = `<div class="eyebrow">Work</div><h1>Runs</h1><section class="card"><div class="list-head"><span>Run</span><span>Type</span><span>Ticket</span><span>AI</span><span>Status</span><span>Started</span></div>${rows || '<div class="card-body"><p>No runs recorded.</p></div>'}</section>`;
+    const body = `<div class="eyebrow">Work</div><h1>Runs</h1><section class="card"><div class="list-head runs-head"><span>Run</span><span>Type</span><span>Ticket</span><span>AI</span><span>Status</span><span>Started</span></div>${rows || '<div class="card-body"><p>No runs recorded.</p></div>'}</section>`;
     return { status: 200, title: "Runs", body };
   }
   const runPageMatch = url.pathname.match(/^\/admin\/runs\/([0-9a-f-]+)$/i);

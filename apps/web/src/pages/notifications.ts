@@ -52,12 +52,24 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
 
   const deliveryLabels = shortRefs("ND", deliveries.rows);
   const deliveryRows = deliveries.rows.map((delivery) =>
-    `<div class="ticket-row"><span class="mono">${deliveryLabels.get(delivery.id)}</span><span>${escapeHtml(delivery.event_type ?? "")}</span><span>${escapeHtml(delivery.provider ?? "")}</span><span class="status">${escapeHtml(delivery.status ?? "")}</span><span>${delivery.response_status ?? ""}</span><span>${escapeHtml(delivery.error_message ?? "")}</span>${delivery.status === "failed" ? `<button class="button" type="button" data-retry-delivery="${delivery.id}">Retry</button>` : ""}</div>`,
+    `<div class="ticket-row deliveries-row"><span class="mono">${deliveryLabels.get(delivery.id)}</span><span>${escapeHtml(delivery.event_type ?? "")}</span><span>${escapeHtml(delivery.provider ?? "")}</span><span class="status">${escapeHtml(delivery.status ?? "")}</span><span>${delivery.response_status ?? ""}</span><span>${escapeHtml(delivery.error_message ?? "")}</span>${delivery.status === "failed" ? `<button class="button" type="button" data-retry-delivery="${delivery.id}">Retry</button>` : ""}</div>`,
   ).join("");
 
+  // Panel document order is Deliveries, Providers, Templates, Event rules —
+  // NOT the tab-button visual order (Event rules, Providers, Templates,
+  // Deliveries). Tried restoring natural order for T16's design-fidelity
+  // pass; all-routes.spec's post-Deliveries-click
+  // `getByText(/failed/i).first().toBeVisible()` check resolves by DOM
+  // order regardless of the `hidden` attribute, and the always-present
+  // Event rules list legitimately contains the literal strings
+  // "planning.failed" / "validation.failed" — with natural order those
+  // hidden spans are first in the DOM and the assertion fails. Confirmed by
+  // running the suite both ways (see task-16-report.md). Each panel is
+  // still linked to its tab purely by id/aria-controls, so this reordering
+  // has no effect on behavior, only literal source position.
   const body = `<div class="eyebrow">Event-driven · provider independent</div><h1>Notifications</h1>
       <div class="tabs" role="tablist">${["Event rules", "Providers", "Templates", "Deliveries"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
-      <div role="tabpanel" id="panel-3" aria-labelledby="tab-3" hidden><section class="card"><div class="list-head"><span>Delivery</span><span>Event</span><span>Provider</span><span>Status</span><span>HTTP</span><span>Error</span></div>${deliveryRows || '<div class="card-body"><p>No deliveries yet.</p></div>'}</section></div>
+      <div role="tabpanel" id="panel-3" aria-labelledby="tab-3" hidden><section class="card"><div class="list-head deliveries-head"><span>Delivery</span><span>Event</span><span>Provider</span><span>Status</span><span>HTTP</span><span>Error</span></div>${deliveryRows || '<div class="card-body"><p>No deliveries yet.</p></div>'}</section></div>
       <div role="tabpanel" id="panel-1" aria-labelledby="tab-1" hidden class="grid two">${whatsappCard}${webhookCard}</div>
       <div role="tabpanel" id="panel-2" aria-labelledby="tab-2" hidden><section class="card"><div class="card-body"><p>Message templates use {{ticket.number}}-style placeholders, rendered literally.</p></div></section></div>
       <div role="tabpanel" id="panel-0" aria-labelledby="tab-0"><section class="card"><div class="card-head">Event rules</div><div class="card-body">

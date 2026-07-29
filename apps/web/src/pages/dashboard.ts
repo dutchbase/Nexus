@@ -1,5 +1,6 @@
 import { escapeHtml, pool, shortRef } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
+import { forbiddenClaudeAuthVariables } from "../../../../packages/claude-runner/src/auth-guard.ts";
 
 function since(date: string | Date) {
   const minutes = Math.round(Math.abs(Date.now() - new Date(date).getTime()) / 60000);
@@ -60,7 +61,7 @@ function blockedRow(title: string, detail: string, tone: string) {
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname !== "/admin") return null;
 
-  const [awaiting, plansReview, activeRuns, prsReview, failedJobs, waitingTickets, runningRuns, healthData, dirtyProjects, failedDeliveries] = await Promise.all([
+  const [awaiting, plansReview, activeRuns, prsReview, failedJobs, waitingTickets, runningRuns, healthData, dirtyProjects, failedDeliveries, queuedJobs] = await Promise.all([
     pool.query("SELECT count(*)::int c FROM tickets WHERE status IN ('Submitted','Triage')"),
     pool.query("SELECT count(*)::int c FROM tickets WHERE status = 'Plan Ready for Review'"),
     pool.query("SELECT count(*)::int c FROM agent_runs WHERE status = 'running'"),
@@ -80,6 +81,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       (SELECT count(*)::int FROM projects WHERE health_status = 'repository_dirty') dirty_projects`),
     pool.query("SELECT slug, name FROM projects WHERE health_status = 'repository_dirty' LIMIT 5"),
     pool.query("SELECT count(*)::int c FROM notification_deliveries WHERE status = 'failed'"),
+    pool.query("SELECT count(*)::int c FROM jobs WHERE status = 'queued'"),
   ]);
 
   const awaitingCount = awaiting.rows[0]?.c ?? 0;
@@ -138,11 +140,16 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   }).join("");
 
   const claudeAuthConfigured = Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN);
+  const offendingAuthVariable = forbiddenClaudeAuthVariables.find((name) => Boolean(process.env[name]));
+  const githubConfigured = Boolean(process.env.GITHUB_API_BASE_URL);
+  const queuedCount = queuedJobs.rows[0]?.c ?? 0;
   const healthRows = [
     healthRow("Claude Code", claudeAuthConfigured ? "subscription auth" : "not configured", claudeAuthConfigured ? "ok" : "danger"),
     healthRow("Worker", hb ? `${since(hb)} ago` : "no worker", hbFresh ? "ok" : "warn"),
     healthRow("Project health", `${healthData.rows[0]?.dirty_projects || 0} blocked`, healthData.rows[0]?.dirty_projects > 0 ? "danger" : "ok"),
     healthRow("Failed deliveries", `${failedDeliveries.rows[0]?.c || 0}`, failedDeliveries.rows[0]?.c > 0 ? "warn" : "ok"),
+    healthRow("Anthropic API guard", offendingAuthVariable ? `${offendingAuthVariable} set — blocked` : "subscription-only enforced", offendingAuthVariable ? "danger" : "ok"),
+    healthRow("GitHub auth", githubConfigured ? "configured" : "not configured", githubConfigured ? "ok" : "warn"),
   ].join("");
 
   const blockedRows = dirtyProjects.rows.length
@@ -183,6 +190,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
           <a href="/admin/runs" style="font-size:12px;color:var(--accent);text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">All runs →</a>
         </div>
         ${runRows ? `<div style="max-height:400px;overflow-y:auto">${runRows}</div>` : `<div style="padding:20px 18px;color:var(--text3);font-size:13px">No active runs.</div>`}
+        <a href="/admin/queue" style="display:block;padding:10px 18px;border-top:1px solid var(--border);font-size:12px;color:var(--text3);text-decoration:none">Queued behind: ${queuedCount} jobs · Inspect queue</a>
       </section>
 
       <section class="card" style="margin-top:0">
