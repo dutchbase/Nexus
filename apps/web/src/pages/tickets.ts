@@ -1,8 +1,9 @@
 import { escapeHtml, lineDiff, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { checkPlanApprovalGate } from "@dcc/domain";
+import { inTransaction } from "@dcc/database";
 
-export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
+export async function render(url: URL, session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname === "/admin/tickets") {
     const values: any[] = [];
     const conditions: string[] = [];
@@ -240,11 +241,29 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   }
   const ticketMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)$/);
   if (ticketMatch) {
-    const ticket = (await pool.query(
+    let ticket = (await pool.query(
       `SELECT t.*,p.name project_name,f.name form_name FROM tickets t JOIN projects p ON p.id=t.project_id LEFT JOIN forms f ON f.id=t.form_id WHERE t.id::text=$1 OR t.ticket_number=$1`,
       [decodeURIComponent(ticketMatch[1])],
     )).rows[0];
     if (!ticket) return { status: 404, title: "Ticket not found", body: "<h1>Ticket not found</h1>" };
+    if (ticket.status === "Submitted") {
+      // PRD §17.2 "Administrator opens triage": Submitted -> Triage fires
+      // as a side effect of an admin viewing the ticket.
+      ticket = await inTransaction(async (client) => {
+        const updated = (await client.query(
+          "UPDATE tickets SET status='Triage',updated_at=now() WHERE id=$1 AND status='Submitted' RETURNING *",
+          [ticket.id],
+        )).rows[0];
+        if (updated) {
+          await client.query(
+            `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
+             VALUES ($1,'Submitted','Triage','Administrator opened triage','admin',$2)`,
+            [ticket.id, session.user_id],
+          );
+        }
+        return { ...ticket, ...(updated ?? {}) };
+      });
+    }
     const [notesResult, historyResult, skillsResult, notificationsResult, runsResult, prsResult] = await Promise.all([
       pool.query("SELECT n.*,u.username FROM ticket_notes n LEFT JOIN users u ON u.id=n.author_id WHERE ticket_id=$1 ORDER BY n.created_at DESC", [ticket.id]),
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
