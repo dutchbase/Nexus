@@ -417,6 +417,7 @@ async function runPlanning(job: any) {
   );
 
   const temporary = await mkdtemp(path.join(tmpdir(), "dcc-planning-"));
+  let rawMarkdownForDebug: string | undefined;
   try {
     const promptFile = path.join(temporary, "planning-prompt.md");
     await writeFile(promptFile, completePrompt, { flag: "wx" });
@@ -435,6 +436,7 @@ async function runPlanning(job: any) {
     // Publish the correlation id only after the CLI has logged/completed,
     // so observers cannot see a run before its matching invocation exists.
     await pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]);
+    rawMarkdownForDebug = result.markdown;
     const markdown = parsePlanMarkdown(result.markdown);
     if (revising) {
       await storeRevisedPlan({
@@ -454,10 +456,13 @@ async function runPlanning(job: any) {
     );
   } catch (error) {
     await pool.query(
-      `UPDATE agent_runs SET status='failed',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4 WHERE id=$1`,
+      `UPDATE agent_runs SET status='failed',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4,metadata_json=metadata_json || $5::jsonb WHERE id=$1`,
       [runId, (error as any)?.exitCode ?? 1,
         error instanceof Error && error.message.startsWith("invalid_plan_structure") ? "invalid_plan_structure" : "planning_failed",
-        error instanceof Error ? error.message : "planning failed"],
+        error instanceof Error ? error.message : "planning failed",
+        // ponytail: capture the raw markdown so an invalid_plan_structure
+        // failure is diagnosable without re-running the costly CLI call.
+        JSON.stringify(rawMarkdownForDebug ? { raw_markdown: rawMarkdownForDebug.slice(0, 8000) } : {})],
     );
     // ponytail: transitionToPlanning() moves the ticket to Planning before
     // invocation; without reverting here on failure the ticket gets stuck
