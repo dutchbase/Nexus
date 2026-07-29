@@ -66,10 +66,11 @@ export type PlanningInvocation = {
 export function buildPlanningArguments(input: PlanningInvocation) {
   return [
     "-p", input.task, "--session-id", input.sessionId, "--model", input.model, "--effort", input.effort,
-    // ponytail: plan mode concludes by calling ExitPlanMode; without it in
-    // --tools the agent has no way to formally finish and falls back to
-    // writing a stray local file instead of returning the plan markdown.
-    "--permission-mode", "plan", "--tools", "Read,Glob,Grep,Bash,ExitPlanMode",
+    // ponytail: --permission-mode plan expects the agent to conclude by
+    // calling ExitPlanMode, which isn't available in headless -p mode —
+    // the agent then wrote a stray local file instead of the plan markdown.
+    // "manual" enforces the same read-only tool set without that dead end.
+    "--permission-mode", "manual", "--tools", "Read,Glob,Grep,Bash",
     "--append-system-prompt-file", input.promptFile, "--add-dir", input.skillBundleDir,
     "--output-format", "json", "--max-turns", String(input.maxTurns),
   ];
