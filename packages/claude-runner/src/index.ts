@@ -78,7 +78,16 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
   const result = await runClaude(buildPlanningArguments(input), { cwd: input.workingDirectory, env });
   if (result.exitCode !== 0) {
-    throw Object.assign(new Error(`Claude planning exited ${result.exitCode}: ${result.stderr.trim() || "no error output"}`), { exitCode: result.exitCode });
+    // ponytail: --output-format json routes CLI errors through stdout as a
+    // JSON result (not stderr), so fall back to stdout when stderr is empty.
+    let detail = result.stderr.trim();
+    if (!detail) {
+      try {
+        const parsed = JSON.parse(result.stdout.trim());
+        detail = typeof parsed?.result === "string" ? parsed.result : result.stdout.trim();
+      } catch { detail = result.stdout.trim(); }
+    }
+    throw Object.assign(new Error(`Claude planning exited ${result.exitCode}: ${detail || "no error output"}`), { exitCode: result.exitCode });
   }
   let response: any;
   try { response = JSON.parse(result.stdout.trim()); } catch { throw new Error("Claude planning returned invalid JSON"); }
