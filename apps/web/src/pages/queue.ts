@@ -79,6 +79,6 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <select name="type" onchange="this.form.submit()"><option value="">All types</option>${types.rows.map((row) => `<option value="${escapeHtml(row.type)}"${type === row.type ? " selected" : ""}>${escapeHtml(row.type)}</option>`).join("")}</select>
       <a class="button" href="/admin/queue">Reset</a><span aria-live="polite">${jobs.rows.length} shown</span>
     </form>
-    <section class="card"><div class="list-head queue-head"><span>Job</span><span>Type</span><span>Ticket · project</span><span>Priority</span><span>Attempt</span><span>Status</span><span style="text-align:right">Available</span></div>${rows || `<div class="card-body"><p>${status || type ? "No jobs match these filters." : "The queue is empty."}</p></div>`}</section>`;
+    <section class="card"><div class="list-head queue-head"><span>Job</span><span>Type</span><span>Ticket · project</span><span>Priority</span><span>Attempt</span><span>Status</span><span style="text-align:right">Available</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">${status || type ? "No jobs match these filters." : "The queue is empty."}</div>`}</section>`;
   return { status: 200, title: "Job queue", body };
 }

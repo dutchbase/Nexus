@@ -12,7 +12,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const rows = runs.map((run) =>
       `<a class="ticket-row runs-row" href="/admin/runs/${run.id}"><span class="mono">${runLabels.get(run.id)}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.ticket_number ?? "")} · ${escapeHtml(run.project_name ?? "")}</span><span>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}</span><span class="status">${escapeHtml(run.status)}</span><time>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : ""}</time></a>`,
     ).join("");
-    const body = `<div class="eyebrow">Work</div><h1>Runs</h1><section class="card"><div class="list-head runs-head"><span>Run</span><span>Type</span><span>Ticket</span><span>AI</span><span>Status</span><span>Started</span></div>${rows || '<div class="card-body"><p>No runs recorded.</p></div>'}</section>`;
+    const body = `<div class="eyebrow">Work</div><h1>Runs</h1><section class="card"><div class="list-head runs-head"><span>Run</span><span>Type</span><span>Ticket</span><span>AI</span><span>Status</span><span>Started</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No runs recorded.</div>`}</section>`;
     return { status: 200, title: "Runs", body };
   }
   const runPageMatch = url.pathname.match(/^\/admin\/runs\/([0-9a-f-]+)$/i);
@@ -54,7 +54,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         <div style="padding:20px"><label style="display:flex;flex-direction:column;gap:8px"><span style="font-size:11.5px;font-weight:600;color:var(--text2)">Instructions</span><textarea name="feedback" data-repair-feedback style="border:1px solid var(--border);background:var(--bg);border-radius:4px;padding:9px 11px;font-size:13px;font-family:monospace;resize:vertical;min-height:120px" required></textarea></label></div>
         <div style="padding:20px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button data-close-dialog class="button secondary">Cancel</button><button data-submit-repair class="button primary">Start repair</button></div>
       </dialog>`;
-    return { status: 200, title: "Run detail", body };
+    return { status: 200, title: shortRef("RUN", run.id), body };
   }
   return null;
 }

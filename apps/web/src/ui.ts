@@ -45,10 +45,25 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
     const active = href === "/admin" ? path === href : path === href || path.startsWith(`${href}/`);
     return `<a class="nav-item${active ? " active" : ""}" href="${href}"${active ? ' aria-current="page"' : ""}><span>${name}</span>${count ? `<span class="badge">${counts[count] ?? 0}</span>` : ""}</a>`;
   }).join("")}</div>`).join("");
+
+  // Derive breadcrumb section and leaf from path and groups
+  let section = "";
+  for (const [groupLabel, items] of groups) {
+    for (const [, href] of items) {
+      if (path === href || path.startsWith(`${href}/`)) {
+        section = groupLabel;
+        break;
+      }
+    }
+    if (section) break;
+  }
+
+  const breadcrumb = section ? `<span class="eyebrow">${section}</span><span>/</span><span>${escapeHtml(title)}</span>` : `<span class="eyebrow">Development Control Center</span><span>/</span><span>${escapeHtml(title)}</span>`;
+
   return document(title, `<div class="shell"><aside class="sidebar"><div class="brand"><span class="brand-mark">D</span><div><div class="brand-title">Development hub</div><div class="brand-sub">Internet Nederland</div></div></div>
     <nav class="nav" aria-label="Primary">${nav}</nav><footer class="sidebar-footer"><div class="theme"><button data-theme-choice="light">Light</button><button data-theme-choice="auto">Auto</button><button data-theme-choice="dark">Dark</button></div><p>${escapeHtml(username)} · administrator</p></footer></aside>
     <button class="scrim" type="button" data-scrim hidden aria-label="Close navigation menu"></button>
-    <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-label="Open navigation menu"><span></span><span></span><span></span></button><span class="eyebrow">Development Control Center</span><span>/</span><span>${escapeHtml(title)}</span><span class="worker">● worker-01 healthy</span><a class="button" href="/f/website-feedback">Public form</a></header><main class="main">${body}</main></div></div>`, `
+    <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}<span class="worker">● worker-01 healthy</span><a class="button" href="/f/website-feedback">Public form</a></header><main class="main">${body}</main></div></div>`, `
       const choice=localStorage.getItem("dccTheme")||"auto";
       const apply=(value)=>{const dark=value==="dark"||(value==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light";document.querySelectorAll("[data-theme-choice]").forEach(b=>b.classList.toggle("selected",b.dataset.themeChoice===value))};
       apply(choice);matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{if((localStorage.getItem("dccTheme")||"auto")==="auto")apply("auto")});

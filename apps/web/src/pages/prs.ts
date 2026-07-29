@@ -40,7 +40,7 @@ function renderDetail(item: any): PageResult {
       ${button("data-pr-close-ticket", "Close ticket", canCloseTicket, item.ticket_id ? "Ticket is already closed" : "No linked ticket")}
     </div>
     <div class="grid two"><section class="card"><div class="card-head">Metadata</div><div class="card-body"><dl>
-    <dt>Ticket</dt><dd>${item.ticket_number ? `<a href="/admin/tickets/${escapeHtml(item.ticket_number)}">${escapeHtml(item.ticket_number)} · ${escapeHtml(item.ticket_title)}</a> (${escapeHtml(item.ticket_status)})` : "Unlinked"}</dd>
+    <dt>Ticket</dt><dd>${item.ticket_number ? `<a href="/admin/tickets/${escapeHtml(item.ticket_number)}">${escapeHtml(item.ticket_number)} · ${escapeHtml(item.ticket_title)}</a> (${escapeHtml(item.ticket_status)})` : `<span style="color:var(--text3)">Not linked</span>`}</dd>
     <dt>Author</dt><dd>${escapeHtml(item.author)}</dd><dt>Branches</dt><dd>${escapeHtml(item.head_branch)} → ${escapeHtml(item.base_branch)}</dd>
     <dt>Checks</dt><dd>${escapeHtml(item.check_state ?? "Unknown")}</dd><dt>Internal review</dt><dd>${escapeHtml(item.internal_review_state ?? "Not reviewed")}</dd>
     <dt>Changes</dt><dd class="mono">${escapeHtml(changes)}</dd>
@@ -58,7 +58,7 @@ function renderDetail(item: any): PageResult {
       ${button("data-pr-start-repair", "Start repair workflow", canStartRepair, "No linked execution run to repair", " primary")}</p>
       <p style="font-size:12px;color:var(--text3)">Merging always happens on GitHub. This platform never merges automatically.</p>
     </div></section>`;
-  return { status: 200, title: `PR #${item.number}`, body };
+  return { status: 200, title: `#${item.number}`, body };
 }
 
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
@@ -112,7 +112,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <select name="repository"><option value="">All repositories</option>${repositories.rows.map((row) => `<option value="${escapeHtml(row.repository)}"${repository === row.repository ? " selected" : ""}>${escapeHtml(row.repository)}</option>`).join("")}</select>
       ${tab !== "all" ? `<input type="hidden" name="tab" value="${escapeHtml(tab)}">` : ""}
       <button class="button" type="submit">Filter</button><a class="button" href="/admin/pull-requests">Reset</a><span aria-live="polite">${pullRequests.rows.length} shown</span></form>
-      <section class="card"><div class="list-head prs-head"><span>PR</span><span>Title</span><span>Ticket</span><span>Checks</span><span>Review</span><span>Changes</span></div>${rows || "<p>No pull requests match these filters.</p>"}</section>`;
+      <section class="card"><div class="list-head prs-head"><span>PR</span><span>Title</span><span>Ticket</span><span>Checks</span><span>Review</span><span>Changes</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No pull requests match these filters.</div>`}</section>`;
     return { status: 200, title: "Pull requests", body };
   }
   const pullRequestSlugMatch = url.pathname.match(/^\/admin\/pull-requests\/([^/]+)\/(\d+)$/);

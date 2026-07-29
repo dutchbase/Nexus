@@ -39,7 +39,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         `<p><strong>v${version.version}</strong>${version.id === prompt.active_version_id ? " · active" : ""} · ${escapeHtml(version.username ?? "system")} · <span class="mono">${escapeHtml(version.content_hash.slice(0, 12))}</span>
         <button class="button" data-restore-version="${version.id}">Restore as new version</button>${prompt.active_version_id && prompt.active_version_id !== version.id ? ` <a href="/api/admin/prompts/${prompt.id}/diff?from=${version.id}&to=${prompt.active_version_id}">Diff with active</a>` : ""}</p>`,
       ).join("") || "<p>No versions yet.</p>"}</div></section>`;
-    return { status: 200, title: "Prompt editor", body };
+    return { status: 200, title: prompt.id, body };
   }
   return null;
 }

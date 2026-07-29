@@ -86,7 +86,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         <button class="button primary" type="button" data-publish-toggle data-form-id="${form.id}" data-status="${escapeHtml(form.status)}">${form.status === "published" ? "Unpublish" : "Publish changes"}</button></div>
       <div class="tabs" role="tablist">${["Fields", "Settings", "Preview"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
       ${[fieldsPanel, settingsPanel, previewPanel].map((content, index) => panel(index, content)).join("")}`;
-    return { status: 200, title: form.name, body };
+    return { status: 200, title: form.slug, body };
   }
   return null;
 }

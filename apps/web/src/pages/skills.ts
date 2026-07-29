@@ -72,7 +72,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         </div>` : "<p style=\"font-size:12.5px;color:var(--text3)\">Never validated</p>"}</div>
       </div></section></div>
       <div style="margin-top:16px"><button class="button" style="border:1px solid var(--t-danger);color:var(--t-danger);background:transparent" data-disable-skill>Disable skill</button></div>`;
-    return { status: 200, title: skill.name, body };
+    return { status: 200, title: skill.slug, body };
   }
   return null;
 }
