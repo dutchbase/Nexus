@@ -716,7 +716,7 @@ async function runExecution(job: any) {
     await publishExecutionAttempt({
       attempt: { ...attempt, ...worktree, worktree_path: worktree.worktreePath, branch_name: worktree.branchName },
       ticket, project: input.project, runId, jobId: job.id,
-      planMarkdown: attempt.content_markdown, skills: copied.skills.map((skill) => skill.slug),
+      planMarkdown: attempt.content_markdown, skills: copied.skills.map((skill: any) => skill.slug),
       validationResults: validation.results, changedFiles: validation.files,
     });
   } catch (error) {

@@ -91,7 +91,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
           <input class="search" data-ticket-filter name="search" placeholder="Search ticket number or title…" value="${escapeHtml(search || "")}">
           <select data-ticket-filter name="project_id">
             <option value="">All projects</option>
-            ${projects.map((p) => `<option value="${p.id}"${url.searchParams.get("project_id") === p.id ? " selected" : ""}>${p.name}</option>`).join("")}
+            ${projects.map((p) => `<option value="${p.id}"${url.searchParams.get("project_id") === p.id ? " selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
           </select>
           <select data-ticket-filter name="priority">
             <option value="">All priorities</option>
@@ -105,7 +105,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
             ${[...validStatuses].map((status) => `<option${url.searchParams.get("status") === status ? " selected" : ""}>${status}</option>`).join("")}
           </select>
           <a class="button" href="/admin/tickets">Reset</a>
-          <span aria-live="polite" style="margin-left:auto">${tickets.length} of 14</span>
+          <span aria-live="polite" style="margin-left:auto">${tickets.length} shown</span>
         </form>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:16px">${boardColumnsHtml}</div>`;
       return { status: 200, title: "Tickets", body };
@@ -123,7 +123,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         <input class="search" data-ticket-filter name="search" placeholder="Search ticket number or title…" value="${escapeHtml(search || "")}">
         <select data-ticket-filter name="project_id">
           <option value="">All projects</option>
-          ${projects.map((p) => `<option value="${p.id}"${url.searchParams.get("project_id") === p.id ? " selected" : ""}>${p.name}</option>`).join("")}
+          ${projects.map((p) => `<option value="${p.id}"${url.searchParams.get("project_id") === p.id ? " selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
         </select>
         <select data-ticket-filter name="priority">
           <option value="">All priorities</option>
@@ -137,7 +137,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
           ${[...validStatuses].map((status) => `<option${url.searchParams.get("status") === status ? " selected" : ""}>${status}</option>`).join("")}
         </select>
         <a class="button" href="/admin/tickets">Reset</a>
-        <span aria-live="polite" style="margin-left:auto">${tickets.length} of 14</span>
+        <span aria-live="polite" style="margin-left:auto">${tickets.length} shown</span>
       </form>
       <section class="card">${emptyState || `<div class="list-head tickets7"><span>Ticket</span><span>Title</span><span>Project</span><span>Priority</span><span>AI config</span><span>Status</span><span>Updated</span></div>${rows}`}</section>`;
     return { status: 200, title: "Tickets", body };

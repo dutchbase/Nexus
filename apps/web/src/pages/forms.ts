@@ -55,8 +55,8 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <section class="card"><div class="card-head">Field settings</div><div class="card-body" data-field-settings><p>Select a field to edit.</p></div></section>
       <p class="error" role="alert" data-fields-error></p>
     </div>
-    <script type="application/json" data-fields-json>${JSON.stringify(fields)}</script>
-    <script type="application/json" data-field-types>${JSON.stringify(fieldTypeLabels)}</script>`;
+    <script type="application/json" data-fields-json>${JSON.stringify(fields).replace(/</g, "\\u003c")}</script>
+    <script type="application/json" data-field-types>${JSON.stringify(fieldTypeLabels).replace(/</g, "\\u003c")}</script>`;
 
     const settingsPanel = `<section class="card"><div class="card-head">Form settings</div><div class="card-body">
       <form data-form-settings>

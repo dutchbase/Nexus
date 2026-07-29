@@ -951,7 +951,11 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     const allowed = ["name", "description", "enabled", "repository_path", "github_owner", "github_repository", "default_branch", "config_json"];
     const entries = Object.entries(body).filter(([key]) => allowed.includes(key));
     if (!entries.length) return json(response, 400, { error: "no supported fields" });
-    const after = (await pool.query(`UPDATE projects SET ${entries.map(([key], index) => `${key}=$${index + 2}`).join(",")},config_version=config_version+1,updated_at=now() WHERE id=$1 RETURNING *`, [projectMatch[1], ...entries.map(([, value]) => value)])).rows[0];
+    // config_json is shallow-merged into the existing value (not replaced) so a
+    // partial save from the UI (e.g. just `commands` + `branch_prefix`) never
+    // wipes worker-only keys like `ai`, `protected_paths`, `definition_of_done`.
+    const assignments = entries.map(([key], index) => key === "config_json" ? `config_json=COALESCE(config_json,'{}'::jsonb) || $${index + 2}::jsonb` : `${key}=$${index + 2}`).join(",");
+    const after = (await pool.query(`UPDATE projects SET ${assignments},config_version=config_version+1,updated_at=now() WHERE id=$1 RETURNING *`, [projectMatch[1], ...entries.map(([, value]) => value)])).rows[0];
     await audit({ actorType: "admin", actorId: session.user_id, action: "project.update", entityType: "project", entityId: after.id, before, after, ip: ipOf(request) });
     return json(response, 200, { project: after });
   }
@@ -1422,7 +1426,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
         throw Object.assign(new Error("only the current plan version can be rejected"), { status: 409 });
       }
       const ticket = (await client.query(
-        "UPDATE tickets SET status='Rejected',updated_at=now() WHERE id=$1 RETURNING *",
+        "UPDATE tickets SET status='Rejected',approved_plan_version_id=NULL,approved_plan_hash=NULL,updated_at=now() WHERE id=$1 RETURNING *",
         [version.ticket_id],
       )).rows[0];
       await client.query(

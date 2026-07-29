@@ -213,6 +213,14 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         nameInput?.addEventListener("input",()=>{if(!slugInput?.value)slugInput.value=nameInput.value.toLowerCase().replace(/[^a-z0-9]+/g,"-").replace(/^-|-$/g,"")});
         document.querySelector("[data-add-project-button]")?.addEventListener("click",()=>modal.showModal());
         modal?.querySelector("[data-close-modal]")?.addEventListener("click",()=>modal.close());
+        modal?.addEventListener("keydown",event=>{
+          if(event.key!=="Tab")return;
+          const focusables=[...modal.querySelectorAll("button,a[href],input,select,textarea,[tabindex]")].filter(el=>!el.disabled);
+          if(!focusables.length)return;
+          const first=focusables[0],last=focusables[focusables.length-1];
+          if(event.shiftKey&&(document.activeElement===first||!modal.contains(document.activeElement))){event.preventDefault();last.focus()}
+          else if(!event.shiftKey&&(document.activeElement===last||!modal.contains(document.activeElement))){event.preventDefault();first.focus()}
+        });
         form?.addEventListener("submit",async(event)=>{
           event.preventDefault();const data=new FormData(form);const payload=Object.fromEntries(data);
           const response=await fetch("/api/admin/projects",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
@@ -223,9 +231,9 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         const csrf=sessionStorage.getItem("dccCsrf")||"",form=document.querySelector("[data-project-form]"),projectId=form?.dataset.projectId;
         document.querySelector("[data-save-button]")?.addEventListener("click",async()=>{
           const data=new FormData(form);const payload=Object.fromEntries(data);
-          const validation_commands={};
-          document.querySelectorAll("[data-cmd]").forEach(input=>{validation_commands[input.dataset.cmd]=input.value});
-          payload.config_json={validation_commands,branch_prefix:payload.branch_prefix||""};
+          const commands={};
+          document.querySelectorAll("[data-cmd]").forEach(input=>{commands[input.dataset.cmd]=input.value});
+          payload.config_json={commands,branch_prefix:payload.branch_prefix||""};
           delete payload.branch_prefix;
           const response=await fetch("/api/admin/projects/"+projectId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
           if(response.ok){alert("Project saved")}else{const result=await response.json();alert(result.error)}
@@ -397,6 +405,14 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         let activeCategory="all";
         document.querySelector("[data-register-skill]")?.addEventListener("click",()=>modal.showModal());
         modal?.querySelector("[data-close-modal]")?.addEventListener("click",()=>modal.close());
+        modal?.addEventListener("keydown",event=>{
+          if(event.key!=="Tab")return;
+          const focusables=[...modal.querySelectorAll("button,a[href],input,select,textarea,[tabindex]")].filter(el=>!el.disabled);
+          if(!focusables.length)return;
+          const first=focusables[0],last=focusables[focusables.length-1];
+          if(event.shiftKey&&(document.activeElement===first||!modal.contains(document.activeElement))){event.preventDefault();last.focus()}
+          else if(!event.shiftKey&&(document.activeElement===last||!modal.contains(document.activeElement))){event.preventDefault();first.focus()}
+        });
         form?.addEventListener("submit",async(event)=>{
           event.preventDefault();const data=new FormData(form);const payload=Object.fromEntries(data);payload.enabled=form.elements.enabled.checked;
           const response=await fetch("/api/admin/skills",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
@@ -417,7 +433,14 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             row.style.display=matchesSearch&&matchesCategory?"":"none";
           });
         }
-        document.querySelector("[data-validate-all]")?.addEventListener("click",async()=>{alert("Validation started")});
+        document.querySelector("[data-validate-all]")?.addEventListener("click",async(event)=>{
+          const button=event.currentTarget;button.disabled=true;
+          try{
+            const ids=[...document.querySelectorAll("[data-skill-id]")].map(el=>el.dataset.skillId);
+            for(const id of ids){await fetch("/api/admin/skills/"+id+"/validate",{method:"POST",headers:{"x-csrf-token":csrf}})}
+            location.reload();
+          }finally{button.disabled=false}
+        });
       `:""}
       ${/^\/admin\/skills\/[^/]+$/.test(path)?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";
@@ -453,6 +476,14 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         });
         document.querySelector("[data-run-repair]")?.addEventListener("click",()=>repairDialog?.showModal());
         repairDialog?.querySelector("[data-close-dialog]")?.addEventListener("click",()=>repairDialog.close());
+        repairDialog?.addEventListener("keydown",event=>{
+          if(event.key!=="Tab")return;
+          const focusables=[...repairDialog.querySelectorAll("button,a[href],input,select,textarea,[tabindex]")].filter(el=>!el.disabled);
+          if(!focusables.length)return;
+          const first=focusables[0],last=focusables[focusables.length-1];
+          if(event.shiftKey&&(document.activeElement===first||!repairDialog.contains(document.activeElement))){event.preventDefault();last.focus()}
+          else if(!event.shiftKey&&(document.activeElement===last||!repairDialog.contains(document.activeElement))){event.preventDefault();first.focus()}
+        });
         repairDialog?.querySelector("[data-submit-repair]")?.addEventListener("click",async()=>{
           const feedback=repairDialog.querySelector("[data-repair-feedback]").value.trim();
           if(!feedback){alert("Instructions are required");return}
