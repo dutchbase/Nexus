@@ -1,5 +1,6 @@
 import { escapeHtml, lineDiff, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
+import { checkPlanApprovalGate } from "@dcc/domain";
 
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname === "/admin/tickets") {
@@ -272,7 +273,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       `<span class="skill-chip" data-skill-chip="${skill.id}" data-slug="${escapeHtml(skill.slug)}" title="${skill.automatic ? "Automatically added by project" : "Selected on this ticket"} · ${escapeHtml(skill.filesystem_path)}">${escapeHtml(skill.name)}
        ${skill.automatic ? '<small>auto</small>' : `<button type="button" aria-label="Remove ${escapeHtml(skill.name)}" data-remove-skill="${skill.id}">×</button>`}</span>`,
     ).join("");
-    const referenceLines = selectedSkills.map((skill) => `- ${skill.slug}: ${skill.filesystem_path}`).join("\n");
+    const referenceLines = selectedSkills.map((skill) => `- ${skill.slug}: ${skill.filesystem_path}`).join("\n") || "No skills resolved for this ticket.";
     const modelOptions = ["fable", "opus", "sonnet", "haiku"].map((model) => `<option value="${model}"${ticket.default_model === model ? " selected" : ""}>${model[0].toUpperCase()}${model.slice(1)}</option>`).join("");
     const reasoningOptions = [["low","Low"],["medium","Medium"],["high","High"],["xhigh","Extra high"],["max","Maximum"],["ultracode","Ultracode"]].map(([value,label]) => `<option value="${value}"${ticket.default_reasoning_level === value ? " selected" : ""}>${label}</option>`).join("");
     const phaseConfiguration = (phase: "planning" | "execution" | "repair") => {
@@ -283,8 +284,23 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       return `<fieldset><legend>${phase[0].toUpperCase()}${phase.slice(1)}</legend><div class="grid two"><label class="field"><span>Model</span><select name="${phase}_model">${models}</select></label><label class="field"><span>Reasoning level</span><select name="${phase}_reasoning_level">${reasoning}</select></label></div></fieldset>`;
     };
     const execRuns = runsResult.rows.filter((run) => run.run_type === "execution");
+    const executionGate = await checkPlanApprovalGate(pool, ticket.id);
     const panel = (index: number, content: string) => `<div role="tabpanel" id="panel-${index}" aria-labelledby="tab-${index}"${index === 0 ? "" : " hidden"}>${content}</div>`;
-    const overviewPanel = `<div class="grid two"><section class="card"><div class="card-head">Original submission</div><div class="card-body"><p>${escapeHtml(ticket.description)}</p><dl><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Environment</dt><dd>${escapeHtml(ticket.environment)}</dd><dt>Source URL</dt><dd>${escapeHtml(ticket.source_url)}</dd></dl></div></section>
+    const priorityOptions = ["critical", "high", "medium", "low"].map((value) => `<option value="${value}"${ticket.priority === value ? " selected" : ""}>${value[0].toUpperCase()}${value.slice(1)}</option>`).join("");
+    const overviewPanel = `<div class="grid two"><section class="card"><div class="card-head">Original submission <button class="button" type="button" data-edit-ticket>Edit</button></div><div class="card-body">
+      <div data-ticket-view><p>${escapeHtml(ticket.description)}</p><dl><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Environment</dt><dd>${escapeHtml(ticket.environment)}</dd><dt>Source URL</dt><dd>${escapeHtml(ticket.source_url)}</dd></dl></div>
+      <form data-ticket-edit-form data-ticket-id="${ticket.id}" hidden>
+        <label class="field"><span>Title</span><input name="title" value="${escapeHtml(ticket.title)}"></label>
+        <label class="field"><span>Description</span><textarea name="description" rows="4">${escapeHtml(ticket.description)}</textarea></label>
+        <div class="grid two"><label class="field"><span>Category</span><input name="category" value="${escapeHtml(ticket.category)}"></label>
+        <label class="field"><span>Environment</span><input name="environment" value="${escapeHtml(ticket.environment)}"></label></div>
+        <label class="field"><span>Priority</span><select name="priority">${priorityOptions}</select></label>
+        <label class="field"><span>Expected behavior</span><textarea name="expected_behavior" rows="3">${escapeHtml(ticket.expected_behavior ?? "")}</textarea></label>
+        <label class="field"><span>Actual behavior</span><textarea name="actual_behavior" rows="3">${escapeHtml(ticket.actual_behavior ?? "")}</textarea></label>
+        <label class="field"><span>Reproduction steps</span><textarea name="reproduction_steps" rows="3">${escapeHtml(ticket.reproduction_steps ?? "")}</textarea></label>
+        <button class="button" type="submit">Save</button> <button class="button" type="button" data-cancel-edit-ticket>Cancel</button><p class="error" role="alert"></p>
+      </form>
+      </div></section>
       <section class="card"><div class="card-head">Internal notes</div><div class="card-body notes">${notes.map((note) => `<div class="note"><strong>${escapeHtml(note.username ?? "Administrator")}</strong><p>${escapeHtml(note.body)}</p></div>`).join("") || "<p>No notes yet.</p>"}<form data-notes-form><label class="field"><span>Add an internal note…</span><textarea name="body" placeholder="Add an internal note…" rows="3"></textarea></label><button class="button" type="submit">Save note</button><p class="error" role="alert"></p></form></div></section></div>
       <div class="grid rail"><section class="card"><div class="card-head">Ticket</div><div class="card-body"><dl><dt>Project</dt><dd>${escapeHtml(ticket.project_name)}</dd><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Source form</dt><dd>${escapeHtml(ticket.form_name ?? "—")}</dd><dt>Created</dt><dd>${new Date(ticket.created_at).toLocaleDateString("nl-NL")}</dd></dl></div></section>
       <section class="card"><div class="card-head">Approval gates</div><div class="card-body"><p><button class="button primary" type="button" data-approve-planning${["Triage", "Needs Information"].includes(ticket.status) ? "" : " disabled"} title="${["Triage", "Needs Information"].includes(ticket.status) ? "" : "Ticket must be Triage or Needs Information"}">Approve for planning</button></p><p class="error" role="alert"></p></div></section>
@@ -324,8 +340,8 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)}</div><h1>${escapeHtml(ticket.title)}</h1>
       <div class="toolbar"><span class="status">${escapeHtml(ticket.status)}</span>
         <button class="button" type="button" data-open-preview>Preview prompt</button>
-        <button class="button primary" type="button" data-start-execution${ticket.status === "Plan Approved" ? "" : " disabled"}>Start execution</button></div>
-      <dialog data-preview-dialog aria-label="Prompt preview"><div class="card-head">Prompt preview</div><pre class="references">Loading…</pre><button class="button" type="button" data-close-dialog>Close</button></dialog>
+        <button class="button primary" type="button" data-start-execution${executionGate.valid ? "" : " disabled"} title="${executionGate.valid ? "" : executionGate.message}">Start execution</button></div>
+      <dialog data-preview-dialog aria-label="Prompt preview"><div class="card-head">Prompt preview</div><p>This is the exact, complete prompt sent to Claude — including global instructions, project context, resolved AI configuration, resolved skills, and ticket content.</p><pre class="references">Loading…</pre><button class="button" type="button" data-close-dialog>Close</button></dialog>
       <div class="tabs" role="tablist">${["Overview", "AI & skills", "Prompt", "Plans", "Runs", "Validation", "Pull request", "Activity"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
       ${[overviewPanel, aiPanel, promptPanel, plansPanel, runsPanel, validationPanel, prPanel, activityPanel].map((content, index) => panel(index, content)).join("")}`;
     return { status: 200, title: ticket.ticket_number, body };

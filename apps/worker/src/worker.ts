@@ -71,10 +71,11 @@ async function subscriptionPreflightOrRefuse() {
   }
 }
 
-if (!(await subscriptionPreflightOrRefuse())) {
-  await pool.end();
-  process.exit(1);
-}
+// Run once at startup for its side effect (refusing any already-queued
+// Claude-dependent jobs with a clear error) — do not exit the process when
+// auth is missing/invalid. project.validate and pull-request.retry jobs
+// never call Claude and must still be claimable by the main loop below.
+await subscriptionPreflightOrRefuse();
 
 function ticketAiConfiguration(ticket: any) {
   return {
@@ -985,8 +986,7 @@ while (!stopping) {
       "SELECT 1 FROM jobs WHERE status='queued' AND type=ANY($1::text[]) LIMIT 1",
       [[...planningJobTypes, ...executionJobTypes]],
     )).rowCount;
-    if (waiting) {
-      if (!(await subscriptionPreflightOrRefuse())) break;
+    if (waiting && (await subscriptionPreflightOrRefuse())) {
       job = await claimJob(workerId, [...planningJobTypes, ...executionJobTypes]);
     }
   }

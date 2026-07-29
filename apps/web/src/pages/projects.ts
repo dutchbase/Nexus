@@ -79,7 +79,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         `<p style="display:flex;gap:8px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:var(--border2);flex-shrink:0"></span>${msg}</p>`,
       ).join("")}</div></div></section>`;
     const promptsPanel = `<section class="card"><div class="card-head">Project prompt files</div><div class="card-body">${promptsResult.rows.length > 0 ? promptsResult.rows.map((prompt) =>
-      `<p>${escapeHtml(prompt.prompt_type)}.md v${prompt.active_version || "—"} · ${prompt.active_version ? "active" : "inactive"}</p>`,
+      `<p><a href="/admin/prompts/${prompt.id}">${escapeHtml(prompt.prompt_type)}.md v${prompt.active_version || "—"} · ${prompt.active_version ? "active" : "inactive"}</a></p>`,
     ).join("") : "<p>No project prompts.</p>"}</div></section>`;
     const body = `<div class="eyebrow">Configure / Projects</div><h1>${escapeHtml(project.name)}</h1>
       <div class="toolbar"><button class="button" data-validate-button>Run validation</button><button class="button primary" data-save-button>Save configuration</button></div>

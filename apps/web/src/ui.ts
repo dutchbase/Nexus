@@ -108,7 +108,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             else{const remove=document.createElement("button");remove.type="button";remove.dataset.removeSkill=input.value;remove.setAttribute("aria-label","Remove "+input.dataset.name);remove.textContent="×";chip.append(remove)}
             return chip;
           }));
-          const lines=selected.map(input=>"- "+input.dataset.slug+": "+input.dataset.path).join("\\n");
+          const lines=selected.map(input=>"- "+input.dataset.slug+": "+input.dataset.path).join("\\n")||"No skills resolved for this ticket.";
           references.textContent="Use the following skills:\\n"+lines;
           if(refCount)refCount.textContent=String(selected.length);
           if(promptSkills)promptSkills.textContent=lines;
@@ -152,6 +152,26 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const response=await fetch("/api/admin/tickets/"+ticketNumber+"/notes",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({body})});
           const result=await response.json();
           if(response.ok){notesForm.reset();location.reload()}else{notesForm.querySelector(".error").textContent=result.error}
+        })}
+        const ticketEditForm=document.querySelector("[data-ticket-edit-form]");
+        const ticketView=document.querySelector("[data-ticket-view]");
+        document.querySelector("[data-edit-ticket]")?.addEventListener("click",()=>{ticketView.hidden=true;ticketEditForm.hidden=false});
+        document.querySelector("[data-cancel-edit-ticket]")?.addEventListener("click",()=>{ticketEditForm.hidden=true;ticketView.hidden=false});
+        if(ticketEditForm){ticketEditForm.addEventListener("submit",async(event)=>{
+          event.preventDefault();
+          const body={
+            title:ticketEditForm.querySelector('[name="title"]').value,
+            description:ticketEditForm.querySelector('[name="description"]').value,
+            category:ticketEditForm.querySelector('[name="category"]').value,
+            environment:ticketEditForm.querySelector('[name="environment"]').value,
+            priority:ticketEditForm.querySelector('[name="priority"]').value,
+            expected_behavior:ticketEditForm.querySelector('[name="expected_behavior"]').value,
+            actual_behavior:ticketEditForm.querySelector('[name="actual_behavior"]').value,
+            reproduction_steps:ticketEditForm.querySelector('[name="reproduction_steps"]').value,
+          };
+          const response=await fetch("/api/admin/tickets/"+ticketEditForm.dataset.ticketId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(body)});
+          const result=await response.json();
+          if(response.ok){location.reload()}else{ticketEditForm.querySelector(".error").textContent=result.error}
         })}
       ` : ""}
       ${/^\/admin\/tickets\/[^/]+\/plans\/\d+$/.test(path) ? `
