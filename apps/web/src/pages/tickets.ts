@@ -35,11 +35,13 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
 
     const statusToneMap: Record<string, string> = {
       "Submitted": "var(--t-info)", "Triage": "var(--t-info)", "Needs Information": "var(--t-warn)",
-      "Rejected": "var(--t-danger)", "Approved for Planning": "var(--t-ok)", "Planning Queued": "var(--t-info)", "Planning": "var(--t-run)", "Plan Ready for Review": "var(--t-run)", "Plan Revision Requested": "var(--t-warn)", "Plan Revision Queued": "var(--t-run)", "Plan Approved": "var(--t-ok)",
+      "Approved for Planning": "var(--t-ok)", "Planning Queued": "var(--t-info)", "Planning": "var(--t-run)", "Plan Ready for Review": "var(--t-run)", "Plan Revision Requested": "var(--t-warn)", "Plan Revision Queued": "var(--t-run)", "Plan Approved": "var(--t-ok)",
       "Execution Queued": "var(--t-info)", "Executing": "var(--t-run)", "Validating": "var(--t-run)", "Validation Failed": "var(--t-danger)", "Execution Failed": "var(--t-danger)", "PR Creation Failed": "var(--t-danger)",
       "PR Ready for Review": "var(--t-warn)", "PR Changes Requested": "var(--t-warn)", "PR Approved": "var(--t-ok)",
       "Merged": "var(--t-ok)", "Completed": "var(--t-ok)", "Rejected": "var(--t-danger)", "Cancelled": "var(--t-muted)", "Archived": "var(--t-muted)", "Closed Without Merge": "var(--t-muted)",
     };
+
+    const prioTone = { critical: "danger", high: "warn", medium: "info", low: "muted" } as Record<string, string>;
 
     if (view === "board") {
       // Board view: group tickets into 6 status columns
@@ -66,9 +68,10 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         const columnTickets = statuses.flatMap(status => groupedByStatus[status] || []);
         const cardsHtml = columnTickets.map((ticket) => {
           const tone = statusToneMap[ticket.status] || "var(--t-text)";
+          const prioColor = prioTone[ticket.priority || "low"] ?? "muted";
           return `<a class="ticket-row" style="display:block;border-left:2px solid ${tone};padding:10px 12px;text-decoration:none;margin-bottom:8px;background:var(--surface);border-radius:4px" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}">
             <span class="mono" style="font-size:11px">${escapeHtml(ticket.ticket_number)}</span>
-            <span style="display:inline-block;font-size:11px;font-weight:700;padding:2px 6px;border-radius:3px;margin-left:4px;background:var(--accent-soft);color:var(--t-${ticket.priority || "low"})">${escapeHtml(ticket.priority || "—")}</span>
+            <span style="display:inline-block;font-size:11px;font-weight:700;padding:2px 6px;border-radius:3px;margin-left:4px;background:var(--accent-soft);color:var(--t-${prioColor})">${escapeHtml(ticket.priority || "—")}</span>
             <span style="display:block;font-weight:600;margin:4px 0">${escapeHtml(ticket.title)}</span>
             <span style="display:block;font-size:12px;color:var(--text2)">${escapeHtml(ticket.project_name)} · <span class="mono">${escapeHtml(ticket.default_model || "—")} · ${escapeHtml(ticket.default_reasoning_level || "—")}</span></span>
           </a>`;
