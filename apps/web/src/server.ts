@@ -1479,12 +1479,14 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
           version.metadata_json?.promptVersionIds ?? {}],
       )).rows[0];
       await client.query("UPDATE plans SET potentially_stale=false,updated_at=now() WHERE id=$1", [version.plan_id]);
+      const approvalNote = typeof body.note === "string" && body.note.trim() ? body.note.trim() : null;
+      const defaultReason = body.reconfirm ? "Approved plan reconfirmed" : "Plan approved";
       await client.query(
         `INSERT INTO ticket_status_history
          (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_plan_version_id)
          VALUES ($1,$2,'Plan Approved',$3,'admin',$4,$5)`,
         [version.ticket_id, body.reconfirm ? "Plan Approved" : "Plan Ready for Review",
-          body.reconfirm ? "Approved plan reconfirmed" : "Plan approved", session.user_id, version.id],
+          approvalNote ?? defaultReason, session.user_id, version.id],
       );
       return { ticket, plan_version: version };
     });
