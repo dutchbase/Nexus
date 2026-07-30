@@ -1288,7 +1288,11 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
         [planRevisionMatch[1]],
       )).rows[0];
       if (!plan) return null;
-      if (plan.status !== "Plan Ready for Review") {
+      // ponytail: revisions are safe up through Plan Approved too — execution
+      // only starts once the ticket hits Execution Queued, and the approval
+      // gate already re-blocks Start execution once a new version supersedes
+      // the approved one (see checkPlanApprovalGate's current_version_id check).
+      if (plan.status !== "Plan Ready for Review" && plan.status !== "Plan Approved") {
         throw Object.assign(new Error(`revision cannot be requested from ${plan.status}`), { status: 409 });
       }
       const current = (await client.query(
