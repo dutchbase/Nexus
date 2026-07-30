@@ -185,11 +185,22 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const result=await response.json();
           diffPanel.querySelector("[data-diff-content]").textContent=response.ok?result.diff:result.error;
         });
-        document.querySelector("[data-approve-plan-version]")?.addEventListener("click",async(event)=>{
-          if(!confirm("Approve this plan version?"))return;
-          const button=event.currentTarget;
-          const response=await fetch("/api/admin/plan-versions/"+button.dataset.approvePlanVersion+"/approve",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({plan_version_id:button.dataset.approvePlanVersion,content_hash:button.dataset.contentHash})});
-          if(response.ok)location.href="/admin/tickets/"+(window.location.pathname.match(/\\/tickets\\/([^\\/]+)/)||[])[1];else alert((await response.json()).error);
+        const approveDialog=document.querySelector("[data-approve-dialog]");
+        document.querySelector("[data-open-approve-dialog]")?.addEventListener("click",()=>approveDialog.showModal());
+        approveDialog?.querySelector("[data-close-dialog]")?.addEventListener("click",()=>approveDialog.close());
+        approveDialog?.addEventListener("keydown",event=>{
+          if(event.key!=="Tab")return;
+          const focusables=[...approveDialog.querySelectorAll("button,a[href],input,select,textarea,[tabindex]")].filter(el=>!el.disabled);
+          if(!focusables.length)return;
+          const first=focusables[0],last=focusables[focusables.length-1];
+          if(event.shiftKey&&(document.activeElement===first||!approveDialog.contains(document.activeElement))){event.preventDefault();last.focus()}
+          else if(!event.shiftKey&&(document.activeElement===last||!approveDialog.contains(document.activeElement))){event.preventDefault();first.focus()}
+        });
+        approveDialog?.querySelector("[data-confirm-approve]")?.addEventListener("click",async()=>{
+          const note=approveDialog.querySelector("[data-approve-note]").value.trim();
+          const response=await fetch("/api/admin/plan-versions/"+approveDialog.dataset.planVersionId+"/approve",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({plan_version_id:approveDialog.dataset.planVersionId,content_hash:approveDialog.dataset.contentHash,note})});
+          if(response.ok)location.href="/admin/tickets/"+(window.location.pathname.match(/\\/tickets\\/([^\\/]+)/)||[])[1];
+          else approveDialog.querySelector(".error").textContent=(await response.json()).error;
         });
         document.querySelector("[data-reject-plan-version]")?.addEventListener("click",async(event)=>{
           if(!confirm("Reject this plan version?"))return;
