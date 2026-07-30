@@ -382,8 +382,11 @@ async function runPlanning(job: any) {
   if (!repository.valid) throw new Error(`repository is not available for planning: ${repository.errors.join("; ")}`);
 
   const runId = randomUUID();
-  const sessionId = revising ? revision.planning_session_id : randomUUID();
-  if (!sessionId) throw new Error("original planning session is unavailable");
+  // ponytail: --session-id asks the CLI to start a NEW session under that id;
+  // reusing the original planning run's id collides ("already in use"). The
+  // full previous plan + feedback is already embedded in the prompt below,
+  // so a revision doesn't need real CLI session continuity — just a fresh id.
+  const sessionId = randomUUID();
   const runType = revising ? "plan_revision" : "planning";
   await pool.query(
     `INSERT INTO agent_runs
