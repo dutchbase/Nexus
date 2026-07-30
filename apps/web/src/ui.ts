@@ -407,6 +407,18 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(response.ok)location.reload();else alert((await response.json()).error);
         }));
       `:""}
+      ${path==="/admin/settings"?`
+        const csrf=sessionStorage.getItem("dccCsrf")||"";
+        const form=document.querySelector("[data-ai-review-settings-form]");
+        if(form){
+          form.addEventListener("submit",async(event)=>{
+            event.preventDefault();
+            const data=new FormData(form);
+            const response=await fetch("/api/admin/settings/ai-review",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({default_model:data.get("default_model"),default_reasoning_level:data.get("default_reasoning_level")})});
+            if(response.ok)location.reload();else{const result=await response.json();form.querySelector(".error").textContent=result.error}
+          });
+        }
+      `:""}
       ${path==="/admin/pull-requests"?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";
         document.querySelector("[data-sync-prs]")?.addEventListener("click",async(event)=>{
