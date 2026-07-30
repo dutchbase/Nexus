@@ -60,6 +60,21 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
+async function requestRaw(path: string, init?: RequestInit): Promise<string> {
+  const response = await fetch(`${apiBaseUrl()}${path}`, {
+    ...init,
+    headers: {
+      authorization: `Bearer ${authToken()}`,
+      ...init?.headers,
+    },
+  });
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`GitHub provider request failed with status ${response.status}${detail ? `: ${detail}` : ""}`);
+  }
+  return response.text();
+}
+
 function pullsPath(owner: string, repository: string) {
   return `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls`;
 }
@@ -122,6 +137,24 @@ export async function updatePullRequestBase(owner: string, repository: string, n
   return request<ProviderPullRequest>(`${pullsPath(owner, repository)}/${number}`, {
     method: "PATCH",
     body: JSON.stringify({ base }),
+  });
+}
+
+export async function createPullRequestComment(
+  owner: string,
+  repo: string,
+  number: number,
+  body: string,
+): Promise<{ id: number; html_url: string }> {
+  return request(`/repos/${owner}/${repo}/issues/${number}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ body }),
+  });
+}
+
+export async function getPullRequestDiff(owner: string, repo: string, number: number): Promise<string> {
+  return requestRaw(`/repos/${owner}/${repo}/pulls/${number}`, {
+    headers: { accept: "application/vnd.github.v3.diff" },
   });
 }
 
