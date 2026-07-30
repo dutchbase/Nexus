@@ -5,6 +5,7 @@ export * from "./plan-approval.ts";
 export * from "./pull-request.ts";
 export * from "./pull-request-sync.ts";
 export * from "./notifications.ts";
+export * from "./pr-review.ts";
 
 export const aiModels = ["fable", "opus", "sonnet", "haiku"] as const;
 export const reasoningLevels = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
