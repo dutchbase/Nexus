@@ -734,8 +734,19 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     syncOpenPullRequests().catch((error) => console.error(`Manual pull-request sync failed: ${error instanceof Error ? error.message : "unknown error"}`));
     return json(response, 202, { ok: true, note: "Sync started. The worker also syncs open pull requests automatically every few seconds." });
   }
+  if (url.pathname === "/api/admin/settings/ai-review" && request.method === "POST") {
+    const body = await bodyOf(request);
+    const selection = validateAiSelection({
+      model: body.default_model, reasoning_level: body.default_reasoning_level,
+    });
+    await pool.query(
+      `UPDATE ai_review_settings SET default_model=$1,default_reasoning_level=$2,updated_at=now(),updated_by=$3 WHERE id=1`,
+      [selection.model, selection.reasoning_level, session.user_id],
+    );
+    return json(response, 200, { ok: true });
+  }
   const pullRequestActionMatch = url.pathname.match(
-    /^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/(mark-reviewed|approve|request-changes|repair-instructions|start-repair|refresh|close-ticket)$/i,
+    /^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/(mark-reviewed|approve|request-changes|repair-instructions|start-repair|refresh|close-ticket|ai-review)$/i,
   );
   if (pullRequestActionMatch && request.method === "POST") {
     const [, pullRequestId, action] = pullRequestActionMatch;
@@ -810,6 +821,32 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     } else if (action === "close-ticket") {
       const target: "Completed" | "Closed Without Merge" = pullRequest.merged_at ? "Completed" : "Closed Without Merge";
       await setPullRequestTicketStatus(pullRequest.id, target, "Ticket closed manually after external pull-request completion", "admin", session.user_id);
+    } else if (action === "ai-review") {
+      const mode = body.mode === "review_and_merge" ? "review_and_merge" : "review_only";
+      const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
+      const selection = validateAiSelection({
+        model: typeof body.model === "string" ? body.model : settings.default_model,
+        reasoning_level: typeof body.reasoning_level === "string" ? body.reasoning_level : settings.default_reasoning_level,
+      });
+      const reviewRow = (
+        await pool.query(
+          `INSERT INTO pr_ai_reviews (pull_request_id, mode, status, model, reasoning_level, created_by)
+           VALUES ($1,$2,'running',$3,$4,$5) RETURNING id`,
+          [pullRequest.id, mode, selection.model, selection.reasoning_level, session.user_id],
+        )
+      ).rows[0];
+      await enqueueJob({
+        type: "pr.ai_review",
+        payload: {
+          pr_ai_review_id: reviewRow.id,
+          pull_request_id: pullRequest.id,
+          mode,
+          model: selection.model,
+          reasoning_level: selection.reasoning_level,
+        },
+        idempotencyKey: `pr-ai-review:${reviewRow.id}`,
+      });
+      return json(response, 200, { id: reviewRow.id });
     }
     const updated = (await pool.query("SELECT * FROM pull_requests WHERE id=$1", [pullRequest.id])).rows[0];
     return json(response, 200, { pull_request: updated });
