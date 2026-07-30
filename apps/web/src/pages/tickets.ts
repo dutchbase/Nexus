@@ -172,7 +172,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     )).rows[0];
     if (!ticket) return { status: 404, title: "Ticket not found", body: "<h1>Ticket not found</h1>" };
     const versions = (await pool.query(
-      `SELECT pv.*,p.planning_session_id,ar.model,ar.reasoning_level,ps.content prompt_content
+      `SELECT pv.*,p.planning_session_id,p.current_version_id,ar.model,ar.reasoning_level,ps.content prompt_content
        FROM plans p JOIN plan_versions pv ON pv.plan_id=p.id
        JOIN agent_runs ar ON ar.id=pv.agent_run_id
        JOIN prompt_snapshots ps ON ps.id=pv.prompt_snapshot_id
@@ -183,12 +183,18 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     if (!target) return { status: 404, title: "Plan version not found", body: "<h1>Plan version not found</h1>" };
     const previous = versions.find((version) => version.version === target.version - 1);
     const versionsRail = versions.map((version) => `<a class="ticket-row"${version.id === target.id ? ' style="background:var(--accent-soft);border-left:2px solid var(--accent)"' : ""} href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans/${version.version}"><span class="mono">v${version.version}</span><span>${escapeHtml(version.model)} · ${escapeHtml(version.reasoning_level)}</span></a>`).join("");
+    const isApproved = ticket.approved_plan_version_id === target.id;
+    const isCurrent = target.id === target.current_version_id;
+    // ponytail: only the current version can ever be approved server-side —
+    // gating the button on the same condition avoids the misleading "still
+    // clickable" state the user hit after approving.
+    const approveDisabledReason = isApproved ? "Already approved" : !isCurrent ? "A newer version exists — only the current version can be approved" : "";
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)} <span class="status">${escapeHtml(ticket.status)}</span></div>
       <h1>Plan review · v${target.version}</h1>
       <div class="toolbar"><a class="button" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans">Back to plans</a>
         <button class="button" type="button" data-open-revision-dialog>Request revision</button>
         <button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reject-plan-version="${target.id}">Reject</button>
-        <button class="button primary" type="button" data-approve-plan-version="${target.id}" data-content-hash="${escapeHtml(target.content_hash)}">Approve this version</button></div>
+        <button class="button primary" type="button" data-approve-plan-version="${target.id}" data-content-hash="${escapeHtml(target.content_hash)}"${approveDisabledReason ? " disabled" : ""} title="${escapeHtml(approveDisabledReason)}">${isApproved ? "Approved" : "Approve this version"}</button></div>
       <div class="grid two">
         <section class="card"><div class="tabs" role="tablist"><button type="button" role="tab" id="tab-0" aria-controls="panel-0" aria-selected="true">Rendered</button><button type="button" role="tab" id="tab-1" aria-controls="panel-1" aria-selected="false">Raw Markdown</button><button type="button" role="tab" id="tab-2" aria-controls="panel-2" aria-selected="false">Diff${previous ? ` v${previous.version} → v${target.version}` : ""}</button></div>
           <div class="card-body">
@@ -244,7 +250,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       [decodeURIComponent(ticketMatch[1])],
     )).rows[0];
     if (!ticket) return { status: 404, title: "Ticket not found", body: "<h1>Ticket not found</h1>" };
-    const [notesResult, historyResult, skillsResult, notificationsResult, runsResult, prsResult] = await Promise.all([
+    const [notesResult, historyResult, skillsResult, notificationsResult, runsResult, prsResult, planVersionsResult] = await Promise.all([
       pool.query("SELECT n.*,u.username FROM ticket_notes n LEFT JOIN users u ON u.id=n.author_id WHERE ticket_id=$1 ORDER BY n.created_at DESC", [ticket.id]),
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
       pool.query(
@@ -263,6 +269,13 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       ),
       pool.query("SELECT * FROM agent_runs WHERE ticket_id=$1 ORDER BY started_at DESC NULLS LAST", [ticket.id]),
       pool.query("SELECT * FROM pull_requests WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
+      pool.query(
+        `SELECT pv.*,p.current_version_id,ar.model,ar.reasoning_level
+         FROM plans p JOIN plan_versions pv ON pv.plan_id=p.id
+         JOIN agent_runs ar ON ar.id=pv.agent_run_id
+         WHERE p.ticket_id=$1 ORDER BY pv.version DESC`,
+        [ticket.id],
+      ),
     ]);
     const notes = notesResult.rows;
     const history = historyResult.rows;
@@ -307,7 +320,19 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
       <pre class="references">Use the following skills:
 <span data-prompt-skills>${escapeHtml(referenceLines)}</span></pre>
       <a class="button" href="/api/admin/tickets/${ticket.id}/prompt-preview">Open full planning prompt preview</a></div></section>`;
-    const plansPanel = `<section class="card"><div class="card-head">Planning</div><div class="card-body"><p>Review the immutable generated plan, its exact prompt, model, reasoning level, and raw Markdown.</p><a class="button" href="/admin/tickets/${ticket.ticket_number}/plans">Open plan review</a></div></section>`;
+    const planVersions = planVersionsResult.rows;
+    // ponytail: no dedicated status column on plan_versions — derive the
+    // label from what already exists (approval pointer, current-version
+    // pointer, ticket status) instead of adding a migration for it.
+    const planVersionStatus = (version: (typeof planVersions)[number]) => {
+      if (ticket.approved_plan_version_id === version.id) return "Approved";
+      if (version.id !== version.current_version_id) return "Revision requested";
+      if (ticket.status === "Rejected") return "Rejected";
+      return "Ready for review";
+    };
+    const plansPanel = `<section class="card"><div class="card-head">Planning</div>${planVersions.length ? planVersions.map((version) =>
+      `<a class="ticket-row" href="/admin/tickets/${ticket.ticket_number}/plans/${version.version}"><span class="mono">v${version.version}</span><strong>${escapeHtml(planVersionStatus(version))}</strong><span>${escapeHtml(version.model)} · ${escapeHtml(version.reasoning_level)}</span><time>${new Date(version.created_at).toLocaleString("nl-NL")}</time></a>`,
+    ).join("") : '<div class="card-body"><p>No plan has been generated yet.</p></div>'}</section>`;
     const runsPanel = `<section class="card"><div class="card-head">Runs</div>${runsResult.rows.map((run) =>
       `<a class="ticket-row" href="/admin/runs/${run.id}"><span class="mono">${shortRef("RUN", run.id)}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}</span><span class="status">${escapeHtml(run.status)}</span><time>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : ""}</time></a>`,
     ).join("") || '<div class="card-body"><p>No runs yet.</p></div>'}</section>`;
