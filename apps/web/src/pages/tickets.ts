@@ -230,7 +230,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · Plan review</div>
       <h1>Implementation plan</h1><p><a class="button" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}">Back to ticket</a></p>
       <p>${compare}</p>
-      ${versions.map((version) => `<section class="card"><div class="card-head">Version ${version.version} · ${escapeHtml(version.model)} / ${escapeHtml(version.reasoning_level)} · <a href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans/${version.version}">Open review page</a></div>
+      ${versions.map((version) => `<section class="card"><div class="card-head">Version ${version.version} · ${escapeHtml(version.model)} / ${escapeHtml(version.reasoning_level)} <a class="button primary" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans/${version.version}">Review &amp; approve</a></div>
         <div class="card-body">${renderMarkdown(version.content_markdown)}
         <details><summary>Raw Markdown</summary><pre>${escapeHtml(version.content_markdown)}</pre></details>
         <details><summary>Exact planning prompt</summary><pre>${escapeHtml(version.prompt_content)}</pre></details>
