@@ -15,8 +15,8 @@ function safeSegment(value: string, fallback: string) {
   return segment || fallback;
 }
 
-export function executionBranchName(ticketNumber: string, title: string) {
-  return `feedback/${safeSegment(ticketNumber, "ticket")}-${safeSegment(title.toLowerCase(), "change")}`;
+export function executionBranchName(ticketNumber: string, title: string, attemptNumber: number) {
+  return `feedback/${safeSegment(ticketNumber, "ticket")}-${attemptNumber}-${safeSegment(title.toLowerCase(), "change")}`;
 }
 
 export async function createExecutionWorktree(input: {
@@ -41,7 +41,7 @@ export async function createExecutionWorktree(input: {
     throw new Error("invalid worktree path");
   }
   await mkdir(path.dirname(worktreePath), { recursive: true });
-  const branchName = executionBranchName(input.ticketNumber, input.title);
+  const branchName = executionBranchName(input.ticketNumber, input.title, input.attemptNumber);
   const baseRef = `refs/heads/${input.defaultBranch}`;
   await exec("git", ["-C", repository, "show-ref", "--verify", baseRef]);
   const baseCommit = (await exec("git", ["-C", repository, "rev-parse", baseRef])).stdout.trim();
