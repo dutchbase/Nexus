@@ -892,12 +892,12 @@ async function publishExecutionAttempt(input: {
         : `UPDATE execution_attempts SET validation_status='pr_creation_failed',completed_at=now() WHERE id=$1`,
       [input.attempt.id],
     );
-    if (blocked) {
-      await pool.query(
-        `UPDATE agent_runs SET status='failed',error_code='validation_failed',error_message=$2 WHERE id=$1`,
-        [input.runId, error.message],
-      );
-    }
+    await pool.query(
+      blocked
+        ? `UPDATE agent_runs SET status='failed',error_code='validation_failed',error_message=$2 WHERE id=$1`
+        : `UPDATE agent_runs SET status='failed',error_code='pr_creation_failed',error_message=$2 WHERE id=$1`,
+      [input.runId, error.message],
+    );
     await inTransaction(async (client) => {
       const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
       await client.query("UPDATE tickets SET status=$2,updated_at=now() WHERE id=$1", [input.ticket.id, status]);
@@ -907,7 +907,9 @@ async function publishExecutionAttempt(input: {
          VALUES ($1,$2,$3,$4,'worker',$5,$6,$7)`,
         [
           input.ticket.id, current.status, status,
-          blocked ? "Commit-time secret/protected-path scan blocked the commit" : "Worker-controlled push or pull-request creation failed",
+          blocked
+            ? "Commit-time secret/protected-path scan blocked the commit"
+            : `Worker-controlled push or pull-request creation failed: ${error.message}`,
           input.jobId, input.runId, input.attempt.plan_version_id,
         ],
       );

@@ -35,12 +35,25 @@ function apiBaseUrl() {
   return url.toString().replace(/\/$/, "");
 }
 
+function authToken() {
+  const value = process.env.GITHUB_TOKEN;
+  if (!value) throw new Error("GITHUB_TOKEN is required");
+  return value;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBaseUrl()}${path}`, {
     ...init,
-    headers: { "content-type": "application/json", ...init?.headers },
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${authToken()}`,
+      ...init?.headers,
+    },
   });
-  if (!response.ok) throw new Error(`GitHub provider request failed with status ${response.status}`);
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`GitHub provider request failed with status ${response.status}${detail ? `: ${detail}` : ""}`);
+  }
   return response.json() as Promise<T>;
 }
 
