@@ -519,28 +519,47 @@ async function runExecution(job: any) {
     baseCommit: attempt.base_commit as string | null,
   };
   if (!repairing) {
-    const repository = await validateProject({
-      repositoryPath: (await pool.query("SELECT repository_path FROM projects WHERE id=$1", [ticket.project_id])).rows[0]?.repository_path,
-      defaultBranch: (await pool.query("SELECT default_branch FROM projects WHERE id=$1", [ticket.project_id])).rows[0]?.default_branch,
-      requireRemote: false,
-    });
-    if (!repository.valid) throw new Error(`repository is not available for execution: ${repository.errors.join("; ")}`);
-    const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
-    worktree = await createExecutionWorktree({
-      repositoryPath: project.repository_path,
-      defaultBranch: project.default_branch,
-      dataRoot: process.env.DCC_DATA_ROOT ?? REPO_ROOT,
-      projectSlug: project.slug,
-      ticketNumber: ticket.ticket_number,
-      title: ticket.title,
-      attemptNumber: attempt.attempt_number,
-    });
-    await pool.query(
-      `UPDATE execution_attempts
-       SET branch_name=$2,worktree_path=$3,base_commit=$4,validation_status='executing'
-       WHERE id=$1`,
-      [attempt.id, worktree.branchName, worktree.worktreePath, worktree.baseCommit],
-    );
+    try {
+      const repository = await validateProject({
+        repositoryPath: (await pool.query("SELECT repository_path FROM projects WHERE id=$1", [ticket.project_id])).rows[0]?.repository_path,
+        defaultBranch: (await pool.query("SELECT default_branch FROM projects WHERE id=$1", [ticket.project_id])).rows[0]?.default_branch,
+        requireRemote: false,
+      });
+      if (!repository.valid) throw new Error(`repository is not available for execution: ${repository.errors.join("; ")}`);
+      const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
+      worktree = await createExecutionWorktree({
+        repositoryPath: project.repository_path,
+        defaultBranch: project.default_branch,
+        dataRoot: process.env.DCC_DATA_ROOT ?? REPO_ROOT,
+        projectSlug: project.slug,
+        ticketNumber: ticket.ticket_number,
+        title: ticket.title,
+        attemptNumber: attempt.attempt_number,
+      });
+      await pool.query(
+        `UPDATE execution_attempts
+         SET branch_name=$2,worktree_path=$3,base_commit=$4,validation_status='executing'
+         WHERE id=$1`,
+        [attempt.id, worktree.branchName, worktree.worktreePath, worktree.baseCommit],
+      );
+    } catch (error) {
+      await pool.query(
+        "UPDATE execution_attempts SET validation_status='failed',completed_at=now() WHERE id=$1",
+        [attempt.id],
+      );
+      await inTransaction(async (client) => {
+        const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
+        await client.query("UPDATE tickets SET status='Execution Failed',updated_at=now() WHERE id=$1", [ticket.id]);
+        await client.query(
+          `INSERT INTO ticket_status_history
+           (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_plan_version_id)
+           VALUES ($1,$2,'Execution Failed',$3,'worker',$4,$5)`,
+          [ticket.id, current.status, error instanceof Error ? error.message : "Execution worktree setup failed",
+            job.id, attempt.plan_version_id],
+        );
+      });
+      throw error;
+    }
   } else if (!worktree.worktreePath) {
     throw new Error("repair worktree is unavailable");
   }
