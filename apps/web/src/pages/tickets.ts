@@ -196,7 +196,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       <div class="toolbar"><a class="button" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans">Back to plans</a>
         <button class="button" type="button" data-open-revision-dialog>Request revision</button>
         <button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reject-plan-version="${target.id}">Reject</button>
-        <button class="button primary" type="button" data-approve-plan-version="${target.id}" data-content-hash="${escapeHtml(target.content_hash)}"${approveDisabledReason ? " disabled" : ""} title="${escapeHtml(approveDisabledReason)}">${isApproved ? "Approved" : "Approve this version"}</button></div>
+        <button class="button primary" type="button" data-open-approve-dialog${approveDisabledReason ? " disabled" : ""} title="${escapeHtml(approveDisabledReason)}">${isApproved ? "Approved" : "Approve this version"}</button></div>
       <div class="grid two">
         <section class="card"><div class="tabs" role="tablist"><button type="button" role="tab" id="tab-0" aria-controls="panel-0" aria-selected="true">Rendered</button><button type="button" role="tab" id="tab-1" aria-controls="panel-1" aria-selected="false">Raw Markdown</button><button type="button" role="tab" id="tab-2" aria-controls="panel-2" aria-selected="false">Diff${previous ? ` v${previous.version} → v${target.version}` : ""}</button></div>
           <div class="card-body">
@@ -213,7 +213,10 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       </div>
       <dialog data-revision-dialog aria-label="Request revision" data-plan-id="${target.plan_id}"><div class="card-head">Request revision</div>
         <div class="card-body"><label class="field"><span>What must change in the next revision?</span><textarea data-revision-feedback rows="6" placeholder="What must change in the next revision?"></textarea></label>
-        <p class="error" role="alert"></p><button class="button" type="button" data-close-dialog>Cancel</button> <button class="button primary" type="button" data-submit-revision>Submit feedback &amp; queue revision</button></div></dialog>`;
+        <p class="error" role="alert"></p><button class="button" type="button" data-close-dialog>Cancel</button> <button class="button primary" type="button" data-submit-revision>Submit feedback &amp; queue revision</button></div></dialog>
+      <dialog data-approve-dialog aria-label="Approve plan version" data-plan-version-id="${target.id}" data-content-hash="${escapeHtml(target.content_hash)}"><div class="card-head">Approve this version</div>
+        <div class="card-body"><label class="field"><span>Note (optional) — open questions or extra context</span><textarea data-approve-note rows="4" placeholder="e.g. approved, but double-check the migration rollback plan"></textarea></label>
+        <p class="error" role="alert"></p><button class="button" type="button" data-close-dialog>Cancel</button> <button class="button primary" type="button" data-confirm-approve>Approve</button></div></dialog>`;
     return { status: 200, title: `${ticket.ticket_number} · Plan review`, body };
   }
   const ticketPlansPageMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)\/plans$/);
