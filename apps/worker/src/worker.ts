@@ -982,7 +982,6 @@ async function retryPublication(job: any) {
 }
 
 async function runPrAiReview(job: any) {
-  await preflightClaudeAuthentication();
   const payload = job.payload_json as {
     pr_ai_review_id: string;
     pull_request_id: string;
@@ -990,6 +989,20 @@ async function runPrAiReview(job: any) {
     model?: string;
     reasoning_level?: string;
   };
+
+  // ponytail: idempotency guard. A retry after a late failure (e.g. between
+  // posting the GitHub comment and the final pr_ai_reviews UPDATE) must not
+  // re-invoke Claude or post a second, duplicate comment. Once a prior
+  // attempt has moved this review out of 'running' — completed or recorded
+  // its own error — treat the job as already handled instead of redoing the
+  // side effects.
+  const existingReview = (
+    await pool.query("SELECT status FROM pr_ai_reviews WHERE id=$1", [payload.pr_ai_review_id])
+  ).rows[0];
+  if (!existingReview) throw new Error("pr_ai_reviews row not found");
+  if (existingReview.status !== "running") return;
+
+  await preflightClaudeAuthentication();
 
   const pullRequest = (
     await pool.query("SELECT * FROM pull_requests WHERE id=$1", [payload.pull_request_id])
@@ -1020,11 +1033,18 @@ async function runPrAiReview(job: any) {
   });
 
   const runId = randomUUID();
+  // ponytail: a fresh session id per attempt, same as runPlanning's sessionId
+  // above (and for the same reason) — the Claude CLI rejects a --session-id
+  // that's already in use. Reusing payload.pr_ai_review_id across retries
+  // would make every retry after a successful-but-not-yet-finalized
+  // invocation fail deterministically at this exact step forever, permanently
+  // defeating retry/backoff for this job type.
+  const sessionId = randomUUID();
   await pool.query(
     `INSERT INTO agent_runs
      (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
-     VALUES ($1,$2,'pr_ai_review','running',$3,$4,$5,$6,now(),$7)`,
-    [runId, project.id, payload.pr_ai_review_id, model, reasoningLevel, project.repository_path,
+     VALUES ($1,$2,'pr_ai_review','running',NULL,$3,$4,$5,now(),$6)`,
+    [runId, project.id, model, reasoningLevel, project.repository_path,
       { job_id: job.id, pr_ai_review_id: payload.pr_ai_review_id }],
   );
   await pool.query("UPDATE pr_ai_reviews SET agent_run_id=$1 WHERE id=$2", [runId, payload.pr_ai_review_id]);
@@ -1039,7 +1059,7 @@ async function runPrAiReview(job: any) {
 
     const result = await invokePlanningClaude({
       task: `Review PR #${pullRequest.number} in ${pullRequest.repository} for merge safety.`,
-      sessionId: payload.pr_ai_review_id,
+      sessionId,
       model,
       effort: reasoningLevel,
       promptFile,
@@ -1048,6 +1068,10 @@ async function runPrAiReview(job: any) {
       maxTurns: 5,
       oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
     });
+    // Publish the correlation id only after the CLI has completed, matching
+    // runPlanning's same ordering (agent_runs.claude_session_id stays NULL
+    // until the invocation this run actually used has finished).
+    await pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]);
 
     const verdict = parsePrReviewVerdict(result.markdown);
 
