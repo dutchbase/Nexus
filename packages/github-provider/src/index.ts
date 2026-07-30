@@ -146,14 +146,14 @@ export async function createPullRequestComment(
   number: number,
   body: string,
 ): Promise<{ id: number; html_url: string }> {
-  return request(`/repos/${owner}/${repo}/issues/${number}/comments`, {
+  return request(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${number}/comments`, {
     method: "POST",
     body: JSON.stringify({ body }),
   });
 }
 
 export async function getPullRequestDiff(owner: string, repo: string, number: number): Promise<string> {
-  return requestRaw(`/repos/${owner}/${repo}/pulls/${number}`, {
+  return requestRaw(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`, {
     headers: { accept: "application/vnd.github.v3.diff" },
   });
 }

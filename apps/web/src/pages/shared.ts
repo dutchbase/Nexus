@@ -15,6 +15,7 @@ export const validStatuses = new Set([
 export const allowedTemplateVariables = new Set([
   "project.slug", "project.name", "project.repository_path", "project.default_branch",
   "ticket.title", "ticket.description", "ticket.category", "ticket.priority",
+  "pr.title", "pr.author", "pr.head_branch", "pr.base_branch", "pr.body", "pr.diff",
 ]);
 
 export function lineDiff(before: string, after: string) {

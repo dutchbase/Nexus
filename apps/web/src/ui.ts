@@ -458,6 +458,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const mode=document.querySelector("[data-ai-review-mode]").value;
           const model=document.querySelector("[data-ai-review-model]").value||undefined;
           const reasoning_level=document.querySelector("[data-ai-review-reasoning]").value||undefined;
+          if(mode==="review_and_merge"&&!confirm("Run AI review and, if approved, merge this pull request on GitHub? This cannot be undone from here."))return;
           prAction("ai-review",{mode,model,reasoning_level});
         });
         const createTicketBtn=document.querySelector("[data-open-create-ticket]"),createTicketDialog=document.querySelector("[data-create-ticket-dialog]");
