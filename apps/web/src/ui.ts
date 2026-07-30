@@ -188,7 +188,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(!confirm("Approve this plan version?"))return;
           const button=event.currentTarget;
           const response=await fetch("/api/admin/plan-versions/"+button.dataset.approvePlanVersion+"/approve",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({plan_version_id:button.dataset.approvePlanVersion,content_hash:button.dataset.contentHash})});
-          if(response.ok)location.reload();else alert((await response.json()).error);
+          if(response.ok)location.href="/admin/tickets/"+(window.location.pathname.match(/\\/tickets\\/([^\\/]+)/)||[])[1];else alert((await response.json()).error);
         });
         document.querySelector("[data-reject-plan-version]")?.addEventListener("click",async(event)=>{
           if(!confirm("Reject this plan version?"))return;
