@@ -1,7 +1,9 @@
 import { escapeHtml, lineDiff, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
+import { checkPlanApprovalGate } from "@dcc/domain";
+import { inTransaction } from "@dcc/database";
 
-export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
+export async function render(url: URL, session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname === "/admin/tickets") {
     const values: any[] = [];
     const conditions: string[] = [];
@@ -172,7 +174,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     )).rows[0];
     if (!ticket) return { status: 404, title: "Ticket not found", body: "<h1>Ticket not found</h1>" };
     const versions = (await pool.query(
-      `SELECT pv.*,p.planning_session_id,ar.model,ar.reasoning_level,ps.content prompt_content
+      `SELECT pv.*,p.planning_session_id,p.current_version_id,ar.model,ar.reasoning_level,ps.content prompt_content
        FROM plans p JOIN plan_versions pv ON pv.plan_id=p.id
        JOIN agent_runs ar ON ar.id=pv.agent_run_id
        JOIN prompt_snapshots ps ON ps.id=pv.prompt_snapshot_id
@@ -183,12 +185,18 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     if (!target) return { status: 404, title: "Plan version not found", body: "<h1>Plan version not found</h1>" };
     const previous = versions.find((version) => version.version === target.version - 1);
     const versionsRail = versions.map((version) => `<a class="ticket-row"${version.id === target.id ? ' style="background:var(--accent-soft);border-left:2px solid var(--accent)"' : ""} href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans/${version.version}"><span class="mono">v${version.version}</span><span>${escapeHtml(version.model)} · ${escapeHtml(version.reasoning_level)}</span></a>`).join("");
+    const isApproved = ticket.approved_plan_version_id === target.id;
+    const isCurrent = target.id === target.current_version_id;
+    // ponytail: only the current version can ever be approved server-side —
+    // gating the button on the same condition avoids the misleading "still
+    // clickable" state the user hit after approving.
+    const approveDisabledReason = isApproved ? "Already approved" : !isCurrent ? "A newer version exists — only the current version can be approved" : "";
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)} <span class="status">${escapeHtml(ticket.status)}</span></div>
       <h1>Plan review · v${target.version}</h1>
       <div class="toolbar"><a class="button" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans">Back to plans</a>
         <button class="button" type="button" data-open-revision-dialog>Request revision</button>
         <button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reject-plan-version="${target.id}">Reject</button>
-        <button class="button primary" type="button" data-approve-plan-version="${target.id}" data-content-hash="${escapeHtml(target.content_hash)}">Approve this version</button></div>
+        <button class="button primary" type="button" data-approve-plan-version="${target.id}" data-content-hash="${escapeHtml(target.content_hash)}"${approveDisabledReason ? " disabled" : ""} title="${escapeHtml(approveDisabledReason)}">${isApproved ? "Approved" : "Approve this version"}</button></div>
       <div class="grid two">
         <section class="card"><div class="tabs" role="tablist"><button type="button" role="tab" id="tab-0" aria-controls="panel-0" aria-selected="true">Rendered</button><button type="button" role="tab" id="tab-1" aria-controls="panel-1" aria-selected="false">Raw Markdown</button><button type="button" role="tab" id="tab-2" aria-controls="panel-2" aria-selected="false">Diff${previous ? ` v${previous.version} → v${target.version}` : ""}</button></div>
           <div class="card-body">
@@ -230,7 +238,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · Plan review</div>
       <h1>Implementation plan</h1><p><a class="button" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}">Back to ticket</a></p>
       <p>${compare}</p>
-      ${versions.map((version) => `<section class="card"><div class="card-head">Version ${version.version} · ${escapeHtml(version.model)} / ${escapeHtml(version.reasoning_level)} · <a href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans/${version.version}">Open review page</a></div>
+      ${versions.map((version) => `<section class="card"><div class="card-head">Version ${version.version} · ${escapeHtml(version.model)} / ${escapeHtml(version.reasoning_level)} <a class="button primary" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans/${version.version}">Review &amp; approve</a></div>
         <div class="card-body">${renderMarkdown(version.content_markdown)}
         <details><summary>Raw Markdown</summary><pre>${escapeHtml(version.content_markdown)}</pre></details>
         <details><summary>Exact planning prompt</summary><pre>${escapeHtml(version.prompt_content)}</pre></details>
@@ -239,12 +247,30 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   }
   const ticketMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)$/);
   if (ticketMatch) {
-    const ticket = (await pool.query(
+    let ticket = (await pool.query(
       `SELECT t.*,p.name project_name,f.name form_name FROM tickets t JOIN projects p ON p.id=t.project_id LEFT JOIN forms f ON f.id=t.form_id WHERE t.id::text=$1 OR t.ticket_number=$1`,
       [decodeURIComponent(ticketMatch[1])],
     )).rows[0];
     if (!ticket) return { status: 404, title: "Ticket not found", body: "<h1>Ticket not found</h1>" };
-    const [notesResult, historyResult, skillsResult, notificationsResult, runsResult, prsResult] = await Promise.all([
+    if (ticket.status === "Submitted") {
+      // PRD §17.2 "Administrator opens triage": Submitted -> Triage fires
+      // as a side effect of an admin viewing the ticket.
+      ticket = await inTransaction(async (client) => {
+        const updated = (await client.query(
+          "UPDATE tickets SET status='Triage',updated_at=now() WHERE id=$1 AND status='Submitted' RETURNING *",
+          [ticket.id],
+        )).rows[0];
+        if (updated) {
+          await client.query(
+            `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
+             VALUES ($1,'Submitted','Triage','Administrator opened triage','admin',$2)`,
+            [ticket.id, session.user_id],
+          );
+        }
+        return { ...ticket, ...(updated ?? {}) };
+      });
+    }
+    const [notesResult, historyResult, skillsResult, notificationsResult, runsResult, prsResult, planVersionsResult] = await Promise.all([
       pool.query("SELECT n.*,u.username FROM ticket_notes n LEFT JOIN users u ON u.id=n.author_id WHERE ticket_id=$1 ORDER BY n.created_at DESC", [ticket.id]),
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
       pool.query(
@@ -263,6 +289,13 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       ),
       pool.query("SELECT * FROM agent_runs WHERE ticket_id=$1 ORDER BY started_at DESC NULLS LAST", [ticket.id]),
       pool.query("SELECT * FROM pull_requests WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
+      pool.query(
+        `SELECT pv.*,p.current_version_id,ar.model,ar.reasoning_level
+         FROM plans p JOIN plan_versions pv ON pv.plan_id=p.id
+         JOIN agent_runs ar ON ar.id=pv.agent_run_id
+         WHERE p.ticket_id=$1 ORDER BY pv.version DESC`,
+        [ticket.id],
+      ),
     ]);
     const notes = notesResult.rows;
     const history = historyResult.rows;
@@ -272,7 +305,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       `<span class="skill-chip" data-skill-chip="${skill.id}" data-slug="${escapeHtml(skill.slug)}" title="${skill.automatic ? "Automatically added by project" : "Selected on this ticket"} · ${escapeHtml(skill.filesystem_path)}">${escapeHtml(skill.name)}
        ${skill.automatic ? '<small>auto</small>' : `<button type="button" aria-label="Remove ${escapeHtml(skill.name)}" data-remove-skill="${skill.id}">×</button>`}</span>`,
     ).join("");
-    const referenceLines = selectedSkills.map((skill) => `- ${skill.slug}: ${skill.filesystem_path}`).join("\n");
+    const referenceLines = selectedSkills.map((skill) => `- ${skill.slug}: ${skill.filesystem_path}`).join("\n") || "No skills resolved for this ticket.";
     const modelOptions = ["fable", "opus", "sonnet", "haiku"].map((model) => `<option value="${model}"${ticket.default_model === model ? " selected" : ""}>${model[0].toUpperCase()}${model.slice(1)}</option>`).join("");
     const reasoningOptions = [["low","Low"],["medium","Medium"],["high","High"],["xhigh","Extra high"],["max","Maximum"],["ultracode","Ultracode"]].map(([value,label]) => `<option value="${value}"${ticket.default_reasoning_level === value ? " selected" : ""}>${label}</option>`).join("");
     const phaseConfiguration = (phase: "planning" | "execution" | "repair") => {
@@ -283,8 +316,23 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       return `<fieldset><legend>${phase[0].toUpperCase()}${phase.slice(1)}</legend><div class="grid two"><label class="field"><span>Model</span><select name="${phase}_model">${models}</select></label><label class="field"><span>Reasoning level</span><select name="${phase}_reasoning_level">${reasoning}</select></label></div></fieldset>`;
     };
     const execRuns = runsResult.rows.filter((run) => run.run_type === "execution");
+    const executionGate = await checkPlanApprovalGate(pool, ticket.id);
     const panel = (index: number, content: string) => `<div role="tabpanel" id="panel-${index}" aria-labelledby="tab-${index}"${index === 0 ? "" : " hidden"}>${content}</div>`;
-    const overviewPanel = `<div class="grid two"><section class="card"><div class="card-head">Original submission</div><div class="card-body"><p>${escapeHtml(ticket.description)}</p><dl><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Environment</dt><dd>${escapeHtml(ticket.environment)}</dd><dt>Source URL</dt><dd>${escapeHtml(ticket.source_url)}</dd></dl></div></section>
+    const priorityOptions = ["critical", "high", "medium", "low"].map((value) => `<option value="${value}"${ticket.priority === value ? " selected" : ""}>${value[0].toUpperCase()}${value.slice(1)}</option>`).join("");
+    const overviewPanel = `<div class="grid two"><section class="card"><div class="card-head">Original submission <button class="button" type="button" data-edit-ticket>Edit</button></div><div class="card-body">
+      <div data-ticket-view><p>${escapeHtml(ticket.description)}</p><dl><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Environment</dt><dd>${escapeHtml(ticket.environment)}</dd><dt>Source URL</dt><dd>${escapeHtml(ticket.source_url)}</dd></dl></div>
+      <form data-ticket-edit-form data-ticket-id="${ticket.id}" hidden>
+        <label class="field"><span>Title</span><input name="title" value="${escapeHtml(ticket.title)}"></label>
+        <label class="field"><span>Description</span><textarea name="description" rows="4">${escapeHtml(ticket.description)}</textarea></label>
+        <div class="grid two"><label class="field"><span>Category</span><input name="category" value="${escapeHtml(ticket.category)}"></label>
+        <label class="field"><span>Environment</span><input name="environment" value="${escapeHtml(ticket.environment)}"></label></div>
+        <label class="field"><span>Priority</span><select name="priority">${priorityOptions}</select></label>
+        <label class="field"><span>Expected behavior</span><textarea name="expected_behavior" rows="3">${escapeHtml(ticket.expected_behavior ?? "")}</textarea></label>
+        <label class="field"><span>Actual behavior</span><textarea name="actual_behavior" rows="3">${escapeHtml(ticket.actual_behavior ?? "")}</textarea></label>
+        <label class="field"><span>Reproduction steps</span><textarea name="reproduction_steps" rows="3">${escapeHtml(ticket.reproduction_steps ?? "")}</textarea></label>
+        <button class="button" type="submit">Save</button> <button class="button" type="button" data-cancel-edit-ticket>Cancel</button><p class="error" role="alert"></p>
+      </form>
+      </div></section>
       <section class="card"><div class="card-head">Internal notes</div><div class="card-body notes">${notes.map((note) => `<div class="note"><strong>${escapeHtml(note.username ?? "Administrator")}</strong><p>${escapeHtml(note.body)}</p></div>`).join("") || "<p>No notes yet.</p>"}<form data-notes-form><label class="field"><span>Add an internal note…</span><textarea name="body" placeholder="Add an internal note…" rows="3"></textarea></label><button class="button" type="submit">Save note</button><p class="error" role="alert"></p></form></div></section></div>
       <div class="grid rail"><section class="card"><div class="card-head">Ticket</div><div class="card-body"><dl><dt>Project</dt><dd>${escapeHtml(ticket.project_name)}</dd><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Source form</dt><dd>${escapeHtml(ticket.form_name ?? "—")}</dd><dt>Created</dt><dd>${new Date(ticket.created_at).toLocaleDateString("nl-NL")}</dd></dl></div></section>
       <section class="card"><div class="card-head">Approval gates</div><div class="card-body"><p><button class="button primary" type="button" data-approve-planning${["Triage", "Needs Information"].includes(ticket.status) ? "" : " disabled"} title="${["Triage", "Needs Information"].includes(ticket.status) ? "" : "Ticket must be Triage or Needs Information"}">Approve for planning</button></p><p class="error" role="alert"></p></div></section>
@@ -307,7 +355,19 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
       <pre class="references">Use the following skills:
 <span data-prompt-skills>${escapeHtml(referenceLines)}</span></pre>
       <a class="button" href="/api/admin/tickets/${ticket.id}/prompt-preview">Open full planning prompt preview</a></div></section>`;
-    const plansPanel = `<section class="card"><div class="card-head">Planning</div><div class="card-body"><p>Review the immutable generated plan, its exact prompt, model, reasoning level, and raw Markdown.</p><a class="button" href="/admin/tickets/${ticket.ticket_number}/plans">Open plan review</a></div></section>`;
+    const planVersions = planVersionsResult.rows;
+    // ponytail: no dedicated status column on plan_versions — derive the
+    // label from what already exists (approval pointer, current-version
+    // pointer, ticket status) instead of adding a migration for it.
+    const planVersionStatus = (version: (typeof planVersions)[number]) => {
+      if (ticket.approved_plan_version_id === version.id) return "Approved";
+      if (version.id !== version.current_version_id) return "Revision requested";
+      if (ticket.status === "Rejected") return "Rejected";
+      return "Ready for review";
+    };
+    const plansPanel = `<section class="card"><div class="card-head">Planning</div>${planVersions.length ? planVersions.map((version) =>
+      `<a class="ticket-row" href="/admin/tickets/${ticket.ticket_number}/plans/${version.version}"><span class="mono">v${version.version}</span><strong>${escapeHtml(planVersionStatus(version))}</strong><span>${escapeHtml(version.model)} · ${escapeHtml(version.reasoning_level)}</span><time>${new Date(version.created_at).toLocaleString("nl-NL")}</time></a>`,
+    ).join("") : '<div class="card-body"><p>No plan has been generated yet.</p></div>'}</section>`;
     const runsPanel = `<section class="card"><div class="card-head">Runs</div>${runsResult.rows.map((run) =>
       `<a class="ticket-row" href="/admin/runs/${run.id}"><span class="mono">${shortRef("RUN", run.id)}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}</span><span class="status">${escapeHtml(run.status)}</span><time>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : ""}</time></a>`,
     ).join("") || '<div class="card-body"><p>No runs yet.</p></div>'}</section>`;
@@ -323,9 +383,9 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
       ).join("") || "<p>No notifications yet.</p>"}</div></section>`;
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)}</div><h1>${escapeHtml(ticket.title)}</h1>
       <div class="toolbar"><span class="status">${escapeHtml(ticket.status)}</span>
-        <button class="button" type="button" data-open-preview>Preview prompt</button>
-        <button class="button primary" type="button" data-start-execution${ticket.status === "Plan Approved" ? "" : " disabled"}>Start execution</button></div>
-      <dialog data-preview-dialog aria-label="Prompt preview"><div class="card-head">Prompt preview</div><pre class="references">Loading…</pre><button class="button" type="button" data-close-dialog>Close</button></dialog>
+        ${["Completed", "Merged", "Closed Without Merge"].includes(ticket.status) ? `<button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reopen-ticket>Reopen</button>` : `<button class="button" type="button" data-open-preview>Preview prompt</button>
+        <button class="button primary" type="button" data-start-execution${executionGate.valid ? "" : " disabled"} title="${executionGate.valid ? "" : executionGate.message}">Start execution</button>`}</div>
+      <dialog data-preview-dialog aria-label="Prompt preview"><div class="card-head">Prompt preview</div><p>This is the exact, complete prompt sent to Claude — including global instructions, project context, resolved AI configuration, resolved skills, and ticket content.</p><pre class="references">Loading…</pre><button class="button" type="button" data-close-dialog>Close</button></dialog>
       <div class="tabs" role="tablist">${["Overview", "AI & skills", "Prompt", "Plans", "Runs", "Validation", "Pull request", "Activity"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
       ${[overviewPanel, aiPanel, promptPanel, plansPanel, runsPanel, validationPanel, prPanel, activityPanel].map((content, index) => panel(index, content)).join("")}`;
     return { status: 200, title: ticket.ticket_number, body };

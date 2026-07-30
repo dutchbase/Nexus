@@ -32,13 +32,17 @@ function renderDetail(item: any): PageResult {
       <span class="status">${escapeHtml(item.is_draft ? "Draft" : item.state)}</span>
       <span class="status">${escapeHtml(item.review_state ?? "Review pending")}</span>
       <span class="status">${escapeHtml(item.internal_review_state ?? "Not reviewed")}</span>
+      ${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}
       <a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a>
       <button class="button" type="button" data-pr-refresh>Refresh</button>
       ${button("data-pr-request-changes", "Request changes", canRequestChanges, "Changes already requested")}
       ${button("data-pr-mark-reviewed", "Mark reviewed", canMarkReviewed, "Already marked reviewed")}
-      ${button("data-pr-approve", "Approve internally", canApprove, "Already approved internally", " primary")}
+      <input type="text" data-pr-target-branch value="${escapeHtml(item.base_branch)}" placeholder="Target branch" style="width:120px" title="Branch to merge into (defaults to current base)">
+      ${button("data-pr-approve", "Approve & merge", canApprove, "Already approved internally", " primary")}
       ${button("data-pr-close-ticket", "Close ticket", canCloseTicket, item.ticket_id ? "Ticket is already closed" : "No linked ticket")}
+      <button class="button" type="button" data-open-create-ticket data-project-id="${item.project_id}" data-title="Follow-up: ${escapeHtml(item.title)}">Create follow-up ticket</button>
     </div>
+    <dialog data-create-ticket-dialog aria-label="Create follow-up ticket"><div class="card-head">Create follow-up ticket</div><form data-create-ticket-form><div class="card-body"><label class="field"><span>Title</span><input name="title" required></label><label class="field"><span>Description</span><textarea name="description" rows="4"></textarea></label><p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-dialog>Cancel</button><button class="button primary" type="submit">Create</button></div></form></dialog>
     <div class="grid two"><section class="card"><div class="card-head">Metadata</div><div class="card-body"><dl>
     <dt>Ticket</dt><dd>${item.ticket_number ? `<a href="/admin/tickets/${escapeHtml(item.ticket_number)}">${escapeHtml(item.ticket_number)} · ${escapeHtml(item.ticket_title)}</a> (${escapeHtml(item.ticket_status)})` : `<span style="color:var(--text3)">Not linked</span>`}</dd>
     <dt>Author</dt><dd>${escapeHtml(item.author)}</dd><dt>Branches</dt><dd>${escapeHtml(item.head_branch)} → ${escapeHtml(item.base_branch)}</dd>
@@ -48,15 +52,17 @@ function renderDetail(item: any): PageResult {
     <dt>Run</dt><dd>${item.run_id ? `<a href="/admin/runs/${item.run_id}">${shortRef("RUN", item.run_id)}</a>` : "Not linked"}</dd>
     <dt>Plan hash</dt><dd class="mono">${item.approved_plan_hash ? escapeHtml(item.approved_plan_hash.slice(0, 12)) : "—"}</dd>
     <dt>Skills applied</dt><dd>${item.skills_applied != null ? escapeHtml(String(item.skills_applied)) : "—"}</dd>
+    <dt>Created</dt><dd>${item.created_at_provider ? new Date(item.created_at_provider).toLocaleString() : "—"}</dd>
     <dt>Last synced</dt><dd>${item.last_synced_at ? new Date(item.last_synced_at).toLocaleString("nl-NL") : "Never"}</dd></dl></div></section>
     <section class="card"><div class="card-head">Changed files & validation</div><div class="card-body"><pre>${escapeHtml(JSON.stringify({ changed_files: validation.changed_files ?? [], results: validation.results ?? [] }, null, 2))}</pre></div></section></div>
+    ${item.body ? `<section class="card"><h2>Description</h2>${renderMarkdown(item.body)}</section>` : ""}
     <section class="card"><div class="card-head">Approved plan</div><div class="card-body">${item.approved_plan ? renderMarkdown(item.approved_plan) : "<p>No approved plan linked.</p>"}</div></section>
     <section class="card"><div class="card-head">Implementation & commits</div><div class="card-body"><p>${escapeHtml(item.metadata_json?.implementation_summary ?? "No separate implementation summary recorded.")}</p><p class="mono">${escapeHtml(item.result_commit ?? "No commit recorded")}</p></div></section>
     <section class="card"><div class="card-head">Repair</div><div class="card-body">
       <label class="field"><span>Instructions for the repair run…</span><textarea rows="4" data-pr-repair-text placeholder="Instructions for the repair run…">${escapeHtml(item.internal_notes ?? "")}</textarea></label>
       <p><button class="button" type="button" data-pr-save-instructions>Save instructions</button>
       ${button("data-pr-start-repair", "Start repair workflow", canStartRepair, "No linked execution run to repair", " primary")}</p>
-      <p style="font-size:12px;color:var(--text3)">Merging always happens on GitHub. This platform never merges automatically.</p>
+      <p style="font-size:12px;color:var(--text3)">Approving merges this pull request on GitHub immediately.</p>
     </div></section>`;
   return { status: 200, title: `#${item.number}`, body };
 }
@@ -92,7 +98,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const rows = pullRequests.rows.map((item) => {
       const changes = (item.additions != null || item.deletions != null || item.changed_files != null)
         ? `+${item.additions ?? 0} −${item.deletions ?? 0} · ${item.changed_files ?? 0} files` : "Unknown";
-      return `<a class="ticket-row prs-row" href="/admin/pull-requests/${escapeHtml(item.project_slug)}/${item.number}"><span class="mono">#${item.number}</span><strong>${escapeHtml(item.title)}</strong><span>${item.ticket_number ? escapeHtml(item.ticket_number) : `<span style="color:var(--text3)">Not linked</span>`}</span><span>${escapeHtml(item.check_state ?? "Unknown")}</span><span class="status">${escapeHtml(item.review_state ?? item.state)}</span><span class="mono">${escapeHtml(changes)}</span></a>`;
+      return `<a class="ticket-row prs-row" href="/admin/pull-requests/${escapeHtml(item.project_slug)}/${item.number}"><span class="mono">#${item.number}</span><strong>${escapeHtml(item.title)}</strong><span>${item.ticket_number ? escapeHtml(item.ticket_number) : `<span style="color:var(--text3)">Not linked</span>`}</span><span>${escapeHtml(item.check_state ?? "Unknown")}</span><span class="status">${escapeHtml(item.review_state ?? item.state)}</span><span class="mono">${escapeHtml(changes)}</span><span>${escapeHtml(item.project_name)}</span><span>${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}</span><span>${item.created_at_provider ? new Date(item.created_at_provider).toLocaleString() : "—"}</span></a>`;
     }).join("");
     const tabs = [["all", "All"], ["open", "Open"], ["draft", "Draft"], ["merged", "Merged"], ["closed", "Closed"]] as const;
     const withTab = (value: string) => {
@@ -112,7 +118,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <select name="repository"><option value="">All repositories</option>${repositories.rows.map((row) => `<option value="${escapeHtml(row.repository)}"${repository === row.repository ? " selected" : ""}>${escapeHtml(row.repository)}</option>`).join("")}</select>
       ${tab !== "all" ? `<input type="hidden" name="tab" value="${escapeHtml(tab)}">` : ""}
       <button class="button" type="submit">Filter</button><a class="button" href="/admin/pull-requests">Reset</a><span aria-live="polite">${pullRequests.rows.length} shown</span></form>
-      <section class="card"><div class="list-head prs-head"><span>PR</span><span>Title</span><span>Ticket</span><span>Checks</span><span>Review</span><span>Changes</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No pull requests match these filters.</div>`}</section>`;
+      <section class="card"><div class="list-head prs-head"><span>PR</span><span>Title</span><span>Ticket</span><span>Checks</span><span>Review</span><span>Changes</span><span>Project</span><span>Conflicts</span><span>Created</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No pull requests match these filters.</div>`}</section>`;
     return { status: 200, title: "Pull requests", body };
   }
   const pullRequestSlugMatch = url.pathname.match(/^\/admin\/pull-requests\/([^/]+)\/(\d+)$/);

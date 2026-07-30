@@ -10,7 +10,7 @@ import {
 import { inTransaction, pool } from "@dcc/database";
 import {
   buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, claimJob, completeJob, failJob,
-  enqueueNotification, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
+  enqueueNotification, importGithubPullRequests, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
@@ -37,6 +37,7 @@ let stopping = false;
 let activeExecutionCancellation: AbortController | null = null;
 let lastPullRequestSync = 0;
 let lastNotificationDelivery = 0;
+let lastGithubImport = 0;
 
 process.on("SIGTERM", () => { stopping = true; activeExecutionCancellation?.abort(); });
 process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort(); });
@@ -71,10 +72,11 @@ async function subscriptionPreflightOrRefuse() {
   }
 }
 
-if (!(await subscriptionPreflightOrRefuse())) {
-  await pool.end();
-  process.exit(1);
-}
+// Run once at startup for its side effect (refusing any already-queued
+// Claude-dependent jobs with a clear error) — do not exit the process when
+// auth is missing/invalid. project.validate and pull-request.retry jobs
+// never call Claude and must still be claimable by the main loop below.
+await subscriptionPreflightOrRefuse();
 
 function ticketAiConfiguration(ticket: any) {
   return {
@@ -382,8 +384,11 @@ async function runPlanning(job: any) {
   if (!repository.valid) throw new Error(`repository is not available for planning: ${repository.errors.join("; ")}`);
 
   const runId = randomUUID();
-  const sessionId = revising ? revision.planning_session_id : randomUUID();
-  if (!sessionId) throw new Error("original planning session is unavailable");
+  // ponytail: --session-id asks the CLI to start a NEW session under that id;
+  // reusing the original planning run's id collides ("already in use"). The
+  // full previous plan + feedback is already embedded in the prompt below,
+  // so a revision doesn't need real CLI session continuity — just a fresh id.
+  const sessionId = randomUUID();
   const runType = revising ? "plan_revision" : "planning";
   await pool.query(
     `INSERT INTO agent_runs
@@ -416,6 +421,7 @@ async function runPlanning(job: any) {
   );
 
   const temporary = await mkdtemp(path.join(tmpdir(), "dcc-planning-"));
+  let rawMarkdownForDebug: string | undefined;
   try {
     const promptFile = path.join(temporary, "planning-prompt.md");
     await writeFile(promptFile, completePrompt, { flag: "wx" });
@@ -434,6 +440,7 @@ async function runPlanning(job: any) {
     // Publish the correlation id only after the CLI has logged/completed,
     // so observers cannot see a run before its matching invocation exists.
     await pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]);
+    rawMarkdownForDebug = result.markdown;
     const markdown = parsePlanMarkdown(result.markdown);
     if (revising) {
       await storeRevisedPlan({
@@ -453,11 +460,28 @@ async function runPlanning(job: any) {
     );
   } catch (error) {
     await pool.query(
-      `UPDATE agent_runs SET status='failed',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4 WHERE id=$1`,
+      `UPDATE agent_runs SET status='failed',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4,metadata_json=metadata_json || $5::jsonb WHERE id=$1`,
       [runId, (error as any)?.exitCode ?? 1,
         error instanceof Error && error.message.startsWith("invalid_plan_structure") ? "invalid_plan_structure" : "planning_failed",
-        error instanceof Error ? error.message : "planning failed"],
+        error instanceof Error ? error.message : "planning failed",
+        // ponytail: capture the raw markdown so an invalid_plan_structure
+        // failure is diagnosable without re-running the costly CLI call.
+        JSON.stringify(rawMarkdownForDebug ? { raw_markdown: rawMarkdownForDebug.slice(0, 8000) } : {})],
     );
+    // ponytail: transitionToPlanning() moves the ticket to Planning before
+    // invocation; without reverting here on failure the ticket gets stuck
+    // there forever, since retries require status===expectedStatus.
+    await inTransaction(async (client) => {
+      const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
+      if (current?.status !== "Planning") return;
+      await client.query("UPDATE tickets SET status=$2,updated_at=now() WHERE id=$1", [ticket.id, expectedStatus]);
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
+         VALUES ($1,'Planning',$2,'Planning job failed','worker',$3,$4)`,
+        [ticket.id, expectedStatus, job.id, runId],
+      );
+    });
     throw error;
   } finally {
     await rm(temporary, { recursive: true, force: true });
@@ -869,12 +893,12 @@ async function publishExecutionAttempt(input: {
         : `UPDATE execution_attempts SET validation_status='pr_creation_failed',completed_at=now() WHERE id=$1`,
       [input.attempt.id],
     );
-    if (blocked) {
-      await pool.query(
-        `UPDATE agent_runs SET status='failed',error_code='validation_failed',error_message=$2 WHERE id=$1`,
-        [input.runId, error.message],
-      );
-    }
+    await pool.query(
+      blocked
+        ? `UPDATE agent_runs SET status='failed',error_code='validation_failed',error_message=$2 WHERE id=$1`
+        : `UPDATE agent_runs SET status='failed',error_code='pr_creation_failed',error_message=$2 WHERE id=$1`,
+      [input.runId, error.message],
+    );
     await inTransaction(async (client) => {
       const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
       await client.query("UPDATE tickets SET status=$2,updated_at=now() WHERE id=$1", [input.ticket.id, status]);
@@ -884,7 +908,9 @@ async function publishExecutionAttempt(input: {
          VALUES ($1,$2,$3,$4,'worker',$5,$6,$7)`,
         [
           input.ticket.id, current.status, status,
-          blocked ? "Commit-time secret/protected-path scan blocked the commit" : "Worker-controlled push or pull-request creation failed",
+          blocked
+            ? "Commit-time secret/protected-path scan blocked the commit"
+            : `Worker-controlled push or pull-request creation failed: ${error.message}`,
           input.jobId, input.runId, input.attempt.plan_version_id,
         ],
       );
@@ -979,14 +1005,23 @@ while (!stopping) {
       console.error(`Notification delivery pass failed: ${error instanceof Error ? error.message : "unknown error"}`);
     }
   }
+  if (Date.now() - lastGithubImport >= 5 * 60 * 1000) {
+    lastGithubImport = Date.now();
+    const projects = (await pool.query(
+      "SELECT * FROM projects WHERE github_owner IS NOT NULL AND github_repository IS NOT NULL",
+    )).rows;
+    for (const project of projects) {
+      try { await importGithubPullRequests(pool, project); }
+      catch (error) { console.error(`github import failed for ${project.name}:`, error); }
+    }
+  }
   let job = await claimJob(workerId, ["project.validate", ...publicationJobTypes]);
   if (!job) {
     const waiting = (await pool.query(
       "SELECT 1 FROM jobs WHERE status='queued' AND type=ANY($1::text[]) LIMIT 1",
       [[...planningJobTypes, ...executionJobTypes]],
     )).rowCount;
-    if (waiting) {
-      if (!(await subscriptionPreflightOrRefuse())) break;
+    if (waiting && (await subscriptionPreflightOrRefuse())) {
       job = await claimJob(workerId, [...planningJobTypes, ...executionJobTypes]);
     }
   }

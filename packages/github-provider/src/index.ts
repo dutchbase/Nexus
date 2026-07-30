@@ -25,6 +25,9 @@ export type ProviderPullRequest = {
   merged_at?: string | null;
   closed_at?: string | null;
   merge_commit_sha?: string | null;
+  body?: string | null;
+  mergeable?: boolean | null;
+  mergeable_state?: string;
 };
 
 function apiBaseUrl() {
@@ -35,12 +38,25 @@ function apiBaseUrl() {
   return url.toString().replace(/\/$/, "");
 }
 
+function authToken() {
+  const value = process.env.GITHUB_TOKEN;
+  if (!value) throw new Error("GITHUB_TOKEN is required");
+  return value;
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const response = await fetch(`${apiBaseUrl()}${path}`, {
     ...init,
-    headers: { "content-type": "application/json", ...init?.headers },
+    headers: {
+      "content-type": "application/json",
+      authorization: `Bearer ${authToken()}`,
+      ...init?.headers,
+    },
   });
-  if (!response.ok) throw new Error(`GitHub provider request failed with status ${response.status}`);
+  if (!response.ok) {
+    const detail = await response.text().catch(() => "");
+    throw new Error(`GitHub provider request failed with status ${response.status}${detail ? `: ${detail}` : ""}`);
+  }
   return response.json() as Promise<T>;
 }
 
@@ -65,4 +81,68 @@ export async function createDraftPullRequest(input: CreatePullRequestInput) {
       title: input.title, body: input.body, head: input.head, base: input.base, draft: input.draft,
     }),
   });
+}
+
+async function graphqlRequest<T>(query: string, variables: Record<string, unknown>): Promise<T> {
+  const response = await fetch("https://api.github.com/graphql", {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${authToken()}` },
+    body: JSON.stringify({ query, variables }),
+  });
+  const payload = await response.json();
+  if (!response.ok || payload.errors) {
+    throw new Error(`GitHub GraphQL request failed: ${payload.errors ? JSON.stringify(payload.errors) : response.status}`);
+  }
+  return payload.data as T;
+}
+
+export async function markReadyForReview(owner: string, repository: string, number: number) {
+  const pr = await request<{ node_id: string }>(`${pullsPath(owner, repository)}/${number}`);
+  await graphqlRequest(
+    `mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { clientMutationId } }`,
+    { id: pr.node_id },
+  );
+}
+
+export type MergeResult = { sha: string; merged: boolean; message: string };
+
+export async function mergePullRequest(
+  owner: string,
+  repository: string,
+  number: number,
+  mergeMethod: "merge" | "squash" | "rebase" = "squash",
+) {
+  return request<MergeResult>(`${pullsPath(owner, repository)}/${number}/merge`, {
+    method: "PUT",
+    body: JSON.stringify({ merge_method: mergeMethod }),
+  });
+}
+
+export async function updatePullRequestBase(owner: string, repository: string, number: number, base: string) {
+  return request<ProviderPullRequest>(`${pullsPath(owner, repository)}/${number}`, {
+    method: "PATCH",
+    body: JSON.stringify({ base }),
+  });
+}
+
+export async function listPullRequests(owner: string, repository: string, state: "open" | "closed" | "all" = "all") {
+  return request<ProviderPullRequest[]>(`${pullsPath(owner, repository)}?state=${state}&per_page=100`);
+}
+
+export type BranchMergeResult =
+  | { outcome: "merged"; sha: string }
+  | { outcome: "already_up_to_date" }
+  | { outcome: "conflict" };
+
+export async function mergeBranch(owner: string, repository: string, base: string, head: string): Promise<BranchMergeResult> {
+  const response = await fetch(`${apiBaseUrl()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/merges`, {
+    method: "POST",
+    headers: { "content-type": "application/json", authorization: `Bearer ${authToken()}` },
+    body: JSON.stringify({ base, head }),
+  });
+  if (response.status === 201) { const b = await response.json() as { sha: string }; return { outcome: "merged", sha: b.sha }; }
+  if (response.status === 204) return { outcome: "already_up_to_date" };
+  if (response.status === 409) return { outcome: "conflict" };
+  const detail = await response.text().catch(() => "");
+  throw new Error(`GitHub branch merge failed with status ${response.status}${detail ? `: ${detail}` : ""}`);
 }

@@ -29,7 +29,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   const type = url.searchParams.get("type") ?? "";
   const values: any[] = [];
   const conditions: string[] = [];
-  if (status) { values.push(status); conditions.push(`j.status=$${values.length}`); }
+  if (status) { values.push(status); conditions.push(`j.status=$${values.length}`); } else { conditions.push(`j.status != 'completed'`); }
   if (type) { values.push(type); conditions.push(`j.type=$${values.length}`); }
 
   const [jobs, statuses, types, depth, heartbeat] = await Promise.all([

@@ -1,5 +1,5 @@
 import type pg from "pg";
-import { getPullRequest } from "../../github-provider/src/index.ts";
+import { getPullRequest, listPullRequests } from "../../github-provider/src/index.ts";
 import { inTransaction, pool } from "@dcc/database";
 
 const openPrStatuses = ["PR Ready for Review", "PR Changes Requested", "PR Approved"];
@@ -68,12 +68,13 @@ export async function syncPullRequest(pullRequestId: string, actorType: "worker"
   await pool.query(
     `UPDATE pull_requests SET state=$2,review_state=$3,check_state=$4,is_draft=$5,
        title=$6,author=$7,head_branch=$8,base_branch=$9,updated_at_provider=$10,
-       merged_at=$11,closed_at=$12,merge_commit_sha=$13,last_synced_at=now(),updated_at=now()
+       merged_at=$11,closed_at=$12,merge_commit_sha=$13,body=$14,merge_conflicts=$15,last_synced_at=now(),updated_at=now()
      WHERE id=$1`,
     [
       stored.id, remote.state, remote.review_state ?? null, remote.check_state ?? null, remote.draft,
       remote.title, remote.user?.login ?? null, remote.head.ref, remote.base.ref, remote.updated_at,
       remote.merged_at ?? null, remote.closed_at ?? null, remote.merge_commit_sha ?? null,
+      remote.body ?? null, remote.mergeable_state === "dirty",
     ],
   );
   if (!stored.ticket_id || !openPrStatuses.includes(stored.ticket_status)) return remote;
@@ -90,6 +91,26 @@ export async function syncPullRequest(pullRequestId: string, actorType: "worker"
     await setPullRequestTicketStatus(stored.id, "PR Changes Requested", "GitHub changes requested", actorType, actorId);
   }
   return remote;
+}
+
+export async function importGithubPullRequests(pool: pg.Pool, project: any) {
+  const remote = await listPullRequests(project.github_owner, project.github_repository, "all");
+  for (const pr of remote) {
+    await pool.query(
+      `INSERT INTO pull_requests (project_id,provider,repository,number,url,title,author,state,review_state,check_state,is_draft,
+         head_branch,base_branch,created_at_provider,updated_at_provider,merged_at,closed_at,merge_commit_sha,body,last_synced_at)
+       VALUES ($1,'github',$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,now())
+       ON CONFLICT (project_id,number) DO UPDATE SET
+         url=EXCLUDED.url,title=EXCLUDED.title,author=EXCLUDED.author,state=EXCLUDED.state,review_state=EXCLUDED.review_state,
+         check_state=EXCLUDED.check_state,is_draft=EXCLUDED.is_draft,head_branch=EXCLUDED.head_branch,base_branch=EXCLUDED.base_branch,
+         updated_at_provider=EXCLUDED.updated_at_provider,merged_at=EXCLUDED.merged_at,closed_at=EXCLUDED.closed_at,
+         merge_commit_sha=EXCLUDED.merge_commit_sha,body=EXCLUDED.body,last_synced_at=now(),updated_at=now()`,
+      [project.id, `${project.github_owner}/${project.github_repository}`, pr.number, pr.html_url, pr.title, pr.user?.login ?? null,
+       pr.state, pr.review_state ?? null, pr.check_state ?? null, pr.draft, pr.head.ref, pr.base.ref,
+       pr.created_at, pr.updated_at, pr.merged_at ?? null, pr.closed_at ?? null, pr.merge_commit_sha ?? null, pr.body ?? null],
+    );
+  }
+  return { imported: remote.length };
 }
 
 export async function syncOpenPullRequests() {

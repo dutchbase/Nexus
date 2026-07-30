@@ -81,6 +81,6 @@ export function shortRefs(prefix: string, rows: Array<{ id: string }>) {
   return labels;
 }
 
-export type Session = { username: string };
+export type Session = { username: string; user_id: string };
 export type PageResult = { status: number; title: string; body: string } | null;
 export type PageModule = { render(url: URL, session: Session, metrics: Record<string, number>): Promise<PageResult> };

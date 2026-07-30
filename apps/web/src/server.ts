@@ -5,10 +5,11 @@ import { resolve } from "node:path";
 import { pool, inTransaction } from "@dcc/database";
 import {
   AiConfigurationError, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob, globalPromptTypes,
-  enqueueNotification, projectPromptTypes, promptContentHash, resolveAiConfiguration, setPullRequestTicketStatus, syncOpenPullRequests, syncPullRequest,
-  validateAiSelection, type AiPhase,
+  enqueueNotification, importGithubPullRequests, projectPromptTypes, promptContentHash, resolveAiConfiguration, setPullRequestTicketStatus,
+  syncOpenPullRequests, syncPullRequest, validateAiSelection, type AiPhase,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
+import { markReadyForReview, mergePullRequest, updatePullRequestBase, mergeBranch } from "../../../packages/github-provider/src/index.ts";
 import {
   resolveSkills, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
 } from "../../../packages/skill-registry/src/index.ts";
@@ -538,7 +539,7 @@ async function transitionTicket(ticketRef: string, status: string, reason: strin
 
 async function counts() {
   const row = (await pool.query(`SELECT
-    (SELECT count(*)::integer FROM tickets WHERE status IN ('Triage','Needs Information')) tickets,
+    (SELECT count(*)::integer FROM tickets WHERE status IN ('Submitted','Triage','Needs Information')) tickets,
     (SELECT count(*)::integer FROM agent_runs WHERE status IN ('running','queued')) runs,
     (SELECT count(*)::integer FROM jobs WHERE status IN ('queued','running')) jobs,
     (SELECT count(*)::integer FROM pull_requests WHERE state = 'open') prs,
@@ -752,8 +753,17 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     } else if (action === "mark-reviewed") {
       await pool.query("UPDATE pull_requests SET internal_review_state='reviewed',updated_at=now() WHERE id=$1", [pullRequest.id]);
     } else if (action === "approve") {
+      const [owner, repo] = pullRequest.repository.split("/");
+      const targetBranch = typeof body.target_branch === "string" ? body.target_branch.trim() : "";
+      try {
+        if (targetBranch && targetBranch !== pullRequest.base_branch) await updatePullRequestBase(owner, repo, pullRequest.number, targetBranch);
+        if (pullRequest.is_draft) await markReadyForReview(owner, repo, pullRequest.number);
+        await mergePullRequest(owner, repo, pullRequest.number);
+      } catch (error) {
+        return json(response, 502, { error: error instanceof Error ? error.message : "merge failed" });
+      }
       await pool.query("UPDATE pull_requests SET internal_review_state='approved',updated_at=now() WHERE id=$1", [pullRequest.id]);
-      await setPullRequestTicketStatus(pullRequest.id, "PR Approved", "Pull request approved internally", "admin", session.user_id);
+      await syncPullRequest(pullRequest.id, "admin", session.user_id);
     } else if (action === "request-changes") {
       await pool.query("UPDATE pull_requests SET internal_review_state='changes_requested',updated_at=now() WHERE id=$1", [pullRequest.id]);
       await setPullRequestTicketStatus(pullRequest.id, "PR Changes Requested", "Internal changes requested", "admin", session.user_id);
@@ -807,6 +817,45 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     }
     const updated = (await pool.query("SELECT * FROM pull_requests WHERE id=$1", [pullRequest.id])).rows[0];
     return json(response, 200, { pull_request: updated });
+  }
+  const mergeBranchesMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/merge-branches$/i);
+  if (mergeBranchesMatch && request.method === "POST") {
+    const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [mergeBranchesMatch[1]])).rows[0];
+    if (!project) return json(response, 404, { error: "project not found" });
+    if (!project.github_owner || !project.github_repository) return json(response, 400, { error: "project has no GitHub repository configured" });
+    const body = await bodyOf(request);
+    const head = typeof body.head === "string" ? body.head.trim() : "";
+    const base = typeof body.base === "string" ? body.base.trim() : "";
+    if (!head || !base) return json(response, 400, { error: "head and base branch are required" });
+    let result;
+    try { result = await mergeBranch(project.github_owner, project.github_repository, base, head); }
+    catch (error) { return json(response, 502, { error: error instanceof Error ? error.message : "branch merge failed" }); }
+    await audit({ actorType: "admin", actorId: session.user_id, action: "project.merge_branches", entityType: "project", entityId: project.id, metadata: { head, base, outcome: result.outcome }, ip: ipOf(request) });
+    if (result.outcome === "conflict") return json(response, 409, { error: `Merge conflict merging ${head} into ${base}. Resolve manually on GitHub.` });
+    return json(response, 200, { outcome: result.outcome, sha: "sha" in result ? result.sha : null });
+  }
+  const importAllGithubPullRequestsMatch = url.pathname === "/api/admin/projects/import-github-prs";
+  if (importAllGithubPullRequestsMatch && request.method === "POST") {
+    const projects = (await pool.query(
+      "SELECT * FROM projects WHERE github_owner IS NOT NULL AND github_repository IS NOT NULL",
+    )).rows;
+    let imported = 0;
+    const errors: string[] = [];
+    for (const project of projects) {
+      try { imported += (await importGithubPullRequests(pool, project)).imported; }
+      catch (error) { errors.push(`${project.name}: ${error instanceof Error ? error.message : "import failed"}`); }
+    }
+    return json(response, 200, { imported, projects: projects.length, errors });
+  }
+  const importGithubPullRequestsMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/import-github-prs$/i);
+  if (importGithubPullRequestsMatch && request.method === "POST") {
+    const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [importGithubPullRequestsMatch[1]])).rows[0];
+    if (!project) return json(response, 404, { error: "project not found" });
+    if (!project.github_owner || !project.github_repository) return json(response, 400, { error: "project has no GitHub repository configured" });
+    let result;
+    try { result = await importGithubPullRequests(pool, project); }
+    catch (error) { return json(response, 502, { error: error instanceof Error ? error.message : "failed to list GitHub pull requests" }); }
+    return json(response, 200, result);
   }
   if (url.pathname === "/api/admin/prompts" && request.method === "GET") {
     const projectId = url.searchParams.get("project_id");
@@ -1126,6 +1175,27 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     const tickets = (await pool.query(`SELECT t.*,p.name project_name,f.name form_name FROM tickets t JOIN projects p ON p.id=t.project_id LEFT JOIN forms f ON f.id=t.form_id ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY t.updated_at DESC LIMIT 200`, params)).rows;
     return json(response, 200, { tickets });
   }
+  const createTicketMatch = url.pathname === "/api/admin/tickets" && request.method === "POST";
+  if (createTicketMatch) {
+    const body = await bodyOf(request);
+    const projectId = typeof body.project_id === "string" ? body.project_id : "";
+    const title = typeof body.title === "string" ? body.title.trim() : "";
+    if (!projectId || !title) return json(response, 400, { error: "project_id and title are required" });
+    const description = typeof body.description === "string" ? body.description.trim() : null;
+    const number = (await pool.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
+    const ticket = (await pool.query(
+      `INSERT INTO tickets (ticket_number,project_id,title,description,status,custom_values_json)
+       VALUES ($1,$2,$3,$4,'Triage','{}'::jsonb) RETURNING *`,
+      [`DCC-${number}`, projectId, title, description],
+    )).rows[0];
+    await pool.query(
+      `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
+       VALUES ($1,NULL,'Triage','Created by admin',$2,$3)`,
+      [ticket.id, "admin", session.user_id],
+    );
+    await audit({ actorType: "admin", actorId: session.user_id, action: "ticket.create", entityType: "ticket", entityId: ticket.id, metadata: { title }, ip: ipOf(request) });
+    return json(response, 201, { ticket });
+  }
   const notesMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/notes$/);
   if (notesMatch && request.method === "POST") {
     const body = await bodyOf(request);
@@ -1186,6 +1256,16 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
   if (actionMatch && request.method === "POST") {
     const statuses: Record<string, string> = { reject: "Rejected", cancel: "Cancelled", archive: "Archived" };
     return transitionTicket(decodeURIComponent(actionMatch[1]), statuses[actionMatch[2]], `${actionMatch[2]} by administrator`, session, request, response);
+  }
+  const reopenMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/reopen$/);
+  if (reopenMatch && request.method === "POST") {
+    const ticketRef = decodeURIComponent(reopenMatch[1]);
+    const before = (await pool.query("SELECT * FROM tickets WHERE id::text = $1 OR ticket_number = $1", [ticketRef])).rows[0];
+    if (!before) return json(response, 404, { error: "ticket not found" });
+    if (!["Completed", "Merged", "Closed Without Merge"].includes(before.status)) {
+      return json(response, 409, { error: `ticket cannot be reopened from ${before.status}` });
+    }
+    return transitionTicket(ticketRef, "Needs Information", "Reopened by admin", session, request, response);
   }
   const approveMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/approve-planning$/);
   if (approveMatch && request.method === "POST") {
@@ -1288,7 +1368,11 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
         [planRevisionMatch[1]],
       )).rows[0];
       if (!plan) return null;
-      if (plan.status !== "Plan Ready for Review") {
+      // ponytail: revisions are safe up through Plan Approved too — execution
+      // only starts once the ticket hits Execution Queued, and the approval
+      // gate already re-blocks Start execution once a new version supersedes
+      // the approved one (see checkPlanApprovalGate's current_version_id check).
+      if (!["Plan Ready for Review", "Plan Approved", "Needs Information"].includes(plan.status)) {
         throw Object.assign(new Error(`revision cannot be requested from ${plan.status}`), { status: 409 });
       }
       const current = (await client.query(
@@ -1782,4 +1866,4 @@ const server = createServer((request, response) => {
     else response.end();
   });
 });
-server.listen(port, "127.0.0.1", () => console.log(`web listening on ${port}`));
+server.listen(port, process.env.HOST ?? "0.0.0.0", () => console.log(`web listening on ${port}`));

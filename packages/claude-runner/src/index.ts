@@ -48,10 +48,14 @@ export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = pro
   const result = await runClaude(["auth", "status"], { env });
   let status: any = null;
   try { status = JSON.parse(result.stdout.trim()); } catch { /* handled below */ }
-  if (result.exitCode !== 0 || status?.authenticated !== true || status?.method !== "subscription") {
+  // ponytail: `claude auth status` reports loggedIn/authMethod, not the
+  // authenticated/method fields this code originally expected — that
+  // mismatch made every subscription-token login fail preflight.
+  const isSubscriptionAuth = status?.authMethod === "subscription" || status?.authMethod === "oauth_token";
+  if (result.exitCode !== 0 || status?.loggedIn !== true || !isSubscriptionAuth) {
     throw new ClaudeAuthError("blocked_auth", "blocked_auth: Claude is unauthenticated or is not using subscription authentication");
   }
-  return status as { authenticated: true; method: "subscription"; account?: string };
+  return status as { loggedIn: true; authMethod: "subscription" | "oauth_token"; apiProvider?: string };
 }
 
 export type PlanningInvocation = {
@@ -62,7 +66,11 @@ export type PlanningInvocation = {
 export function buildPlanningArguments(input: PlanningInvocation) {
   return [
     "-p", input.task, "--session-id", input.sessionId, "--model", input.model, "--effort", input.effort,
-    "--permission-mode", "plan", "--tools", "Read,Glob,Grep,Bash",
+    // ponytail: --permission-mode plan expects the agent to conclude by
+    // calling ExitPlanMode, which isn't available in headless -p mode —
+    // the agent then wrote a stray local file instead of the plan markdown.
+    // "manual" enforces the same read-only tool set without that dead end.
+    "--permission-mode", "manual", "--tools", "Read,Glob,Grep,Bash",
     "--append-system-prompt-file", input.promptFile, "--add-dir", input.skillBundleDir,
     "--output-format", "json", "--max-turns", String(input.maxTurns),
   ];
@@ -74,7 +82,16 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
   const result = await runClaude(buildPlanningArguments(input), { cwd: input.workingDirectory, env });
   if (result.exitCode !== 0) {
-    throw Object.assign(new Error(`Claude planning exited ${result.exitCode}: ${result.stderr.trim() || "no error output"}`), { exitCode: result.exitCode });
+    // ponytail: --output-format json routes CLI errors through stdout as a
+    // JSON result (not stderr), so fall back to stdout when stderr is empty.
+    let detail = result.stderr.trim();
+    if (!detail) {
+      try {
+        const parsed = JSON.parse(result.stdout.trim());
+        detail = typeof parsed?.result === "string" ? parsed.result : result.stdout.trim();
+      } catch { detail = result.stdout.trim(); }
+    }
+    throw Object.assign(new Error(`Claude planning exited ${result.exitCode}: ${detail || "no error output"}`), { exitCode: result.exitCode });
   }
   let response: any;
   try { response = JSON.parse(result.stdout.trim()); } catch { throw new Error("Claude planning returned invalid JSON"); }
@@ -185,9 +202,21 @@ const requiredPlanHeadings = [
 
 export function parsePlanMarkdown(markdown: string) {
   const headings = markdown.split(/\r?\n/).filter((line) => /^#{1,2} /.test(line.trim())).map((line) => line.trim());
-  if (headings.length !== requiredPlanHeadings.length ||
-      requiredPlanHeadings.some((heading, index) => headings[index] !== heading)) {
-    throw new Error("invalid_plan_structure: expected the complete ordered 17-section implementation plan");
+  const mismatchIndex = headings.length !== requiredPlanHeadings.length
+    ? Math.min(headings.length, requiredPlanHeadings.length)
+    // ponytail: startsWith, not ===, so a heading like "# Implementation
+    // Plan — DCC-1001: ..." (model adds a descriptive suffix) still counts —
+    // only order/count/prefix are structural, trailing text is harmless.
+    : requiredPlanHeadings.findIndex((heading, index) => !headings[index]?.startsWith(heading));
+  if (mismatchIndex !== -1) {
+    // ponytail: name the actual mismatch instead of a generic message, so a
+    // failed run is diagnosable without re-running the (costly) CLI call.
+    throw new Error(
+      `invalid_plan_structure: expected the complete ordered 17-section implementation plan ` +
+      `(got ${headings.length} headings, expected ${requiredPlanHeadings.length}; ` +
+      `first mismatch at position ${mismatchIndex + 1}: expected "${requiredPlanHeadings[mismatchIndex] ?? "<end>"}", ` +
+      `got "${headings[mismatchIndex] ?? "<end>"}")`,
+    );
   }
   return markdown.endsWith("\n") ? markdown : `${markdown}\n`;
 }
