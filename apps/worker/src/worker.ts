@@ -10,7 +10,7 @@ import {
 import { inTransaction, pool } from "@dcc/database";
 import {
   buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, claimJob, completeJob, failJob,
-  enqueueNotification, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
+  enqueueNotification, importGithubPullRequests, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
@@ -37,6 +37,7 @@ let stopping = false;
 let activeExecutionCancellation: AbortController | null = null;
 let lastPullRequestSync = 0;
 let lastNotificationDelivery = 0;
+let lastGithubImport = 0;
 
 process.on("SIGTERM", () => { stopping = true; activeExecutionCancellation?.abort(); });
 process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort(); });
@@ -1002,6 +1003,16 @@ while (!stopping) {
       await deliverDueNotification();
     } catch (error) {
       console.error(`Notification delivery pass failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    }
+  }
+  if (Date.now() - lastGithubImport >= 5 * 60 * 1000) {
+    lastGithubImport = Date.now();
+    const projects = (await pool.query(
+      "SELECT * FROM projects WHERE github_owner IS NOT NULL AND github_repository IS NOT NULL",
+    )).rows;
+    for (const project of projects) {
+      try { await importGithubPullRequests(pool, project); }
+      catch (error) { console.error(`github import failed for ${project.name}:`, error); }
     }
   }
   let job = await claimJob(workerId, ["project.validate", ...publicationJobTypes]);

@@ -145,6 +145,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         document.querySelector("[data-reject-ticket]")?.addEventListener("click",()=>{if(confirm("Reject this ticket?"))ticketAction("reject")});
         document.querySelector("[data-cancel-ticket]")?.addEventListener("click",()=>{if(confirm("Cancel this ticket? In-flight work stops."))ticketAction("cancel")});
         document.querySelector("[data-archive-ticket]")?.addEventListener("click",()=>{if(confirm("Archive this ticket?"))ticketAction("archive")});
+        document.querySelector("[data-reopen-ticket]")?.addEventListener("click",()=>{if(confirm("Reopen this ticket? It will move to \\"Needs Information\\" so you can update the details before a new plan is generated."))ticketAction("reopen")});
         const notesForm=document.querySelector("[data-notes-form]");
         if(notesForm){notesForm.addEventListener("submit",async(event)=>{
           event.preventDefault();const body=(notesForm.querySelector('[name="body"]')||{}).value?.trim();
@@ -269,6 +270,14 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             if(!response.ok){const result=await response.json();alert(result.error);checkbox.checked=!checkbox.checked}
           });
         });
+        document.querySelector("[data-merge-branches-form]")?.addEventListener("submit",async(event)=>{
+          event.preventDefault();
+          const payload=Object.fromEntries(new FormData(event.currentTarget));
+          const response=await fetch("/api/admin/projects/"+projectId+"/merge-branches",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
+          const result=await response.json();
+          if(response.ok)alert(result.outcome==="already_up_to_date"?"Already up to date — nothing to merge.":"Merged "+payload.head+" into "+payload.base+".");
+          else alert(result.error);
+        });
       `:""}
       ${path==="/admin/forms/new"?`
         const csrf=sessionStorage.getItem("dccCsrf")||"",form=document.querySelector("[data-new-form-form]");
@@ -392,8 +401,9 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         document.querySelector("[data-sync-prs]")?.addEventListener("click",async(event)=>{
           const button=event.currentTarget;button.disabled=true;
           try{
-            const response=await fetch("/api/admin/pull-requests/sync",{method:"POST",headers:{"x-csrf-token":csrf}});
-            if(response.ok)alert("Sync started. Refresh in a few seconds to see updates.");else alert((await response.json()).error);
+            const response=await fetch("/api/admin/projects/import-github-prs",{method:"POST",headers:{"x-csrf-token":csrf}});
+            const result=await response.json();
+            if(response.ok)location.reload();else alert(result.error);
           }finally{button.disabled=false}
         });
       `:""}
@@ -406,7 +416,10 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         }
         document.querySelector("[data-pr-refresh]")?.addEventListener("click",()=>prAction("refresh"));
         document.querySelector("[data-pr-mark-reviewed]")?.addEventListener("click",()=>prAction("mark-reviewed"));
-        document.querySelector("[data-pr-approve]")?.addEventListener("click",()=>prAction("approve"));
+        document.querySelector("[data-pr-approve]")?.addEventListener("click",()=>{
+          const targetBranch=document.querySelector("[data-pr-target-branch]")?.value.trim();
+          if(confirm("Approve and merge this pull request on GitHub? This cannot be undone from here."))prAction("approve",targetBranch?{target_branch:targetBranch}:{});
+        });
         document.querySelector("[data-pr-request-changes]")?.addEventListener("click",()=>prAction("request-changes"));
         document.querySelector("[data-pr-close-ticket]")?.addEventListener("click",()=>{if(confirm("Close the linked ticket? This cannot be undone from here."))prAction("close-ticket")});
         document.querySelector("[data-pr-save-instructions]")?.addEventListener("click",()=>{
@@ -417,6 +430,28 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         document.querySelector("[data-pr-start-repair]")?.addEventListener("click",()=>{
           const feedback=document.querySelector("[data-pr-repair-text]").value.trim();
           prAction("start-repair",feedback?{feedback}:{});
+        });
+        const createTicketBtn=document.querySelector("[data-open-create-ticket]"),createTicketDialog=document.querySelector("[data-create-ticket-dialog]");
+        createTicketBtn?.addEventListener("click",()=>{
+          createTicketDialog.querySelector('[name="title"]').value=createTicketBtn.dataset.title;
+          createTicketDialog.showModal();
+        });
+        createTicketDialog?.querySelector("[data-close-dialog]")?.addEventListener("click",()=>createTicketDialog.close());
+        createTicketDialog?.addEventListener("keydown",event=>{
+          if(event.key!=="Tab")return;
+          const focusables=[...createTicketDialog.querySelectorAll("button,a[href],input,select,textarea,[tabindex]")].filter(el=>!el.disabled);
+          if(!focusables.length)return;
+          const first=focusables[0],last=focusables[focusables.length-1];
+          if(event.shiftKey&&(document.activeElement===first||!createTicketDialog.contains(document.activeElement))){event.preventDefault();last.focus()}
+          else if(!event.shiftKey&&(document.activeElement===last||!createTicketDialog.contains(document.activeElement))){event.preventDefault();first.focus()}
+        });
+        createTicketDialog?.querySelector("[data-create-ticket-form]")?.addEventListener("submit",async(event)=>{
+          event.preventDefault();
+          const form=event.currentTarget;
+          const data=new FormData(form);
+          const response=await fetch("/api/admin/tickets",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({project_id:createTicketBtn.dataset.projectId,title:data.get("title"),description:data.get("description")})});
+          const result=await response.json();
+          if(response.ok){createTicketDialog.close();location.reload()}else{form.querySelector(".error").textContent=result.error}
         });
       `:""}
       ${path==="/admin/skills"?`

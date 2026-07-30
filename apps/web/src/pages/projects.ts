@@ -70,6 +70,16 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <section class="card"><div class="card-head">Validation commands</div><div class="card-body" style="display:flex;flex-direction:column;gap:8px">${["install", "lint", "typecheck", "test", "build"].map((cmd) =>
         `<div style="display:flex;gap:8px;align-items:center"><span class="mono" style="min-width:80px;color:var(--text3)">${escapeHtml(cmd)}</span><input data-cmd="${cmd}" style="flex:1" value="${escapeHtml(validationCommands[cmd] || "")}" placeholder="Command"></div>`,
       ).join("")}</div></section>`;
+    const mergeBranchesPanel = project.github_owner && project.github_repository
+      ? `<section class="card"><div class="card-head">Merge branches</div><div class="card-body">
+      <form data-merge-branches-form style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
+        <label class="field"><span>From (head)</span><input name="head" value="${escapeHtml(project.default_branch)}" required></label>
+        <label class="field"><span>Into (base)</span><input name="base" placeholder="e.g. production" required></label>
+        <button class="button" type="submit">Merge</button>
+      </form>
+      <p style="font-size:12px;color:var(--text3)">Merges one branch directly into another on GitHub (no pull request). Use to promote master into staging/production.</p>
+    </div></section>`
+      : "";
     const yamlPanel = `<section class="card"><div class="card-head">config/projects.yaml · version ${project.config_version}</div><div class="card-body"><pre style="background:var(--code-bg);padding:12px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:12px;overflow-x:auto">${escapeHtml(yaml)}</pre></div></section>`;
     const skillsPanel = `<section class="card"><div class="card-head">Automatically attached to every ticket</div><div class="card-body">${allSkillsResult.rows.length > 0 ? allSkillsResult.rows.map((skill) =>
       `<label style="padding:8px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)"><div><strong>${escapeHtml(skill.name)}</strong> <span class="mono" style="font-size:11px;color:var(--text3)">${escapeHtml(skill.slug)}</span> <span style="font-size:11px;font-weight:600;color:var(--text3)">${escapeHtml(skill.category)}</span> <span style="font-size:11px;color:var(--text3)">v${escapeHtml(skill.version)}</span></div><input type="checkbox" data-skill-checkbox value="${skill.id}" ${skill.attached ? "checked" : ""}></label>`,
@@ -85,7 +95,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <div class="toolbar"><button class="button" data-validate-button>Run validation</button><button class="button primary" data-save-button>Save configuration</button></div>
       ${dirty ? `<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px"><strong>Planning and execution are blocked.</strong> <em>The primary checkout has ${escapeHtml(String(config.uncommitted_count || 3))} uncommitted files. Resolve them on the server — the platform never resets a checkout automatically.</em></div>` : ""}
       <div class="tabs" role="tablist">${["Overview", "YAML config", "Skills", "Validation", "Prompts"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
-      ${[overviewPanel, yamlPanel, skillsPanel, validationPanel, promptsPanel].map((content, index) => panel(index, content)).join("")}`;
+      ${[overviewPanel + mergeBranchesPanel, yamlPanel, skillsPanel, validationPanel, promptsPanel].map((content, index) => panel(index, content)).join("")}`;
     return { status: 200, title: project.name, body };
   }
   return null;

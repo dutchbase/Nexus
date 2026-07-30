@@ -383,8 +383,8 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
       ).join("") || "<p>No notifications yet.</p>"}</div></section>`;
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)}</div><h1>${escapeHtml(ticket.title)}</h1>
       <div class="toolbar"><span class="status">${escapeHtml(ticket.status)}</span>
-        <button class="button" type="button" data-open-preview>Preview prompt</button>
-        <button class="button primary" type="button" data-start-execution${executionGate.valid ? "" : " disabled"} title="${executionGate.valid ? "" : executionGate.message}">Start execution</button></div>
+        ${["Completed", "Merged", "Closed Without Merge"].includes(ticket.status) ? `<button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reopen-ticket>Reopen</button>` : `<button class="button" type="button" data-open-preview>Preview prompt</button>
+        <button class="button primary" type="button" data-start-execution${executionGate.valid ? "" : " disabled"} title="${executionGate.valid ? "" : executionGate.message}">Start execution</button>`}</div>
       <dialog data-preview-dialog aria-label="Prompt preview"><div class="card-head">Prompt preview</div><p>This is the exact, complete prompt sent to Claude — including global instructions, project context, resolved AI configuration, resolved skills, and ticket content.</p><pre class="references">Loading…</pre><button class="button" type="button" data-close-dialog>Close</button></dialog>
       <div class="tabs" role="tablist">${["Overview", "AI & skills", "Prompt", "Plans", "Runs", "Validation", "Pull request", "Activity"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
       ${[overviewPanel, aiPanel, promptPanel, plansPanel, runsPanel, validationPanel, prPanel, activityPanel].map((content, index) => panel(index, content)).join("")}`;
