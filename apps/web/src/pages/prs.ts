@@ -1,5 +1,6 @@
 import { escapeHtml, pool, renderMarkdown, shortRef } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
+import { aiModels, reasoningLevels } from "@dcc/domain";
 
 const detailQuery = `SELECT pr.*,p.name project_name,p.slug project_slug,t.ticket_number,t.title ticket_title,t.status ticket_status,t.approved_plan_hash,
               pv.content_markdown approved_plan,ar.id run_id,ar.model run_model,ar.reasoning_level run_reasoning_level,
@@ -13,7 +14,7 @@ const detailQuery = `SELECT pr.*,p.name project_name,p.slug project_slug,t.ticke
 
 // Shared by both the uuid route (/admin/pull-requests/{uuid}) and the slug
 // route (/admin/pull-requests/{projectSlug}/{number}) so the two never drift.
-function renderDetail(item: any): PageResult {
+function renderDetail(item: any, aiReviews: any[]): PageResult {
   if (!item) return { status: 404, title: "Pull request not found", body: "<h1>Pull request not found</h1>" };
   const validation = item.metadata_json?.validation_output ?? {};
   const changes = (item.additions != null || item.deletions != null || item.changed_files != null)
@@ -42,6 +43,18 @@ function renderDetail(item: any): PageResult {
       ${button("data-pr-close-ticket", "Close ticket", canCloseTicket, item.ticket_id ? "Ticket is already closed" : "No linked ticket")}
       <button class="button" type="button" data-open-create-ticket data-project-id="${item.project_id}" data-title="Follow-up: ${escapeHtml(item.title)}">Create follow-up ticket</button>
     </div>
+    <div class="toolbar" data-ai-review-controls>
+      <select data-ai-review-mode>
+        <option value="review_only">Review only</option>
+        <option value="review_and_merge">Review &amp; merge</option>
+      </select>
+      <details>
+        <summary>Override model/effort</summary>
+        <select data-ai-review-model><option value="">(default)</option>${aiModels.map((m) => `<option value="${m}">${escapeHtml(m)}</option>`).join("")}</select>
+        <select data-ai-review-reasoning><option value="">(default)</option>${reasoningLevels.map((r) => `<option value="${r}">${escapeHtml(r)}</option>`).join("")}</select>
+      </details>
+      <button class="button primary" type="button" data-pr-ai-review>Run AI Review</button>
+    </div>
     <dialog data-create-ticket-dialog aria-label="Create follow-up ticket"><div class="card-head">Create follow-up ticket</div><form data-create-ticket-form><div class="card-body"><label class="field"><span>Title</span><input name="title" required></label><label class="field"><span>Description</span><textarea name="description" rows="4"></textarea></label><p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-dialog>Cancel</button><button class="button primary" type="submit">Create</button></div></form></dialog>
     <div class="grid two"><section class="card"><div class="card-head">Metadata</div><div class="card-body"><dl>
     <dt>Ticket</dt><dd>${item.ticket_number ? `<a href="/admin/tickets/${escapeHtml(item.ticket_number)}">${escapeHtml(item.ticket_number)} · ${escapeHtml(item.ticket_title)}</a> (${escapeHtml(item.ticket_status)})` : `<span style="color:var(--text3)">Not linked</span>`}</dd>
@@ -63,7 +76,13 @@ function renderDetail(item: any): PageResult {
       <p><button class="button" type="button" data-pr-save-instructions>Save instructions</button>
       ${button("data-pr-start-repair", "Start repair workflow", canStartRepair, "No linked execution run to repair", " primary")}</p>
       <p style="font-size:12px;color:var(--text3)">Approving merges this pull request on GitHub immediately.</p>
-    </div></section>`;
+    </div></section>
+    <section class="card"><div class="card-head">AI Review history</div><div class="card-body">${aiReviews.length === 0 ? "<p>No AI reviews yet.</p>" : aiReviews.map((r) => `
+      <div class="ai-review-entry ai-review-${escapeHtml(r.status)}" style="padding:10px 0;border-bottom:1px solid var(--border)">
+        <strong>${escapeHtml(r.status.toUpperCase())}</strong> (${escapeHtml(r.mode)}, ${escapeHtml(r.model)}/${escapeHtml(r.reasoning_level)}) — ${new Date(r.created_at).toLocaleString()}
+        <p>${escapeHtml(r.status === "error" ? (r.error_message ?? "Review failed.") : (r.summary ?? "Running…"))}</p>
+        ${r.github_comment_url ? `<a href="${escapeHtml(r.github_comment_url)}" target="_blank" rel="noreferrer">View on GitHub</a>` : ""}
+      </div>`).join("")}</div></section>`;
   return { status: 200, title: `#${item.number}`, body };
 }
 
@@ -124,12 +143,14 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   const pullRequestSlugMatch = url.pathname.match(/^\/admin\/pull-requests\/([^/]+)\/(\d+)$/);
   if (pullRequestSlugMatch) {
     const item = (await pool.query(`${detailQuery} WHERE p.slug=$1 AND pr.number=$2`, [decodeURIComponent(pullRequestSlugMatch[1]), Number(pullRequestSlugMatch[2])])).rows[0];
-    return renderDetail(item);
+    const aiReviews = item ? (await pool.query("SELECT * FROM pr_ai_reviews WHERE pull_request_id=$1 ORDER BY created_at DESC", [item.id])).rows : [];
+    return renderDetail(item, aiReviews);
   }
   const pullRequestPageMatch = url.pathname.match(/^\/admin\/pull-requests\/([0-9a-f-]+)$/i);
   if (pullRequestPageMatch) {
     const item = (await pool.query(`${detailQuery} WHERE pr.id=$1`, [pullRequestPageMatch[1]])).rows[0];
-    return renderDetail(item);
+    const aiReviews = item ? (await pool.query("SELECT * FROM pr_ai_reviews WHERE pull_request_id=$1 ORDER BY created_at DESC", [item.id])).rows : [];
+    return renderDetail(item, aiReviews);
   }
   return null;
 }

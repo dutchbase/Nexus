@@ -454,6 +454,12 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const feedback=document.querySelector("[data-pr-repair-text]").value.trim();
           prAction("start-repair",feedback?{feedback}:{});
         });
+        document.querySelector("[data-pr-ai-review]")?.addEventListener("click",()=>{
+          const mode=document.querySelector("[data-ai-review-mode]").value;
+          const model=document.querySelector("[data-ai-review-model]").value||undefined;
+          const reasoning_level=document.querySelector("[data-ai-review-reasoning]").value||undefined;
+          prAction("ai-review",{mode,model,reasoning_level});
+        });
         const createTicketBtn=document.querySelector("[data-open-create-ticket]"),createTicketDialog=document.querySelector("[data-create-ticket-dialog]");
         createTicketBtn?.addEventListener("click",()=>{
           createTicketDialog.querySelector('[name="title"]').value=createTicketBtn.dataset.title;
