@@ -737,7 +737,8 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
   if (url.pathname === "/api/admin/settings/ai-review" && request.method === "POST") {
     const body = await bodyOf(request);
     const selection = validateAiSelection({
-      model: body.default_model, reasoning_level: body.default_reasoning_level,
+      model: typeof body.default_model === "string" ? body.default_model : "",
+      reasoning_level: typeof body.default_reasoning_level === "string" ? body.default_reasoning_level : "",
     });
     await pool.query(
       `UPDATE ai_review_settings SET default_model=$1,default_reasoning_level=$2,updated_at=now(),updated_by=$3 WHERE id=1`,
@@ -828,23 +829,26 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
         model: typeof body.model === "string" ? body.model : settings.default_model,
         reasoning_level: typeof body.reasoning_level === "string" ? body.reasoning_level : settings.default_reasoning_level,
       });
-      const reviewRow = (
-        await pool.query(
-          `INSERT INTO pr_ai_reviews (pull_request_id, mode, status, model, reasoning_level, created_by)
-           VALUES ($1,$2,'running',$3,$4,$5) RETURNING id`,
-          [pullRequest.id, mode, selection.model, selection.reasoning_level, session.user_id],
-        )
-      ).rows[0];
-      await enqueueJob({
-        type: "pr.ai_review",
-        payload: {
-          pr_ai_review_id: reviewRow.id,
-          pull_request_id: pullRequest.id,
-          mode,
-          model: selection.model,
-          reasoning_level: selection.reasoning_level,
-        },
-        idempotencyKey: `pr-ai-review:${reviewRow.id}`,
+      const reviewRow = await inTransaction(async (client) => {
+        const row = (
+          await client.query(
+            `INSERT INTO pr_ai_reviews (pull_request_id, mode, status, model, reasoning_level, created_by)
+             VALUES ($1,$2,'running',$3,$4,$5) RETURNING id`,
+            [pullRequest.id, mode, selection.model, selection.reasoning_level, session.user_id],
+          )
+        ).rows[0];
+        await enqueueJob({
+          type: "pr.ai_review",
+          payload: {
+            pr_ai_review_id: row.id,
+            pull_request_id: pullRequest.id,
+            mode,
+            model: selection.model,
+            reasoning_level: selection.reasoning_level,
+          },
+          idempotencyKey: `pr-ai-review:${row.id}`,
+        }, client);
+        return row;
       });
       return json(response, 200, { id: reviewRow.id });
     }
