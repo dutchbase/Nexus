@@ -4,12 +4,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { resolve } from "node:path";
 import { pool, inTransaction } from "@dcc/database";
 import {
-  AiConfigurationError, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob, globalPromptTypes,
-  enqueueNotification, importGithubPullRequests, projectPromptTypes, promptContentHash, resolveAiConfiguration, setPullRequestTicketStatus,
-  syncOpenPullRequests, syncPullRequest, validateAiSelection, type AiPhase,
+  AiConfigurationError, approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
+  globalPromptTypes, enqueueNotification, importGithubPullRequests, projectPromptTypes, promptContentHash, PullRequestMergeError,
+  resolveAiConfiguration, setPullRequestTicketStatus, syncOpenPullRequests, syncPullRequest, validateAiSelection, type AiPhase,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
-import { markReadyForReview, mergePullRequest, updatePullRequestBase, mergeBranch } from "../../../packages/github-provider/src/index.ts";
+import { mergeBranch } from "../../../packages/github-provider/src/index.ts";
 import {
   resolveSkills, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
 } from "../../../packages/skill-registry/src/index.ts";
@@ -753,17 +753,13 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     } else if (action === "mark-reviewed") {
       await pool.query("UPDATE pull_requests SET internal_review_state='reviewed',updated_at=now() WHERE id=$1", [pullRequest.id]);
     } else if (action === "approve") {
-      const [owner, repo] = pullRequest.repository.split("/");
-      const targetBranch = typeof body.target_branch === "string" ? body.target_branch.trim() : "";
+      const targetBranch = typeof body.target_branch === "string" ? body.target_branch.trim() : undefined;
       try {
-        if (targetBranch && targetBranch !== pullRequest.base_branch) await updatePullRequestBase(owner, repo, pullRequest.number, targetBranch);
-        if (pullRequest.is_draft) await markReadyForReview(owner, repo, pullRequest.number);
-        await mergePullRequest(owner, repo, pullRequest.number);
+        await approveAndMergePullRequest(pool, pullRequest, targetBranch, { type: "admin", id: session.user_id });
       } catch (error) {
-        return json(response, 502, { error: error instanceof Error ? error.message : "merge failed" });
+        if (error instanceof PullRequestMergeError) return json(response, 502, { error: error.message });
+        throw error;
       }
-      await pool.query("UPDATE pull_requests SET internal_review_state='approved',updated_at=now() WHERE id=$1", [pullRequest.id]);
-      await syncPullRequest(pullRequest.id, "admin", session.user_id);
     } else if (action === "request-changes") {
       await pool.query("UPDATE pull_requests SET internal_review_state='changes_requested',updated_at=now() WHERE id=$1", [pullRequest.id]);
       await setPullRequestTicketStatus(pullRequest.id, "PR Changes Requested", "Internal changes requested", "admin", session.user_id);

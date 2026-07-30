@@ -4,6 +4,7 @@ export * from "./prompts.ts";
 export * from "./plan-approval.ts";
 export * from "./pull-request.ts";
 export * from "./pull-request-sync.ts";
+export * from "./pr-merge.ts";
 export * from "./notifications.ts";
 export * from "./pr-review.ts";
 
