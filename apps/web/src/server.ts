@@ -652,6 +652,10 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
       "SELECT * FROM pr_ai_reviews WHERE pull_request_id=$1 ORDER BY created_at DESC",
       [pullRequest.id],
     )).rows;
+    const conflictResolutions = (await pool.query(
+      "SELECT * FROM pr_conflict_resolutions WHERE pull_request_id=$1 ORDER BY created_at DESC",
+      [pullRequest.id],
+    )).rows;
     return json(response, 200, {
       pull_request: pullRequest,
       implementation_summary: pullRequest.run_metadata?.implementation_summary ?? null,
@@ -661,6 +665,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
       review_comments: [],
       notification_history: notifications,
       ai_reviews: aiReviews,
+      conflict_resolutions: conflictResolutions,
     });
   }
   if (url.pathname === "/api/admin/notifications/providers" && request.method === "GET") {
@@ -752,7 +757,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     return json(response, 200, { ok: true });
   }
   const pullRequestActionMatch = url.pathname.match(
-    /^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/(mark-reviewed|approve|request-changes|repair-instructions|start-repair|refresh|close-ticket|ai-review)$/i,
+    /^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/(mark-reviewed|approve|request-changes|repair-instructions|start-repair|refresh|close-ticket|ai-review|resolve-conflicts)$/i,
   );
   if (pullRequestActionMatch && request.method === "POST") {
     const [, pullRequestId, action] = pullRequestActionMatch;
@@ -858,6 +863,33 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
         return row;
       });
       return json(response, 200, { id: reviewRow.id });
+    } else if (action === "resolve-conflicts") {
+      const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
+      const selection = validateAiSelection({
+        model: typeof body.model === "string" ? body.model : settings.default_model,
+        reasoning_level: typeof body.reasoning_level === "string" ? body.reasoning_level : settings.default_reasoning_level,
+      });
+      const resolutionRow = await inTransaction(async (client) => {
+        const row = (
+          await client.query(
+            `INSERT INTO pr_conflict_resolutions (pull_request_id, status, model, reasoning_level, created_by)
+             VALUES ($1,'running',$2,$3,$4) RETURNING id`,
+            [pullRequest.id, selection.model, selection.reasoning_level, session.user_id],
+          )
+        ).rows[0];
+        await enqueueJob({
+          type: "pr.conflict_resolution",
+          payload: {
+            pr_conflict_resolution_id: row.id,
+            pull_request_id: pullRequest.id,
+            model: selection.model,
+            reasoning_level: selection.reasoning_level,
+          },
+          idempotencyKey: `pr-conflict-resolution:${row.id}`,
+        }, client);
+        return row;
+      });
+      return json(response, 200, { id: resolutionRow.id });
     }
     const updated = (await pool.query("SELECT * FROM pull_requests WHERE id=$1", [pullRequest.id])).rows[0];
     return json(response, 200, { pull_request: updated });
