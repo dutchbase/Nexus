@@ -80,7 +80,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           tabs.forEach(item=>{const panel=document.getElementById(item.getAttribute("aria-controls")||"");if(panel)panel.hidden=item!==tab});
         });
       });
-      ${path.startsWith("/admin/tickets") ? `
+      ${path === "/admin/tickets" ? `
         (function(){
           const params=new URLSearchParams(location.search);
           if(!params.has("status")){
@@ -100,6 +100,19 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           location.href="/admin/tickets?"+q;
         });
         document.querySelector("[data-tickets-reset]")?.addEventListener("click",()=>localStorage.removeItem("dccTicketStatus"));
+        ${path === "/admin/tickets" ? `
+          const csrf=sessionStorage.getItem("dccCsrf")||"",modal=document.querySelector("[data-add-ticket-modal]"),form=document.querySelector("[data-add-ticket-form]");
+          document.querySelector("[data-add-ticket-button]")?.addEventListener("click",()=>modal.showModal());
+          modal?.querySelector("[data-close-modal]")?.addEventListener("click",()=>modal.close());
+          modal?.addEventListener("keydown",event=>{
+            if(event.key!=="Tab")return;const focusables=[...modal.querySelectorAll("button,a[href],input,select,textarea,[tabindex]")].filter(el=>!el.disabled);if(!focusables.length)return;
+            const first=focusables[0],last=focusables[focusables.length-1];if(event.shiftKey&&(document.activeElement===first||!modal.contains(document.activeElement))){event.preventDefault();last.focus()}else if(!event.shiftKey&&(document.activeElement===last||!modal.contains(document.activeElement))){event.preventDefault();first.focus()}
+          });
+          form?.addEventListener("submit",async(event)=>{
+            event.preventDefault();const response=await fetch("/api/admin/tickets",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(Object.fromEntries(new FormData(form)))});const result=await response.json();
+            if(response.ok)location.href="/admin/tickets/"+result.ticket.ticket_number;else form.querySelector(".error").textContent=result.error;
+          });
+        ` : ""}
       ` : ""}
       ${/^\/admin\/tickets\/[^/]+$/.test(path) ? `
         const csrf=sessionStorage.getItem("dccCsrf")||"";

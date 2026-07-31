@@ -7,6 +7,10 @@ export function selectedStatusesFrom(url: URL): string[] {
   return url.searchParams.getAll("status").filter((status) => validStatuses.has(status));
 }
 
+export function ticketCreateModal(projects: Array<{ id: string; name: string }>) {
+  const priorities = ["critical", "high", "medium", "low"];
+  return `<button class="button primary" type="button" data-add-ticket-button>Add ticket</button><dialog data-add-ticket-modal aria-label="Add ticket"><div class="card-head">Add ticket</div><form data-add-ticket-form><div class="card-body"><label class="field"><span>Project</span><select name="project_id" required><option value="">Choose a project</option>${projects.map((project) => `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`).join("")}</select></label><label class="field"><span>Title</span><input name="title" required></label><label class="field"><span>Description</span><textarea name="description" rows="4" required></textarea></label><div class="grid two"><label class="field"><span>Category</span><input name="category"></label><label class="field"><span>Priority</span><select name="priority"><option value="">Choose priority</option>${priorities.map((priority) => `<option value="${priority}">${priority[0].toUpperCase()}${priority.slice(1)}</option>`).join("")}</select></label></div><label class="field"><span>Environment</span><input name="environment"></label><label class="field"><span>Expected behavior</span><textarea name="expected_behavior" rows="3"></textarea></label><label class="field"><span>Actual behavior</span><textarea name="actual_behavior" rows="3"></textarea></label><label class="field"><span>Reproduction steps</span><textarea name="reproduction_steps" rows="3"></textarea></label><p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Create ticket</button></div></form></dialog>`;
+}
 export async function render(url: URL, session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname === "/admin/tickets") {
     const values: any[] = [];
@@ -63,6 +67,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
 
     const prioTone = { critical: "danger", high: "warn", medium: "info", low: "muted" } as Record<string, string>;
 
+    const createTicket = ticketCreateModal(projects);
     if (view === "board") {
       // Board view: group tickets into 6 status columns
       const boardColumns = {
@@ -106,6 +111,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
         <div class="toolbar">
           <a class="button" href="${escapeHtml(buildFilterUrl())}">Table</a>
           <a class="button" style="background:var(--accent-soft);color:var(--accent)">Board</a>
+          <span style="margin-left:auto">${createTicket}</span>
         </div>
         <form class="toolbar" id="filters" style="margin-top:16px">
           <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;flex:1;min-width:600px">
@@ -137,6 +143,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       <div class="toolbar">
         <a class="button" style="background:var(--accent-soft);color:var(--accent)">Table</a>
         <a class="button" href="${escapeHtml(buildFilterUrl("board"))}">Board</a>
+        <span style="margin-left:auto">${createTicket}</span>
       </div>
       <form class="toolbar" id="filters" style="margin-top:16px">
         <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;flex:1;min-width:600px">

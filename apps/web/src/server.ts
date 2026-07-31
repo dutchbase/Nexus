@@ -1263,15 +1263,18 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
   const createTicketMatch = url.pathname === "/api/admin/tickets" && request.method === "POST";
   if (createTicketMatch) {
     const body = await bodyOf(request);
-    const projectId = typeof body.project_id === "string" ? body.project_id : "";
-    const title = typeof body.title === "string" ? body.title.trim() : "";
-    if (!projectId || !title) return json(response, 400, { error: "project_id and title are required" });
-    const description = typeof body.description === "string" ? body.description.trim() : null;
+    const text = (key: string) => typeof body[key] === "string" ? body[key].trim() : "";
+    const projectId = text("project_id"), title = text("title"), description = text("description");
+    if (!projectId || !title || !description) return json(response, 400, { error: "Project, title, and description are required" });
+    const project = (await pool.query("SELECT id FROM projects WHERE id=$1", [projectId])).rows[0];
+    if (!project) return json(response, 404, { error: "Choose an existing project" });
+    const priority = text("priority");
+    if (priority && !["critical", "high", "medium", "low"].includes(priority)) return json(response, 400, { error: "Choose a valid priority" });
     const number = (await pool.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
     const ticket = (await pool.query(
-      `INSERT INTO tickets (ticket_number,project_id,title,description,status,custom_values_json)
-       VALUES ($1,$2,$3,$4,'Triage','{}'::jsonb) RETURNING *`,
-      [`DCC-${number}`, projectId, title, description],
+      `INSERT INTO tickets (ticket_number,project_id,title,description,category,priority,environment,expected_behavior,actual_behavior,reproduction_steps,status,custom_values_json)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'Triage','{}'::jsonb) RETURNING *`,
+      [`DCC-${number}`, projectId, title, description, text("category") || null, priority || null, text("environment") || null, text("expected_behavior") || null, text("actual_behavior") || null, text("reproduction_steps") || null],
     )).rows[0];
     await pool.query(
       `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
