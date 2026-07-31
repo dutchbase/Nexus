@@ -60,7 +60,7 @@ export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = pro
 
 export type PlanningInvocation = {
   task: string; sessionId: string; model: string; effort: string; promptFile: string;
-  skillBundleDir: string; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string;
+  skillBundleDir: string; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string; tools?: string[];
 };
 
 export function buildPlanningArguments(input: PlanningInvocation) {
@@ -70,10 +70,24 @@ export function buildPlanningArguments(input: PlanningInvocation) {
     // calling ExitPlanMode, which isn't available in headless -p mode —
     // the agent then wrote a stray local file instead of the plan markdown.
     // "manual" enforces the same read-only tool set without that dead end.
-    "--permission-mode", "manual", "--tools", "Read,Glob,Grep,Bash",
+    "--permission-mode", "manual", "--tools", input.tools?.join(",") ?? "Read,Glob,Grep,Bash",
     "--append-system-prompt-file", input.promptFile, "--add-dir", input.skillBundleDir,
     "--output-format", "json", "--max-turns", String(input.maxTurns),
   ];
+}
+
+export function summarizeClaudeFailure(stdout: string, stderr: string) {
+  let detail = stderr.trim();
+  let bashDenied = /bash.*(?:denied|not allowed|not permitted)|(?:denied|not allowed|not permitted).*bash/i.test(detail);
+  if (!detail) {
+    try {
+      const response = JSON.parse(stdout.trim());
+      const errors = response?.errors;
+      detail = typeof errors === "string" ? errors : Array.isArray(errors) ? errors.filter((error) => typeof error === "string").join(" ") : "";
+      bashDenied ||= Array.isArray(response?.permission_denials) && response.permission_denials.some((denial: any) => denial?.tool_name === "Bash");
+    } catch { /* use the generic message below */ }
+  }
+  return `${detail || "Claude planning failed."}${bashDenied ? " Bash access was denied; the review did not complete." : ""}`;
 }
 
 export async function invokePlanningClaude(input: PlanningInvocation) {
@@ -82,16 +96,7 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
   const result = await runClaude(buildPlanningArguments(input), { cwd: input.workingDirectory, env });
   if (result.exitCode !== 0) {
-    // ponytail: --output-format json routes CLI errors through stdout as a
-    // JSON result (not stderr), so fall back to stdout when stderr is empty.
-    let detail = result.stderr.trim();
-    if (!detail) {
-      try {
-        const parsed = JSON.parse(result.stdout.trim());
-        detail = typeof parsed?.result === "string" ? parsed.result : result.stdout.trim();
-      } catch { detail = result.stdout.trim(); }
-    }
-    throw Object.assign(new Error(`Claude planning exited ${result.exitCode}: ${detail || "no error output"}`), { exitCode: result.exitCode });
+    throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), { exitCode: result.exitCode });
   }
   let response: any;
   try { response = JSON.parse(result.stdout.trim()); } catch { throw new Error("Claude planning returned invalid JSON"); }

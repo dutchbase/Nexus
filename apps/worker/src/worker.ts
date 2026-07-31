@@ -1072,13 +1072,14 @@ async function runPrAiReview(job: any) {
       await writeFile(promptFile, prompt, { flag: "wx" });
 
       const result = await invokePlanningClaude({
-        task: `Review PR #${pullRequest.number} in ${pullRequest.repository} for merge safety.`,
+        task: `Review PR #${pullRequest.number} in ${pullRequest.repository} for merge safety. Use only the supplied PR description and diff; do not inspect the repository or run commands. Return the requested JSON verdict.`,
         sessionId,
         model,
         effort: reasoningLevel,
         promptFile,
         skillBundleDir: temporary,
         workingDirectory: project.repository_path,
+        tools: ["Read", "Glob", "Grep"],
         maxTurns: 5,
         oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
       });
