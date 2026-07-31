@@ -3,14 +3,20 @@ import type { PageResult, Session } from "./shared.ts";
 import { checkPlanApprovalGate } from "@dcc/domain";
 import { inTransaction } from "@dcc/database";
 
+export function selectedStatusesFrom(url: URL): string[] {
+  return url.searchParams.getAll("status").filter((status) => validStatuses.has(status));
+}
+
 export async function render(url: URL, session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname === "/admin/tickets") {
     const values: any[] = [];
     const conditions: string[] = [];
-    for (const [key, column] of [["project_id", "t.project_id"], ["status", "t.status"], ["priority", "t.priority"], ["category", "t.category"], ["form", "f.slug"]] as const) {
+    for (const [key, column] of [["project_id", "t.project_id"], ["priority", "t.priority"], ["category", "t.category"], ["form", "f.slug"]] as const) {
       const value = url.searchParams.get(key);
       if (value) { values.push(value); conditions.push(`${column} = $${values.length}`); }
     }
+    const selectedStatuses = selectedStatusesFrom(url);
+    if (selectedStatuses.length) { values.push(selectedStatuses); conditions.push(`t.status = ANY($${values.length}::text[])`); }
     const search = url.searchParams.get("search");
     if (search) { values.push(`%${search}%`); conditions.push(`(t.ticket_number ILIKE $${values.length} OR t.title ILIKE $${values.length} OR t.description ILIKE $${values.length})`); }
     const [ticketsResult, projectsResult] = await Promise.all([
@@ -30,10 +36,22 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       if (search) params.append("search", search);
       if (url.searchParams.get("project_id")) params.append("project_id", url.searchParams.get("project_id")!);
       if (url.searchParams.get("priority")) params.append("priority", url.searchParams.get("priority")!);
-      if (url.searchParams.get("status")) params.append("status", url.searchParams.get("status")!);
+      for (const status of selectedStatuses) params.append("status", status);
       if (newView) params.append("view", newView);
       return `/admin/tickets${params.size > 0 ? "?" + params.toString() : ""}`;
     };
+
+    const statusFilterLabel = selectedStatuses.length === 0
+      ? "All statuses"
+      : selectedStatuses.length === 1
+        ? selectedStatuses[0]
+        : `${selectedStatuses.length} statuses`;
+    const statusFilterHtml = `<details class="menu" data-status-filter style="width:100%">
+      <summary class="button" style="width:100%;text-align:left">${escapeHtml(statusFilterLabel)}</summary>
+      <div class="menu-panel skill-options">
+        ${[...validStatuses].map((status) => `<label><input type="checkbox" name="status" value="${escapeHtml(status)}" data-ticket-filter${selectedStatuses.includes(status) ? " checked" : ""}> ${escapeHtml(status)}</label>`).join("")}
+      </div>
+    </details>`;
 
     const statusToneMap: Record<string, string> = {
       "Submitted": "var(--t-info)", "Triage": "var(--t-info)", "Needs Information": "var(--t-warn)",
@@ -103,12 +121,9 @@ export async function render(url: URL, session: Session, _metrics: Record<string
               <option value="medium"${url.searchParams.get("priority") === "medium" ? " selected" : ""}>Medium</option>
               <option value="low"${url.searchParams.get("priority") === "low" ? " selected" : ""}>Low</option>
             </select>
-            <select data-ticket-filter name="status">
-              <option value="">All statuses</option>
-              ${[...validStatuses].map((status) => `<option${url.searchParams.get("status") === status ? " selected" : ""}>${status}</option>`).join("")}
-            </select>
+            ${statusFilterHtml}
           </div>
-          <a class="button" href="/admin/tickets">Reset</a>
+          <a class="button" data-tickets-reset href="/admin/tickets">Reset</a>
           <span aria-live="polite" style="margin-left:auto">${tickets.length} shown</span>
         </form>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:16px">${boardColumnsHtml}</div>`;
@@ -137,12 +152,9 @@ export async function render(url: URL, session: Session, _metrics: Record<string
             <option value="medium"${url.searchParams.get("priority") === "medium" ? " selected" : ""}>Medium</option>
             <option value="low"${url.searchParams.get("priority") === "low" ? " selected" : ""}>Low</option>
           </select>
-          <select data-ticket-filter name="status">
-            <option value="">All statuses</option>
-            ${[...validStatuses].map((status) => `<option${url.searchParams.get("status") === status ? " selected" : ""}>${status}</option>`).join("")}
-          </select>
+          ${statusFilterHtml}
         </div>
-        <a class="button" href="/admin/tickets">Reset</a>
+        <a class="button" data-tickets-reset href="/admin/tickets">Reset</a>
         <span aria-live="polite" style="margin-left:auto">${tickets.length} shown</span>
       </form>
       <section class="card">${emptyState || `<div class="list-head tickets7"><span>Ticket</span><span>Title</span><span>Project</span><span>Priority</span><span>AI config</span><span>Status</span><span>Updated</span></div>${rows}`}</section>`;

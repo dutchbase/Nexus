@@ -80,7 +80,21 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           tabs.forEach(item=>{const panel=document.getElementById(item.getAttribute("aria-controls")||"");if(panel)panel.hidden=item!==tab});
         });
       });
-      ${path.startsWith("/admin/tickets") ? `document.querySelectorAll("[data-ticket-filter]").forEach(el=>el.addEventListener("change",()=>{const q=new URLSearchParams(new FormData(document.querySelector("#filters")));location.href="/admin/tickets?"+q}))` : ""}
+      ${path.startsWith("/admin/tickets") ? `
+        (function(){
+          const params=new URLSearchParams(location.search);
+          if(!params.has("status")){
+            const saved=JSON.parse(localStorage.getItem("dccTicketStatus")||"[]");
+            if(saved.length){saved.forEach(s=>params.append("status",s));location.replace("/admin/tickets?"+params)}
+          }
+        })();
+        document.querySelectorAll("[data-ticket-filter]").forEach(el=>el.addEventListener("change",()=>{
+          const q=new URLSearchParams(new FormData(document.querySelector("#filters")));
+          localStorage.setItem("dccTicketStatus",JSON.stringify(q.getAll("status")));
+          location.href="/admin/tickets?"+q;
+        }));
+        document.querySelector("[data-tickets-reset]")?.addEventListener("click",()=>localStorage.removeItem("dccTicketStatus"));
+      ` : ""}
       ${/^\/admin\/tickets\/[^/]+$/.test(path) ? `
         const csrf=sessionStorage.getItem("dccCsrf")||"";
         const aiForm=document.querySelector("#ai-config");
