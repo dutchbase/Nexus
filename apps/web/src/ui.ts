@@ -444,6 +444,11 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(confirm("Approve and merge this pull request on GitHub? This cannot be undone from here."))prAction("approve",targetBranch?{target_branch:targetBranch}:{});
         });
         document.querySelector("[data-pr-request-changes]")?.addEventListener("click",()=>prAction("request-changes"));
+        document.querySelector("[data-pr-resolve-conflicts]")?.addEventListener("click",(event)=>{
+          if(!confirm("Resolve merge conflicts with AI and push the result to this PR's branch? This cannot be undone from here."))return;
+          event.currentTarget.disabled=true;event.currentTarget.textContent="Resolving…";
+          prAction("resolve-conflicts",{});
+        });
         document.querySelector("[data-pr-close-ticket]")?.addEventListener("click",()=>{if(confirm("Close the linked ticket? This cannot be undone from here."))prAction("close-ticket")});
         document.querySelector("[data-pr-save-instructions]")?.addEventListener("click",()=>{
           const instructions=document.querySelector("[data-pr-repair-text]").value.trim();
@@ -454,13 +459,43 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const feedback=document.querySelector("[data-pr-repair-text]").value.trim();
           prAction("start-repair",feedback?{feedback}:{});
         });
-        document.querySelector("[data-pr-ai-review]")?.addEventListener("click",()=>{
-          const mode=document.querySelector("[data-ai-review-mode]").value;
+        function runAiReview(mode,targetBranch){
           const model=document.querySelector("[data-ai-review-model]").value||undefined;
           const reasoning_level=document.querySelector("[data-ai-review-reasoning]").value||undefined;
-          if(mode==="review_and_merge"&&!confirm("Run AI review and, if approved, merge this pull request on GitHub? This cannot be undone from here."))return;
-          prAction("ai-review",{mode,model,reasoning_level});
+          prAction("ai-review",{mode,model,reasoning_level,target_branch:targetBranch});
+        }
+        document.querySelector("[data-pr-ai-review]")?.addEventListener("click",(event)=>{
+          event.currentTarget.disabled=true;event.currentTarget.textContent="Starting…";
+          runAiReview("review_only");
         });
+        document.querySelector("[data-pr-ai-review-merge]")?.addEventListener("click",(event)=>{
+          if(!confirm("Run AI review and, if approved, merge this pull request on GitHub? This cannot be undone from here."))return;
+          event.currentTarget.disabled=true;event.currentTarget.textContent="Starting…";
+          const targetBranch=document.querySelector("[data-ai-merge-target-branch]")?.value.trim();
+          runAiReview("review_and_merge",targetBranch||undefined);
+        });
+        const aiStatusBadge=document.querySelector("[data-ai-review-status]");
+        if(aiStatusBadge&&aiStatusBadge.dataset.aiReviewStatus==="running"){
+          const poll=setInterval(async()=>{
+            try{
+              const response=await fetch("/api/admin/pull-requests/"+prId);
+              if(!response.ok)return;
+              const result=await response.json();
+              if(result.ai_reviews?.[0]?.status!=="running"){clearInterval(poll);location.reload()}
+            }catch{}
+          },4000);
+        }
+        const conflictResolutionBadge=document.querySelector("[data-conflict-resolution-status]");
+        if(conflictResolutionBadge&&conflictResolutionBadge.dataset.conflictResolutionStatus==="running"){
+          const poll=setInterval(async()=>{
+            try{
+              const response=await fetch("/api/admin/pull-requests/"+prId);
+              if(!response.ok)return;
+              const result=await response.json();
+              if(result.conflict_resolutions?.[0]?.status!=="running"){clearInterval(poll);location.reload()}
+            }catch{}
+          },4000);
+        }
         const createTicketBtn=document.querySelector("[data-open-create-ticket]"),createTicketDialog=document.querySelector("[data-create-ticket-dialog]");
         createTicketBtn?.addEventListener("click",()=>{
           createTicketDialog.querySelector('[name="title"]').value=createTicketBtn.dataset.title;

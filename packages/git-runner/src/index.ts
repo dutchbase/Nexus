@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, realpath } from "node:fs/promises";
+import { mkdir, readFile, realpath, rm } from "node:fs/promises";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -125,6 +125,55 @@ export function sanitizeValidationOutput(output: string) {
 
 async function git(worktreePath: string, args: string[]) {
   return exec("git", ["-C", worktreePath, ...args], { maxBuffer: 16 * 1024 * 1024 });
+}
+
+export async function createConflictResolutionWorktree(input: {
+  repositoryPath: string;
+  headBranch: string;
+  baseBranch: string;
+  dataRoot: string;
+  projectSlug: string;
+  pullRequestNumber: number;
+}) {
+  const repository = await realpath(input.repositoryPath);
+  const root = path.resolve(input.dataRoot, "data", "worktrees");
+  const worktreePath = path.resolve(
+    root, safeSegment(input.projectSlug, "project"), `pr-${input.pullRequestNumber}-conflict-resolution`,
+  );
+  const relative = path.relative(root, worktreePath);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("invalid worktree path");
+  }
+  await mkdir(path.dirname(worktreePath), { recursive: true });
+  // ponytail: a prior attempt (validation failure, crash) can leave this same
+  // path registered as a worktree. Force-clear it so retrying doesn't fail on
+  // "branch already checked out" or "path already exists".
+  await rm(worktreePath, { recursive: true, force: true });
+  await exec("git", ["-C", repository, "worktree", "prune"]).catch(() => {});
+  await exec("git", ["-C", repository, "fetch", "origin", input.headBranch, input.baseBranch]);
+  await exec("git", [
+    "-C", repository, "worktree", "add", "-B", input.headBranch, worktreePath, `origin/${input.headBranch}`,
+  ]);
+  const headCommit = (await exec("git", ["-C", worktreePath, "rev-parse", "HEAD"])).stdout.trim();
+  return { worktreePath, branchName: input.headBranch, headCommit };
+}
+
+export async function mergeBaseIntoWorktree(worktreePath: string, baseBranch: string) {
+  try {
+    await git(worktreePath, ["merge", `origin/${baseBranch}`, "--no-edit"]);
+    return { conflicted: false };
+  } catch {
+    return { conflicted: true };
+  }
+}
+
+export async function conflictedFiles(worktreePath: string) {
+  const result = await git(worktreePath, ["diff", "--name-only", "--diff-filter=U", "-z"]);
+  return result.stdout.split("\0").filter(Boolean);
+}
+
+export async function abortMerge(worktreePath: string) {
+  await git(worktreePath, ["merge", "--abort"]);
 }
 
 export async function changedWorktreeFiles(worktreePath: string, baseCommit: string) {

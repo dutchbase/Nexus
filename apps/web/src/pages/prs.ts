@@ -14,7 +14,7 @@ const detailQuery = `SELECT pr.*,p.name project_name,p.slug project_slug,t.ticke
 
 // Shared by both the uuid route (/admin/pull-requests/{uuid}) and the slug
 // route (/admin/pull-requests/{projectSlug}/{number}) so the two never drift.
-function renderDetail(item: any, aiReviews: any[]): PageResult {
+function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[]): PageResult {
   if (!item) return { status: 404, title: "Pull request not found", body: "<h1>Pull request not found</h1>" };
   const validation = item.metadata_json?.validation_output ?? {};
   const changes = (item.additions != null || item.deletions != null || item.changed_files != null)
@@ -26,34 +26,70 @@ function renderDetail(item: any, aiReviews: any[]): PageResult {
   const canStartRepair = Boolean(item.run_id);
   const button = (attr: string, label: string, allowed: boolean, deniedReason: string, extraClass = "") =>
     `<button class="button${extraClass}" type="button" ${attr}${allowed ? "" : " disabled"} title="${allowed ? "" : escapeHtml(deniedReason)}">${label}</button>`;
+  // ponytail: item.review_state is never actually populated (GitHub's REST PR
+  // response has no such field — only GraphQL's reviewDecision does, which
+  // this app doesn't fetch), so the badge always fell back to a hardcoded
+  // "Review pending" string. Replaced with badges the app actually keeps
+  // current: PR state, our own internal_review_state, and the latest AI
+  // review verdict.
+  const latestAiReview = aiReviews[0] ?? null;
+  const stateBadge = item.is_draft
+    ? { cls: "muted", label: "Draft" }
+    : item.merged_at
+    ? { cls: "ok", label: "Merged" }
+    : item.state === "closed"
+    ? { cls: "danger", label: "Closed" }
+    : { cls: "info", label: "Open" };
+  const reviewBadge = ({
+    approved: { cls: "ok", label: "Admin: Approved" },
+    changes_requested: { cls: "warn", label: "Admin: Changes requested" },
+    reviewed: { cls: "info", label: "Admin: Reviewed" },
+  } as Record<string, { cls: string; label: string }>)[item.internal_review_state ?? ""] ?? { cls: "muted", label: "Admin: Not reviewed" };
+  const aiBadge = latestAiReview
+    ? ({
+        running: { cls: "run", label: "AI: Running…" },
+        approved: { cls: "ok", label: "AI: Approved" },
+        rejected: { cls: "danger", label: "AI: Rejected" },
+        error: { cls: "danger", label: "AI: Error" },
+      } as Record<string, { cls: string; label: string }>)[latestAiReview.status] ?? { cls: "muted", label: `AI: ${escapeHtml(latestAiReview.status)}` }
+    : { cls: "muted", label: "AI: No review yet" };
+  const latestConflictResolution = conflictResolutions[0] ?? null;
+  const conflictResolutionBadge = latestConflictResolution
+    ? ({
+        running: { cls: "run", label: "Conflict resolution: Running…" },
+        resolved: { cls: "ok", label: "Conflict resolution: Resolved" },
+        error: { cls: "danger", label: "Conflict resolution: Error" },
+      } as Record<string, { cls: string; label: string }>)[latestConflictResolution.status]
+      ?? { cls: "muted", label: `Conflict resolution: ${escapeHtml(latestConflictResolution.status)}` }
+    : null;
   const body = `<div class="eyebrow">${escapeHtml(item.project_name)} · ${escapeHtml(item.repository)}</div>
     <p class="mono">${escapeHtml(item.project_slug)}/${escapeHtml(item.repository)} #${item.number}</p>
     <h1>${escapeHtml(item.title)}</h1>
     <div class="toolbar" data-pr-id="${item.id}">
-      <span class="status">${escapeHtml(item.is_draft ? "Draft" : item.state)}</span>
-      <span class="status">${escapeHtml(item.review_state ?? "Review pending")}</span>
-      <span class="status">${escapeHtml(item.internal_review_state ?? "Not reviewed")}</span>
+      <span class="status ${stateBadge.cls}">${escapeHtml(stateBadge.label)}</span>
+      <span class="status ${reviewBadge.cls}">${escapeHtml(reviewBadge.label)}</span>
+      <span class="status ${aiBadge.cls}" data-ai-review-status="${escapeHtml(latestAiReview?.status ?? "")}">${escapeHtml(aiBadge.label)}</span>
       ${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}
-      <a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a>
-      <button class="button" type="button" data-pr-refresh>Refresh</button>
-      ${button("data-pr-request-changes", "Request changes", canRequestChanges, "Changes already requested")}
-      ${button("data-pr-mark-reviewed", "Mark reviewed", canMarkReviewed, "Already marked reviewed")}
+      ${conflictResolutionBadge ? `<span class="status ${conflictResolutionBadge.cls}" data-conflict-resolution-status="${escapeHtml(latestConflictResolution.status)}">${escapeHtml(conflictResolutionBadge.label)}</span>` : ""}
+      ${item.merge_conflicts ? button("data-pr-resolve-conflicts", "Resolve conflicts (AI)", true, "") : ""}
       <input type="text" data-pr-target-branch value="${escapeHtml(item.base_branch)}" placeholder="Target branch" style="width:120px" title="Branch to merge into (defaults to current base)">
       ${button("data-pr-approve", "Approve & merge", canApprove, "Already approved internally", " primary")}
-      ${button("data-pr-close-ticket", "Close ticket", canCloseTicket, item.ticket_id ? "Ticket is already closed" : "No linked ticket")}
-      <button class="button" type="button" data-open-create-ticket data-project-id="${item.project_id}" data-title="Follow-up: ${escapeHtml(item.title)}">Create follow-up ticket</button>
-    </div>
-    <div class="toolbar" data-ai-review-controls>
-      <select data-ai-review-mode>
-        <option value="review_only">Review only</option>
-        <option value="review_and_merge">Review &amp; merge</option>
-      </select>
-      <details>
-        <summary>Override model/effort</summary>
-        <select data-ai-review-model><option value="">(default)</option>${aiModels.map((m) => `<option value="${m}">${escapeHtml(m)}</option>`).join("")}</select>
-        <select data-ai-review-reasoning><option value="">(default)</option>${reasoningLevels.map((r) => `<option value="${r}">${escapeHtml(r)}</option>`).join("")}</select>
+      ${button("data-pr-ai-review", "AI review", true, "")}
+      <input type="text" data-ai-merge-target-branch value="${escapeHtml(item.base_branch)}" placeholder="Target branch" style="width:120px" title="Branch to merge into (defaults to current base)">
+      ${button("data-pr-ai-review-merge", "AI review and approve", canApprove, "Already approved internally", " primary")}
+      <a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a>
+      <details class="menu">
+        <summary class="button">More options ▾</summary>
+        <div class="menu-panel">
+          <button class="button" type="button" data-pr-refresh>Refresh</button>
+          ${button("data-pr-request-changes", "Request changes", canRequestChanges, "Changes already requested")}
+          ${button("data-pr-mark-reviewed", "Mark reviewed", canMarkReviewed, "Already marked reviewed")}
+          ${button("data-pr-close-ticket", "Close ticket", canCloseTicket, item.ticket_id ? "Ticket is already closed" : "No linked ticket")}
+          <button class="button" type="button" data-open-create-ticket data-project-id="${item.project_id}" data-title="Follow-up: ${escapeHtml(item.title)}">Create follow-up ticket</button>
+          <label class="field"><span>AI model override</span><select data-ai-review-model><option value="">(default)</option>${aiModels.map((m) => `<option value="${m}">${escapeHtml(m)}</option>`).join("")}</select></label>
+          <label class="field"><span>AI reasoning override</span><select data-ai-review-reasoning><option value="">(default)</option>${reasoningLevels.map((r) => `<option value="${r}">${escapeHtml(r)}</option>`).join("")}</select></label>
+        </div>
       </details>
-      <button class="button primary" type="button" data-pr-ai-review>Run AI Review</button>
     </div>
     <dialog data-create-ticket-dialog aria-label="Create follow-up ticket"><div class="card-head">Create follow-up ticket</div><form data-create-ticket-form><div class="card-body"><label class="field"><span>Title</span><input name="title" required></label><label class="field"><span>Description</span><textarea name="description" rows="4"></textarea></label><p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-dialog>Cancel</button><button class="button primary" type="submit">Create</button></div></form></dialog>
     <div class="grid two"><section class="card"><div class="card-head">Metadata</div><div class="card-body"><dl>
@@ -144,13 +180,15 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   if (pullRequestSlugMatch) {
     const item = (await pool.query(`${detailQuery} WHERE p.slug=$1 AND pr.number=$2`, [decodeURIComponent(pullRequestSlugMatch[1]), Number(pullRequestSlugMatch[2])])).rows[0];
     const aiReviews = item ? (await pool.query("SELECT * FROM pr_ai_reviews WHERE pull_request_id=$1 ORDER BY created_at DESC", [item.id])).rows : [];
-    return renderDetail(item, aiReviews);
+    const conflictResolutions = item ? (await pool.query("SELECT * FROM pr_conflict_resolutions WHERE pull_request_id=$1 ORDER BY created_at DESC", [item.id])).rows : [];
+    return renderDetail(item, aiReviews, conflictResolutions);
   }
   const pullRequestPageMatch = url.pathname.match(/^\/admin\/pull-requests\/([0-9a-f-]+)$/i);
   if (pullRequestPageMatch) {
     const item = (await pool.query(`${detailQuery} WHERE pr.id=$1`, [pullRequestPageMatch[1]])).rows[0];
     const aiReviews = item ? (await pool.query("SELECT * FROM pr_ai_reviews WHERE pull_request_id=$1 ORDER BY created_at DESC", [item.id])).rows : [];
-    return renderDetail(item, aiReviews);
+    const conflictResolutions = item ? (await pool.query("SELECT * FROM pr_conflict_resolutions WHERE pull_request_id=$1 ORDER BY created_at DESC", [item.id])).rows : [];
+    return renderDetail(item, aiReviews, conflictResolutions);
   }
   return null;
 }
