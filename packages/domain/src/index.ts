@@ -8,6 +8,7 @@ export * from "./pr-merge.ts";
 export * from "./notifications.ts";
 export * from "./pr-review.ts";
 export * from "./pr-conflict-resolution.ts";
+export * from "./follow-up-ticket.ts";
 
 export const aiModels = ["fable", "opus", "sonnet", "haiku"] as const;
 export const reasoningLevels = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;

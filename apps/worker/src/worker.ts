@@ -11,7 +11,7 @@ import { inTransaction, pool } from "@dcc/database";
 import {
   approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate,
   claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, parsePrReviewVerdict,
-  renderConflictResolutionPrompt, renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
+  renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
@@ -25,6 +25,7 @@ import { validateProject } from "@dcc/project-config";
 import {
   materializeSkillBundle, resolveSkills, snapshotSkills, type ResolutionSource, type SkillCandidate,
 } from "@dcc/skill-registry";
+import { formatFollowUpDescription } from "./follow-up-description.ts";
 
 // Resolved relative to this module's own file, not process.cwd() — `pnpm
 // --filter worker dev/start` runs with cwd=apps/worker, so a cwd-relative
@@ -37,6 +38,7 @@ const planningJobTypes = ["planning.generate", "planning.revise"];
 const executionJobTypes = ["execution.run", "execution.repair"];
 const publicationJobTypes = ["pull-request.retry"];
 const aiReviewJobTypes = ["pr.ai_review"];
+const followUpDescriptionJobTypes = ["pr.follow_up_description"];
 const conflictResolutionJobTypes = ["pr.conflict_resolution"];
 let stopping = false;
 let activeExecutionCancellation: AbortController | null = null;
@@ -56,7 +58,7 @@ async function refuseQueuedClaudeJobs(code: string, message: string) {
     await pool.query(
       `UPDATE jobs SET status=$1,completed_at=now(),error_json=jsonb_build_object('message',$2::text),updated_at=now()
        WHERE status='queued' AND type=ANY($3::text[])`,
-      [code, message, [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...conflictResolutionJobTypes]],
+      [code, message, [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes]],
     );
   } catch {
     // Startup refusal must remain visible even when the database is unavailable.
@@ -1131,6 +1133,53 @@ async function runPrAiReview(job: any) {
   }
 }
 
+async function runFollowUpDescription(job: any) {
+  const payload = job.payload_json as { pull_request_id: string; feedback: string };
+  let runId: string | null = null;
+  try {
+    const pullRequest = (await pool.query("SELECT * FROM pull_requests WHERE id=$1", [payload.pull_request_id])).rows[0];
+    if (!pullRequest) throw new Error("pull request not found");
+    const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [pullRequest.project_id])).rows[0];
+    if (!project) throw new Error("project not found");
+    const promptRow = await activePrompt("global", "follow-up-ticket");
+    const prompt = renderFollowUpTicketPrompt(promptRow.content ?? "", {
+      project: { name: project.name, slug: project.slug, repository_path: project.repository_path },
+      pr: {
+        number: pullRequest.number, title: pullRequest.title, url: pullRequest.url, author: pullRequest.author,
+        head_branch: pullRequest.head_branch, base_branch: pullRequest.base_branch, body: pullRequest.body ?? "",
+      },
+      feedback: payload.feedback,
+    });
+    runId = randomUUID();
+    const sessionId = randomUUID();
+    await pool.query(
+      `INSERT INTO agent_runs
+       (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
+       VALUES ($1,$2,$3,$4,NULL,$5,$6,$7,now(),$8)`,
+      [runId, project.id, "pr_follow_up_description", "running", "haiku", "low", project.repository_path, { job_id: job.id, pull_request_id: pullRequest.id }],
+    );
+    const temporary = await mkdtemp(path.join(tmpdir(), "dcc-follow-up-description-"));
+    try {
+      const promptFile = path.join(temporary, "follow-up-ticket-prompt.md");
+      await writeFile(promptFile, prompt, { flag: "wx" });
+      const result = await invokePlanningClaude({
+        task: `Write a follow-up ticket description for PR #${pullRequest.number}. Use only the supplied prompt; do not inspect repositories or run commands.`,
+        sessionId, model: "haiku", effort: "low", promptFile,
+        skillBundleDir: temporary, workingDirectory: temporary, tools: [], maxTurns: 1,
+        oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
+      });
+      const description = formatFollowUpDescription({ number: pullRequest.number, title: pullRequest.title, url: pullRequest.url }, result.markdown);
+      await pool.query("UPDATE jobs SET payload_json=payload_json || jsonb_build_object($2,$3::text),updated_at=now() WHERE id=$1", [job.id, "generated_description", description]);
+      await pool.query("UPDATE agent_runs SET status=$2,claude_session_id=$3,finished_at=now(),exit_code=$4 WHERE id=$1", [runId, "completed", sessionId, result.exitCode]);
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  } catch (error) {
+    if (runId) await pool.query("UPDATE agent_runs SET status=$2,finished_at=now(),error_message=$3 WHERE id=$1", [runId, "failed", error instanceof Error ? error.message : "follow-up description failed"]);
+    throw error;
+  }
+}
+
 async function runPrConflictResolution(job: any) {
   const payload = job.payload_json as {
     pr_conflict_resolution_id: string;
@@ -1353,10 +1402,10 @@ while (!stopping) {
   if (!job) {
     const waiting = (await pool.query(
       "SELECT 1 FROM jobs WHERE status='queued' AND type=ANY($1::text[]) LIMIT 1",
-      [[...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...conflictResolutionJobTypes]],
+      [[...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes]],
     )).rowCount;
     if (waiting && (await subscriptionPreflightOrRefuse())) {
-      job = await claimJob(workerId, [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...conflictResolutionJobTypes]);
+      job = await claimJob(workerId, [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes]);
     }
   }
   if (!job) {
@@ -1379,6 +1428,8 @@ while (!stopping) {
       await retryPublication(job);
     } else if (aiReviewJobTypes.includes(job.type)) {
       await runPrAiReview(job);
+    } else if (followUpDescriptionJobTypes.includes(job.type)) {
+      await runFollowUpDescription(job);
     } else if (conflictResolutionJobTypes.includes(job.type)) {
       await runPrConflictResolution(job);
     } else if (planningJobTypes.includes(job.type)) {

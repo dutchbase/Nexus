@@ -3,7 +3,7 @@ import type pg from "pg";
 import { pool } from "@dcc/database";
 
 export const globalPromptTypes = [
-  "base", "planning", "plan-revision", "execution", "execution-repair", "validation", "pull-request", "pr-review", "pr-conflict-resolution",
+  "base", "planning", "plan-revision", "execution", "execution-repair", "validation", "pull-request", "pr-review", "pr-conflict-resolution", "follow-up-ticket",
 ] as const;
 export const projectPromptTypes = ["context", "planning", "execution", "testing", "pull-request"] as const;
 
