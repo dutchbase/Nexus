@@ -773,11 +773,16 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     const submittedFeedback = typeof body.feedback === "string" ? body.feedback : "";
     const feedback = submittedFeedback.trim();
     if (!feedback || submittedFeedback.length > 10_000) return json(response, 400, { error: "feedback is required" });
-    const pullRequest = (await pool.query("SELECT id FROM pull_requests WHERE id=$1", [followUpDescriptionMatch[1]])).rows[0];
+    const pullRequest = (await pool.query("SELECT id,project_id FROM pull_requests WHERE id=$1", [followUpDescriptionMatch[1]])).rows[0];
     if (!pullRequest) return json(response, 404, { error: "pull request not found" });
+    const ticketId = typeof body.ticket_id === "string" ? body.ticket_id : "";
+    const initialDescription = typeof body.initial_description === "string" ? body.initial_description : "";
+    if (ticketId && !(await pool.query("SELECT 1 FROM tickets WHERE id::text=$1 AND project_id=$2", [ticketId, pullRequest.project_id])).rowCount) {
+      return json(response, 400, { error: "ticket must belong to the pull request project" });
+    }
     const job = await enqueueJob({
       type: "pr.follow_up_description",
-      payload: { pull_request_id: pullRequest.id, feedback },
+      payload: { pull_request_id: pullRequest.id, feedback, ticket_id: ticketId || undefined, initial_description: initialDescription || undefined },
       priority: "low",
       idempotencyKey: `pr-follow-up-description:${pullRequest.id}:${randomUUID()}`,
     });
