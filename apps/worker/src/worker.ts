@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,12 +11,12 @@ import { inTransaction, pool } from "@dcc/database";
 import {
   approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate,
   claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, parsePrReviewVerdict,
-  renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
+  renderConflictResolutionPrompt, renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
-  commitExecutionChanges, createExecutionWorktree, pushExecutionBranch, validateExecutionWorktree,
-  WorktreeValidationError, worktreeDiff,
+  abortMerge, commitExecutionChanges, conflictedFiles, createConflictResolutionWorktree, createExecutionWorktree,
+  mergeBaseIntoWorktree, pushExecutionBranch, validateExecutionWorktree, WorktreeValidationError, worktreeDiff,
 } from "../../../packages/git-runner/src/index.ts";
 import {
   createDraftPullRequest, createPullRequestComment, findOpenPullRequestForHead, getPullRequestDiff,
@@ -37,6 +37,7 @@ const planningJobTypes = ["planning.generate", "planning.revise"];
 const executionJobTypes = ["execution.run", "execution.repair"];
 const publicationJobTypes = ["pull-request.retry"];
 const aiReviewJobTypes = ["pr.ai_review"];
+const conflictResolutionJobTypes = ["pr.conflict_resolution"];
 let stopping = false;
 let activeExecutionCancellation: AbortController | null = null;
 let lastPullRequestSync = 0;
@@ -55,7 +56,7 @@ async function refuseQueuedClaudeJobs(code: string, message: string) {
     await pool.query(
       `UPDATE jobs SET status=$1,completed_at=now(),error_json=jsonb_build_object('message',$2::text),updated_at=now()
        WHERE status='queued' AND type=ANY($3::text[])`,
-      [code, message, [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes]],
+      [code, message, [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...conflictResolutionJobTypes]],
     );
   } catch {
     // Startup refusal must remain visible even when the database is unavailable.
@@ -1128,6 +1129,167 @@ async function runPrAiReview(job: any) {
   }
 }
 
+async function runPrConflictResolution(job: any) {
+  const payload = job.payload_json as {
+    pr_conflict_resolution_id: string;
+    pull_request_id: string;
+    model?: string;
+    reasoning_level?: string;
+  };
+
+  const existing = (
+    await pool.query("SELECT status FROM pr_conflict_resolutions WHERE id=$1", [payload.pr_conflict_resolution_id])
+  ).rows[0];
+  if (!existing) throw new Error("pr_conflict_resolutions row not found");
+  if (existing.status !== "running") return;
+
+  let runId: string | null = null;
+  try {
+    await preflightClaudeAuthentication();
+
+    const pullRequest = (
+      await pool.query("SELECT * FROM pull_requests WHERE id=$1", [payload.pull_request_id])
+    ).rows[0];
+    if (!pullRequest) throw new Error("pull request not found");
+    const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [pullRequest.project_id])).rows[0];
+    if (!project) throw new Error("project not found");
+
+    const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
+    const model = payload.model ?? settings.default_model;
+    const reasoningLevel = payload.reasoning_level ?? settings.default_reasoning_level;
+
+    const worktree = await createConflictResolutionWorktree({
+      repositoryPath: project.repository_path,
+      headBranch: pullRequest.head_branch,
+      baseBranch: pullRequest.base_branch,
+      dataRoot: process.env.DCC_DATA_ROOT ?? REPO_ROOT,
+      projectSlug: project.slug,
+      pullRequestNumber: pullRequest.number,
+    });
+    const merge = await mergeBaseIntoWorktree(worktree.worktreePath, pullRequest.base_branch);
+
+    if (!merge.conflicted) {
+      await pushExecutionBranch(worktree.worktreePath, worktree.branchName);
+      await pool.query(
+        `UPDATE pr_conflict_resolutions
+         SET status='resolved',summary='Branch already merged cleanly; no conflicts to resolve.',completed_at=now()
+         WHERE id=$1`,
+        [payload.pr_conflict_resolution_id],
+      );
+      return;
+    }
+
+    const conflicts = await conflictedFiles(worktree.worktreePath);
+    const fileContents = await Promise.all(conflicts.map(async (file) => ({
+      path: file,
+      content: await readFile(path.join(worktree.worktreePath, file), "utf8"),
+    })));
+
+    const promptRow = await activePrompt("global", "pr-conflict-resolution");
+    const prompt = renderConflictResolutionPrompt(promptRow.content ?? "", {
+      project: { name: project.name },
+      pr: { title: pullRequest.title, headBranch: pullRequest.head_branch, baseBranch: pullRequest.base_branch },
+      conflictedFiles: fileContents,
+    });
+
+    const newRunId = randomUUID();
+    const sessionId = randomUUID();
+    await pool.query(
+      `INSERT INTO agent_runs
+       (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
+       VALUES ($1,$2,'pr_conflict_resolution','running',NULL,$3,$4,$5,now(),$6)`,
+      [newRunId, project.id, model, reasoningLevel, worktree.worktreePath,
+        { job_id: job.id, pr_conflict_resolution_id: payload.pr_conflict_resolution_id }],
+    );
+    runId = newRunId;
+    await pool.query(
+      "UPDATE pr_conflict_resolutions SET agent_run_id=$1 WHERE id=$2",
+      [runId, payload.pr_conflict_resolution_id],
+    );
+
+    const temporary = await mkdtemp(path.join(tmpdir(), "dcc-conflict-resolution-"));
+    try {
+      const promptFile = path.join(temporary, "conflict-resolution-prompt.md");
+      await writeFile(promptFile, prompt, { flag: "wx" });
+
+      const result = await invokePlanningClaude({
+        task: `Resolve the merge conflicts in PR #${pullRequest.number} in ${pullRequest.repository}.`,
+        sessionId,
+        model,
+        effort: reasoningLevel,
+        promptFile,
+        skillBundleDir: temporary,
+        workingDirectory: worktree.worktreePath,
+        maxTurns: 10,
+        oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
+      });
+      await pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]);
+
+      const remaining = await conflictedFiles(worktree.worktreePath);
+      if (remaining.length) {
+        await abortMerge(worktree.worktreePath);
+        throw new Error(`Claude left ${remaining.length} unresolved conflict(s): ${remaining.join(", ")}`);
+      }
+
+      let validation;
+      try {
+        validation = await validateExecutionWorktree({
+          worktreePath: worktree.worktreePath,
+          baseCommit: worktree.headCommit,
+          protectedPaths: project.config_json?.protected_paths,
+          commands: {
+            install: project.config_json?.commands?.install ?? project.config_json?.install_command,
+            lint: project.config_json?.commands?.lint ?? project.config_json?.lint_command,
+            typecheck: project.config_json?.commands?.typecheck ?? project.config_json?.typecheck_command,
+            test: project.config_json?.commands?.test ?? project.config_json?.test_command,
+            build: project.config_json?.commands?.build ?? project.config_json?.build_command,
+          },
+          projectValidationCommands: Array.isArray(project.config_json?.validation_commands)
+            ? project.config_json.validation_commands : [],
+        });
+      } catch (error) {
+        await abortMerge(worktree.worktreePath);
+        throw error instanceof WorktreeValidationError
+          ? new Error(`${error.check} failed after resolving conflicts: ${error.message}`)
+          : error;
+      }
+      void validation;
+
+      const commit = await commitExecutionChanges({
+        worktreePath: worktree.worktreePath,
+        message: `Merge ${pullRequest.base_branch} into ${pullRequest.head_branch}`,
+        protectedPaths: project.config_json?.protected_paths,
+      });
+      await pushExecutionBranch(worktree.worktreePath, worktree.branchName);
+
+      await pool.query(
+        "UPDATE agent_runs SET status='completed',finished_at=now(),exit_code=$2 WHERE id=$1",
+        [runId, result.exitCode],
+      );
+      await pool.query(
+        `UPDATE pr_conflict_resolutions
+         SET status='resolved',summary=$2,resolved_sha=$3,completed_at=now() WHERE id=$1`,
+        [payload.pr_conflict_resolution_id,
+          `Resolved conflicts in ${conflicts.length} file(s): ${conflicts.join(", ")}`, commit],
+      );
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  } catch (error: any) {
+    if (runId) {
+      await pool.query(
+        "UPDATE agent_runs SET status='failed',finished_at=now(),error_message=$2 WHERE id=$1",
+        [runId, error.message],
+      );
+    }
+    await pool.query(
+      "UPDATE pr_conflict_resolutions SET status='error',error_message=$2,completed_at=now() WHERE id=$1",
+      [payload.pr_conflict_resolution_id, error.message],
+    );
+    throw error;
+  }
+}
+
 async function deliverDueNotification() {
   const delivery = await inTransaction(async (client) => {
     const row = (await client.query(
@@ -1189,10 +1351,10 @@ while (!stopping) {
   if (!job) {
     const waiting = (await pool.query(
       "SELECT 1 FROM jobs WHERE status='queued' AND type=ANY($1::text[]) LIMIT 1",
-      [[...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes]],
+      [[...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...conflictResolutionJobTypes]],
     )).rowCount;
     if (waiting && (await subscriptionPreflightOrRefuse())) {
-      job = await claimJob(workerId, [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes]);
+      job = await claimJob(workerId, [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...conflictResolutionJobTypes]);
     }
   }
   if (!job) {
@@ -1215,6 +1377,8 @@ while (!stopping) {
       await retryPublication(job);
     } else if (aiReviewJobTypes.includes(job.type)) {
       await runPrAiReview(job);
+    } else if (conflictResolutionJobTypes.includes(job.type)) {
+      await runPrConflictResolution(job);
     } else if (planningJobTypes.includes(job.type)) {
       await runPlanning(job);
     } else {
