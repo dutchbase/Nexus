@@ -444,6 +444,11 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(confirm("Approve and merge this pull request on GitHub? This cannot be undone from here."))prAction("approve",targetBranch?{target_branch:targetBranch}:{});
         });
         document.querySelector("[data-pr-request-changes]")?.addEventListener("click",()=>prAction("request-changes"));
+        document.querySelector("[data-pr-resolve-conflicts]")?.addEventListener("click",(event)=>{
+          if(!confirm("Resolve merge conflicts with AI and push the result to this PR's branch? This cannot be undone from here."))return;
+          event.currentTarget.disabled=true;event.currentTarget.textContent="Resolving…";
+          prAction("resolve-conflicts",{});
+        });
         document.querySelector("[data-pr-close-ticket]")?.addEventListener("click",()=>{if(confirm("Close the linked ticket? This cannot be undone from here."))prAction("close-ticket")});
         document.querySelector("[data-pr-save-instructions]")?.addEventListener("click",()=>{
           const instructions=document.querySelector("[data-pr-repair-text]").value.trim();
@@ -477,6 +482,17 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
               if(!response.ok)return;
               const result=await response.json();
               if(result.ai_reviews?.[0]?.status!=="running"){clearInterval(poll);location.reload()}
+            }catch{}
+          },4000);
+        }
+        const conflictResolutionBadge=document.querySelector("[data-conflict-resolution-status]");
+        if(conflictResolutionBadge&&conflictResolutionBadge.dataset.conflictResolutionStatus==="running"){
+          const poll=setInterval(async()=>{
+            try{
+              const response=await fetch("/api/admin/pull-requests/"+prId);
+              if(!response.ok)return;
+              const result=await response.json();
+              if(result.conflict_resolutions?.[0]?.status!=="running"){clearInterval(poll);location.reload()}
             }catch{}
           },4000);
         }

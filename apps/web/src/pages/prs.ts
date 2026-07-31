@@ -14,7 +14,7 @@ const detailQuery = `SELECT pr.*,p.name project_name,p.slug project_slug,t.ticke
 
 // Shared by both the uuid route (/admin/pull-requests/{uuid}) and the slug
 // route (/admin/pull-requests/{projectSlug}/{number}) so the two never drift.
-function renderDetail(item: any, aiReviews: any[]): PageResult {
+function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[]): PageResult {
   if (!item) return { status: 404, title: "Pull request not found", body: "<h1>Pull request not found</h1>" };
   const validation = item.metadata_json?.validation_output ?? {};
   const changes = (item.additions != null || item.deletions != null || item.changed_files != null)
@@ -53,6 +53,15 @@ function renderDetail(item: any, aiReviews: any[]): PageResult {
         error: { cls: "danger", label: "AI: Error" },
       } as Record<string, { cls: string; label: string }>)[latestAiReview.status] ?? { cls: "muted", label: `AI: ${escapeHtml(latestAiReview.status)}` }
     : { cls: "muted", label: "AI: No review yet" };
+  const latestConflictResolution = conflictResolutions[0] ?? null;
+  const conflictResolutionBadge = latestConflictResolution
+    ? ({
+        running: { cls: "run", label: "Conflict resolution: Running…" },
+        resolved: { cls: "ok", label: "Conflict resolution: Resolved" },
+        error: { cls: "danger", label: "Conflict resolution: Error" },
+      } as Record<string, { cls: string; label: string }>)[latestConflictResolution.status]
+      ?? { cls: "muted", label: `Conflict resolution: ${escapeHtml(latestConflictResolution.status)}` }
+    : null;
   const body = `<div class="eyebrow">${escapeHtml(item.project_name)} · ${escapeHtml(item.repository)}</div>
     <p class="mono">${escapeHtml(item.project_slug)}/${escapeHtml(item.repository)} #${item.number}</p>
     <h1>${escapeHtml(item.title)}</h1>
@@ -61,6 +70,8 @@ function renderDetail(item: any, aiReviews: any[]): PageResult {
       <span class="status ${reviewBadge.cls}">${escapeHtml(reviewBadge.label)}</span>
       <span class="status ${aiBadge.cls}" data-ai-review-status="${escapeHtml(latestAiReview?.status ?? "")}">${escapeHtml(aiBadge.label)}</span>
       ${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}
+      ${conflictResolutionBadge ? `<span class="status ${conflictResolutionBadge.cls}" data-conflict-resolution-status="${escapeHtml(latestConflictResolution.status)}">${escapeHtml(conflictResolutionBadge.label)}</span>` : ""}
+      ${item.merge_conflicts ? button("data-pr-resolve-conflicts", "Resolve conflicts (AI)", true, "") : ""}
       <input type="text" data-pr-target-branch value="${escapeHtml(item.base_branch)}" placeholder="Target branch" style="width:120px" title="Branch to merge into (defaults to current base)">
       ${button("data-pr-approve", "Approve & merge", canApprove, "Already approved internally", " primary")}
       ${button("data-pr-ai-review", "AI review", true, "")}
@@ -169,13 +180,15 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   if (pullRequestSlugMatch) {
     const item = (await pool.query(`${detailQuery} WHERE p.slug=$1 AND pr.number=$2`, [decodeURIComponent(pullRequestSlugMatch[1]), Number(pullRequestSlugMatch[2])])).rows[0];
     const aiReviews = item ? (await pool.query("SELECT * FROM pr_ai_reviews WHERE pull_request_id=$1 ORDER BY created_at DESC", [item.id])).rows : [];
-    return renderDetail(item, aiReviews);
+    const conflictResolutions = item ? (await pool.query("SELECT * FROM pr_conflict_resolutions WHERE pull_request_id=$1 ORDER BY created_at DESC", [item.id])).rows : [];
+    return renderDetail(item, aiReviews, conflictResolutions);
   }
   const pullRequestPageMatch = url.pathname.match(/^\/admin\/pull-requests\/([0-9a-f-]+)$/i);
   if (pullRequestPageMatch) {
     const item = (await pool.query(`${detailQuery} WHERE pr.id=$1`, [pullRequestPageMatch[1]])).rows[0];
     const aiReviews = item ? (await pool.query("SELECT * FROM pr_ai_reviews WHERE pull_request_id=$1 ORDER BY created_at DESC", [item.id])).rows : [];
-    return renderDetail(item, aiReviews);
+    const conflictResolutions = item ? (await pool.query("SELECT * FROM pr_conflict_resolutions WHERE pull_request_id=$1 ORDER BY created_at DESC", [item.id])).rows : [];
+    return renderDetail(item, aiReviews, conflictResolutions);
   }
   return null;
 }
