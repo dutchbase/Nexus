@@ -79,6 +79,7 @@ for SLUG in "${SLUGS[@]}"; do
         fi
 
         # Set local git config
+        git config core.hooksPath /dev/null
         git config user.name "DCC Fixture"
         git config user.email "fixture@example.invalid"
 
