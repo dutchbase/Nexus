@@ -6,7 +6,7 @@ const planning = {
   globalPlanningInstructions: "Plan only.",
   projectContext: "A TypeScript service.",
   projectPlanningInstructions: "Preserve conventions.",
-  projectPathsAndRepositoryMetadata: { repository_path: "/repo", default_branch: "main" },
+  projectPathsAndRepositoryMetadata: { repository_path: "/repo", agent_start_path: "/repo/planning", default_branch: "main" },
   resolvedAiConfiguration: { reasoning_level: "high", model: "sonnet" },
   resolvedSkills: [{ version: "1", slug: "typescript", id: "skill-1", resolution_sources: ["project_automatic"] }],
   ticket: {
@@ -55,9 +55,13 @@ describe("prompt compiler", () => {
     const reordered = {
       ...planning,
       resolvedAiConfiguration: { model: "sonnet", reasoning_level: "high" },
-      projectPathsAndRepositoryMetadata: { default_branch: "main", repository_path: "/repo" },
+      projectPathsAndRepositoryMetadata: { default_branch: "main", agent_start_path: "/repo/planning", repository_path: "/repo" },
     };
     expect(buildPlanningPrompt(reordered)).toBe(buildPlanningPrompt(planning));
+  });
+
+  it("includes the effective planning start path alongside the repository path", () => {
+    expect(buildPlanningPrompt(planning)).toContain("\"agent_start_path\":\"/repo/planning\"");
   });
 
   it("builds byte-identical execution prompts and embeds the approved plan exactly", () => {

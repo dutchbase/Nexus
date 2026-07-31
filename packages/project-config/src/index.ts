@@ -1,6 +1,6 @@
 import { access, readFile, stat } from "node:fs/promises";
 import { constants } from "node:fs";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { parse } from "yaml";
@@ -30,11 +30,32 @@ export type ProjectValidationInput = {
   automaticSkillPaths?: string[];
   validationCommands?: string[];
   requireRemote?: boolean;
+  agentStartPath?: string | null;
 };
+
+export function normalizeAgentStartPath(value: unknown) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+export async function validateAgentStartPath(path: unknown) {
+  if (path === null || path === undefined || path === "") return [];
+  if (typeof path !== "string") return ["planning agent start path must be a string"];
+  if (!path.trim()) return [];
+  if (!isAbsolute(path)) return ["planning agent start path must be absolute"];
+  try {
+    if (!(await stat(path)).isDirectory()) throw new Error();
+    await access(path, constants.R_OK | constants.X_OK);
+    return [];
+  } catch {
+    return ["planning agent start path is not a readable and searchable directory"];
+  }
+}
+
 
 export async function validateProject(input: ProjectValidationInput) {
   const errors: string[] = [];
   const changedFiles: string[] = [];
+  errors.push(...await validateAgentStartPath(input.agentStartPath));
   try {
     if (!(await stat(input.repositoryPath)).isDirectory()) errors.push("repository path is not a directory");
     await access(input.repositoryPath, constants.R_OK);
