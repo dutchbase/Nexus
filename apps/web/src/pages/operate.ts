@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { escapeHtml, pool, shortRef } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { forbiddenClaudeAuthVariables } from "../../../../packages/claude-runner/src/auth-guard.ts";
+import { aiModels, reasoningLevels } from "@dcc/domain";
 
 // Coarse relative-duration label — same rule as queue.ts (minutes below an
 // hour, hours above); duplicated because these are the only two callers.
@@ -23,7 +24,7 @@ function maskedDatabaseUrl() {
   }
 }
 
-function settingsBody(): string {
+function settingsBody(aiReviewSettings: any): string {
   const panel = (index: number, content: string) => `<div role="tabpanel" id="panel-${index}" aria-labelledby="tab-${index}"${index === 0 ? "" : " hidden"}>${content}</div>`;
   const field = (label: string, value: string) => `<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div class="eyebrow">${escapeHtml(label)}</div><div class="mono" style="font-size:13px;margin-top:4px">${escapeHtml(value)}</div></div>`;
   const check = (label: string) => `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:13px"><input type="checkbox" checked disabled>${escapeHtml(label)}</label>`;
@@ -61,9 +62,29 @@ function settingsBody(): string {
 
   const retention = `<section class="card">${field("Worktree cleanup", "7 days after completion")}${field("Run event retention", "90 days")}${field("Audit retention", "forever")}${field("Daily backup window", "03:15 Europe/Amsterdam")}</section>`;
 
+  const aiReview = `<section class="card"><div class="card-body">
+    <div class="card-head" style="margin:-18px -18px 14px;border-radius:6px 6px 0 0">AI PR Review defaults</div>
+    <form data-ai-review-settings-form style="display:flex;flex-direction:column;gap:12px">
+      <label class="field"><span>Model</span>
+        <select name="default_model">
+          ${aiModels.map(m => `<option value="${m}" ${m === aiReviewSettings?.default_model ? "selected" : ""}>${escapeHtml(m)}</option>`).join("")}
+        </select>
+      </label>
+      <label class="field"><span>Reasoning level</span>
+        <select name="default_reasoning_level">
+          ${reasoningLevels.map(r => `<option value="${r}" ${r === aiReviewSettings?.default_reasoning_level ? "selected" : ""}>${escapeHtml(r)}</option>`).join("")}
+        </select>
+      </label>
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="button primary" type="submit">Save</button>
+        <div class="error" style="flex:1;color:var(--t-danger);align-self:center;font-size:13px"></div>
+      </div>
+    </form>
+  </div></section>`;
+
   return `<div class="eyebrow">config / system.yaml</div><h1>Settings</h1>
-    <div class="tabs" role="tablist">${["General", "Authentication", "Claude runtime", "GitHub", "Retention"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
-    ${panel(0, general)}${panel(1, authentication)}${panel(2, claude)}${panel(3, github)}${panel(4, retention)}`;
+    <div class="tabs" role="tablist">${["General", "Authentication", "Claude runtime", "GitHub", "AI Review", "Retention"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
+    ${panel(0, general)}${panel(1, authentication)}${panel(2, claude)}${panel(3, github)}${panel(4, aiReview)}${panel(5, retention)}`;
 }
 
 function statCard(label: string, value: string, detail: string, tone: string) {
@@ -150,7 +171,10 @@ async function systemBody(): Promise<string> {
 }
 
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
-  if (url.pathname === "/admin/settings") return { status: 200, title: "Settings", body: settingsBody() };
+  if (url.pathname === "/admin/settings") {
+    const aiReviewSettings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
+    return { status: 200, title: "Settings", body: settingsBody(aiReviewSettings) };
+  }
   if (url.pathname === "/admin/system") return { status: 200, title: "System health", body: await systemBody() };
   return null;
 }

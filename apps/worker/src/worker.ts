@@ -9,15 +9,18 @@ import {
 } from "@dcc/claude-runner";
 import { inTransaction, pool } from "@dcc/database";
 import {
-  buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, claimJob, completeJob, failJob,
-  enqueueNotification, importGithubPullRequests, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
+  approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate,
+  claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, parsePrReviewVerdict,
+  renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
   commitExecutionChanges, createExecutionWorktree, pushExecutionBranch, validateExecutionWorktree,
   WorktreeValidationError, worktreeDiff,
 } from "../../../packages/git-runner/src/index.ts";
-import { createDraftPullRequest, findOpenPullRequestForHead } from "@dcc/github-provider";
+import {
+  createDraftPullRequest, createPullRequestComment, findOpenPullRequestForHead, getPullRequestDiff,
+} from "@dcc/github-provider";
 import { validateProject } from "@dcc/project-config";
 import {
   materializeSkillBundle, resolveSkills, snapshotSkills, type ResolutionSource, type SkillCandidate,
@@ -33,6 +36,7 @@ const workerId = `worker-${randomUUID()}`;
 const planningJobTypes = ["planning.generate", "planning.revise"];
 const executionJobTypes = ["execution.run", "execution.repair"];
 const publicationJobTypes = ["pull-request.retry"];
+const aiReviewJobTypes = ["pr.ai_review"];
 let stopping = false;
 let activeExecutionCancellation: AbortController | null = null;
 let lastPullRequestSync = 0;
@@ -51,7 +55,7 @@ async function refuseQueuedClaudeJobs(code: string, message: string) {
     await pool.query(
       `UPDATE jobs SET status=$1,completed_at=now(),error_json=jsonb_build_object('message',$2::text),updated_at=now()
        WHERE status='queued' AND type=ANY($3::text[])`,
-      [code, message, [...planningJobTypes, ...executionJobTypes]],
+      [code, message, [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes]],
     );
   } catch {
     // Startup refusal must remain visible even when the database is unavailable.
@@ -977,6 +981,152 @@ async function retryPublication(job: any) {
   });
 }
 
+async function runPrAiReview(job: any) {
+  const payload = job.payload_json as {
+    pr_ai_review_id: string;
+    pull_request_id: string;
+    mode: "review_only" | "review_and_merge";
+    model?: string;
+    reasoning_level?: string;
+  };
+
+  // ponytail: idempotency guard. A retry after a late failure (e.g. between
+  // posting the GitHub comment and the final pr_ai_reviews UPDATE) must not
+  // re-invoke Claude or post a second, duplicate comment. Once a prior
+  // attempt has moved this review out of 'running' — completed or recorded
+  // its own error — treat the job as already handled instead of redoing the
+  // side effects.
+  const existingReview = (
+    await pool.query("SELECT status FROM pr_ai_reviews WHERE id=$1", [payload.pr_ai_review_id])
+  ).rows[0];
+  if (!existingReview) throw new Error("pr_ai_reviews row not found");
+  if (existingReview.status !== "running") return;
+
+  // ponytail: everything below — including the preflight check, the row
+  // lookups, and the diff fetch — can throw (e.g. GitHub returns 406 for a
+  // diff exceeding its size limit). The try starts here, right after the
+  // idempotency guard, so any such failure still lands in the catch block
+  // below and moves pr_ai_reviews off status='running' instead of leaving a
+  // permanent "Running…" row with no error ever recorded. runId is hoisted
+  // and only assigned once the agent_runs row actually exists, since the
+  // catch block's agent_runs UPDATE must tolerate failures that happen
+  // before that INSERT runs.
+  let runId: string | null = null;
+  try {
+    await preflightClaudeAuthentication();
+
+    const pullRequest = (
+      await pool.query("SELECT * FROM pull_requests WHERE id=$1", [payload.pull_request_id])
+    ).rows[0];
+    if (!pullRequest) throw new Error("pull request not found");
+    const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [pullRequest.project_id])).rows[0];
+    if (!project) throw new Error("project not found");
+
+    const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
+    const model = payload.model ?? settings.default_model;
+    const reasoningLevel = payload.reasoning_level ?? settings.default_reasoning_level;
+
+    const promptRow = await activePrompt("global", "pr-review");
+
+    const [owner, repo] = pullRequest.repository.split("/");
+    const diff = await getPullRequestDiff(owner, repo, pullRequest.number);
+
+    const prompt = renderPrReviewPrompt(promptRow.content ?? "", {
+      project: { name: project.name },
+      pr: {
+        title: pullRequest.title,
+        author: pullRequest.author,
+        head_branch: pullRequest.head_branch,
+        base_branch: pullRequest.base_branch,
+        body: pullRequest.body ?? "",
+        diff,
+      },
+    });
+
+    const newRunId = randomUUID();
+    // ponytail: a fresh session id per attempt, same as runPlanning's sessionId
+    // above (and for the same reason) — the Claude CLI rejects a --session-id
+    // that's already in use. Reusing payload.pr_ai_review_id across retries
+    // would make every retry after a successful-but-not-yet-finalized
+    // invocation fail deterministically at this exact step forever, permanently
+    // defeating retry/backoff for this job type.
+    const sessionId = randomUUID();
+    await pool.query(
+      `INSERT INTO agent_runs
+       (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
+       VALUES ($1,$2,'pr_ai_review','running',NULL,$3,$4,$5,now(),$6)`,
+      [newRunId, project.id, model, reasoningLevel, project.repository_path,
+        { job_id: job.id, pr_ai_review_id: payload.pr_ai_review_id }],
+    );
+    runId = newRunId;
+    await pool.query("UPDATE pr_ai_reviews SET agent_run_id=$1 WHERE id=$2", [runId, payload.pr_ai_review_id]);
+
+    // No skills are attached to a PR review (the diff is embedded directly in the
+    // prompt), but invokePlanningClaude's --add-dir argument requires a real,
+    // existing directory — an empty temp dir stands in for a skill bundle.
+    const temporary = await mkdtemp(path.join(tmpdir(), "dcc-pr-review-"));
+    try {
+      const promptFile = path.join(temporary, "pr-review-prompt.md");
+      await writeFile(promptFile, prompt, { flag: "wx" });
+
+      const result = await invokePlanningClaude({
+        task: `Review PR #${pullRequest.number} in ${pullRequest.repository} for merge safety.`,
+        sessionId,
+        model,
+        effort: reasoningLevel,
+        promptFile,
+        skillBundleDir: temporary,
+        workingDirectory: project.repository_path,
+        maxTurns: 5,
+        oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
+      });
+      // Publish the correlation id only after the CLI has completed, matching
+      // runPlanning's same ordering (agent_runs.claude_session_id stays NULL
+      // until the invocation this run actually used has finished).
+      await pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]);
+
+      const verdict = parsePrReviewVerdict(result.markdown);
+
+      await pool.query(
+        "UPDATE agent_runs SET status='completed',finished_at=now(),exit_code=$2 WHERE id=$1",
+        [runId, result.exitCode],
+      );
+
+      const commentBody = verdict.verdict === "approved"
+        ? `**AI Review: Approved**\n\n${verdict.summary}`
+        : `**AI Review: Not safe to merge**\n\n${verdict.summary}`;
+      const comment = await createPullRequestComment(owner, repo, pullRequest.number, commentBody);
+
+      await pool.query(
+        `UPDATE pr_ai_reviews SET status=$2,summary=$3,github_comment_url=$4,completed_at=now() WHERE id=$1`,
+        [payload.pr_ai_review_id, verdict.verdict === "approved" ? "approved" : "rejected", verdict.summary, comment.html_url],
+      );
+
+      if (payload.mode === "review_and_merge" && verdict.verdict === "approved") {
+        await approveAndMergePullRequest(pool, pullRequest, undefined, { type: "worker", id: payload.pr_ai_review_id });
+      }
+    } finally {
+      await rm(temporary, { recursive: true, force: true });
+    }
+  } catch (error: any) {
+    if (runId) {
+      await pool.query(
+        "UPDATE agent_runs SET status='failed',finished_at=now(),error_message=$2 WHERE id=$1",
+        [runId, error.message],
+      );
+    }
+    await pool.query(
+      "UPDATE pr_ai_reviews SET status='error',error_message=$2,completed_at=now() WHERE id=$1",
+      [payload.pr_ai_review_id, error.message],
+    );
+    // ponytail: rethrow so the main loop's failJob()/completeJob() dispatch
+    // (which every other job handler relies on) retries or hard-fails this
+    // job through the normal jobs-table lifecycle instead of silently
+    // completing a job whose review actually errored out.
+    throw error;
+  }
+}
+
 async function deliverDueNotification() {
   const delivery = await inTransaction(async (client) => {
     const row = (await client.query(
@@ -1038,10 +1188,10 @@ while (!stopping) {
   if (!job) {
     const waiting = (await pool.query(
       "SELECT 1 FROM jobs WHERE status='queued' AND type=ANY($1::text[]) LIMIT 1",
-      [[...planningJobTypes, ...executionJobTypes]],
+      [[...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes]],
     )).rowCount;
     if (waiting && (await subscriptionPreflightOrRefuse())) {
-      job = await claimJob(workerId, [...planningJobTypes, ...executionJobTypes]);
+      job = await claimJob(workerId, [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes]);
     }
   }
   if (!job) {
@@ -1062,6 +1212,8 @@ while (!stopping) {
       if (!result.valid) throw new Error(result.errors.join("; "));
     } else if (publicationJobTypes.includes(job.type)) {
       await retryPublication(job);
+    } else if (aiReviewJobTypes.includes(job.type)) {
+      await runPrAiReview(job);
     } else if (planningJobTypes.includes(job.type)) {
       await runPlanning(job);
     } else {

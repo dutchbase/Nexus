@@ -4,12 +4,12 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { resolve } from "node:path";
 import { pool, inTransaction } from "@dcc/database";
 import {
-  AiConfigurationError, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob, globalPromptTypes,
-  enqueueNotification, importGithubPullRequests, projectPromptTypes, promptContentHash, resolveAiConfiguration, setPullRequestTicketStatus,
-  syncOpenPullRequests, syncPullRequest, validateAiSelection, type AiPhase,
+  AiConfigurationError, approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
+  globalPromptTypes, enqueueNotification, importGithubPullRequests, projectPromptTypes, promptContentHash, PullRequestMergeError,
+  resolveAiConfiguration, setPullRequestTicketStatus, syncOpenPullRequests, syncPullRequest, validateAiSelection, type AiPhase,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
-import { markReadyForReview, mergePullRequest, updatePullRequestBase, mergeBranch } from "../../../packages/github-provider/src/index.ts";
+import { mergeBranch } from "../../../packages/github-provider/src/index.ts";
 import {
   resolveSkills, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
 } from "../../../packages/skill-registry/src/index.ts";
@@ -734,8 +734,20 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     syncOpenPullRequests().catch((error) => console.error(`Manual pull-request sync failed: ${error instanceof Error ? error.message : "unknown error"}`));
     return json(response, 202, { ok: true, note: "Sync started. The worker also syncs open pull requests automatically every few seconds." });
   }
+  if (url.pathname === "/api/admin/settings/ai-review" && request.method === "POST") {
+    const body = await bodyOf(request);
+    const selection = validateAiSelection({
+      model: typeof body.default_model === "string" ? body.default_model : "",
+      reasoning_level: typeof body.default_reasoning_level === "string" ? body.default_reasoning_level : "",
+    });
+    await pool.query(
+      `UPDATE ai_review_settings SET default_model=$1,default_reasoning_level=$2,updated_at=now(),updated_by=$3 WHERE id=1`,
+      [selection.model, selection.reasoning_level, session.user_id],
+    );
+    return json(response, 200, { ok: true });
+  }
   const pullRequestActionMatch = url.pathname.match(
-    /^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/(mark-reviewed|approve|request-changes|repair-instructions|start-repair|refresh|close-ticket)$/i,
+    /^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/(mark-reviewed|approve|request-changes|repair-instructions|start-repair|refresh|close-ticket|ai-review)$/i,
   );
   if (pullRequestActionMatch && request.method === "POST") {
     const [, pullRequestId, action] = pullRequestActionMatch;
@@ -753,17 +765,13 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     } else if (action === "mark-reviewed") {
       await pool.query("UPDATE pull_requests SET internal_review_state='reviewed',updated_at=now() WHERE id=$1", [pullRequest.id]);
     } else if (action === "approve") {
-      const [owner, repo] = pullRequest.repository.split("/");
-      const targetBranch = typeof body.target_branch === "string" ? body.target_branch.trim() : "";
+      const targetBranch = typeof body.target_branch === "string" ? body.target_branch.trim() : undefined;
       try {
-        if (targetBranch && targetBranch !== pullRequest.base_branch) await updatePullRequestBase(owner, repo, pullRequest.number, targetBranch);
-        if (pullRequest.is_draft) await markReadyForReview(owner, repo, pullRequest.number);
-        await mergePullRequest(owner, repo, pullRequest.number);
+        await approveAndMergePullRequest(pool, pullRequest, targetBranch, { type: "admin", id: session.user_id });
       } catch (error) {
-        return json(response, 502, { error: error instanceof Error ? error.message : "merge failed" });
+        if (error instanceof PullRequestMergeError) return json(response, 502, { error: error.message });
+        throw error;
       }
-      await pool.query("UPDATE pull_requests SET internal_review_state='approved',updated_at=now() WHERE id=$1", [pullRequest.id]);
-      await syncPullRequest(pullRequest.id, "admin", session.user_id);
     } else if (action === "request-changes") {
       await pool.query("UPDATE pull_requests SET internal_review_state='changes_requested',updated_at=now() WHERE id=$1", [pullRequest.id]);
       await setPullRequestTicketStatus(pullRequest.id, "PR Changes Requested", "Internal changes requested", "admin", session.user_id);
@@ -814,6 +822,35 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     } else if (action === "close-ticket") {
       const target: "Completed" | "Closed Without Merge" = pullRequest.merged_at ? "Completed" : "Closed Without Merge";
       await setPullRequestTicketStatus(pullRequest.id, target, "Ticket closed manually after external pull-request completion", "admin", session.user_id);
+    } else if (action === "ai-review") {
+      const mode = body.mode === "review_and_merge" ? "review_and_merge" : "review_only";
+      const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
+      const selection = validateAiSelection({
+        model: typeof body.model === "string" ? body.model : settings.default_model,
+        reasoning_level: typeof body.reasoning_level === "string" ? body.reasoning_level : settings.default_reasoning_level,
+      });
+      const reviewRow = await inTransaction(async (client) => {
+        const row = (
+          await client.query(
+            `INSERT INTO pr_ai_reviews (pull_request_id, mode, status, model, reasoning_level, created_by)
+             VALUES ($1,$2,'running',$3,$4,$5) RETURNING id`,
+            [pullRequest.id, mode, selection.model, selection.reasoning_level, session.user_id],
+          )
+        ).rows[0];
+        await enqueueJob({
+          type: "pr.ai_review",
+          payload: {
+            pr_ai_review_id: row.id,
+            pull_request_id: pullRequest.id,
+            mode,
+            model: selection.model,
+            reasoning_level: selection.reasoning_level,
+          },
+          idempotencyKey: `pr-ai-review:${row.id}`,
+        }, client);
+        return row;
+      });
+      return json(response, 200, { id: reviewRow.id });
     }
     const updated = (await pool.query("SELECT * FROM pull_requests WHERE id=$1", [pullRequest.id])).rows[0];
     return json(response, 200, { pull_request: updated });
