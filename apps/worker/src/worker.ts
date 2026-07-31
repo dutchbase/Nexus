@@ -157,7 +157,7 @@ async function planningInputs(ticket: any) {
   });
   const values = {
     "project.slug": project.slug, "project.name": project.name,
-    "project.repository_path": project.repository_path, "project.default_branch": project.default_branch,
+    "project.repository_path": project.repository_path, "project.agent_start_path": project.agent_start_path ?? project.repository_path, "project.default_branch": project.default_branch,
     "ticket.title": ticket.title, "ticket.description": ticket.description,
     "ticket.category": ticket.category, "ticket.priority": ticket.priority,
   };
@@ -172,7 +172,7 @@ async function planningInputs(ticket: any) {
     projectPlanningInstructions: renderTemplate(projectPlanning.content ?? "", values),
     projectPathsAndRepositoryMetadata: {
       default_branch: project.default_branch, github_owner: project.github_owner,
-      github_repository: project.github_repository, repository_path: project.repository_path, slug: project.slug,
+      github_repository: project.github_repository, repository_path: project.repository_path, agent_start_path: project.agent_start_path ?? project.repository_path, slug: project.slug,
     },
     resolvedAiConfiguration: ai,
     resolvedSkills: skills.map((skill) => ({
@@ -224,7 +224,7 @@ async function executionInputs(ticket: any, phase: "execution" | "repair", appro
   });
   const values = {
     "project.slug": project.slug, "project.name": project.name,
-    "project.repository_path": project.repository_path, "project.default_branch": project.default_branch,
+    "project.repository_path": project.repository_path, "project.agent_start_path": project.agent_start_path ?? project.repository_path, "project.default_branch": project.default_branch,
     "ticket.title": ticket.title, "ticket.description": ticket.description,
     "ticket.category": ticket.category, "ticket.priority": ticket.priority,
   };
@@ -384,10 +384,11 @@ async function runPlanning(job: any) {
     input.promptVersionIds["global.plan-revision"] = revisionInstructions.active_version_id;
   }
   const repository = await validateProject({
-    repositoryPath: input.project.repository_path, defaultBranch: input.project.default_branch, requireRemote: false,
+    repositoryPath: input.project.repository_path, defaultBranch: input.project.default_branch, requireRemote: false, agentStartPath: input.project.agent_start_path,
   });
   if (!repository.valid) throw new Error(`repository is not available for planning: ${repository.errors.join("; ")}`);
 
+  const planningStartPath = input.project.agent_start_path ?? input.project.repository_path;
   const runId = randomUUID();
   // ponytail: --session-id asks the CLI to start a NEW session under that id;
   // reusing the original planning run's id collides ("already in use"). The
@@ -400,7 +401,7 @@ async function runPlanning(job: any) {
      (id,ticket_id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
      VALUES ($1,$2,$3,$4,'running',NULL,$5,$6,$7,now(),$8)`,
     [runId, ticket.id, input.project.id, runType, input.ai.model, input.ai.reasoning_level,
-      input.project.repository_path, { job_id: job.id, project_config_version: input.project.config_version }],
+      planningStartPath, { job_id: job.id, project_config_version: input.project.config_version, planning_start_path: planningStartPath }],
   );
   await transitionToPlanning(ticket.id, job.id, runId);
 
@@ -417,7 +418,7 @@ async function runPlanning(job: any) {
     model: input.ai.model, reasoningLevel: input.ai.reasoning_level, skillSnapshotId: skillSnapshot.id,
     metadata: {
       promptVersionIds: input.promptVersionIds, projectConfigVersion: input.project.config_version,
-      ticketVersion: ticket.updated_at, runType,
+      ticketVersion: ticket.updated_at, runType, planningStartPath,
     },
   });
   await pool.query(
@@ -437,7 +438,7 @@ async function runPlanning(job: any) {
         ? `Return a complete revised implementation plan for ticket ${ticket.ticket_number}, applying the administrator feedback.`
         : `Create the implementation plan for ticket ${ticket.ticket_number}.`,
       sessionId, model: input.ai.model, effort: input.ai.reasoning_level, promptFile,
-      skillBundleDir: skillBundle, workingDirectory: input.project.repository_path,
+      skillBundleDir: skillBundle, workingDirectory: planningStartPath,
       maxTurns: Number(input.project.config_json?.planning_max_turns ?? 20),
       oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
       scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
@@ -1367,7 +1368,7 @@ while (!stopping) {
       const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [job.payload_json.project_id])).rows[0];
       if (!project) throw new Error("project not found");
       const result = await validateProject({
-        repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: true,
+        repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: true, agentStartPath: project.agent_start_path,
       });
       await pool.query(
         "UPDATE projects SET health_status=$2,last_validated_at=now(),updated_at=now() WHERE id=$1",

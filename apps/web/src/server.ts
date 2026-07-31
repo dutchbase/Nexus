@@ -14,7 +14,7 @@ import {
   resolveSkills, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
 } from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
-import { validateProject } from "@dcc/project-config";
+import { normalizeAgentStartPath, validateAgentStartPath, validateProject } from "@dcc/project-config";
 import { adminPage, escapeHtml, loginPage, publicFormPage, submittedPage } from "./ui.ts";
 import { allowedTemplateVariables, fieldsFor, lineDiff, validStatuses } from "./pages/shared.ts";
 import * as dashboardPage from "./pages/dashboard.ts";
@@ -154,6 +154,7 @@ async function promptInputsFor(ticket: any, phase: "planning" | "execution", app
     "project.slug": project.slug,
     "project.name": project.name,
     "project.repository_path": project.repository_path,
+    "project.agent_start_path": project.agent_start_path ?? project.repository_path,
     "project.default_branch": project.default_branch,
     "ticket.title": ticket.title,
     "ticket.description": ticket.description,
@@ -187,6 +188,7 @@ async function promptInputsFor(ticket: any, phase: "planning" | "execution", app
           github_owner: project.github_owner,
           github_repository: project.github_repository,
           repository_path: project.repository_path,
+          agent_start_path: project.agent_start_path ?? project.repository_path,
           slug: project.slug,
         },
         resolvedAiConfiguration: ai,
@@ -1065,10 +1067,13 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
   if (request.method === "GET" && url.pathname === "/api/admin/projects") return json(response, 200, { projects: (await pool.query("SELECT * FROM projects ORDER BY name")).rows });
   if (request.method === "POST" && url.pathname === "/api/admin/projects") {
     const body = await bodyOf(request);
+    const agentStartPath = normalizeAgentStartPath(body.agent_start_path);
+    const agentStartPathErrors = await validateAgentStartPath(body.agent_start_path);
+    if (agentStartPathErrors.length) return json(response, 400, { error: agentStartPathErrors.join("; ") });
     const result = await pool.query(
-      `INSERT INTO projects (slug,name,description,enabled,repository_path,github_owner,github_repository,default_branch,config_json)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [body.slug, body.name, body.description ?? null, body.enabled ?? true, body.repository_path, body.github_owner ?? null, body.github_repository ?? null, body.default_branch ?? "main", body.config_json ?? {}],
+      `INSERT INTO projects (slug,name,description,enabled,repository_path,agent_start_path,github_owner,github_repository,default_branch,config_json)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [body.slug, body.name, body.description ?? null, body.enabled ?? true, body.repository_path, agentStartPath, body.github_owner ?? null, body.github_repository ?? null, body.default_branch ?? "main", body.config_json ?? {}],
     );
     await audit({ actorType: "admin", actorId: session.user_id, action: "project.create", entityType: "project", entityId: result.rows[0].id, after: result.rows[0], ip: ipOf(request) });
     return json(response, 201, { project: result.rows[0] });
@@ -1082,8 +1087,13 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     const before = (await pool.query("SELECT * FROM projects WHERE id = $1", [projectMatch[1]])).rows[0];
     if (!before) return json(response, 404, { error: "project not found" });
     const body = await bodyOf(request);
-    const allowed = ["name", "description", "enabled", "repository_path", "github_owner", "github_repository", "default_branch", "config_json"];
-    const entries = Object.entries(body).filter(([key]) => allowed.includes(key));
+    const agentStartPath = normalizeAgentStartPath(body.agent_start_path);
+    if (Object.hasOwn(body, "agent_start_path")) {
+      const agentStartPathErrors = await validateAgentStartPath(body.agent_start_path);
+      if (agentStartPathErrors.length) return json(response, 400, { error: agentStartPathErrors.join("; ") });
+    }
+    const allowed = ["name", "description", "enabled", "repository_path", "agent_start_path", "github_owner", "github_repository", "default_branch", "config_json"];
+    const entries = Object.entries(body).filter(([key]) => allowed.includes(key)).map(([key, value]) => [key, key === "agent_start_path" ? agentStartPath : value]);
     if (!entries.length) return json(response, 400, { error: "no supported fields" });
     // config_json is shallow-merged into the existing value (not replaced) so a
     // partial save from the UI (e.g. just `commands` + `branch_prefix`) never
@@ -1366,7 +1376,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     // any workflow-status guard since it's an environment precondition, not
     // a business-state one.
     const repoCheck = await validateProject({
-      repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false,
+      repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false, agentStartPath: project.agent_start_path,
     });
     if (repoCheck.changedFiles.length) {
       return json(response, 409, {
