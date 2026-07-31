@@ -765,6 +765,37 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     );
     return json(response, 200, { ok: true });
   }
+  const followUpDescriptionMatch = url.pathname.match(/^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/follow-up-description$/i);
+  if (followUpDescriptionMatch && request.method === "POST") {
+    const body = await bodyOf(request);
+    const submittedFeedback = typeof body.feedback === "string" ? body.feedback : "";
+    const feedback = submittedFeedback.trim();
+    if (!feedback || submittedFeedback.length > 10_000) return json(response, 400, { error: "feedback is required" });
+    const pullRequest = (await pool.query("SELECT id FROM pull_requests WHERE id=$1", [followUpDescriptionMatch[1]])).rows[0];
+    if (!pullRequest) return json(response, 404, { error: "pull request not found" });
+    const job = await enqueueJob({
+      type: "pr.follow_up_description",
+      payload: { pull_request_id: pullRequest.id, feedback },
+      priority: "low",
+      idempotencyKey: `pr-follow-up-description:${pullRequest.id}:${randomUUID()}`,
+    });
+    return json(response, 202, { job });
+  }
+  const followUpDescriptionStatusMatch = url.pathname.match(/^\/api\/admin\/pull-requests\/follow-up-descriptions\/([0-9a-f-]+)$/i);
+  if (followUpDescriptionStatusMatch && request.method === "GET") {
+    const job = (await pool.query(
+      "SELECT status,payload_json,error_json FROM jobs WHERE id=$1 AND type=$2",
+      [followUpDescriptionStatusMatch[1], "pr.follow_up_description"],
+    )).rows[0];
+    if (!job) return json(response, 404, { error: "follow-up description job not found" });
+    const generatedDescription = job.payload_json?.generated_description;
+    const error = job.error_json?.message;
+    return json(response, 200, {
+      status: job.status,
+      ...(typeof generatedDescription === "string" ? { generated_description: generatedDescription } : {}),
+      ...(typeof error === "string" ? { error } : {}),
+    });
+  }
   const pullRequestActionMatch = url.pathname.match(
     /^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/(mark-reviewed|approve|request-changes|repair-instructions|start-repair|refresh|close-ticket|ai-review|resolve-conflicts)$/i,
   );
