@@ -988,6 +988,7 @@ async function runPrAiReview(job: any) {
     mode: "review_only" | "review_and_merge";
     model?: string;
     reasoning_level?: string;
+    target_branch?: string;
   };
 
   // ponytail: idempotency guard. A retry after a late failure (e.g. between
@@ -1103,7 +1104,7 @@ async function runPrAiReview(job: any) {
       );
 
       if (payload.mode === "review_and_merge" && verdict.verdict === "approved") {
-        await approveAndMergePullRequest(pool, pullRequest, undefined, { type: "worker", id: payload.pr_ai_review_id });
+        await approveAndMergePullRequest(pool, pullRequest, payload.target_branch, { type: "worker", id: payload.pr_ai_review_id });
       }
     } finally {
       await rm(temporary, { recursive: true, force: true });
