@@ -1134,7 +1134,7 @@ async function runPrAiReview(job: any) {
 }
 
 async function runFollowUpDescription(job: any) {
-  const payload = job.payload_json as { pull_request_id: string; feedback: string };
+  const payload = job.payload_json as { pull_request_id: string; feedback: string; ticket_id?: string; initial_description?: string };
   let runId: string | null = null;
   try {
     const pullRequest = (await pool.query("SELECT * FROM pull_requests WHERE id=$1", [payload.pull_request_id])).rows[0];
@@ -1169,7 +1169,10 @@ async function runFollowUpDescription(job: any) {
         oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
       });
       const description = formatFollowUpDescription({ number: pullRequest.number, title: pullRequest.title, url: pullRequest.url }, result.markdown);
-      await pool.query("UPDATE jobs SET payload_json=payload_json || jsonb_build_object($2,$3::text),updated_at=now() WHERE id=$1", [job.id, "generated_description", description]);
+      await pool.query("UPDATE jobs SET payload_json=payload_json || jsonb_build_object($2::text,$3::text),updated_at=now() WHERE id=$1", [job.id, "generated_description", description]);
+      if (payload.ticket_id && payload.initial_description) {
+        await pool.query("UPDATE tickets SET description=$2,updated_at=now() WHERE id=$1 AND description=$3", [payload.ticket_id, description, payload.initial_description]);
+      }
       await pool.query("UPDATE agent_runs SET status=$2,claude_session_id=$3,finished_at=now(),exit_code=$4 WHERE id=$1", [runId, "completed", sessionId, result.exitCode]);
     } finally {
       await rm(temporary, { recursive: true, force: true });
