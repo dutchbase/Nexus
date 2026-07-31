@@ -90,22 +90,24 @@ export async function render(url: URL, session: Session, _metrics: Record<string
           <a class="button" style="background:var(--accent-soft);color:var(--accent)">Board</a>
         </div>
         <form class="toolbar" id="filters" style="margin-top:16px">
-          <input class="search" data-ticket-filter name="search" placeholder="Search ticket number or title…" value="${escapeHtml(search || "")}">
-          <select data-ticket-filter name="project_id">
-            <option value="">All projects</option>
-            ${projects.map((p) => `<option value="${p.id}"${url.searchParams.get("project_id") === p.id ? " selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
-          </select>
-          <select data-ticket-filter name="priority">
-            <option value="">All priorities</option>
-            <option value="critical"${url.searchParams.get("priority") === "critical" ? " selected" : ""}>Critical</option>
-            <option value="high"${url.searchParams.get("priority") === "high" ? " selected" : ""}>High</option>
-            <option value="medium"${url.searchParams.get("priority") === "medium" ? " selected" : ""}>Medium</option>
-            <option value="low"${url.searchParams.get("priority") === "low" ? " selected" : ""}>Low</option>
-          </select>
-          <select data-ticket-filter name="status">
-            <option value="">All statuses</option>
-            ${[...validStatuses].map((status) => `<option${url.searchParams.get("status") === status ? " selected" : ""}>${status}</option>`).join("")}
-          </select>
+          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;flex:1;min-width:600px">
+            <input class="search" data-ticket-filter name="search" placeholder="Search ticket number or title…" value="${escapeHtml(search || "")}">
+            <select data-ticket-filter name="project_id">
+              <option value="">All projects</option>
+              ${projects.map((p) => `<option value="${p.id}"${url.searchParams.get("project_id") === p.id ? " selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
+            </select>
+            <select data-ticket-filter name="priority">
+              <option value="">All priorities</option>
+              <option value="critical"${url.searchParams.get("priority") === "critical" ? " selected" : ""}>Critical</option>
+              <option value="high"${url.searchParams.get("priority") === "high" ? " selected" : ""}>High</option>
+              <option value="medium"${url.searchParams.get("priority") === "medium" ? " selected" : ""}>Medium</option>
+              <option value="low"${url.searchParams.get("priority") === "low" ? " selected" : ""}>Low</option>
+            </select>
+            <select data-ticket-filter name="status">
+              <option value="">All statuses</option>
+              ${[...validStatuses].map((status) => `<option${url.searchParams.get("status") === status ? " selected" : ""}>${status}</option>`).join("")}
+            </select>
+          </div>
           <a class="button" href="/admin/tickets">Reset</a>
           <span aria-live="polite" style="margin-left:auto">${tickets.length} shown</span>
         </form>
@@ -122,22 +124,24 @@ export async function render(url: URL, session: Session, _metrics: Record<string
         <a class="button" href="${escapeHtml(buildFilterUrl("board"))}">Board</a>
       </div>
       <form class="toolbar" id="filters" style="margin-top:16px">
-        <input class="search" data-ticket-filter name="search" placeholder="Search ticket number or title…" value="${escapeHtml(search || "")}">
-        <select data-ticket-filter name="project_id">
-          <option value="">All projects</option>
-          ${projects.map((p) => `<option value="${p.id}"${url.searchParams.get("project_id") === p.id ? " selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
-        </select>
-        <select data-ticket-filter name="priority">
-          <option value="">All priorities</option>
-          <option value="critical"${url.searchParams.get("priority") === "critical" ? " selected" : ""}>Critical</option>
-          <option value="high"${url.searchParams.get("priority") === "high" ? " selected" : ""}>High</option>
-          <option value="medium"${url.searchParams.get("priority") === "medium" ? " selected" : ""}>Medium</option>
-          <option value="low"${url.searchParams.get("priority") === "low" ? " selected" : ""}>Low</option>
-        </select>
-        <select data-ticket-filter name="status">
-          <option value="">All statuses</option>
-          ${[...validStatuses].map((status) => `<option${url.searchParams.get("status") === status ? " selected" : ""}>${status}</option>`).join("")}
-        </select>
+        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;flex:1;min-width:600px">
+          <input class="search" data-ticket-filter name="search" placeholder="Search ticket number or title…" value="${escapeHtml(search || "")}">
+          <select data-ticket-filter name="project_id">
+            <option value="">All projects</option>
+            ${projects.map((p) => `<option value="${p.id}"${url.searchParams.get("project_id") === p.id ? " selected" : ""}>${escapeHtml(p.name)}</option>`).join("")}
+          </select>
+          <select data-ticket-filter name="priority">
+            <option value="">All priorities</option>
+            <option value="critical"${url.searchParams.get("priority") === "critical" ? " selected" : ""}>Critical</option>
+            <option value="high"${url.searchParams.get("priority") === "high" ? " selected" : ""}>High</option>
+            <option value="medium"${url.searchParams.get("priority") === "medium" ? " selected" : ""}>Medium</option>
+            <option value="low"${url.searchParams.get("priority") === "low" ? " selected" : ""}>Low</option>
+          </select>
+          <select data-ticket-filter name="status">
+            <option value="">All statuses</option>
+            ${[...validStatuses].map((status) => `<option${url.searchParams.get("status") === status ? " selected" : ""}>${status}</option>`).join("")}
+          </select>
+        </div>
         <a class="button" href="/admin/tickets">Reset</a>
         <span aria-live="polite" style="margin-left:auto">${tickets.length} shown</span>
       </form>

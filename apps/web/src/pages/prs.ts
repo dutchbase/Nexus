@@ -133,7 +133,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     }
     const repository = url.searchParams.get("repository") ?? "";
     if (repository) { values.push(repository); conditions.push(`pr.repository=$${values.length}`); }
-    const tab = url.searchParams.get("tab") ?? "all";
+    const tab = url.searchParams.get("tab") ?? "open";
     if (tab === "open") conditions.push("pr.state='open' AND pr.is_draft IS NOT TRUE");
     else if (tab === "draft") conditions.push("pr.is_draft=true");
     else if (tab === "merged") conditions.push("pr.merged_at IS NOT NULL");
@@ -158,21 +158,27 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const tabs = [["all", "All"], ["open", "Open"], ["draft", "Draft"], ["merged", "Merged"], ["closed", "Closed"]] as const;
     const withTab = (value: string) => {
       const params = new URLSearchParams(url.search);
-      if (value === "all") params.delete("tab"); else params.set("tab", value);
+      if (value === "open") params.delete("tab"); else params.set("tab", value);
       const query = params.toString();
       return `/admin/pull-requests${query ? `?${query}` : ""}`;
     };
-    const tabsNav = `<nav class="tabs" style="margin-top:14px">${tabs.map(([value, label]) =>
+    const tabsNav = `<nav class="tabs">${tabs.map(([value, label]) =>
       `<a class="button${tab === value ? " primary" : ""}" href="${withTab(value)}">${label}</a>`).join("")}</nav>`;
     const syncedAt = lastSynced.rows[0]?.synced;
     const syncedLabel = syncedAt ? `last ${Math.max(0, Math.round((Date.now() - new Date(syncedAt).getTime()) / 60000))} min ago` : "never synced";
     const body = `<div class="eyebrow">All configured repositories</div><h1>Pull requests</h1>
       <div class="toolbar"><button class="button" type="button" data-sync-prs>Sync all · ${escapeHtml(syncedLabel)}</button></div>
-      ${tabsNav}
-      <form class="toolbar"><input class="search" name="search" placeholder="Search title, number or ticket…" value="${escapeHtml(search)}">
-      <select name="repository"><option value="">All repositories</option>${repositories.rows.map((row) => `<option value="${escapeHtml(row.repository)}"${repository === row.repository ? " selected" : ""}>${escapeHtml(row.repository)}</option>`).join("")}</select>
-      ${tab !== "all" ? `<input type="hidden" name="tab" value="${escapeHtml(tab)}">` : ""}
-      <button class="button" type="submit">Filter</button><a class="button" href="/admin/pull-requests">Reset</a><span aria-live="polite">${pullRequests.rows.length} shown</span></form>
+      <div class="toolbar" style="margin-top:14px;justify-content:space-between;flex-wrap:wrap">
+        ${tabsNav}
+        <form class="toolbar" style="flex:1;min-width:300px;justify-content:flex-end;flex-wrap:wrap">
+          <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px;flex:1;min-width:280px">
+            <input class="search" name="search" placeholder="Search title, number or ticket…" value="${escapeHtml(search)}">
+            <select name="repository"><option value="">All repositories</option>${repositories.rows.map((row) => `<option value="${escapeHtml(row.repository)}"${repository === row.repository ? " selected" : ""}>${escapeHtml(row.repository)}</option>`).join("")}</select>
+          </div>
+          ${tab !== "open" ? `<input type="hidden" name="tab" value="${escapeHtml(tab)}">` : ""}
+          <button class="button" type="submit">Filter</button><a class="button" href="/admin/pull-requests">Reset</a><span aria-live="polite">${pullRequests.rows.length} shown</span>
+        </form>
+      </div>
       <section class="card"><div class="list-head prs-head"><span>PR</span><span>Title</span><span>Ticket</span><span>Checks</span><span>Review</span><span>Changes</span><span>Project</span><span>Conflicts</span><span>Created</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No pull requests match these filters.</div>`}</section>`;
     return { status: 200, title: "Pull requests", body };
   }

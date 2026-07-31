@@ -29,7 +29,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   const type = url.searchParams.get("type") ?? "";
   const values: any[] = [];
   const conditions: string[] = [];
-  if (status) { values.push(status); conditions.push(`j.status=$${values.length}`); } else { conditions.push(`j.status != 'completed'`); }
+  if (status) { values.push(status); conditions.push(`j.status=$${values.length}`); } else { conditions.push(`j.status NOT IN ('completed','failed')`); }
   if (type) { values.push(type); conditions.push(`j.type=$${values.length}`); }
 
   const [jobs, statuses, types, depth, heartbeat] = await Promise.all([
@@ -75,7 +75,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       </div>
     </div>
     <form class="toolbar" style="margin-top:16px">
-      <select name="status" onchange="this.form.submit()"><option value="">All statuses</option>${statuses.rows.map((row) => `<option value="${escapeHtml(row.status)}"${status === row.status ? " selected" : ""}>${escapeHtml(cap(row.status))}</option>`).join("")}</select>
+      <select name="status" onchange="this.form.submit()"><option value="">All statuses</option>${statuses.rows.filter((row) => row.status !== "failed").map((row) => `<option value="${escapeHtml(row.status)}"${status === row.status ? " selected" : ""}>${escapeHtml(cap(row.status))}</option>`).join("")}</select>
       <select name="type" onchange="this.form.submit()"><option value="">All types</option>${types.rows.map((row) => `<option value="${escapeHtml(row.type)}"${type === row.type ? " selected" : ""}>${escapeHtml(row.type)}</option>`).join("")}</select>
       <a class="button" href="/admin/queue">Reset</a><span aria-live="polite">${jobs.rows.length} shown</span>
     </form>
