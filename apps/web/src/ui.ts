@@ -668,13 +668,24 @@ export function publicFormPage(form: any, fields: any[], projects: any[]) {
     }
     if (type === "checkbox") control = `<input name="${name}" type="checkbox" value="true">`;
     if (type === "hidden") return `<label class="honeypot" aria-hidden="true">${escapeHtml(field.label)}<input name="${name}" tabindex="-1" autocomplete="off"></label>`;
-    if (type === "image_upload") control = `<input name="${name}" type="file" accept="image/png,image/jpeg"><small>PNG of JPG · max 8 MB · geen SVG</small>`;
+    if (type === "image_upload") control = `<input name="${name}" type="file" accept="image/png,image/jpeg" multiple><small>PNG of JPG · max 5 bestanden · max 5 MB per bestand · geen SVG</small>`;
     return `<label class="field"><span>${escapeHtml(field.label)}</span>${control}</label>`;
   }).join("");
-  return document(form.title, `<main class="public"><div class="url-strip">/f/${escapeHtml(form.slug)}</div><form class="card" id="public-form"><div class="card-body"><div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description)}</p><div class="grid two">${controls}</div><br><button class="button primary" type="submit">Melding versturen</button><p class="error" role="alert"></p></div></form></main>`, `
+  return document(form.title, `<main class="public"><div class="url-strip">/f/${escapeHtml(form.slug)}</div><form class="card" id="public-form"><div class="card-body"><div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description)}</p><div class="grid one">${controls}</div><br><button class="button primary" type="submit">Melding versturen</button><p class="error" role="alert"></p></div></form></main>`, `
     document.querySelector("#public-form").addEventListener("submit",async(event)=>{
-      event.preventDefault();const data=new FormData(event.currentTarget);const payload={};
-      for(const [key,value] of data){if(value instanceof File&&value.size){const upload=new FormData();upload.append("file",value);const result=await fetch("/api/public/uploads",{method:"POST",body:upload});if(!result.ok){document.querySelector(".error").textContent="Upload geweigerd";return}payload[key]=(await result.json()).upload_id}else if(!(value instanceof File))payload[key]=value}
+      event.preventDefault();const data=new FormData(event.currentTarget);const payload={};const files={};
+      for(const [key,value] of data){if(value instanceof File&&value.size){(files[key]=files[key]||[]).push(value)}else if(!(value instanceof File))payload[key]=value}
+      for(const [key,list] of Object.entries(files)){
+        if(list.length>5){document.querySelector(".error").textContent="Max 5 bestanden per veld";return}
+        const ids=[];
+        for(const file of list){
+          const upload=new FormData();upload.append("file",file);
+          const result=await fetch("/api/public/uploads",{method:"POST",body:upload});
+          if(!result.ok){document.querySelector(".error").textContent="Upload geweigerd";return}
+          ids.push((await result.json()).upload_id);
+        }
+        payload[key]=ids;
+      }
       const response=await fetch("/api/public/forms/${escapeHtml(form.slug)}/submissions",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload)});
       const result=await response.json();if(!response.ok){document.querySelector(".error").textContent=result.error;return}
       sessionStorage.setItem("submittedTicket",result.ticket_number);location.href="/f/${escapeHtml(form.slug)}/submitted";

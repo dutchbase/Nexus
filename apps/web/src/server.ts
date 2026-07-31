@@ -37,7 +37,7 @@ const lockoutThreshold = 5;
 const lockoutWindowMinutes = 15;
 const sessionHours = 8;
 const maxJsonBytes = 1024 * 1024;
-const maxUploadBytes = 8 * 1024 * 1024;
+const maxUploadBytes = 5 * 1024 * 1024;
 const defaultRateLimit = 15;
 const dummyHash = await hashPassword(randomBytes(32).toString("hex"));
 const systemOnlyStatuses = new Set(["Planning", "Executing", "Validating", "PR Ready for Review", "Merged"]);
@@ -376,8 +376,15 @@ async function publicForm(slug: string) {
 function validateFields(fields: any[], body: Record<string, any>) {
   const errors: Record<string, string> = {};
   for (const field of fields) {
-    if (field.field_type === "hidden" || field.field_type === "static" || field.field_type === "image_upload") continue;
+    if (field.field_type === "hidden" || field.field_type === "static") continue;
     const value = body[field.field_key];
+    if (field.field_type === "image_upload") {
+      const ids = Array.isArray(value) ? value : (typeof value === "string" && value ? [value] : []);
+      if (field.required && !ids.length) errors[field.field_key] = "required";
+      else if (ids.length > 5) errors[field.field_key] = "max 5 files";
+      else if (ids.some((id) => typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id))) errors[field.field_key] = "invalid upload";
+      continue;
+    }
     if (field.required && (value === undefined || value === null || value === "")) errors[field.field_key] = "required";
     if (typeof value === "string") {
       const limit = Math.min(Number(field.validation_json?.max_length ?? (field.field_type === "long_text" ? 10000 : 500)), 10000);
@@ -447,7 +454,9 @@ async function submitPublicForm(request: IncomingMessage, response: ServerRespon
        VALUES ($1,NULL,'Submitted','Public form submitted','public')`,
       [result.rows[0].id],
     );
-    const uploadIds = Object.values(body).filter((value) => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value));
+    const uploadIds = Object.values(body)
+      .flatMap((value) => (Array.isArray(value) ? value : [value]))
+      .filter((value) => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value));
     if (uploadIds.length) {
       await client.query(
         `UPDATE attachments SET ticket_id = $1 WHERE ticket_id IS NULL AND upload_id = ANY($2::uuid[])`,

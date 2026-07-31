@@ -63,6 +63,7 @@ h1 { font-size:clamp(30px,4.2vw,42px);line-height:1.05 }
 .card-body { padding:18px }
 .grid { display:grid;gap:16px }
 .grid.two { grid-template-columns:repeat(auto-fit,minmax(220px,1fr)) }
+.grid.one { grid-template-columns:1fr }
 .grid.rail { grid-template-columns:minmax(0,1fr) 306px }
 .grid.prompts { grid-template-columns:250px minmax(0,1fr) }
 .field { display:flex;flex-direction:column;gap:6px }
