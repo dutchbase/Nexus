@@ -88,11 +88,17 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             if(saved.length){saved.forEach(s=>params.append("status",s));location.replace("/admin/tickets?"+params)}
           }
         })();
-        document.querySelectorAll("[data-ticket-filter]").forEach(el=>el.addEventListener("change",()=>{
+        document.querySelectorAll("[data-ticket-filter]:not([type=checkbox])").forEach(el=>el.addEventListener("change",()=>{
           const q=new URLSearchParams(new FormData(document.querySelector("#filters")));
           localStorage.setItem("dccTicketStatus",JSON.stringify(q.getAll("status")));
           location.href="/admin/tickets?"+q;
         }));
+        document.querySelector("[data-status-filter]")?.addEventListener("toggle",function(){
+          if(this.open)return;
+          const q=new URLSearchParams(new FormData(document.querySelector("#filters")));
+          localStorage.setItem("dccTicketStatus",JSON.stringify(q.getAll("status")));
+          location.href="/admin/tickets?"+q;
+        });
         document.querySelector("[data-tickets-reset]")?.addEventListener("click",()=>localStorage.removeItem("dccTicketStatus"));
       ` : ""}
       ${/^\/admin\/tickets\/[^/]+$/.test(path) ? `
