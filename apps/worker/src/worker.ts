@@ -889,7 +889,8 @@ async function publishExecutionAttempt(input: {
          VALUES ($1,$2,$3,'github',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
                  $17,$18,$19,$20,now(),$21)
          ON CONFLICT (project_id,number) DO UPDATE SET
-           ticket_id=EXCLUDED.ticket_id,execution_attempt_id=EXCLUDED.execution_attempt_id,
+           ticket_id=COALESCE(pull_requests.ticket_id, EXCLUDED.ticket_id),
+           execution_attempt_id=COALESCE(pull_requests.execution_attempt_id, EXCLUDED.execution_attempt_id),
            url=EXCLUDED.url,title=EXCLUDED.title,author=EXCLUDED.author,state=EXCLUDED.state,
            review_state=EXCLUDED.review_state,check_state=EXCLUDED.check_state,is_draft=EXCLUDED.is_draft,
            head_branch=EXCLUDED.head_branch,base_branch=EXCLUDED.base_branch,head_sha=EXCLUDED.head_sha,

@@ -22,5 +22,10 @@ it("casts the JSON key when saving generated output", async () => {
 it("upserts on project_id+number instead of a plain insert, so it can't collide with the PR sync job", async () => {
   const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
   expect(worker).toContain("ON CONFLICT (project_id,number) DO UPDATE SET");
-  expect(worker).toContain("ticket_id=EXCLUDED.ticket_id,execution_attempt_id=EXCLUDED.execution_attempt_id");
+});
+
+it("only claims ticket_id/execution_attempt_id when the existing row is unowned, so it can't steal ownership from another attempt", async () => {
+  const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
+  expect(worker).toContain("ticket_id=COALESCE(pull_requests.ticket_id, EXCLUDED.ticket_id)");
+  expect(worker).toContain("execution_attempt_id=COALESCE(pull_requests.execution_attempt_id, EXCLUDED.execution_attempt_id)");
 });
