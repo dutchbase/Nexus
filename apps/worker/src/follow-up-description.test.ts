@@ -29,3 +29,8 @@ it("only claims ticket_id/execution_attempt_id when the existing row is unowned,
   expect(worker).toContain("ticket_id=COALESCE(pull_requests.ticket_id, EXCLUDED.ticket_id)");
   expect(worker).toContain("execution_attempt_id=COALESCE(pull_requests.execution_attempt_id, EXCLUDED.execution_attempt_id)");
 });
+
+it("looks up an existing pull_requests row by branch too, not just execution_attempt_id", async () => {
+  const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
+  expect(worker).toContain("OR (project_id=$2 AND head_branch=$3)");
+});

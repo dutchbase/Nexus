@@ -850,8 +850,10 @@ async function publishExecutionAttempt(input: {
     );
 
     let stored = (await pool.query(
-      "SELECT * FROM pull_requests WHERE execution_attempt_id=$1",
-      [input.attempt.id],
+      `SELECT * FROM pull_requests
+       WHERE execution_attempt_id=$1
+          OR (project_id=$2 AND head_branch=$3)`,
+      [input.attempt.id, input.project.id, input.attempt.branch_name],
     )).rows[0];
     if (!stored) {
       const body = buildPullRequestBody({
