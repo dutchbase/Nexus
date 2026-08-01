@@ -130,13 +130,15 @@ function renderPromptTemplate(content: string, values: Record<string, unknown>) 
   return content.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_match, variable: string) => String(values[variable] ?? ""));
 }
 
-async function activePrompt(scope: "global" | "project", promptType: string, projectId?: string) {
+async function resolvedPrompt(promptType: string, projectId: string) {
   const row = (await pool.query(
     `SELECT pf.id prompt_file_id,pf.active_version_id,pv.content,pv.version
      FROM prompt_files pf LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id
-     WHERE pf.scope=$1 AND pf.prompt_type=$2
-       AND (($1='global' AND pf.project_id IS NULL) OR pf.project_id=$3)`,
-    [scope, promptType, projectId ?? null],
+     WHERE pf.prompt_type=$1 AND pf.active_version_id IS NOT NULL
+       AND ((pf.scope='project' AND pf.project_id=$2) OR (pf.scope='global' AND pf.project_id IS NULL))
+     ORDER BY CASE pf.scope WHEN 'project' THEN 0 ELSE 1 END
+     LIMIT 1`,
+    [promptType, projectId],
   )).rows[0];
   return row ?? { prompt_file_id: null, active_version_id: null, content: "", version: null };
 }
@@ -144,18 +146,16 @@ async function activePrompt(scope: "global" | "project", promptType: string, pro
 async function promptInputsFor(ticket: any, phase: "planning" | "execution", approvedPlan?: string) {
   const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
   if (!project) throw Object.assign(new Error("project not found"), { status: 404 });
-  const [base, phaseGlobal, context, phaseProject, testing] = await Promise.all([
-    activePrompt("global", "base"),
-    activePrompt("global", phase),
-    activePrompt("project", "context", project.id),
-    activePrompt("project", phase, project.id),
-    activePrompt("project", "testing", project.id),
+  const [base, phaseResolved] = await Promise.all([
+    resolvedPrompt("base", project.id),
+    resolvedPrompt(phase, project.id),
   ]);
   const ai = resolvedAiFor(ticket, project, phase);
   const skills = await resolvedSkillsFor(ticket, phase);
   const templateValues = {
     "project.slug": project.slug,
     "project.name": project.name,
+    "project.description": project.description,
     "project.repository_path": project.repository_path,
     "project.agent_start_path": project.agent_start_path ?? project.repository_path,
     "project.default_branch": project.default_branch,
@@ -164,7 +164,7 @@ async function promptInputsFor(ticket: any, phase: "planning" | "execution", app
     "ticket.category": ticket.category,
     "ticket.priority": ticket.priority,
   };
-  for (const prompt of [base, phaseGlobal, context, phaseProject, testing]) {
+  for (const prompt of [base, phaseResolved]) {
     prompt.content = renderPromptTemplate(prompt.content ?? "", templateValues);
   }
   const resolvedSkillContent = skills.map((skill) => ({
@@ -173,19 +173,16 @@ async function promptInputsFor(ticket: any, phase: "planning" | "execution", app
   const promptVersionIds = Object.fromEntries(
     [
       ["global.base", base.active_version_id],
-      [`global.${phase}`, phaseGlobal.active_version_id],
-      ["project.context", context.active_version_id],
-      [`project.${phase}`, phaseProject.active_version_id],
-      ...(phase === "execution" ? [["project.testing", testing.active_version_id]] : []),
+      [`global.${phase}`, phaseResolved.active_version_id],
     ].filter(([, id]) => id),
   );
   if (phase === "planning") {
     return {
       content: buildPlanningPrompt({
         globalBaseInstructions: base.content,
-        globalPlanningInstructions: phaseGlobal.content,
-        projectContext: context.content,
-        projectPlanningInstructions: phaseProject.content,
+        globalPlanningInstructions: phaseResolved.content,
+        projectContext: "",
+        projectPlanningInstructions: "",
         projectPathsAndRepositoryMetadata: {
           default_branch: project.default_branch,
           github_owner: project.github_owner,
@@ -211,10 +208,10 @@ async function promptInputsFor(ticket: any, phase: "planning" | "execution", app
   return {
     content: buildExecutionPrompt({
       globalBaseInstructions: base.content,
-      globalExecutionInstructions: phaseGlobal.content,
-      projectContext: context.content,
-      projectExecutionInstructions: phaseProject.content,
-      projectTestingInstructions: testing.content,
+      globalExecutionInstructions: phaseResolved.content,
+      projectContext: "",
+      projectExecutionInstructions: "",
+      projectTestingInstructions: "",
       resolvedAiConfiguration: ai,
       resolvedSkills: resolvedSkillContent,
       exactApprovedPlan: approvedPlan ?? "",
