@@ -227,8 +227,8 @@ async function promptInputsFor(ticket: any, phase: "planning" | "execution", app
   };
 }
 
-function json(response: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
-  response.writeHead(status, { "content-type": "application/json; charset=utf-8", ...headers });
+function json(response: ServerResponse, status: number, body: unknown, headers: Record<string, string | string[]> = {}) {
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8", ...(headers as Record<string, string | string[]>) });
   response.end(JSON.stringify(body));
 }
 
@@ -366,9 +366,10 @@ async function login(request: IncomingMessage, response: ServerResponse) {
     await client.query("UPDATE users SET last_login_at = now(), updated_at = now() WHERE id = $1", [user.id]);
     await audit({ actorType: "admin", actorId: user.id, action: "login", entityType: "user", entityId: user.id, after: { success: true }, ip: ipOf(request) }, client);
   });
-  const attributes = [`dcc_session=${token}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${sessionHours * 3600}`];
-  if (production) attributes.push("Secure");
-  json(response, 200, { user: { id: user.id, username: user.username, role: user.role }, csrfToken: csrf }, { "set-cookie": attributes.join("; ") });
+  const sessionAttributes = [`dcc_session=${token}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${sessionHours * 3600}`];
+  const csrfAttributes = [`dcc_csrf=${csrf}`, "Path=/", "SameSite=Lax", `Max-Age=${sessionHours * 3600}`];
+  if (production) { sessionAttributes.push("Secure"); csrfAttributes.push("Secure"); }
+  json(response, 200, { user: { id: user.id, username: user.username, role: user.role }, csrfToken: csrf }, { "set-cookie": [sessionAttributes.join("; "), csrfAttributes.join("; ")] });
 }
 
 async function publicForm(slug: string) {
@@ -583,7 +584,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
   if (request.method === "POST" && url.pathname === "/api/admin/logout") {
     await pool.query("UPDATE admin_sessions SET invalidated_at = now() WHERE id = $1", [session.id]);
     await audit({ actorType: "admin", actorId: session.user_id, action: "logout", entityType: "user", entityId: session.user_id, ip: ipOf(request) });
-    return json(response, 200, { ok: true }, { "set-cookie": "dcc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0" });
+    return json(response, 200, { ok: true }, { "set-cookie": ["dcc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0", "dcc_csrf=; Path=/; SameSite=Lax; Max-Age=0"] });
   }
   if (url.pathname === "/api/admin/pull-requests" && request.method === "GET") {
     const params: any[] = [];
