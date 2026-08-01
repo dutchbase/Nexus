@@ -8,7 +8,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
        FROM prompt_files pf LEFT JOIN projects p ON p.id=pf.project_id
        LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id
        WHERE pf.scope='global'
-       ORDER BY pf.scope,p.name,pf.prompt_type`,
+       ORDER BY pf.prompt_type`,
     )).rows;
     const body = `<div class="eyebrow">Configure</div><h1>Prompts</h1><p>Global prompts apply to every project. Add per-project overrides from a project's Prompts tab.</p>
       <section class="card"><div class="list-head" style="display:grid;grid-template-columns:minmax(200px,2fr) 1fr 1fr;gap:12px;padding:10px 18px;border-bottom:1px solid var(--border);background:var(--surface2)"><span style="font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)">Prompt type</span><span style="font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)">Active version</span><span style="font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3);justify-self:end">Status</span></div>
