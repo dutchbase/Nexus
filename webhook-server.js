@@ -208,7 +208,7 @@ function recoverOnBoot() {
 
 function respond(res, code, msg) { res.writeHead(code).end(msg); }
 
-async function handleDeploy(res, sha, deliveryId) {
+async function handleDeploy(res, sha, deliveryId, ciAlreadyOk = false) {
   const preState = loadState();
   if (deliveryId && preState.processedDeliveries[deliveryId]) {
     respond(res, 200, 'Already processed (delivery dedup)');
@@ -220,16 +220,18 @@ async function handleDeploy(res, sha, deliveryId) {
     return;
   }
 
-  const ci = await checkRequiredCiStatus(sha);
-  if (!ci.ok) {
-    await mutateState((state) => {
-      state.shaOutcomes[sha] = 'rejected-ci';
-      if (deliveryId) state.processedDeliveries[deliveryId] = { sha, at: new Date().toISOString() };
-    });
-    console.warn(`[webhook] CI gate rejected ${sha}: ${ci.reason}`);
-    sendNotification(`dev-control deploy REJECTED: ${sha.slice(0, 8)} — CI '${REQUIRED_CI_CHECK}' ${ci.reason}`);
-    respond(res, 409, `CI check '${REQUIRED_CI_CHECK}' not successful for ${sha}`);
-    return;
+  if (!ciAlreadyOk) {
+    const ci = await checkRequiredCiStatus(sha);
+    if (!ci.ok) {
+      await mutateState((state) => {
+        state.shaOutcomes[sha] = 'rejected-ci';
+        if (deliveryId) state.processedDeliveries[deliveryId] = { sha, at: new Date().toISOString() };
+      });
+      console.warn(`[webhook] CI gate rejected ${sha}: ${ci.reason}`);
+      sendNotification(`dev-control deploy REJECTED: ${sha.slice(0, 8)} — CI '${REQUIRED_CI_CHECK}' ${ci.reason}`);
+      respond(res, 409, `CI check '${REQUIRED_CI_CHECK}' not successful for ${sha}`);
+      return;
+    }
   }
 
   let launched = null;
@@ -282,7 +284,7 @@ async function handleRequest(req, res, body) {
     const sha = cr.head_sha;
     if (!sha || !VALID_SHA_RE.test(sha)) { respond(res, 400, 'Bad Request'); return; }
     console.log(`[webhook] check_run success -> evaluating ${sha}`);
-    await handleDeploy(res, sha, req.headers['x-github-delivery'] || '');
+    await handleDeploy(res, sha, req.headers['x-github-delivery'] || '', true);
     return;
   }
 

@@ -10,5 +10,5 @@ git fetch origin master
 git checkout master
 git reset --hard "$SHA"
 pnpm install
-pm2 restart dcc-web dcc-worker
+pm2 restart dcc-web dcc-worker dcc-webhook
 echo "deploy.sh: deployed $SHA"
