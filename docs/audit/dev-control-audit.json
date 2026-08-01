@@ -59,7 +59,7 @@
     "overall_risk": "high",
     "decision": "Stabilize correctness, authority boundaries, and observability before workflow acceleration or autonomous policy expansion.",
     "finding_count": 12,
-    "priority_counts": { "P0": 4, "P1": 7, "P2": 1, "P3": 0 },
+    "priority_counts": { "P0": 5, "P1": 6, "P2": 1, "P3": 0 },
     "strengths": [
       "Queue claim uses a transaction and SKIP LOCKED.",
       "Health and scoped test baselines were available at the audit point.",
