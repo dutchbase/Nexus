@@ -73,7 +73,7 @@
       "priority": "P0",
       "dependencies": ["G09-data-lifecycle", "G10-operational-truth"],
       "finding_ids": ["G01-F01"],
-      "agent_prompt": "Implement durable workflow leases and a reaper without changing user-visible merge/deploy intent. Add job and delivery heartbeat/lease fields, reclaim only expired owned work, make related ticket/run transitions atomic, and return a new rerun identity after terminal work. Preserve history; never convert failed PR-review or conflict-resolution work to completed merely because a retry was queued. Add focused queue recovery tests and operator-visible recovery reasons."
+      "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for G01-workflow-state. Implement durable workflow leases and a reaper without changing user-visible merge/deploy intent. Add job and delivery heartbeat/lease fields, reclaim only expired owned work, make related ticket/run transitions atomic, and return a new rerun identity after terminal work. Preserve history; never convert failed PR-review or conflict-resolution work to completed merely because a retry was queued. Add focused queue recovery tests and operator-visible recovery reasons."
     },
     {
       "id": "G02-execution-safety",
@@ -81,7 +81,7 @@
       "priority": "P0",
       "dependencies": ["G01-workflow-state", "G07-auth-secrets", "G09-data-lifecycle"],
       "finding_ids": ["G02-F01"],
-      "agent_prompt": "Harden execution, repair, planning, and worktree lifecycle while retaining the current ability to publish valid changes. Clear or version result commits before repair; scan staged deletions safely; pass a scrubbed allowlist environment to validation and Claude; restrict Bash/Write permissions by operation; fetch and verify the configured starting revision; implement real cleanup; enforce scoped conflict edits; and guarantee planning timeout/finalization plus atomic plan-file/database persistence. Prove each behavior with small integration tests."
+      "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for G02-execution-safety. Harden execution, repair, planning, and worktree lifecycle while retaining the current ability to publish valid changes. Clear or version result commits before repair; scan staged deletions safely; pass a scrubbed allowlist environment to validation and Claude; restrict Bash/Write permissions by operation; fetch and verify the configured starting revision; implement real cleanup; enforce scoped conflict edits; and guarantee planning timeout/finalization plus atomic plan-file/database persistence. Prove each behavior with small integration tests."
     },
     {
       "id": "G03-approval-reproducibility",
@@ -89,7 +89,7 @@
       "priority": "P0",
       "dependencies": ["G01-workflow-state", "G09-data-lifecycle"],
       "finding_ids": ["G03-F01"],
-      "agent_prompt": "Make plan approval a compare-and-swap snapshot. Execute only the approved version, atomically lock its plan, prompt, project/config, skill, and model inputs, and retain rejection metadata. Apply required skills and documented ticket-override policy, distinguish harmless validation metadata changes from stale inputs, keep mandatory safety prompts enabled, preserve approved model overrides, version project imports, and replace brittle plan parsing with a compatible validated format. Add race and provenance tests."
+      "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for G03-approval-reproducibility. Make plan approval a compare-and-swap snapshot. Execute only the approved version, atomically lock its plan, prompt, project/config, skill, and model inputs, and retain rejection metadata. Apply required skills and documented ticket-override policy, distinguish harmless validation metadata changes from stale inputs, keep mandatory safety prompts enabled, preserve approved model overrides, version project imports, and replace brittle plan parsing with a compatible validated format. Add race and provenance tests."
     },
     {
       "id": "G04-github-integrity",
@@ -97,7 +97,7 @@
       "priority": "P1",
       "dependencies": ["G01-workflow-state", "G07-auth-secrets", "G10-operational-truth"],
       "finding_ids": ["G04-F01"],
-      "agent_prompt": "Create a bounded GitHub synchronization layer based on the official REST/GraphQL contracts. Use owner-qualified head filters and pagination, aggregate real review/check/requested-reviewer/diff/head data, add timeout/retry/backoff/version headers and custom-base support, and report stale state. Reject ambiguous verdict JSON. Bind merge to a freshly read unchanged head SHA plus enforced checks/reviews. Move write side effects from web requests into durable jobs and keep review retries state-preserving."
+      "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for G04-github-integrity. Create a bounded GitHub synchronization layer based on the official REST/GraphQL contracts. Use owner-qualified head filters and pagination, aggregate real review/check/requested-reviewer/diff/head data, add timeout/retry/backoff/version headers and custom-base support, and report stale state. Reject ambiguous verdict JSON. Bind merge to a freshly read unchanged head SHA plus enforced checks/reviews. Move write side effects from web requests into durable jobs and keep review retries state-preserving."
     },
     {
       "id": "G05-deployment-safety",
@@ -105,7 +105,7 @@
       "priority": "P0",
       "dependencies": ["G04-github-integrity", "G07-auth-secrets", "G09-data-lifecycle"],
       "finding_ids": ["G05-F01"],
-      "agent_prompt": "Harden, do not remove, the current deploy webhook. Verify a successful required check belongs to the current protected master SHA; use frozen dependency installation; run migrations with an explicit failure policy; make release state atomic; add post-deploy health checks, rollback, approval/retry/history/audit records, and bounded recovery for corrupt or stuck state. Validate webhook size and external notification results, remove shell interpolation, and require explicit configured notification destinations."
+      "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for G05-deployment-safety. Harden, do not remove, the current deploy webhook. Verify a successful required check belongs to the current protected master SHA; use frozen dependency installation; run migrations with an explicit failure policy; make release state atomic; add post-deploy health checks, rollback, approval/retry/history/audit records, and bounded recovery for corrupt or stuck state. Validate webhook size and external notification results, remove shell interpolation, and require explicit configured notification destinations."
     },
     {
       "id": "G06-public-intake",
@@ -113,7 +113,7 @@
       "priority": "P1",
       "dependencies": ["G07-auth-secrets", "G09-data-lifecycle"],
       "finding_ids": ["G06-F01"],
-      "agent_prompt": "Harden public intake with schema validation for every field type and option, optional email/URL correctness, HTTPS-only URLs, and correct radio/multiselect/static rendering. Either implement or visibly disable declared attachment/CAPTCHA/notification/rate-limit settings. Bind uploads to a short-lived form/session capability, atomically rate-limit attempts using trusted proxy configuration, verify multipart/image content, clean files after DB/user failures, expose authorized downloads, and reject ambiguous fallback project routing."
+      "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for G06-public-intake. Harden public intake with schema validation for every field type and option, optional email/URL correctness, HTTPS-only URLs, and correct radio/multiselect/static rendering. Either implement or visibly disable declared attachment/CAPTCHA/notification/rate-limit settings. Bind uploads to a short-lived form/session capability, atomically rate-limit attempts using trusted proxy configuration, verify multipart/image content, clean files after DB/user failures, expose authorized downloads, and reject ambiguous fallback project routing."
     },
     {
       "id": "G07-auth-secrets",
@@ -121,7 +121,7 @@
       "priority": "P0",
       "dependencies": ["G09-data-lifecycle"],
       "finding_ids": ["G07-F01"],
-      "agent_prompt": "Establish least privilege across web, worker, deploy, and notification paths. Add baseline security headers; require production NODE_ENV and Secure cookies; use trusted-proxy-aware login throttling that avoids account lockout DoS; expire sessions; compare CSRF in constant time; encrypt or externalize notification authorization references; scrub errors/logs; remove password CLI leakage/truncation; and document a portable Argon2 build/runtime strategy. Move GitHub write/deploy authority out of the web process."
+      "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for G07-auth-secrets. Establish least privilege across web, worker, deploy, and notification paths. Add baseline security headers; require production NODE_ENV and Secure cookies; use trusted-proxy-aware login throttling that avoids account lockout DoS; expire sessions; compare CSRF in constant time; encrypt or externalize notification authorization references; scrub errors/logs; remove password CLI leakage/truncation; and document a portable Argon2 build/runtime strategy. Move GitHub write/deploy authority out of the web process."
     },
     {
       "id": "G08-notifications",
@@ -129,7 +129,7 @@
       "priority": "P1",
       "dependencies": ["G01-workflow-state", "G07-auth-secrets", "G09-data-lifecycle"],
       "finding_ids": ["G08-F01"],
-      "agent_prompt": "Make notification delivery operationally safe. Honor provider max_attempts, lease/recover sending deliveries, serialize manual retry against workers, route only events enabled by per-provider rules, complete event coverage, validate provider/endpoint/timeout configuration, forbid literal credentials, and make test/send operations idempotent with durable status transitions. Add provider contract tests and recovery tests without sending external messages."
+      "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for G08-notifications. Make notification delivery operationally safe. Honor provider max_attempts, lease/recover sending deliveries, serialize manual retry against workers, route only events enabled by per-provider rules, complete event coverage, validate provider/endpoint/timeout configuration, forbid literal credentials, and make test/send operations idempotent with durable status transitions. Add provider contract tests and recovery tests without sending external messages."
     },
     {
       "id": "G09-data-lifecycle",
@@ -137,7 +137,7 @@
       "priority": "P1",
       "dependencies": [],
       "finding_ids": ["G09-F01"],
-      "agent_prompt": "Make persistence authoritative. Add an advisory lock and unique migration naming policy; enforce workflow/status and append-only invariants in the database; transactionally coordinate plan artifacts with rows or use recoverable staging; review indexes against real query plans; back up database, filesystem artifacts, and configuration; implement documented retention/scheduling; and automate a restore drill that verifies an isolated restored service."
+      "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for G09-data-lifecycle. Make persistence authoritative. Add an advisory lock and unique migration naming policy; enforce workflow/status and append-only invariants in the database; transactionally coordinate plan artifacts with rows or use recoverable staging; review indexes against real query plans; back up database, filesystem artifacts, and configuration; implement documented retention/scheduling; and automate a restore drill that verifies an isolated restored service."
     },
     {
       "id": "G10-operational-truth",
@@ -145,7 +145,7 @@
       "priority": "P1",
       "dependencies": ["G01-workflow-state", "G04-github-integrity", "G09-data-lifecycle"],
       "finding_ids": ["G10-F01"],
-      "agent_prompt": "Make operator surfaces truthful. Derive worker health from a renewable heartbeat rather than job claim time, validate GitHub authentication against the relevant capability, update run progress, show stale PR state, preserve historical log links on repair, paginate list/log APIs, make ticket-detail GET side-effect-free, return stable error codes with recovery steps, and remove or accurately label settings that advertise limits, cleanup, backups, or merge behavior not actually implemented."
+      "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for G10-operational-truth. Make operator surfaces truthful. Derive worker health from a renewable heartbeat rather than job claim time, validate GitHub authentication against the relevant capability, update run progress, show stale PR state, preserve historical log links on repair, paginate list/log APIs, make ticket-detail GET side-effect-free, return stable error codes with recovery steps, and remove or accurately label settings that advertise limits, cleanup, backups, or merge behavior not actually implemented."
     },
     {
       "id": "G11-frontend-quality",
@@ -153,7 +153,7 @@
       "priority": "P2",
       "dependencies": ["G06-public-intake", "G10-operational-truth"],
       "finding_ids": ["G11-F01"],
-      "agent_prompt": "Audit and correct the highest-impact frontend quality defects: keyboard tab semantics and focus management, mobile navigation semantics and touch targets, reduced-motion support, contrast verification, responsive labels for data tables, fixed-width overflow, and attachment visibility. Move inline styles/scripts toward CSP-compatible assets and evaluate local/system fonts for privacy and performance. Keep accent-border consistency as P3 unless user research elevates it."
+      "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for G11-frontend-quality. Audit and correct the highest-impact frontend quality defects: keyboard tab semantics and focus management, mobile navigation semantics and touch targets, reduced-motion support, contrast verification, responsive labels for data tables, fixed-width overflow, and attachment visibility. Move inline styles/scripts toward CSP-compatible assets and evaluate local/system fonts for privacy and performance. Keep accent-border consistency as P3 unless user research elevates it."
     },
     {
       "id": "G12-ci-maintainability",
@@ -161,7 +161,7 @@
       "priority": "P1",
       "dependencies": ["G01-workflow-state", "G06-public-intake", "G09-data-lifecycle"],
       "finding_ids": ["G12-F01"],
-      "agent_prompt": "Restore trustworthy delivery checks. Remove CI failure masking, define one documented root verification command, add focused route/worker/database/webhook/upload end-to-end coverage, and use the already-installed browser test tooling only where browser artifacts prove a real flow. Pin action/tool and production script versions, remove or implement placeholders/empty packages, consolidate duplicated resolvers, split oversized modules at tested seams, and document workspace prerequisites."
+      "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for G12-ci-maintainability. Restore trustworthy delivery checks. Remove CI failure masking, define one documented root verification command, add focused route/worker/database/webhook/upload end-to-end coverage, and use the already-installed browser test tooling only where browser artifacts prove a real flow. Pin action/tool and production script versions, remove or implement placeholders/empty packages, consolidate duplicated resolvers, split oversized modules at tested seams, and document workspace prerequisites."
     }
   ],
   "findings": [
@@ -255,8 +255,30 @@
       "id": "G08-F01", "group_id": "G08-notifications", "kind": "reliability", "priority": "P1", "confidence": "high", "status": "open", "title": "Notification delivery is not fully policy-driven or recoverable",
       "summary": "Delivery retries and provider selection do not yet enforce configuration, leases, or complete event routing.", "impact": "Operators can receive duplicate, missing, or unintended notifications and stuck sends can persist.",
       "evidence": [
-        { "source": "repository", "location": "packages/domain/src/notifications.ts", "symbol": "notification enqueue", "observation": "Delivery creation uses an idempotency key, but provider-rule and delivery-recovery policy must be completed." },
-        { "source": "repository", "location": "apps/worker/src/worker.ts", "symbol": "deliverDueNotification", "observation": "Delivery worker path needs lease/recovery and max-attempt enforcement." }
+        {
+          "source": "repository",
+          "location": "packages/domain/src/notifications.ts",
+          "symbol": "NotificationEvent / enqueueNotification",
+          "observation": "The event union contains a fixed subset of workflow events, and enqueueNotification inserts one delivery for every enabled provider with no provider-rule filter."
+        },
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "deliverDueNotification",
+          "observation": "The worker claims queued/failed rows and marks them sending without a lease/heartbeat; retry scheduling increments attempts but does not read a provider max_attempts value."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "notificationRetryMatch",
+          "observation": "The admin retry route calls provider.send directly, then updates the delivery without a compare-and-swap status guard or worker lease."
+        },
+        {
+          "source": "repository",
+          "location": "packages/notification-provider/src/index.ts",
+          "symbol": "Configuration / createNotificationProvider",
+          "observation": "Configuration accepts authorization_header directly and endpoint validation only checks URL parseability; send uses the supplied method, headers, and timeout value."
+        }
       ],
       "root_cause": ["Provider max_attempts is ignored.", "Manual retry can race and duplicate sends.", "Sending deliveries have no recovery.", "All providers receive all events because rule configuration is absent.", "Event coverage is incomplete.", "Provider/timeout/endpoint validation is weak.", "Literal credentials are accepted.", "Provider tests and sends lack robust idempotency/status checks."],
       "recommendation": "Persist provider rules and delivery leases, validate configuration and secret references, and serialize retry/send transitions.",
@@ -292,8 +314,30 @@
       "id": "G11-F01", "group_id": "G11-frontend-quality", "kind": "accessibility", "priority": "P2", "confidence": "medium", "status": "open", "title": "Frontend accessibility and responsive quality require a targeted pass",
       "summary": "Operator and public pages need keyboard, focus, motion, contrast, touch, responsive-data, attachment, CSP, and font improvements.", "impact": "People using keyboard, touch, small screens, reduced motion, or constrained networks can lose context or be unable to complete workflows.",
       "evidence": [
-        { "source": "repository", "location": "apps/web/src/ui.ts", "symbol": "inline client behavior", "observation": "A large inline script concentrates interactive behavior, increasing CSP and testability cost." },
-        { "source": "repository", "location": "apps/web/src/pages", "symbol": "page renderers", "observation": "Server-rendered fixed layout and data components require responsive semantic review." }
+        {
+          "source": "repository",
+          "location": "apps/web/src/ui.ts",
+          "symbol": "tablist click handler",
+          "observation": "Tab selection is wired to click events and toggles aria-selected/hidden panels, but the handler has no Arrow/Home/End keyboard navigation or focus movement."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/design-tokens.css",
+          "symbol": "dccPulse / dccIn keyframes and media rules",
+          "observation": "The stylesheet defines pulse and dialog animations but has no prefers-reduced-motion override; its mobile rule hides list headers and uses generic ticket-row columns, while specialized table grids retain their desktop column definitions."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/forms.ts",
+          "symbol": "render previewPanel",
+          "observation": "The form preview renders every non-static field as a disabled input, so attachment-specific presentation is not represented in the preview."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/ui.ts",
+          "symbol": "fontsHead / document",
+          "observation": "Every rendered document includes external Google Fonts links plus inline style and script content, which constrains a strict CSP and adds third-party font requests."
+        }
       ],
       "root_cause": ["Tab keyboard behavior, focus management, mobile navigation semantics, touch targets, reduced motion, contrast verification, and responsive data labeling need work.", "Some fixed-width layouts overflow.", "Attachments are not surfaced.", "Inline scripts/styles complicate CSP.", "External fonts add privacy/performance cost.", "Lower-priority accent-border inconsistencies should remain P3."],
       "recommendation": "Prioritize accessibility semantics and responsive content first, then isolate inline assets and evaluate font loading; retain minor accent-border cleanup as P3.",
@@ -316,35 +360,35 @@
   "roadmap": [
     {
       "phase": "Phase 0 restore trust", "goal": "Stop false success and make current state observable before expanding behavior.", "items": [
-        { "id": "R0-01", "name": "Truthful verification and operational baseline", "dependencies": [], "outcomes": ["CI fails on test failure", "root verification command", "health/progress/error contract"], "acceptance_criteria": ["Scoped Vitest remains green and CI no longer masks failures", "operator read APIs are side-effect-free"], "agent_prompt": "Remove only the CI success-masking fallback, add one documented root verification script using existing tools, and add focused checks for side-effect-free reads and truthful health/error fields. Do not add dependencies or change deployment behavior." },
-        { "id": "R0-02", "name": "State recovery and secret-boundary containment", "dependencies": ["R0-01"], "outcomes": ["leased jobs/deliveries", "scrubbed child environments", "secure production configuration"], "acceptance_criteria": ["expired work recovers audibly", "web no longer carries deploy/broad write authority", "production configuration fails closed"], "agent_prompt": "Implement the smallest durable lease/reaper and environment allowlist needed to prevent stranded work and credential inheritance. Enforce secure production config and preserve existing merge/deploy capability behind durable worker jobs." }
+        { "id": "R0-01", "name": "Truthful verification and operational baseline", "dependencies": [], "outcomes": ["CI fails on test failure", "root verification command", "health/progress/error contract"], "acceptance_criteria": ["Scoped Vitest remains green and CI no longer masks failures", "operator read APIs are side-effect-free"], "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for R0-01. Remove only the CI success-masking fallback, add one documented root verification script using existing tools, and add focused checks for side-effect-free reads and truthful health/error fields. Do not add dependencies or change deployment behavior." },
+        { "id": "R0-02", "name": "State recovery and secret-boundary containment", "dependencies": ["R0-01"], "outcomes": ["leased jobs/deliveries", "scrubbed child environments", "secure production configuration"], "acceptance_criteria": ["expired work recovers audibly", "web no longer carries deploy/broad write authority", "production configuration fails closed"], "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for R0-02. Implement the smallest durable lease/reaper and environment allowlist needed to prevent stranded work and credential inheritance. Enforce secure production config and preserve existing merge/deploy capability behind durable worker jobs." }
       ]
     },
     {
       "phase": "Phase 1 deterministic and secure operation", "goal": "Bind approvals, execution, GitHub truth, and persistence to immutable verified inputs.", "items": [
-        { "id": "R1-01", "name": "Unified project preflight", "dependencies": ["R0-02"], "outcomes": ["fresh revision validation", "configuration/skill/prompt validation", "portable runtime checks"], "acceptance_criteria": ["planning and execution share one preflight result", "stale branches and missing prerequisites fail before agent launch"], "agent_prompt": "Create one shared project preflight that validates repository revision, agent start path, configured skills/prompts, required environment, and runtime prerequisites. Return a structured immutable result used by planning and execution; reuse existing project-config capabilities." },
-        { "id": "R1-02", "name": "Event-driven GitHub sync with polling fallback", "dependencies": ["R0-02", "R1-01"], "outcomes": ["paginated authoritative PR sync", "webhook-driven updates", "rate-aware polling fallback"], "acceptance_criteria": ["all pages sync", "stale state is visible", "provider writes flow through durable jobs"], "agent_prompt": "Implement GitHub event-driven synchronization with bounded, rate-aware polling fallback. Use official pagination and review/check/reviewer endpoints, preserve source timestamps/head SHA, and do not perform GitHub writes synchronously from web routes." },
-        { "id": "R1-03", "name": "GitHub App credentials and policy-based merge/deploy modes", "dependencies": ["R1-02"], "outcomes": ["least-privilege installation credentials", "head-bound merge", "policy-based merge/deploy modes"], "acceptance_criteria": ["merge verifies current head/check/reviews", "credential scope is separate from web read capability"], "agent_prompt": "Introduce GitHub App installation credentials with least privilege and policy-based merge/deploy modes. Before merge or deploy, re-read and bind the exact head SHA and required checks/reviews. Keep manual and automated modes explicit and audited." }
+        { "id": "R1-01", "name": "Unified project preflight", "dependencies": ["R0-02"], "outcomes": ["fresh revision validation", "configuration/skill/prompt validation", "portable runtime checks"], "acceptance_criteria": ["planning and execution share one preflight result", "stale branches and missing prerequisites fail before agent launch"], "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for R1-01. Create one shared project preflight that validates repository revision, agent start path, configured skills/prompts, required environment, and runtime prerequisites. Return a structured immutable result used by planning and execution; reuse existing project-config capabilities." },
+        { "id": "R1-02", "name": "Event-driven GitHub sync with polling fallback", "dependencies": ["R0-02", "R1-01"], "outcomes": ["paginated authoritative PR sync", "webhook-driven updates", "rate-aware polling fallback"], "acceptance_criteria": ["all pages sync", "stale state is visible", "provider writes flow through durable jobs"], "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for R1-02. Implement GitHub event-driven synchronization with bounded, rate-aware polling fallback. Use official pagination and review/check/reviewer endpoints, preserve source timestamps/head SHA, and do not perform GitHub writes synchronously from web routes." },
+        { "id": "R1-03", "name": "GitHub App credentials and policy-based merge/deploy modes", "dependencies": ["R1-02"], "outcomes": ["least-privilege installation credentials", "head-bound merge", "policy-based merge/deploy modes"], "acceptance_criteria": ["merge verifies current head/check/reviews", "credential scope is separate from web read capability"], "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for R1-03. Introduce GitHub App installation credentials with least privilege and policy-based merge/deploy modes. Before merge or deploy, re-read and bind the exact head SHA and required checks/reviews. Keep manual and automated modes explicit and audited." }
       ]
     },
     {
       "phase": "Phase 2 operator confidence", "goal": "Make deployment, restore, intake, and notification operations recoverable and inspectable.", "items": [
-        { "id": "R2-01", "name": "Deployment control center", "dependencies": ["R1-03", "R0-02"], "outcomes": ["health-gated releases", "history", "rollback", "approval/retry audit"], "acceptance_criteria": ["only protected current master deploys", "failed health creates a durable rollback/recovery outcome"], "agent_prompt": "Build a minimal deployment control center around the existing deploy flow: protected-head verification, frozen install, migration policy, health checks, history, explicit approval/retry, and rollback. Do not remove automated deployment; make every decision durable and visible." },
-        { "id": "R2-02", "name": "Backup and restore drills", "dependencies": ["R0-02"], "outcomes": ["complete backup manifest", "scheduled retention", "isolated restore verification"], "acceptance_criteria": ["backup includes DB, artifacts, and configuration", "restore drill has a recorded successful verification"], "agent_prompt": "Implement backup manifests and an isolated restore drill using existing shell/database capabilities. Include database, artifact, and configuration data; record outcomes; and make retention behavior truthful. Never run a destructive drill against production." },
-        { "id": "R2-03", "name": "Safe public intake and notification recovery", "dependencies": ["R0-02"], "outcomes": ["scoped uploads", "atomic rate limits", "rule-based leased notifications"], "acceptance_criteria": ["upload capability is scoped and cleaned", "notification retries cannot duplicate sends"], "agent_prompt": "Harden public forms and notifications together at their trust boundaries: validated schema, trusted proxy policy, scoped upload authorization and cleanup, plus provider event rules, delivery leases, idempotent retries, and secret references. Keep unsupported form settings visibly unavailable." }
+        { "id": "R2-01", "name": "Deployment control center", "dependencies": ["R1-03", "R0-02"], "outcomes": ["health-gated releases", "history", "rollback", "approval/retry audit"], "acceptance_criteria": ["only protected current master deploys", "failed health creates a durable rollback/recovery outcome"], "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for R2-01. Build a minimal deployment control center around the existing deploy flow: protected-head verification, frozen install, migration policy, health checks, history, explicit approval/retry, and rollback. Do not remove automated deployment; make every decision durable and visible." },
+        { "id": "R2-02", "name": "Backup and restore drills", "dependencies": ["R0-02"], "outcomes": ["complete backup manifest", "scheduled retention", "isolated restore verification"], "acceptance_criteria": ["backup includes DB, artifacts, and configuration", "restore drill has a recorded successful verification"], "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for R2-02. Implement backup manifests and an isolated restore drill using existing shell/database capabilities. Include database, artifact, and configuration data; record outcomes; and make retention behavior truthful. Never run a destructive drill against production." },
+        { "id": "R2-03", "name": "Safe public intake and notification recovery", "dependencies": ["R0-02"], "outcomes": ["scoped uploads", "atomic rate limits", "rule-based leased notifications"], "acceptance_criteria": ["upload capability is scoped and cleaned", "notification retries cannot duplicate sends"], "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for R2-03. Harden public forms and notifications together at their trust boundaries: validated schema, trusted proxy policy, scoped upload authorization and cleanup, plus provider event rules, delivery leases, idempotent retries, and secret references. Keep unsupported form settings visibly unavailable." }
       ]
     },
     {
       "phase": "Phase 3 workflow acceleration", "goal": "Add repeatable workflow features only after deterministic controls prove stable.", "items": [
-        { "id": "R3-01", "name": "Reviewer-comment repairs", "dependencies": ["R1-03", "R2-01"], "outcomes": ["scoped repair tickets", "fresh-head repair", "review history"], "acceptance_criteria": ["repair is tied to a specific reviewer comment and current head", "old commit cannot be republished"], "agent_prompt": "Add reviewer-comment repair jobs that link a specific review comment to a new immutable execution attempt. Require fresh head verification, path scope, approval snapshot, and history-preserving result publication." },
-        { "id": "R3-02", "name": "Reusable ticket/project templates", "dependencies": ["R1-01", "R0-02"], "outcomes": ["versioned reusable inputs", "explicit project defaults", "auditable overrides"], "acceptance_criteria": ["template use is recorded in the approval snapshot", "overrides are visible and versioned"], "agent_prompt": "Implement small versioned ticket/project templates using existing prompt/config storage patterns. Bind selected template versions and overrides into approval provenance; avoid a generic workflow engine or new dependency." },
-        { "id": "R3-03", "name": "Optional Playwright/browser artifacts", "dependencies": ["R0-01", "R2-03"], "outcomes": ["evidence for critical browser flows", "stored redacted artifacts"], "acceptance_criteria": ["browser artifacts cover login, public intake, and one operator flow", "artifacts exclude secrets and are retained safely"], "agent_prompt": "Use the already-installed Playwright only for critical browser journeys that need evidence. Add optional redacted screenshots/traces with bounded retention; do not add browser testing to every unit test." }
+        { "id": "R3-01", "name": "Reviewer-comment repairs", "dependencies": ["R1-03", "R2-01"], "outcomes": ["scoped repair tickets", "fresh-head repair", "review history"], "acceptance_criteria": ["repair is tied to a specific reviewer comment and current head", "old commit cannot be republished"], "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for R3-01. Add reviewer-comment repair jobs that link a specific review comment to a new immutable execution attempt. Require fresh head verification, path scope, approval snapshot, and history-preserving result publication." },
+        { "id": "R3-02", "name": "Reusable ticket/project templates", "dependencies": ["R1-01", "R0-02"], "outcomes": ["versioned reusable inputs", "explicit project defaults", "auditable overrides"], "acceptance_criteria": ["template use is recorded in the approval snapshot", "overrides are visible and versioned"], "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for R3-02. Implement small versioned ticket/project templates using existing prompt/config storage patterns. Bind selected template versions and overrides into approval provenance; avoid a generic workflow engine or new dependency." },
+        { "id": "R3-03", "name": "Optional Playwright/browser artifacts", "dependencies": ["R0-01", "R2-03"], "outcomes": ["evidence for critical browser flows", "stored redacted artifacts"], "acceptance_criteria": ["browser artifacts cover login, public intake, and one operator flow", "artifacts exclude secrets and are retained safely"], "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for R3-03. Use the already-installed Playwright only for critical browser journeys that need evidence. Add optional redacted screenshots/traces with bounded retention; do not add browser testing to every unit test." }
       ]
     },
     {
       "phase": "Phase 4 controlled automation and insight", "goal": "Introduce policy-driven automation and analytics only with measured safety and value.", "items": [
-        { "id": "R4-01", "name": "Cost/latency/failure analytics", "dependencies": ["R0-01", "R1-01", "R2-01"], "outcomes": ["aggregate operational metrics", "failure taxonomy", "capacity evidence"], "acceptance_criteria": ["dashboard shows redacted aggregate trends and confidence", "no raw prompts, secrets, or personal data are stored for analytics"], "agent_prompt": "Add aggregate cost, latency, and failure analytics from durable job/run/deploy records. Use a bounded event taxonomy and redacted aggregates only; label estimates and point-in-time values clearly." },
-        { "id": "R4-02", "name": "Candidate workflow conveniences", "dependencies": ["R4-01"], "outcomes": ["measured proposals only", "policy-gated automation"], "acceptance_criteria": ["each convenience has demonstrated demand and rollback", "automation never bypasses approval/merge/deploy policies"], "agent_prompt": "Treat speculative workflow conveniences as candidates, not commitments. For each, collect demonstrated need, define policy gates and rollback, then implement only the smallest approved convenience without bypassing the immutable approval and deploy controls." }
+        { "id": "R4-01", "name": "Cost/latency/failure analytics", "dependencies": ["R0-01", "R1-01", "R2-01"], "outcomes": ["aggregate operational metrics", "failure taxonomy", "capacity evidence"], "acceptance_criteria": ["dashboard shows redacted aggregate trends and confidence", "no raw prompts, secrets, or personal data are stored for analytics"], "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for R4-01. Add aggregate cost, latency, and failure analytics from durable job/run/deploy records. Use a bounded event taxonomy and redacted aggregates only; label estimates and point-in-time values clearly." },
+        { "id": "R4-02", "name": "Candidate workflow conveniences", "dependencies": ["R4-01"], "outcomes": ["measured proposals only", "policy-gated automation"], "acceptance_criteria": ["each convenience has demonstrated demand and rollback", "automation never bypasses approval/merge/deploy policies"], "agent_prompt": "Use docs/audit/dev-control-audit.json as the canonical audit contract for R4-02. Treat speculative workflow conveniences as candidates, not commitments. For each, collect demonstrated need, define policy gates and rollback, then implement only the smallest approved convenience without bypassing the immutable approval and deploy controls." }
       ]
     }
   ],
