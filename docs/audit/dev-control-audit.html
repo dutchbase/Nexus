@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <meta name="report-id" content="dev-control-engineering-audit-2026-08-01">
   <meta name="source-commit" content="00b8539e645ebb8bb6ce8641223d4fb17d04e053">
-  <meta name="schema-version" content="1.1.0">
-  <meta name="json-sha256" content="5b262746c0ae5a7ebae9c0ffcbdc43df7cf558f786d715192c15b90b2708532f">
+  <meta name="schema-version" content="1.2.0">
+  <meta name="json-sha256" content="c5f9b176173821651f7710512c956041935180a950d0e7e9c35db11267003e3d">
   <meta name="json-path" content="docs/audit/dev-control-audit.json">
   <meta name="html-path" content="docs/audit/dev-control-audit.html">
   <title>Dev Control engineering audit</title>
@@ -62,11 +62,11 @@
     <h2 id="provenance">Provenance</h2>
     <dl class="metadata">
       <dt>Report ID</dt><dd>dev-control-engineering-audit-2026-08-01</dd>
-      <dt>Schema version</dt><dd>1.1.0</dd>
+      <dt>Schema version</dt><dd>1.2.0</dd>
       <dt>Source commit</dt><dd><code>00b8539e645ebb8bb6ce8641223d4fb17d04e053</code></dd>
       <dt>Canonical JSON</dt><dd><a href="./dev-control-audit.json">docs/audit/dev-control-audit.json</a></dd>
       <dt>Stable HTML</dt><dd>docs/audit/dev-control-audit.html</dd>
-      <dt>Exact JSON SHA-256</dt><dd><code>5b262746c0ae5a7ebae9c0ffcbdc43df7cf558f786d715192c15b90b2708532f</code></dd>
+      <dt>Exact JSON SHA-256</dt><dd><code>c5f9b176173821651f7710512c956041935180a950d0e7e9c35db11267003e3d</code></dd>
     </dl>
     <p>/admin/audit remains the operational database audit-log UI; it is not a stable path for this engineering report.</p>
     <p>Read-only code, configuration, workflow, and aggregate runtime-observation audit of Dev Control. No production mutation, secret access,
@@ -92,10 +92,10 @@
   <section id="executive-summary">
     <h2>Executive summary</h2>
     <p><strong>Overall risk:</strong> high.</p>
-    <p><strong>Findings:</strong> 59 total — P0 10, P1 38, P2 11, P3 0.</p>
-    <p><strong>P0 exits:</strong> <a href="#G01-F01">G01-F01</a>, <a href="#G01-F02">G01-F02</a>, <a href="#G02-F01">G02-F01</a>, <a href="#G02-F03">G02-F03</a>,
-      <a href="#G03-F01">G03-F01</a>, <a href="#G03-F02">G03-F02</a>, <a href="#G04-F05">G04-F05</a>, <a href="#G05-F01">G05-F01</a>, <a href="#G05-F02">G05-F02</a>,
-      <a href="#G07-F04">G07-F04</a>.</p>
+    <p><strong>Findings:</strong> 67 total — P0 10, P1 44, P2 13, P3 0.</p>
+    <p><strong>P0 exits:</strong> <a href="#G07-F04">G07-F04</a>, <a href="#G03-F01">G03-F01</a>, <a href="#G03-F02">G03-F02</a>, <a href="#G01-F01">G01-F01</a>,
+      <a href="#G01-F02">G01-F02</a>, <a href="#G02-F01">G02-F01</a>, <a href="#G02-F03">G02-F03</a>, <a href="#G04-F05">G04-F05</a>, <a href="#G05-F01">G05-F01</a>,
+      <a href="#G05-F02">G05-F02</a>.</p>
     <p><strong>Top risks:</strong> <a href="#G03-F01">G03-F01</a>, <a href="#G04-F05">G04-F05</a>, <a href="#G02-F01">G02-F01</a>, <a href="#G05-F01">G05-F01</a>,
       <a href="#G05-F02">G05-F02</a>, <a href="#G07-F04">G07-F04</a>, <a href="#G01-F02">G01-F02</a>.</p>
     <h3>Remediation order</h3>
@@ -323,13 +323,13 @@ Remediate only G09-F01, G09-F02, G09-F03, G09-F04.</pre>
     <p>Enforce secure HTTP, secret, authentication, and process authority boundaries.</p>
     <p><strong>Group dependencies:</strong> <a href="#G09-data-lifecycle">G09-data-lifecycle</a></p>
     <p><strong>Finding IDs:</strong> <a href="#G07-F01">G07-F01</a>, <a href="#G07-F02">G07-F02</a>, <a href="#G07-F03">G07-F03</a>, <a href="#G07-F04">G07-F04</a>,
-      <a href="#G07-F05">G07-F05</a></p>
+      <a href="#G07-F05">G07-F05</a>, <a href="#G07-F06">G07-F06</a>, <a href="#G07-F07">G07-F07</a>, <a href="#G07-F08">G07-F08</a></p>
     <h3>Group agent prompt</h3>
 <pre class="prompt">Read docs/audit/dev-control-audit.json and the G07-auth-secrets entry before changing code.
 Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
 Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
 Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
-Remediate only G07-F01, G07-F02, G07-F03, G07-F04, G07-F05.</pre>
+Remediate only G07-F01, G07-F02, G07-F03, G07-F04, G07-F05, G07-F06, G07-F07, G07-F08.</pre>
 <article class="finding" id="G07-F01">
   <h4><span class="priority P1">P1</span> G07-F01 — Authenticated HTTP security depends on optional runtime configuration</h4>
   <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
@@ -357,41 +357,38 @@ Remediate only G07-F01, G07-F02, G07-F03, G07-F04, G07-F05.</pre>
   <li>header matrix</li>
   <li>cookie attributes</li>
 </ul>
-  <p><strong>Finding dependencies:</strong> <a href="#G05-F02">G05-F02</a></p>
+  <p><strong>Finding dependencies:</strong> None</p>
   <p><strong>Interface changes:</strong> Expose non-secret secure-config health fields.</p>
 </article>
 <article class="finding" id="G07-F02">
-  <h4><span class="priority P1">P1</span> G07-F02 — Session, CSRF, proxy, and login-throttle controls are not one hardened boundary</h4>
-  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
-  <p><strong>Summary:</strong> Expired session cleanup, proxy identity, username lockout behavior, and CSRF comparison use separate custom logic.</p>
-  <p><strong>Impact:</strong> Attackers can target accounts for denial of service, influence client identity, or exploit inconsistent token handling.</p>
+  <h4><span class="priority P1">P1</span> G07-F02 — Expired admin sessions are rejected but never cleaned</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Authentication filters expired rows on read without deleting or expiring them operationally.</p>
+  <p><strong>Impact:</strong> Session storage grows indefinitely and settings cannot truthfully claim a cleanup lifecycle.</p>
   <h5>Evidence</h5>
   <ul>
-    <li><code>apps/web/src/server.ts</code> · <code>requireAdmin / login / ipOf / CSRF check</code> — Authentication uses custom session, login-attempt,
-      proxy-IP, and CSRF logic; CSRF hashes are compared as strings rather than one constant-time byte comparison path.</li>
-    <li><code>packages/database/migrations/001_foundation.sql</code> · <code>admin_sessions / login_attempts</code> — Session expiry and login
-      attempts are stored, but the schema does not schedule cleanup or define an account-safe throttle policy.</li>
+    <li><code>apps/web/src/server.ts</code> · <code>sessionFor</code> — The session query requires expires_at &gt; now(), but the server contains
+      no expired-session deletion path.</li>
+    <li><code>packages/database/migrations/001_foundation.sql</code> · <code>admin_sessions.expires_at</code> — The schema stores expiry but defines
+      no database cleanup mechanism.</li>
   </ul>
-  <p><strong>Root cause:</strong> Authentication protections are implemented as independent route checks without one threat-modeled session and
-    client-identity policy.</p>
-  <p><strong>Recommendation:</strong> Use trusted-proxy client identity, constant-time token comparison, expiry cleanup, and throttling that limits
-    sources without enabling permanent username-targeted lockout.</p>
+  <p><strong>Root cause:</strong> Session expiry is enforced as a read predicate without a retention or cleanup owner.</p>
+  <p><strong>Recommendation:</strong> Add bounded scheduled cleanup or delete expired rows during an existing maintenance pass, with an observable
+    result.</p>
   <h5>Acceptance criteria</h5>
 <ul>
-  <li>Expired sessions are rejected and cleaned.</li>
-  <li>CSRF comparison uses equal-length constant-time bytes.</li>
-  <li>Forwarding-header spoofing fails.</li>
-  <li>One attacker cannot lock out a username globally.</li>
+  <li>Expired sessions cannot authenticate.</li>
+  <li>Expired rows are removed within the documented interval.</li>
+  <li>Cleanup never deletes unexpired sessions.</li>
 </ul>
   <h5>Regression coverage</h5>
 <ul>
-  <li>expired session</li>
-  <li>CSRF mismatch</li>
-  <li>proxy spoof</li>
-  <li>targeted lockout</li>
+  <li>expired rejection</li>
+  <li>cleanup boundary</li>
+  <li>active-session preservation</li>
 </ul>
-  <p><strong>Finding dependencies:</strong> <a href="#G07-F01">G07-F01</a></p>
-  <p><strong>Interface changes:</strong> Return stable auth failure classes without account disclosure.</p>
+  <p><strong>Finding dependencies:</strong> <a href="#G09-F04">G09-F04</a></p>
+  <p><strong>Interface changes:</strong> Expose session cleanup freshness and count without actor data.</p>
 </article>
 <article class="finding" id="G07-F03">
   <h4><span class="priority P1">P1</span> G07-F03 — Secret storage and redaction accept literal credentials</h4>
@@ -452,42 +449,121 @@ Remediate only G07-F01, G07-F02, G07-F03, G07-F04, G07-F05.</pre>
   <li>write job audit</li>
   <li>least-privilege credential</li>
 </ul>
-  <p><strong>Finding dependencies:</strong> <a href="#G01-F03">G01-F03</a></p>
+  <p><strong>Finding dependencies:</strong> None</p>
   <p><strong>Interface changes:</strong> Publish process-role capability health without credential values.</p>
 </article>
 <article class="finding" id="G07-F05">
-  <h4><span class="priority P1">P1</span> G07-F05 — Password tooling leaks arguments and compiles native code at runtime</h4>
+  <h4><span class="priority P1">P1</span> G07-F05 — Password administration exposes secrets and truncates edge-case input</h4>
   <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
-  <p><strong>Summary:</strong> Admin creation accepts a password command-line argument and the password module compiles a C helper into /tmp during
-    module load.</p>
-  <p><strong>Impact:</strong> Passwords can appear in process history, long/newline edge cases can truncate, and authentication can fail on hosts
-    without compiler/runtime libraries.</p>
+  <p><strong>Summary:</strong> Admin creation reads a password from argv, and the line-based native helper has fixed buffers and newline semantics.</p>
+  <p><strong>Impact:</strong> Passwords can appear in process listings or be silently truncated or altered at newline boundaries.</p>
   <h5>Evidence</h5>
   <ul>
-    <li><code>scripts/create-admin.ts</code> · <code>--password argument</code> — The non-interactive CLI reads the password from a command-line
-      flag.</li>
-    <li><code>packages/database/src/password.ts</code> · <code>module initialization / execute</code> — The module invokes gcc at runtime and
-      passes newline-delimited password input to a helper.</li>
-    <li><code>packages/database/native/argon2-helper.c</code> · <code>read_line / password buffer</code> — The helper uses a fixed 4096-byte line
-      buffer.</li>
+    <li><code>scripts/create-admin.ts</code> · <code>--password argument</code> — The non-interactive command reads the password from process.argv.</li>
+    <li><code>packages/database/native/argon2-helper.c</code> · <code>read_line / password buffer</code> — The helper reads a line into a fixed
+      4096-byte buffer and strips CR/LF.</li>
   </ul>
-  <p><strong>Root cause:</strong> Password input and hashing portability are delegated to ad hoc CLI/native process conventions.</p>
-  <p><strong>Recommendation:</strong> Read secrets from stdin or a protected file descriptor, reject unsupported edge cases explicitly, and package/document
-    a reproducible Argon2 runtime.</p>
+  <p><strong>Root cause:</strong> Password transport uses command-line and line-oriented process conventions instead of a protected binary-safe
+    input contract.</p>
+  <p><strong>Recommendation:</strong> Read the password from stdin or a protected descriptor and reject unsupported length/newline input explicitly.</p>
   <h5>Acceptance criteria</h5>
 <ul>
-  <li>Password never appears in argv.</li>
-  <li>Length/newline behavior is explicit and tested.</li>
-  <li>Production authentication starts without a compiler and with pinned Argon2 support.</li>
+  <li>Password values never appear in argv.</li>
+  <li>Length and newline limits are explicit and fail closed.</li>
+  <li>Hash and verify use the same binary-safe input contract.</li>
 </ul>
   <h5>Regression coverage</h5>
 <ul>
   <li>argv secrecy</li>
-  <li>length/newline</li>
-  <li>compiler-absent runtime</li>
+  <li>maximum length</li>
+  <li>embedded newline</li>
 </ul>
   <p><strong>Finding dependencies:</strong> None</p>
-  <p><strong>Interface changes:</strong> Document supported password input contract.</p>
+  <p><strong>Interface changes:</strong> Document the supported password-input contract.</p>
+</article>
+<article class="finding" id="G07-F06">
+  <h4><span class="priority P1">P1</span> G07-F06 — CSRF verification uses ordinary string comparison</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The request token is hashed and compared to the stored hash with JavaScript string inequality.</p>
+  <p><strong>Impact:</strong> The security boundary lacks an explicit equal-length constant-time comparison.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>requireAdmin CSRF branch</code> — The branch evaluates hash(csrf) !== session.csrf_token_hash.</li>
+  </ul>
+  <p><strong>Root cause:</strong> CSRF verification uses general string equality rather than a constant-time byte comparison helper.</p>
+  <p><strong>Recommendation:</strong> Decode equal-length hash bytes and compare them with timingSafeEqual; reject malformed lengths before comparison.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Valid tokens pass.</li>
+  <li>Malformed and unequal-length tokens fail without throwing.</li>
+  <li>The comparison path uses timingSafeEqual.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>valid CSRF</li>
+  <li>invalid CSRF</li>
+  <li>unequal-length CSRF</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> Keep the existing 403 contract with a stable csrf_invalid code.</p>
+</article>
+<article class="finding" id="G07-F07">
+  <h4><span class="priority P1">P1</span> G07-F07 — Client identity ignores trusted reverse-proxy configuration</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Audit and throttle identity always uses the socket peer address.</p>
+  <p><strong>Impact:</strong> Behind a reverse proxy, every client can collapse to one proxy address and source-based controls become inaccurate.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>ipOf</code> — The helper returns request.socket.remoteAddress and has no trusted-proxy policy
+      or forwarded-address parsing.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Client IP derivation has no explicit deployment trust model.</p>
+  <p><strong>Recommendation:</strong> Configure trusted proxy hops and accept forwarded client addresses only from those peers; otherwise retain
+    the socket address.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Direct untrusted forwarding headers are ignored.</li>
+  <li>A configured trusted proxy yields the intended client address.</li>
+  <li>Audit output never stores an unvalidated address chain.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>direct socket</li>
+  <li>spoofed forwarded header</li>
+  <li>trusted proxy chain</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G07-F01">G07-F01</a></p>
+  <p><strong>Interface changes:</strong> Document trusted-proxy configuration and identity source.</p>
+</article>
+<article class="finding" id="G07-F08">
+  <h4><span class="priority P1">P1</span> G07-F08 — Login throttling permits username-targeted denial of service</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Failure counting is keyed only by username, then blocks the account after a fixed threshold.</p>
+  <p><strong>Impact:</strong> An attacker can intentionally lock an administrator account regardless of source identity.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>login failure query and lockout branch</code> — The failure query filters by username and
+      time only, then returns account temporarily locked at lockoutThreshold.</li>
+    <li><code>packages/database/migrations/001_foundation.sql</code> · <code>login_attempts</code> — The table stores username, attempted_at,
+      and succeeded but no client/network key used by the query.</li>
+  </ul>
+  <p><strong>Root cause:</strong> The throttle budget is account-global rather than combining source-sensitive limits with account-safe backoff.</p>
+  <p><strong>Recommendation:</strong> Use bounded source and account signals that slow attacks without allowing one source to lock an account
+    globally; preserve uniform credential errors.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>One hostile source cannot globally lock a username.</li>
+  <li>High-rate failures are throttled.</li>
+  <li>Unknown and valid usernames remain indistinguishable.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>targeted username attack</li>
+  <li>source burst</li>
+  <li>unknown-user parity</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G07-F07">G07-F07</a></p>
+  <p><strong>Interface changes:</strong> Return retry timing without disclosing account existence.</p>
 </article>
   </div>
 </details>
@@ -847,7 +923,7 @@ Remediate only G02-F01, G02-F02, G02-F03, G02-F04, G02-F05, G02-F06.</pre>
   <li>attempt/commit binding</li>
   <li>publication retry</li>
 </ul>
-  <p><strong>Finding dependencies:</strong> <a href="#G01-F02">G01-F02</a>, <a href="#G03-F01">G03-F01</a></p>
+  <p><strong>Finding dependencies:</strong> <a href="#G03-F01">G03-F01</a></p>
   <p><strong>Interface changes:</strong> Persist immutable attempt input and result identities.</p>
 </article>
 <article class="finding" id="G02-F02">
@@ -875,7 +951,7 @@ Remediate only G02-F01, G02-F02, G02-F03, G02-F04, G02-F05, G02-F06.</pre>
   <li>rename</li>
   <li>binary/secret fixture</li>
 </ul>
-  <p><strong>Finding dependencies:</strong> <a href="#G12-F02">G12-F02</a></p>
+  <p><strong>Finding dependencies:</strong> None</p>
   <p><strong>Interface changes:</strong> None</p>
 </article>
 <article class="finding" id="G02-F03">
@@ -906,7 +982,7 @@ Remediate only G02-F01, G02-F02, G02-F03, G02-F04, G02-F05, G02-F06.</pre>
   <li>credential canary</li>
   <li>outside-worktree write refusal</li>
 </ul>
-  <p><strong>Finding dependencies:</strong> <a href="#G07-F04">G07-F04</a></p>
+  <p><strong>Finding dependencies:</strong> None</p>
   <p><strong>Interface changes:</strong> Record the operation policy and environment profile without secret values.</p>
 </article>
 <article class="finding" id="G02-F04">
@@ -1187,13 +1263,13 @@ Remediate only G04-F01, G04-F02, G04-F03, G04-F04, G04-F05.</pre>
     <p><strong>Group dependencies:</strong> <a href="#G02-execution-safety">G02-execution-safety</a>, <a href="#G04-github-integrity">G04-github-integrity</a>,
       <a href="#G07-auth-secrets">G07-auth-secrets</a>, <a href="#G09-data-lifecycle">G09-data-lifecycle</a></p>
     <p><strong>Finding IDs:</strong> <a href="#G05-F01">G05-F01</a>, <a href="#G05-F02">G05-F02</a>, <a href="#G05-F03">G05-F03</a>, <a href="#G05-F04">G05-F04</a>,
-      <a href="#G05-F05">G05-F05</a></p>
+      <a href="#G05-F05">G05-F05</a>, <a href="#G05-F06">G05-F06</a>, <a href="#G05-F07">G05-F07</a></p>
     <h3>Group agent prompt</h3>
 <pre class="prompt">Read docs/audit/dev-control-audit.json and the G05-deployment-safety entry before changing code.
 Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
 Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
 Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
-Remediate only G05-F01, G05-F02, G05-F03, G05-F04, G05-F05.</pre>
+Remediate only G05-F01, G05-F02, G05-F03, G05-F04, G05-F05, G05-F06, G05-F07.</pre>
 <article class="finding" id="G05-F01">
   <h4><span class="priority P0">P0</span> G05-F01 — Successful check events can deploy a non-protected-branch SHA</h4>
   <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
@@ -1289,34 +1365,33 @@ Remediate only G05-F01, G05-F02, G05-F03, G05-F04, G05-F05.</pre>
   <p><strong>Interface changes:</strong> Add deployment attempt and event records.</p>
 </article>
 <article class="finding" id="G05-F04">
-  <h4><span class="priority P1">P1</span> G05-F04 — Webhook and shell boundaries do not fail closed consistently</h4>
-  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
-  <p><strong>Summary:</strong> Request body handling, external response checks, and shell command construction use bespoke paths.</p>
-  <p><strong>Impact:</strong> Oversize input, failed notification responses, or unsafe interpolation can create denial-of-service or misleading
-    success behavior.</p>
+  <h4><span class="priority P1">P1</span> G05-F04 — Oversize webhook bodies terminate without an HTTP response</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The server destroys the request after the byte limit but does not send a stable 413 response or prevent end handling
+    explicitly.</p>
+  <p><strong>Impact:</strong> Clients and operators can see a reset or ambiguous failure instead of an attributable rejected delivery.</p>
   <h5>Evidence</h5>
   <ul>
-    <li><code>webhook-server.js</code> · <code>handleRequest / notify / runDeployDetached</code> — The server accumulates and parses request bodies,
-      notification fetch does not require an OK response, and deployment launches sh -c with constructed paths.</li>
+    <li><code>webhook-server.js</code> · <code>http.createServer data/end handlers</code> — The data handler increments size and calls req.destroy()
+      after MAX, while the end handler still owns response handling and no 413 response is written.</li>
   </ul>
-  <p><strong>Root cause:</strong> Untrusted HTTP data and configured paths cross request, network, and shell boundaries without one bounded validation/error
-    contract.</p>
-  <p><strong>Recommendation:</strong> Bound and reject request bodies before buffering, require checked external responses, and invoke deployment
-    with argv rather than shell interpolation.</p>
+  <p><strong>Root cause:</strong> The request-size guard aborts the transport instead of completing one explicit bounded HTTP rejection state.</p>
+  <p><strong>Recommendation:</strong> Stop buffering at the limit, mark the request rejected, and send one stable 413 response without invoking
+    signature or JSON processing.</p>
   <h5>Acceptance criteria</h5>
 <ul>
-  <li>Oversize bodies terminate with a stable 413 response.</li>
-  <li>External non-2xx responses are recorded as failures.</li>
-  <li>Configured paths cannot inject shell syntax.</li>
+  <li>A body above MAX receives exactly one 413 response.</li>
+  <li>Oversize content is not parsed, authenticated, or deployed.</li>
+  <li>The rejection is logged without body content.</li>
 </ul>
   <h5>Regression coverage</h5>
 <ul>
-  <li>oversize webhook</li>
-  <li>notification non-2xx</li>
-  <li>path metacharacters</li>
+  <li>just-under-limit request</li>
+  <li>oversize 413</li>
+  <li>data/end race</li>
 </ul>
-  <p><strong>Finding dependencies:</strong> <a href="#G05-F03">G05-F03</a>, <a href="#G07-F03">G07-F03</a></p>
-  <p><strong>Interface changes:</strong> Return stable webhook and notification failure codes.</p>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> Return a stable webhook_body_too_large code.</p>
 </article>
 <article class="finding" id="G05-F05">
   <h4><span class="priority P1">P1</span> G05-F05 — Deployment notifications have an implicit hardcoded recipient</h4>
@@ -1343,6 +1418,61 @@ Remediate only G05-F01, G05-F02, G05-F03, G05-F04, G05-F05.</pre>
 </ul>
   <p><strong>Finding dependencies:</strong> <a href="#G07-F03">G07-F03</a></p>
   <p><strong>Interface changes:</strong> None</p>
+</article>
+<article class="finding" id="G05-F06">
+  <h4><span class="priority P1">P1</span> G05-F06 — Deployment notification HTTP failures are treated as success</h4>
+  <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The notification helper awaits fetch but does not reject or record non-2xx responses.</p>
+  <p><strong>Impact:</strong> A deployment notification can be lost while the webhook path appears successful.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>webhook-server.js</code> · <code>sendNotification</code> — The helper awaits fetch and catches thrown network errors, but never
+      checks Response.ok or status.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Notification delivery treats transport completion as provider acceptance.</p>
+  <p><strong>Recommendation:</strong> Check the response status, record a redacted failure for non-2xx results, and keep notification failure
+    distinct from deployment outcome.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Every non-2xx response is recorded as a notification failure.</li>
+  <li>Deployment success is not rewritten by notification failure.</li>
+  <li>Errors contain no authorization header, recipient, or response body secrets.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>notification 204</li>
+  <li>notification 400/500</li>
+  <li>redacted failure</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G07-F03">G07-F03</a></p>
+  <p><strong>Interface changes:</strong> Expose a separate notification outcome code on deployment history.</p>
+</article>
+<article class="finding" id="G05-F07">
+  <h4><span class="priority P1">P1</span> G05-F07 — Deployment launch interpolates configured paths into a shell command</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The deploy executable, marker, and log paths are quoted into one sh -c string.</p>
+  <p><strong>Impact:</strong> A configured path containing shell syntax can alter the launched command despite single-quote wrapping assumptions.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>webhook-server.js</code> · <code>launchDeploy</code> — spawn runs sh -c with a constructed command containing DEPLOY_SH_PATH, marker,
+      and logPath interpolation.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Process execution delegates argument and redirection boundaries to shell parsing.</p>
+  <p><strong>Recommendation:</strong> Invoke the deploy script with an argv array and open/pass log descriptors without a shell.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>No sh -c or interpolated command is used for deployment.</li>
+  <li>Paths containing whitespace or shell metacharacters remain literal arguments.</li>
+  <li>Detached execution and completion tracking still work.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>path whitespace</li>
+  <li>shell metacharacters</li>
+  <li>detached completion</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G05-F03">G05-F03</a></p>
+  <p><strong>Interface changes:</strong> Define the deploy argv and log-descriptor contract.</p>
 </article>
   </div>
 </details>
@@ -1996,13 +2126,13 @@ Remediate only G11-F01, G11-F02, G11-F03, G11-F04, G11-F05.</pre>
     <p><strong>Group dependencies:</strong> <a href="#G01-workflow-state">G01-workflow-state</a>, <a href="#G05-deployment-safety">G05-deployment-safety</a>,
       <a href="#G06-public-intake">G06-public-intake</a>, <a href="#G09-data-lifecycle">G09-data-lifecycle</a></p>
     <p><strong>Finding IDs:</strong> <a href="#G12-F01">G12-F01</a>, <a href="#G12-F02">G12-F02</a>, <a href="#G12-F03">G12-F03</a>, <a href="#G12-F04">G12-F04</a>,
-      <a href="#G12-F05">G12-F05</a>, <a href="#G12-F06">G12-F06</a></p>
+      <a href="#G12-F05">G12-F05</a>, <a href="#G12-F06">G12-F06</a>, <a href="#G12-F07">G12-F07</a>, <a href="#G12-F08">G12-F08</a>, <a href="#G12-F09">G12-F09</a></p>
     <h3>Group agent prompt</h3>
 <pre class="prompt">Read docs/audit/dev-control-audit.json and the G12-ci-maintainability entry before changing code.
 Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
 Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
 Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
-Remediate only G12-F01, G12-F02, G12-F03, G12-F04, G12-F05, G12-F06.</pre>
+Remediate only G12-F01, G12-F02, G12-F03, G12-F04, G12-F05, G12-F06, G12-F07, G12-F08, G12-F09.</pre>
 <article class="finding" id="G12-F01">
   <h4><span class="priority P1">P1</span> G12-F01 — CI explicitly masks Vitest failure</h4>
   <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
@@ -2062,36 +2192,34 @@ Remediate only G12-F01, G12-F02, G12-F03, G12-F04, G12-F05, G12-F06.</pre>
   <p><strong>Interface changes:</strong> None</p>
 </article>
 <article class="finding" id="G12-F03">
-  <h4><span class="priority P2">P2</span> G12-F03 — Tooling and workspace setup are not reproducible from one contract</h4>
-  <p><strong>Kind:</strong> maintainability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
-  <p><strong>Summary:</strong> Action/tool versions, production scripts, workspace dependency declarations, and setup prerequisites are scattered.</p>
-  <p><strong>Impact:</strong> A clean machine or deploy host can resolve different tools or fail on undocumented native requirements.</p>
+  <h4><span class="priority P2">P2</span> G12-F03 — The repository has no root verification command</h4>
+  <p><strong>Kind:</strong> maintainability · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Contributors must know and compose the TypeScript and scoped Vitest commands themselves.</p>
+  <p><strong>Impact:</strong> Local, CI, and agent verification can drift or accidentally run the unrelated unscoped harness.</p>
   <h5>Evidence</h5>
   <ul>
-    <li><code>package.json</code> · <code>scripts / dependencies</code> — There is no single root verify script covering the requested scoped
-      contract, and tool versions use range declarations.</li>
-    <li><code>.github/workflows/ci.yml</code> · <code>actions and setup</code> — CI setup and versions live in workflow steps rather than one
-      documented workspace prerequisite contract.</li>
-    <li><code>packages/database/src/password.ts</code> · <code>runtime gcc invocation</code> — Authentication has an undocumented native compiler/library
-      prerequisite at runtime.</li>
+    <li><code>package.json</code> · <code>scripts</code> — The root scripts include dev, admin:create, and projects:import but no verify, typecheck,
+      or test contract.</li>
+    <li><code>.github/workflows/ci.yml</code> · <code>TypeScript and Vitest steps</code> — CI spells the verification commands separately rather
+      than calling a root script.</li>
   </ul>
-  <p><strong>Root cause:</strong> Reproducibility information is distributed across package manifests, CI, deploy scripts, and runtime code.</p>
-  <p><strong>Recommendation:</strong> Define one root verify command and document/pin the minimum Node/pnpm/native/workspace prerequisites used
-    by CI and production.</p>
+  <p><strong>Root cause:</strong> The authoritative verification sequence is duplicated outside the package script contract.</p>
+  <p><strong>Recommendation:</strong> Add one root script using the existing TypeScript and scoped Vitest commands, and make CI/documentation
+    call it.</p>
   <h5>Acceptance criteria</h5>
 <ul>
-  <li>Fresh documented setup runs verification without undeclared prerequisites.</li>
-  <li>CI and production use the same frozen dependency graph.</li>
-  <li>Native runtime requirements are prebuilt or explicitly checked at startup.</li>
+  <li>One documented root command runs the intended product checks.</li>
+  <li>CI calls the same root command.</li>
+  <li>The command excludes the unrelated .lfd harness intentionally.</li>
 </ul>
   <h5>Regression coverage</h5>
 <ul>
-  <li>clean setup</li>
-  <li>root verify</li>
-  <li>frozen install</li>
+  <li>root verify command</li>
+  <li>CI command parity</li>
+  <li>scope check</li>
 </ul>
-  <p><strong>Finding dependencies:</strong> <a href="#G12-F01">G12-F01</a>, <a href="#G07-F05">G07-F05</a></p>
-  <p><strong>Interface changes:</strong> Publish workspace prerequisite and verification contracts.</p>
+  <p><strong>Finding dependencies:</strong> <a href="#G12-F01">G12-F01</a></p>
+  <p><strong>Interface changes:</strong> Publish the root verification command.</p>
 </article>
 <article class="finding" id="G12-F04">
   <h4><span class="priority P2">P2</span> G12-F04 — Placeholder scripts and empty packages advertise nonexistent capability</h4>
@@ -2180,6 +2308,98 @@ Remediate only G12-F01, G12-F02, G12-F03, G12-F04, G12-F05, G12-F06.</pre>
   <p><strong>Finding dependencies:</strong> <a href="#G12-F02">G12-F02</a>, <a href="#G12-F05">G12-F05</a></p>
   <p><strong>Interface changes:</strong> None</p>
 </article>
+<article class="finding" id="G12-F07">
+  <h4><span class="priority P2">P2</span> G12-F07 — Dependency and package-manager versions are not fully pinned</h4>
+  <p><strong>Kind:</strong> maintainability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Root dependency ranges and CI's latest pnpm selection allow tool resolution to change without a repository diff.</p>
+  <p><strong>Impact:</strong> Fresh installs can use different test/browser/database tooling or package-manager behavior.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>package.json</code> · <code>devDependencies</code> — Several root packages use caret ranges and the manifest has no packageManager
+      field.</li>
+    <li><code>.github/workflows/ci.yml</code> · <code>pnpm/action-setup</code> — The workflow requests version: latest.</li>
+  </ul>
+  <p><strong>Root cause:</strong> The repository does not declare one exact package-manager/toolchain identity at the manifest boundary.</p>
+  <p><strong>Recommendation:</strong> Declare the intended package manager version and pin direct tool versions where reproducibility requires
+    it; continue using the frozen lockfile.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>The package-manager version is declared in the repository.</li>
+  <li>CI uses that declared version rather than latest.</li>
+  <li>Frozen install resolves the committed lockfile without drift.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>declared package manager</li>
+  <li>frozen clean install</li>
+  <li>version drift canary</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> Add package-manager/toolchain version metadata.</p>
+</article>
+<article class="finding" id="G12-F08">
+  <h4><span class="priority P2">P2</span> G12-F08 — CI setup is not a complete workspace prerequisite contract</h4>
+  <p><strong>Kind:</strong> maintainability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Node, pnpm, cache, native, and workspace assumptions live in workflow YAML without matching manifest/setup documentation.</p>
+  <p><strong>Impact:</strong> A clean developer or production host can satisfy package install yet fail on an undeclared prerequisite.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>.github/workflows/ci.yml</code> · <code>setup steps</code> — The workflow selects Node 22, pnpm setup, cache, and install behavior
+      directly.</li>
+    <li><code>package.json</code> · <code>root manifest</code> — The manifest does not declare engines or a packageManager version.</li>
+    <li><code>pnpm-workspace.yaml</code> · <code>workspace and allowBuilds</code> — Workspace packages and esbuild build permission are defined
+      separately from the root setup contract.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Environment prerequisites are encoded in automation implementation rather than one repository-owned setup contract.</p>
+  <p><strong>Recommendation:</strong> Document and validate the minimum Node, package manager, workspace, and native prerequisites shared by CI
+    and supported hosts.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>A clean supported host can follow one setup contract.</li>
+  <li>Unsupported Node/package-manager versions fail early with guidance.</li>
+  <li>CI validates the same prerequisites it documents.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>clean workspace setup</li>
+  <li>unsupported runtime</li>
+  <li>workspace install</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G12-F07">G12-F07</a></p>
+  <p><strong>Interface changes:</strong> Publish supported runtime and workspace prerequisites.</p>
+</article>
+<article class="finding" id="G12-F09">
+  <h4><span class="priority P1">P1</span> G12-F09 — Authentication compiles native Argon2 code at module load</h4>
+  <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Importing the password module invokes gcc and links a host library into a temporary executable.</p>
+  <p><strong>Impact:</strong> Production authentication can fail to start on hosts without the compiler, linker library, writable temp path, or
+    compatible ABI.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/database/src/password.ts</code> · <code>module initialization</code> — execFileSync runs gcc before hashPassword or verifyPassword
+      is called.</li>
+    <li><code>packages/database/src/password.ts</code> · <code>binary path</code> — The compiled helper is written under tmpdir with the process
+      ID.</li>
+  </ul>
+  <p><strong>Root cause:</strong> A production runtime dependency is built dynamically during module initialization instead of being provisioned
+    and verified before process start.</p>
+  <p><strong>Recommendation:</strong> Package or provision the helper during a reproducible build/install step, then fail startup with a focused
+    prerequisite error if unavailable.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Production authentication starts without gcc installed.</li>
+  <li>The Argon2 implementation and ABI are reproducibly provisioned.</li>
+  <li>Missing/incompatible native support fails with an actionable startup error.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>compiler-absent startup</li>
+  <li>missing library</li>
+  <li>hash/verify smoke</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G12-F08">G12-F08</a></p>
+  <p><strong>Interface changes:</strong> Add an Argon2 runtime capability/preflight contract.</p>
+</article>
   </div>
 </details>
   </section>
@@ -2203,7 +2423,7 @@ Remediate only G12-F01, G12-F02, G12-F03, G12-F04, G12-F05, G12-F06.</pre>
 </ul>
   <h5>Acceptance criteria</h5>
 <ul>
-  <li>G12-F01 and G01-F01 have verified exits</li>
+  <li>G09-F02, G12-F01, and G01-F01 have verified exits</li>
   <li>GET routes do not mutate state</li>
   <li>worker health uses renewable heartbeat</li>
 </ul>
@@ -2212,7 +2432,7 @@ Remediate only G12-F01, G12-F02, G12-F03, G12-F04, G12-F05, G12-F06.</pre>
 Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
 Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
 Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
-Implement only this roadmap item: Make CI truthful and implement the minimum shared lease/heartbeat/reaper and read-side truth required by G12-F01, G01-F01, G10-F01, and G10-F05.</pre>
+Implement only this roadmap item: Make CI truthful and implement the minimum shared lease/heartbeat/reaper and read-side truth required by G09-F02, G12-F01, G01-F01, G10-F01, and G10-F05.</pre>
 </article>
 <article class="roadmap-item" id="R0-02">
   <h4>R0-02 — Approval reproducibility exit</h4>
@@ -2260,7 +2480,7 @@ Implement only this roadmap item: Bind repair and publication to fresh immutable
 </article>
 <article class="roadmap-item" id="R0-04">
   <h4>R0-04 — Terminal rerun and web authority exit</h4>
-  <p><strong>Dependencies:</strong> <a href="#R0-01">R0-01</a>, <a href="#R0-02">R0-02</a>, <a href="#R0-03">R0-03</a></p>
+  <p><strong>Dependencies:</strong> <a href="#R0-01">R0-01</a>, <a href="#R0-02">R0-02</a></p>
   <h5>Outcomes</h5>
 <ul>
   <li>immutable rerun identity</li>
@@ -2285,22 +2505,22 @@ Implement only this roadmap item: Implement immutable rerun identity and move al
   <p><strong>Dependencies:</strong> <a href="#R0-02">R0-02</a>, <a href="#R0-04">R0-04</a></p>
   <h5>Outcomes</h5>
 <ul>
-  <li>authoritative final policy snapshot</li>
+  <li>authoritative review/check snapshot</li>
   <li>expected-SHA merge</li>
   <li>durable audit</li>
 </ul>
   <h5>Acceptance criteria</h5>
 <ul>
-  <li>G04-F05 has a verified exit</li>
-  <li>changed head or missing required check/review refuses merge</li>
-  <li>merged SHA is recorded</li>
+  <li>G04-F02 and G04-F05 have verified exits</li>
+  <li>Changed head or missing required check/review refuses merge</li>
+  <li>Merged SHA and policy snapshot are recorded</li>
 </ul>
   <h5>Agent prompt</h5>
 <pre class="prompt">Read docs/audit/dev-control-audit.json and the R0-05 entry before changing code.
 Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
 Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
 Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
-Implement only this roadmap item: Implement the final authoritative head/check/review snapshot and expected-SHA merge refusal required by G04-F05.</pre>
+Implement only this roadmap item: Implement the final authoritative head/check/review snapshot and expected-SHA merge refusal required by G04-F02 and G04-F05.</pre>
 </article>
 <article class="roadmap-item" id="R0-06">
   <h4>R0-06 — Protected health-gated deployment exit</h4>
@@ -2313,16 +2533,16 @@ Implement only this roadmap item: Implement the final authoritative head/check/r
 </ul>
   <h5>Acceptance criteria</h5>
 <ul>
-  <li>G05-F01 and G05-F02 have verified exits</li>
-  <li>only current protected head deploys</li>
-  <li>failed health has tested rollback or blocked recovery</li>
+  <li>G09-F01, G05-F01, and G05-F02 have verified exits</li>
+  <li>Only current protected head deploys</li>
+  <li>Failed health has tested rollback or blocked recovery</li>
 </ul>
   <h5>Agent prompt</h5>
 <pre class="prompt">Read docs/audit/dev-control-audit.json and the R0-06 entry before changing code.
 Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
 Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
 Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
-Implement only this roadmap item: Complete deployment safety for G05-F01 and G05-F02 before any dependent automation: protected-head proof, frozen staged release, migration, health, rollback, and durable history.</pre>
+Implement only this roadmap item: Complete deployment safety for G09-F01, G05-F01, and G05-F02 before any dependent automation: protected-head proof, frozen staged release, migration, health, rollback, and durable history.</pre>
 </article>
 <article class="roadmap-item" id="R0-07">
   <h4>R0-07 — All-P0 verified exit gate</h4>

@@ -1,5 +1,5 @@
 {
-  "schema_version": "1.1.0",
+  "schema_version": "1.2.0",
   "report": {
     "id": "dev-control-engineering-audit-2026-08-01",
     "title": "Dev Control engineering audit",
@@ -106,24 +106,24 @@
   "summary": {
     "overall_risk": "high",
     "decision": "Complete and verify every P0 stabilization exit before any Phase 1-4 feature work.",
-    "finding_count": 59,
+    "finding_count": 67,
     "priority_counts": {
       "P0": 10,
-      "P1": 38,
-      "P2": 11,
+      "P1": 44,
+      "P2": 13,
       "P3": 0
     },
     "p0_finding_ids": [
+      "G07-F04",
+      "G03-F01",
+      "G03-F02",
       "G01-F01",
       "G01-F02",
       "G02-F01",
       "G02-F03",
-      "G03-F01",
-      "G03-F02",
       "G04-F05",
       "G05-F01",
-      "G05-F02",
-      "G07-F04"
+      "G05-F02"
     ],
     "top_risks": [
       "G03-F01",
@@ -182,9 +182,12 @@
         "G07-F02",
         "G07-F03",
         "G07-F04",
-        "G07-F05"
+        "G07-F05",
+        "G07-F06",
+        "G07-F07",
+        "G07-F08"
       ],
-      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G07-auth-secrets entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G07-F01, G07-F02, G07-F03, G07-F04, G07-F05."
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G07-auth-secrets entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G07-F01, G07-F02, G07-F03, G07-F04, G07-F05, G07-F06, G07-F07, G07-F08."
     },
     {
       "id": "G03-approval-reproducibility",
@@ -277,9 +280,11 @@
         "G05-F02",
         "G05-F03",
         "G05-F04",
-        "G05-F05"
+        "G05-F05",
+        "G05-F06",
+        "G05-F07"
       ],
-      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G05-deployment-safety entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G05-F01, G05-F02, G05-F03, G05-F04, G05-F05."
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G05-deployment-safety entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G05-F01, G05-F02, G05-F03, G05-F04, G05-F05, G05-F06, G05-F07."
     },
     {
       "id": "G06-public-intake",
@@ -373,448 +378,513 @@
         "G12-F03",
         "G12-F04",
         "G12-F05",
-        "G12-F06"
+        "G12-F06",
+        "G12-F07",
+        "G12-F08",
+        "G12-F09"
       ],
-      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G12-ci-maintainability entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G12-F01, G12-F02, G12-F03, G12-F04, G12-F05, G12-F06."
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G12-ci-maintainability entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G12-F01, G12-F02, G12-F03, G12-F04, G12-F05, G12-F06, G12-F07, G12-F08, G12-F09."
     }
   ],
   "findings": [
     {
-      "id": "G01-F01",
-      "group_id": "G01-workflow-state",
-      "kind": "reliability",
-      "priority": "P0",
+      "id": "G09-F01",
+      "group_id": "G09-data-lifecycle",
+      "kind": "integrity",
+      "priority": "P1",
       "confidence": "high",
       "status": "open",
-      "title": "Running work has no renewable ownership or automatic recovery",
-      "summary": "Jobs and notification deliveries are claimed without a lease heartbeat or bounded reaper.",
-      "impact": "Process loss or authentication refusal can strand work and leave related records stale.",
+      "title": "Migration execution is neither serialized nor uniquely ordered",
+      "summary": "The runner checks/applies files without an advisory lock, and migration filenames can share numeric prefixes.",
+      "impact": "Concurrent deploys or ambiguous ordering can diverge database schema state.",
       "evidence": [
         {
           "source": "repository",
-          "location": "packages/domain/src/index.ts",
-          "symbol": "claimJob / failJob",
-          "observation": "Job claims set claimed_at and claimed_by, but no lease expiry or heartbeat is stored or checked."
+          "location": "packages/database/src/migrate.ts",
+          "symbol": "migration runner",
+          "observation": "The runner creates schema_migrations and loops files without a PostgreSQL advisory lock."
         },
         {
           "source": "repository",
-          "location": "apps/worker/src/worker.ts",
-          "symbol": "refuseQueuedClaudeJobs / deliverDueNotification",
-          "observation": "Authentication refusal updates queued jobs, while notification delivery changes a row to sending without renewable ownership or recovery."
-        },
-        {
-          "source": "runtime",
-          "location": "runtime aggregate observation",
-          "symbol": "expired_active_sessions / stale_plans",
-          "observation": "The read-only audit observed 11 expired active sessions and 2 stale plans; these are point-in-time counts, not invariants."
+          "location": "packages/database/migrations",
+          "symbol": "migration filenames",
+          "observation": "The directory contains numeric migration naming managed only by full filename uniqueness, not a unique monotonic prefix policy."
         }
       ],
-      "root_cause": "Workflow ownership is represented by one-time timestamps and statuses instead of renewable leases with expiry and recovery transitions.",
-      "recommendation": "Add lease owner, expiry, heartbeat, and bounded reaper semantics shared by jobs and deliveries; couple recovery to ticket/run history.",
+      "root_cause": "Migration coordination and ordering rely on deployment convention rather than a database lock and validated naming rule.",
+      "recommendation": "Acquire a transaction/session advisory lock, validate unique monotonic prefixes, and fail before applying an ambiguous set.",
       "acceptance_criteria": [
-        "Only the live lease owner can complete or fail work.",
-        "Expired work is recovered once with an audit event.",
-        "Authentication refusal leaves every related ticket and run in an actionable terminal or queued state."
+        "Concurrent migration processes serialize.",
+        "Duplicate or out-of-order prefixes fail before DDL.",
+        "A failed migration leaves an actionable recorded state."
       ],
       "tests": [
-        "job lease expiry and reclaim",
-        "notification sending recovery",
-        "authentication-refusal state matrix"
+        "concurrent migrate",
+        "duplicate prefix",
+        "failed DDL"
+      ],
+      "dependencies": [],
+      "interface_changes": [
+        "Document migration lock key and naming contract."
+      ]
+    },
+    {
+      "id": "G09-F02",
+      "group_id": "G09-data-lifecycle",
+      "kind": "integrity",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Core status and append-only invariants rely on application code",
+      "summary": "Several tables store free-form statuses or audit/provenance rows without complete database-enforced lifecycle constraints.",
+      "impact": "A bug or maintenance query can create impossible transitions or delete required history.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/database/migrations/001_foundation.sql",
+          "symbol": "jobs / audit_events / tickets / agent_runs",
+          "observation": "Multiple workflow status columns are text without table-level state/data checks, and audit history is not protected from deletion."
+        },
+        {
+          "source": "repository",
+          "location": "packages/database/migrations/004_prompt_system.sql",
+          "symbol": "prompt_versions / prompt_snapshots",
+          "observation": "Some hash/scope constraints exist, demonstrating that other lifecycle invariants can also be enforced at the DB boundary."
+        }
+      ],
+      "root_cause": "The database is treated as storage while workflow validity and append-only guarantees live mainly in callers.",
+      "recommendation": "Add targeted CHECK/foreign-key/trigger protections for stable invariants and review indexes against actual high-value queries before adding any.",
+      "acceptance_criteria": [
+        "Invalid stable statuses and broken required relationships fail in PostgreSQL.",
+        "Append-only audit/provenance deletion is blocked or tightly privileged.",
+        "Every added index is justified by an EXPLAIN-backed query."
+      ],
+      "tests": [
+        "constraint rejection",
+        "append-only delete",
+        "query-plan index"
+      ],
+      "dependencies": [
+        "G09-F01"
+      ],
+      "interface_changes": [
+        "Document database-enforced invariants."
+      ]
+    },
+    {
+      "id": "G09-F03",
+      "group_id": "G09-data-lifecycle",
+      "kind": "integrity",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Filesystem artifacts and database references are not atomically published",
+      "summary": "Plan, log, upload, and worktree artifacts are written outside PostgreSQL transactions that reference them.",
+      "impact": "Crashes can create orphan files or live rows with missing content.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "storePlan / log path / worktree paths",
+          "observation": "Filesystem paths are created and then stored in run/plan/attempt metadata across separate operations."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "upload/submission handlers",
+          "observation": "Upload files and attachment/database rows require manual compensation across failure paths."
+        }
+      ],
+      "root_cause": "Artifact lifecycle has no shared staged/finalized state or reconciliation job across filesystem and database boundaries.",
+      "recommendation": "Write to staged identities, commit the row, atomically rename/finalize, and reconcile expired staged or missing artifacts.",
+      "acceptance_criteria": [
+        "No active row points to a missing artifact after recovery.",
+        "Expired staged files are removed safely.",
+        "Finalized artifacts have an integrity hash and owner record."
+      ],
+      "tests": [
+        "crash before row",
+        "crash after row",
+        "reconciler"
       ],
       "dependencies": [
         "G09-F02"
       ],
       "interface_changes": [
-        "Expose lease expiry, owner, and recovery reason in operator APIs."
+        "Add artifact state, owner, hash, and finalization timestamp."
       ]
     },
     {
-      "id": "G01-F02",
-      "group_id": "G01-workflow-state",
-      "kind": "correctness",
-      "priority": "P0",
-      "confidence": "high",
-      "status": "open",
-      "title": "Idempotency keys do not distinguish legitimate terminal reruns",
-      "summary": "Enqueue conflicts return the existing job even when its terminal history should remain immutable and a new attempt is requested.",
-      "impact": "A rerun can be blocked, or retry code can make failed review/conflict work look completed before replacement work succeeds.",
-      "evidence": [
-        {
-          "source": "repository",
-          "location": "packages/domain/src/index.ts",
-          "symbol": "enqueueJob",
-          "observation": "ON CONFLICT(idempotency_key) performs a no-op update and returns the pre-existing row regardless of terminal status."
-        },
-        {
-          "source": "repository",
-          "location": "apps/worker/src/worker.ts",
-          "symbol": "runPrAiReview / runPrConflictResolution / main dispatch",
-          "observation": "Retryable handlers share the jobs-table lifecycle, so their domain status and job completion must remain correlated across attempts."
-        }
-      ],
-      "root_cause": "One permanent idempotency identity is used for both duplicate suppression and user-requested attempt identity.",
-      "recommendation": "Keep the original job immutable and create an explicitly linked rerun identity; complete domain work only after the replacement attempt succeeds.",
-      "acceptance_criteria": [
-        "A terminal job can be rerun through a new linked identity.",
-        "Duplicate enqueue during an active attempt remains idempotent.",
-        "Failed review or conflict history never becomes completed merely because a retry was queued."
-      ],
-      "tests": [
-        "terminal rerun identity",
-        "active duplicate suppression",
-        "review/conflict retry state matrix"
-      ],
-      "dependencies": [
-        "G01-F01"
-      ],
-      "interface_changes": [
-        "Add immutable rerun_of and attempt identity fields."
-      ]
-    },
-    {
-      "id": "G01-F03",
-      "group_id": "G01-workflow-state",
-      "kind": "integrity",
+      "id": "G09-F04",
+      "group_id": "G09-data-lifecycle",
+      "kind": "reliability",
       "priority": "P1",
       "confidence": "high",
       "status": "open",
-      "title": "Publication and state events are not one atomic transition",
-      "summary": "Several workflow paths update work state, history, and external publication in separate operations.",
-      "impact": "A partial failure can leave the UI, audit history, and externally visible result disagreeing.",
+      "title": "Backup and retention claims do not cover complete tested recovery",
+      "summary": "The backup script dumps PostgreSQL only, while filesystem artifacts/configuration, scheduling, retention, and restore verification are separate or absent.",
+      "impact": "A nominal backup can be unusable for restoring the service's full state.",
       "evidence": [
         {
           "source": "repository",
-          "location": "apps/worker/src/worker.ts",
-          "symbol": "publishExecutionAttempt",
-          "observation": "Publication performs multiple database and provider operations around commit and pull-request state rather than one durable publication state machine."
+          "location": "scripts/backup.sh",
+          "symbol": "backup script",
+          "observation": "The script runs pg_dump to data/backups and does not manifest artifact/configuration content or perform a restore verification."
         },
         {
           "source": "repository",
-          "location": "packages/domain/src/index.ts",
-          "symbol": "completeJob / failJob",
-          "observation": "Job completion and failure update only the jobs row; related ticket/run/event updates are performed by callers."
+          "location": "apps/web/src/pages/operate.ts",
+          "symbol": "settings/operations rendering",
+          "observation": "Operator surfaces expose operational configuration but do not provide a verified restore result or implemented scheduler contract."
         }
       ],
-      "root_cause": "Workflow transitions have no shared transaction/outbox boundary tying domain state, history, and external side-effect intent together.",
-      "recommendation": "Use a transactional state transition plus durable outbox/publication record, then make external effects idempotent.",
+      "root_cause": "Backup is a database command rather than a versioned full-service recovery product with lifecycle and drill evidence.",
+      "recommendation": "Create a manifest for database, required artifacts, and configuration references; implement truthful retention/scheduling and an isolated restore drill.",
       "acceptance_criteria": [
-        "A database failure cannot publish an unrecorded result.",
-        "A provider failure preserves a retryable publication record and prior history.",
-        "Every externally visible transition has one attributable audit event."
+        "Manifest covers DB, artifacts, and configuration references.",
+        "Retention and schedule match the displayed contract.",
+        "An isolated restore verifies service health and records the result."
       ],
       "tests": [
-        "transaction rollback",
-        "provider failure retry",
-        "duplicate publication"
+        "backup manifest",
+        "retention",
+        "isolated restore drill"
       ],
       "dependencies": [
-        "G01-F01",
+        "G09-F03"
+      ],
+      "interface_changes": [
+        "Add backup/restore manifest and verification record."
+      ]
+    },
+    {
+      "id": "G07-F01",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Authenticated HTTP security depends on optional runtime configuration",
+      "summary": "Security headers are incomplete and Secure cookies depend on NODE_ENV being set correctly.",
+      "impact": "A deployment configuration error can weaken session transport and browser defenses.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "production / login response / response helpers",
+          "observation": "The production flag is NODE_ENV === production and is used to conditionally secure cookies; a complete authenticated security-header policy is not centralized."
+        },
+        {
+          "source": "repository",
+          "location": "deploy.sh",
+          "symbol": "process restart",
+          "observation": "The deploy script restarts processes without proving NODE_ENV=production or other secure boot requirements."
+        }
+      ],
+      "root_cause": "Secure HTTP behavior is conditional and distributed instead of validated as a production boot invariant.",
+      "recommendation": "Fail production boot closed without secure cookie/origin configuration and centralize headers including CSP-compatible policy, frame, MIME, and referrer controls.",
+      "acceptance_criteria": [
+        "Production cannot start with insecure cookie configuration.",
+        "Authenticated responses include the documented header baseline.",
+        "Development behavior is explicit and separately tested."
+      ],
+      "tests": [
+        "secure boot",
+        "header matrix",
+        "cookie attributes"
+      ],
+      "dependencies": [],
+      "interface_changes": [
+        "Expose non-secret secure-config health fields."
+      ]
+    },
+    {
+      "id": "G07-F02",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "Expired admin sessions are rejected but never cleaned",
+      "summary": "Authentication filters expired rows on read without deleting or expiring them operationally.",
+      "impact": "Session storage grows indefinitely and settings cannot truthfully claim a cleanup lifecycle.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "sessionFor",
+          "observation": "The session query requires expires_at > now(), but the server contains no expired-session deletion path."
+        },
+        {
+          "source": "repository",
+          "location": "packages/database/migrations/001_foundation.sql",
+          "symbol": "admin_sessions.expires_at",
+          "observation": "The schema stores expiry but defines no database cleanup mechanism."
+        }
+      ],
+      "root_cause": "Session expiry is enforced as a read predicate without a retention or cleanup owner.",
+      "recommendation": "Add bounded scheduled cleanup or delete expired rows during an existing maintenance pass, with an observable result.",
+      "acceptance_criteria": [
+        "Expired sessions cannot authenticate.",
+        "Expired rows are removed within the documented interval.",
+        "Cleanup never deletes unexpired sessions."
+      ],
+      "tests": [
+        "expired rejection",
+        "cleanup boundary",
+        "active-session preservation"
+      ],
+      "dependencies": [
+        "G09-F04"
+      ],
+      "interface_changes": [
+        "Expose session cleanup freshness and count without actor data."
+      ]
+    },
+    {
+      "id": "G07-F03",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Secret storage and redaction accept literal credentials",
+      "summary": "Notification configuration can store authorization headers directly and error redaction covers only selected paths.",
+      "impact": "Secrets can persist in JSON, logs, or returned errors beyond the intended secret boundary.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/notification-provider/src/index.ts",
+          "symbol": "Configuration / createNotificationProvider",
+          "observation": "Configuration accepts authorization_header directly as well as a secret reference."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "notification provider save / redactConfiguration",
+          "observation": "The write route accepts authorization_header, while the response helper only hides it from selected output."
+        },
+        {
+          "source": "repository",
+          "location": "packages/notification-provider/src/index.ts",
+          "symbol": "redactNotificationError",
+          "observation": "Notification error redaction is provider-specific rather than a process-wide structured logging policy."
+        }
+      ],
+      "root_cause": "Credential values are allowed in general configuration and redaction is applied after errors are formatted.",
+      "recommendation": "Require secret references or encrypted storage, remove literals, and apply structured allowlisted error/log serialization before persistence or response.",
+      "acceptance_criteria": [
+        "Literal credentials are rejected.",
+        "Known secret canaries never appear in rows, logs, or responses.",
+        "Rotation changes a reference without rewriting unrelated config."
+      ],
+      "tests": [
+        "literal credential rejection",
+        "error/log canary",
+        "rotation"
+      ],
+      "dependencies": [
         "G09-F02"
       ],
       "interface_changes": [
-        "Persist publication state and external idempotency key."
+        "Expose only secret reference identifiers and configured booleans."
       ]
     },
     {
-      "id": "G01-F04",
-      "group_id": "G01-workflow-state",
-      "kind": "performance",
-      "priority": "P2",
-      "confidence": "high",
-      "status": "open",
-      "title": "The worker serializes unrelated job classes",
-      "summary": "One loop claims and awaits at most one job while also polling synchronization and notification work.",
-      "impact": "Throughput and recovery latency scale with the slowest operation despite operator surfaces implying general queue capacity.",
-      "evidence": [
-        {
-          "source": "repository",
-          "location": "apps/worker/src/worker.ts",
-          "symbol": "while (!stopping) main loop",
-          "observation": "The loop awaits sync, delivery, one claim, and one handler sequentially before the next iteration."
-        },
-        {
-          "source": "repository",
-          "location": "apps/web/src/pages/queue.ts",
-          "symbol": "queue rendering",
-          "observation": "The operator view reports queued/running work but has no documented single-concurrency capacity contract."
-        }
-      ],
-      "root_cause": "All job types share one sequential event loop without per-capability concurrency or a truthful capacity setting.",
-      "recommendation": "Either label the worker as single-concurrency or add bounded per-capability concurrency after lease safety is complete.",
-      "acceptance_criteria": [
-        "Displayed capacity matches actual behavior.",
-        "If concurrency is enabled, independent jobs overlap without double claims.",
-        "Shutdown waits for or safely expires active leases."
-      ],
-      "tests": [
-        "capacity label",
-        "bounded concurrency",
-        "graceful shutdown"
-      ],
-      "dependencies": [
-        "G01-F01"
-      ],
-      "interface_changes": [
-        "Expose configured and observed worker capacity."
-      ]
-    },
-    {
-      "id": "G02-F01",
-      "group_id": "G02-execution-safety",
-      "kind": "integrity",
-      "priority": "P0",
-      "confidence": "high",
-      "status": "open",
-      "title": "Repair publication can reuse a prior attempt commit",
-      "summary": "Repair and publication paths read stored result_commit/worktree metadata that can outlive the attempt being repaired.",
-      "impact": "A repair can publish an old commit rather than the newly validated result.",
-      "evidence": [
-        {
-          "source": "repository",
-          "location": "apps/worker/src/worker.ts",
-          "symbol": "publishExecutionAttempt / retryPublication",
-          "observation": "Publication initializes commit from execution_attempts.result_commit and retryPublication requires the stored commit, worktree, and branch."
-        },
-        {
-          "source": "repository",
-          "location": "apps/worker/src/worker.ts",
-          "symbol": "runExecution validation failure updates",
-          "observation": "Some failure paths clear result_commit, showing correctness depends on every path resetting mutable attempt state."
-        }
-      ],
-      "root_cause": "Mutable publication fields are reused across attempts instead of binding each repair to a fresh immutable attempt result.",
-      "recommendation": "Clear publication state before repair and bind validation and publication to the new attempt ID, base commit, result commit, and worktree.",
-      "acceptance_criteria": [
-        "A repair cannot publish any prior attempt commit.",
-        "Publication rejects a commit not produced and validated by its attempt.",
-        "Prior attempt metadata remains immutable history."
-      ],
-      "tests": [
-        "stale-commit repair regression",
-        "attempt/commit binding",
-        "publication retry"
-      ],
-      "dependencies": [
-        "G01-F02",
-        "G03-F01"
-      ],
-      "interface_changes": [
-        "Persist immutable attempt input and result identities."
-      ]
-    },
-    {
-      "id": "G02-F02",
-      "group_id": "G02-execution-safety",
-      "kind": "security",
-      "priority": "P1",
-      "confidence": "high",
-      "status": "open",
-      "title": "Secret scanning assumes changed paths still exist in the index",
-      "summary": "The validation flow can inspect staged content through git show :path even when a change deletes that path.",
-      "impact": "A valid deletion can fail validation or bypass consistent scanning behavior.",
-      "evidence": [
-        {
-          "source": "repository",
-          "location": "packages/git-runner/src/index.ts",
-          "symbol": "scanSecrets / validateExecutionWorktree",
-          "observation": "Secret scanning derives content from changed paths and invokes Git index content reads; deleted paths need explicit handling."
-        }
-      ],
-      "root_cause": "The scanner models every changed path as an index blob and does not classify deletions before content inspection.",
-      "recommendation": "Classify change status first; scan added/modified blobs and treat deletions as content-free while retaining path-policy checks.",
-      "acceptance_criteria": [
-        "A staged deletion validates without an invalid index read.",
-        "Added and modified secrets still fail closed.",
-        "Rename and binary behavior is documented and tested."
-      ],
-      "tests": [
-        "staged deletion",
-        "rename",
-        "binary/secret fixture"
-      ],
-      "dependencies": [
-        "G12-F02"
-      ],
-      "interface_changes": []
-    },
-    {
-      "id": "G02-F03",
-      "group_id": "G02-execution-safety",
+      "id": "G07-F04",
+      "group_id": "G07-auth-secrets",
       "kind": "security",
       "priority": "P0",
       "confidence": "high",
       "status": "open",
-      "title": "Agent and validation children inherit worker authority",
-      "summary": "Claude and git validation subprocesses inherit process.env, while execution grants broad filesystem and shell tools.",
-      "impact": "A repository instruction or command can access credentials and capabilities unrelated to the approved task.",
+      "title": "Web handlers hold direct GitHub write and deployment authority",
+      "summary": "Authenticated web routes can perform provider mutations instead of only enqueueing durable least-privilege jobs.",
+      "impact": "A web-process compromise can gain broad repository or deployment side effects.",
       "evidence": [
         {
           "source": "repository",
-          "location": "packages/claude-runner/src/index.ts",
-          "symbol": "invokePlanningClaude / invokeExecutionClaude",
-          "observation": "Both invocation paths spread process.env into the child environment and add the Claude OAuth token."
+          "location": "apps/web/src/server.ts",
+          "symbol": "pull-request admin routes / providerConfigFrom",
+          "observation": "The web server imports provider operations and owns routes that trigger review/merge or other GitHub-related mutations."
         },
         {
           "source": "repository",
-          "location": "packages/git-runner/src/index.ts",
-          "symbol": "run validation command",
-          "observation": "Validation subprocesses use env: {...process.env}."
-        },
-        {
-          "source": "repository",
-          "location": "packages/claude-runner/src/index.ts",
-          "symbol": "execution tool arguments",
-          "observation": "Execution tool policy enables filesystem and shell-capable tools rather than an OS-level authority boundary."
+          "location": "packages/domain/src/pr-merge.ts",
+          "symbol": "approveAndMergePullRequest",
+          "observation": "Merge is a callable domain/provider side effect rather than exclusively a worker job boundary."
         }
       ],
-      "root_cause": "Child-process authority is inherited by default and prompt/tool declarations are treated as the isolation boundary.",
-      "recommendation": "Pass an explicit environment allowlist, separate required credentials by process role, and enforce worktree/path scope outside the prompt.",
+      "root_cause": "Process roles are divided by convention while the web process retains credentials and direct write call paths.",
+      "recommendation": "Give web only read/enqueue capability; execute GitHub writes and deploys in audited jobs with narrower credentials and policy checks.",
       "acceptance_criteria": [
-        "Child environments contain only documented variables.",
-        "A repository command cannot read GitHub/deploy/notification credentials.",
-        "Agent writes outside the assigned worktree are rejected."
+        "Web runs without GitHub write or deployment credentials.",
+        "Every write has a durable job, actor, approved target, and idempotency key.",
+        "Worker credentials are scoped to the exact provider operations required."
       ],
       "tests": [
-        "environment allowlist",
-        "credential canary",
-        "outside-worktree write refusal"
+        "web credential absence",
+        "write job audit",
+        "least-privilege credential"
       ],
-      "dependencies": [
-        "G07-F04"
-      ],
+      "dependencies": [],
       "interface_changes": [
-        "Record the operation policy and environment profile without secret values."
+        "Publish process-role capability health without credential values."
       ]
     },
     {
-      "id": "G02-F04",
-      "group_id": "G02-execution-safety",
-      "kind": "reliability",
+      "id": "G07-F05",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
       "priority": "P1",
       "confidence": "high",
       "status": "open",
-      "title": "Execution worktrees are not guaranteed to start fresh and be reclaimed",
-      "summary": "Execution can use a stale local default branch, and cleanup tooling does not prove complete lifecycle recovery.",
-      "impact": "Changes can be based on an obsolete revision or leave worktrees that interfere with later attempts.",
+      "title": "Password administration exposes secrets and truncates edge-case input",
+      "summary": "Admin creation reads a password from argv, and the line-based native helper has fixed buffers and newline semantics.",
+      "impact": "Passwords can appear in process listings or be silently truncated or altered at newline boundaries.",
       "evidence": [
         {
           "source": "repository",
-          "location": "packages/git-runner/src/index.ts",
-          "symbol": "createExecutionWorktree / validateProject",
-          "observation": "Worktree creation and repository validation are separate operations; a current remote default-branch proof is not persisted with the attempt."
+          "location": "scripts/create-admin.ts",
+          "symbol": "--password argument",
+          "observation": "The non-interactive command reads the password from process.argv."
         },
         {
           "source": "repository",
-          "location": "scripts/cleanup-worktrees.ts",
-          "symbol": "script body",
-          "observation": "Cleanup scans a configured directory but is not coupled to attempt lease ownership or publication state."
+          "location": "packages/database/native/argon2-helper.c",
+          "symbol": "read_line / password buffer",
+          "observation": "The helper reads a line into a fixed 4096-byte buffer and strips CR/LF."
         }
       ],
-      "root_cause": "Worktree creation, freshness proof, ownership, and cleanup are separate conventions rather than one attempt lifecycle.",
-      "recommendation": "Create from a freshly verified base SHA, persist it on the attempt, and reclaim only worktrees whose attempt lease is terminal or expired.",
+      "root_cause": "Password transport uses command-line and line-oriented process conventions instead of a protected binary-safe input contract.",
+      "recommendation": "Read the password from stdin or a protected descriptor and reject unsupported length/newline input explicitly.",
       "acceptance_criteria": [
-        "Attempt base SHA equals the freshly resolved protected branch SHA.",
-        "Dirty or stale repositories fail before agent launch.",
-        "Cleanup never removes a live attempt and reclaims expired terminal worktrees."
+        "Password values never appear in argv.",
+        "Length and newline limits are explicit and fail closed.",
+        "Hash and verify use the same binary-safe input contract."
       ],
       "tests": [
-        "stale branch refusal",
-        "live-worktree protection",
-        "expired cleanup"
+        "argv secrecy",
+        "maximum length",
+        "embedded newline"
       ],
-      "dependencies": [
-        "G01-F01",
-        "G09-F03"
-      ],
+      "dependencies": [],
       "interface_changes": [
-        "Expose base SHA and worktree lifecycle status."
+        "Document the supported password-input contract."
       ]
     },
     {
-      "id": "G02-F05",
-      "group_id": "G02-execution-safety",
-      "kind": "correctness",
+      "id": "G07-F06",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
       "priority": "P1",
-      "confidence": "high",
+      "confidence": "confirmed",
       "status": "open",
-      "title": "Conflict-resolution permissions and path scope are inconsistent",
-      "summary": "The conflict agent is asked to edit a worktree without a persisted allowlist limited to conflicted files.",
-      "impact": "It can fail to edit or modify unrelated paths while still reaching validation and publication.",
+      "title": "CSRF verification uses ordinary string comparison",
+      "summary": "The request token is hashed and compared to the stored hash with JavaScript string inequality.",
+      "impact": "The security boundary lacks an explicit equal-length constant-time comparison.",
       "evidence": [
         {
           "source": "repository",
-          "location": "apps/worker/src/worker.ts",
-          "symbol": "runPrConflictResolution",
-          "observation": "The prompt contains conflicted file contents and the agent runs in the full worktree; validation occurs after invocation, with no pre-invocation write allowlist persisted."
-        },
-        {
-          "source": "repository",
-          "location": "packages/domain/src/prompts.ts",
-          "symbol": "renderConflictResolutionPrompt",
-          "observation": "The prompt requests conflict resolution, so correctness depends on tool allowance and enforced file scope matching that request."
+          "location": "apps/web/src/server.ts",
+          "symbol": "requireAdmin CSRF branch",
+          "observation": "The branch evaluates hash(csrf) !== session.csrf_token_hash."
         }
       ],
-      "root_cause": "Prompt intent, tool permissions, and filesystem enforcement are not derived from one scoped conflict-operation policy.",
-      "recommendation": "Generate one policy that permits edits only to conflicted paths plus explicitly required merge metadata, and enforce it during and after execution.",
+      "root_cause": "CSRF verification uses general string equality rather than a constant-time byte comparison helper.",
+      "recommendation": "Decode equal-length hash bytes and compare them with timingSafeEqual; reject malformed lengths before comparison.",
       "acceptance_criteria": [
-        "The agent can edit every conflicted file.",
-        "Writes outside the approved conflict set fail.",
-        "Remaining conflicts or unrelated diffs prevent publication."
+        "Valid tokens pass.",
+        "Malformed and unequal-length tokens fail without throwing.",
+        "The comparison path uses timingSafeEqual."
       ],
       "tests": [
-        "conflicted-file edit",
-        "unrelated write refusal",
-        "remaining-marker refusal"
+        "valid CSRF",
+        "invalid CSRF",
+        "unequal-length CSRF"
       ],
-      "dependencies": [
-        "G02-F03"
-      ],
+      "dependencies": [],
       "interface_changes": [
-        "Persist allowed paths and tool policy for the conflict attempt."
+        "Keep the existing 403 contract with a stable csrf_invalid code."
       ]
     },
     {
-      "id": "G02-F06",
-      "group_id": "G02-execution-safety",
-      "kind": "reliability",
+      "id": "G07-F07",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
       "priority": "P1",
-      "confidence": "high",
+      "confidence": "confirmed",
       "status": "open",
-      "title": "Planning output finalization is not crash-safe",
-      "summary": "Plan files, run completion, and database plan/version rows are finalized through separate filesystem and database operations.",
-      "impact": "Timeout or process loss can leave a running stream, orphan plan artifact, or database row pointing at incomplete state.",
+      "title": "Client identity ignores trusted reverse-proxy configuration",
+      "summary": "Audit and throttle identity always uses the socket peer address.",
+      "impact": "Behind a reverse proxy, every client can collapse to one proxy address and source-based controls become inaccurate.",
       "evidence": [
         {
           "source": "repository",
-          "location": "apps/worker/src/worker.ts",
-          "symbol": "runPlanning / storePlan / storeRevisedPlan",
-          "observation": "Planning writes prompt and plan artifacts around separate agent_run and transactional plan/version updates."
+          "location": "apps/web/src/server.ts",
+          "symbol": "ipOf",
+          "observation": "The helper returns request.socket.remoteAddress and has no trusted-proxy policy or forwarded-address parsing."
+        }
+      ],
+      "root_cause": "Client IP derivation has no explicit deployment trust model.",
+      "recommendation": "Configure trusted proxy hops and accept forwarded client addresses only from those peers; otherwise retain the socket address.",
+      "acceptance_criteria": [
+        "Direct untrusted forwarding headers are ignored.",
+        "A configured trusted proxy yields the intended client address.",
+        "Audit output never stores an unvalidated address chain."
+      ],
+      "tests": [
+        "direct socket",
+        "spoofed forwarded header",
+        "trusted proxy chain"
+      ],
+      "dependencies": [
+        "G07-F01"
+      ],
+      "interface_changes": [
+        "Document trusted-proxy configuration and identity source."
+      ]
+    },
+    {
+      "id": "G07-F08",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "Login throttling permits username-targeted denial of service",
+      "summary": "Failure counting is keyed only by username, then blocks the account after a fixed threshold.",
+      "impact": "An attacker can intentionally lock an administrator account regardless of source identity.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "login failure query and lockout branch",
+          "observation": "The failure query filters by username and time only, then returns account temporarily locked at lockoutThreshold."
         },
         {
           "source": "repository",
-          "location": "packages/claude-runner/src/index.ts",
-          "symbol": "invokePlanningClaude",
-          "observation": "Invocation is bounded by CLI turns but has no independently persisted finalization lease tying stream completion to artifact commit."
+          "location": "packages/database/migrations/001_foundation.sql",
+          "symbol": "login_attempts",
+          "observation": "The table stores username, attempted_at, and succeeded but no client/network key used by the query."
         }
       ],
-      "root_cause": "Filesystem artifacts and run/plan state have no recoverable staging protocol with a final atomic publish marker.",
-      "recommendation": "Use a bounded timeout and staged artifact state; finalize the row and rename/publish artifact idempotently, with recovery for interrupted attempts.",
+      "root_cause": "The throttle budget is account-global rather than combining source-sensitive limits with account-safe backoff.",
+      "recommendation": "Use bounded source and account signals that slow attacks without allowing one source to lock an account globally; preserve uniform credential errors.",
       "acceptance_criteria": [
-        "Timed-out planning terminates and records a final state.",
-        "A crash before DB commit leaves no active plan pointing to an orphan artifact.",
-        "Recovery finalizes or removes staged artifacts idempotently."
+        "One hostile source cannot globally lock a username.",
+        "High-rate failures are throttled.",
+        "Unknown and valid usernames remain indistinguishable."
       ],
       "tests": [
-        "planning timeout",
-        "crash before commit",
-        "staged artifact recovery"
+        "targeted username attack",
+        "source burst",
+        "unknown-user parity"
       ],
       "dependencies": [
-        "G01-F01",
-        "G09-F03"
+        "G07-F07"
       ],
       "interface_changes": [
-        "Add artifact staging/finalization status."
+        "Return retry timing without disclosing account existence."
       ]
     },
     {
@@ -1042,6 +1112,439 @@
       ],
       "interface_changes": [
         "Version the plan schema separately from Markdown rendering."
+      ]
+    },
+    {
+      "id": "G01-F01",
+      "group_id": "G01-workflow-state",
+      "kind": "reliability",
+      "priority": "P0",
+      "confidence": "high",
+      "status": "open",
+      "title": "Running work has no renewable ownership or automatic recovery",
+      "summary": "Jobs and notification deliveries are claimed without a lease heartbeat or bounded reaper.",
+      "impact": "Process loss or authentication refusal can strand work and leave related records stale.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/domain/src/index.ts",
+          "symbol": "claimJob / failJob",
+          "observation": "Job claims set claimed_at and claimed_by, but no lease expiry or heartbeat is stored or checked."
+        },
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "refuseQueuedClaudeJobs / deliverDueNotification",
+          "observation": "Authentication refusal updates queued jobs, while notification delivery changes a row to sending without renewable ownership or recovery."
+        },
+        {
+          "source": "runtime",
+          "location": "runtime aggregate observation",
+          "symbol": "expired_active_sessions / stale_plans",
+          "observation": "The read-only audit observed 11 expired active sessions and 2 stale plans; these are point-in-time counts, not invariants."
+        }
+      ],
+      "root_cause": "Workflow ownership is represented by one-time timestamps and statuses instead of renewable leases with expiry and recovery transitions.",
+      "recommendation": "Add lease owner, expiry, heartbeat, and bounded reaper semantics shared by jobs and deliveries; couple recovery to ticket/run history.",
+      "acceptance_criteria": [
+        "Only the live lease owner can complete or fail work.",
+        "Expired work is recovered once with an audit event.",
+        "Authentication refusal leaves every related ticket and run in an actionable terminal or queued state."
+      ],
+      "tests": [
+        "job lease expiry and reclaim",
+        "notification sending recovery",
+        "authentication-refusal state matrix"
+      ],
+      "dependencies": [
+        "G09-F02"
+      ],
+      "interface_changes": [
+        "Expose lease expiry, owner, and recovery reason in operator APIs."
+      ]
+    },
+    {
+      "id": "G01-F02",
+      "group_id": "G01-workflow-state",
+      "kind": "correctness",
+      "priority": "P0",
+      "confidence": "high",
+      "status": "open",
+      "title": "Idempotency keys do not distinguish legitimate terminal reruns",
+      "summary": "Enqueue conflicts return the existing job even when its terminal history should remain immutable and a new attempt is requested.",
+      "impact": "A rerun can be blocked, or retry code can make failed review/conflict work look completed before replacement work succeeds.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/domain/src/index.ts",
+          "symbol": "enqueueJob",
+          "observation": "ON CONFLICT(idempotency_key) performs a no-op update and returns the pre-existing row regardless of terminal status."
+        },
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "runPrAiReview / runPrConflictResolution / main dispatch",
+          "observation": "Retryable handlers share the jobs-table lifecycle, so their domain status and job completion must remain correlated across attempts."
+        }
+      ],
+      "root_cause": "One permanent idempotency identity is used for both duplicate suppression and user-requested attempt identity.",
+      "recommendation": "Keep the original job immutable and create an explicitly linked rerun identity; complete domain work only after the replacement attempt succeeds.",
+      "acceptance_criteria": [
+        "A terminal job can be rerun through a new linked identity.",
+        "Duplicate enqueue during an active attempt remains idempotent.",
+        "Failed review or conflict history never becomes completed merely because a retry was queued."
+      ],
+      "tests": [
+        "terminal rerun identity",
+        "active duplicate suppression",
+        "review/conflict retry state matrix"
+      ],
+      "dependencies": [
+        "G01-F01"
+      ],
+      "interface_changes": [
+        "Add immutable rerun_of and attempt identity fields."
+      ]
+    },
+    {
+      "id": "G01-F03",
+      "group_id": "G01-workflow-state",
+      "kind": "integrity",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Publication and state events are not one atomic transition",
+      "summary": "Several workflow paths update work state, history, and external publication in separate operations.",
+      "impact": "A partial failure can leave the UI, audit history, and externally visible result disagreeing.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "publishExecutionAttempt",
+          "observation": "Publication performs multiple database and provider operations around commit and pull-request state rather than one durable publication state machine."
+        },
+        {
+          "source": "repository",
+          "location": "packages/domain/src/index.ts",
+          "symbol": "completeJob / failJob",
+          "observation": "Job completion and failure update only the jobs row; related ticket/run/event updates are performed by callers."
+        }
+      ],
+      "root_cause": "Workflow transitions have no shared transaction/outbox boundary tying domain state, history, and external side-effect intent together.",
+      "recommendation": "Use a transactional state transition plus durable outbox/publication record, then make external effects idempotent.",
+      "acceptance_criteria": [
+        "A database failure cannot publish an unrecorded result.",
+        "A provider failure preserves a retryable publication record and prior history.",
+        "Every externally visible transition has one attributable audit event."
+      ],
+      "tests": [
+        "transaction rollback",
+        "provider failure retry",
+        "duplicate publication"
+      ],
+      "dependencies": [
+        "G01-F01",
+        "G09-F02"
+      ],
+      "interface_changes": [
+        "Persist publication state and external idempotency key."
+      ]
+    },
+    {
+      "id": "G01-F04",
+      "group_id": "G01-workflow-state",
+      "kind": "performance",
+      "priority": "P2",
+      "confidence": "high",
+      "status": "open",
+      "title": "The worker serializes unrelated job classes",
+      "summary": "One loop claims and awaits at most one job while also polling synchronization and notification work.",
+      "impact": "Throughput and recovery latency scale with the slowest operation despite operator surfaces implying general queue capacity.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "while (!stopping) main loop",
+          "observation": "The loop awaits sync, delivery, one claim, and one handler sequentially before the next iteration."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/queue.ts",
+          "symbol": "queue rendering",
+          "observation": "The operator view reports queued/running work but has no documented single-concurrency capacity contract."
+        }
+      ],
+      "root_cause": "All job types share one sequential event loop without per-capability concurrency or a truthful capacity setting.",
+      "recommendation": "Either label the worker as single-concurrency or add bounded per-capability concurrency after lease safety is complete.",
+      "acceptance_criteria": [
+        "Displayed capacity matches actual behavior.",
+        "If concurrency is enabled, independent jobs overlap without double claims.",
+        "Shutdown waits for or safely expires active leases."
+      ],
+      "tests": [
+        "capacity label",
+        "bounded concurrency",
+        "graceful shutdown"
+      ],
+      "dependencies": [
+        "G01-F01"
+      ],
+      "interface_changes": [
+        "Expose configured and observed worker capacity."
+      ]
+    },
+    {
+      "id": "G02-F01",
+      "group_id": "G02-execution-safety",
+      "kind": "integrity",
+      "priority": "P0",
+      "confidence": "high",
+      "status": "open",
+      "title": "Repair publication can reuse a prior attempt commit",
+      "summary": "Repair and publication paths read stored result_commit/worktree metadata that can outlive the attempt being repaired.",
+      "impact": "A repair can publish an old commit rather than the newly validated result.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "publishExecutionAttempt / retryPublication",
+          "observation": "Publication initializes commit from execution_attempts.result_commit and retryPublication requires the stored commit, worktree, and branch."
+        },
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "runExecution validation failure updates",
+          "observation": "Some failure paths clear result_commit, showing correctness depends on every path resetting mutable attempt state."
+        }
+      ],
+      "root_cause": "Mutable publication fields are reused across attempts instead of binding each repair to a fresh immutable attempt result.",
+      "recommendation": "Clear publication state before repair and bind validation and publication to the new attempt ID, base commit, result commit, and worktree.",
+      "acceptance_criteria": [
+        "A repair cannot publish any prior attempt commit.",
+        "Publication rejects a commit not produced and validated by its attempt.",
+        "Prior attempt metadata remains immutable history."
+      ],
+      "tests": [
+        "stale-commit repair regression",
+        "attempt/commit binding",
+        "publication retry"
+      ],
+      "dependencies": [
+        "G03-F01"
+      ],
+      "interface_changes": [
+        "Persist immutable attempt input and result identities."
+      ]
+    },
+    {
+      "id": "G02-F02",
+      "group_id": "G02-execution-safety",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Secret scanning assumes changed paths still exist in the index",
+      "summary": "The validation flow can inspect staged content through git show :path even when a change deletes that path.",
+      "impact": "A valid deletion can fail validation or bypass consistent scanning behavior.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/git-runner/src/index.ts",
+          "symbol": "scanSecrets / validateExecutionWorktree",
+          "observation": "Secret scanning derives content from changed paths and invokes Git index content reads; deleted paths need explicit handling."
+        }
+      ],
+      "root_cause": "The scanner models every changed path as an index blob and does not classify deletions before content inspection.",
+      "recommendation": "Classify change status first; scan added/modified blobs and treat deletions as content-free while retaining path-policy checks.",
+      "acceptance_criteria": [
+        "A staged deletion validates without an invalid index read.",
+        "Added and modified secrets still fail closed.",
+        "Rename and binary behavior is documented and tested."
+      ],
+      "tests": [
+        "staged deletion",
+        "rename",
+        "binary/secret fixture"
+      ],
+      "dependencies": [],
+      "interface_changes": []
+    },
+    {
+      "id": "G02-F03",
+      "group_id": "G02-execution-safety",
+      "kind": "security",
+      "priority": "P0",
+      "confidence": "high",
+      "status": "open",
+      "title": "Agent and validation children inherit worker authority",
+      "summary": "Claude and git validation subprocesses inherit process.env, while execution grants broad filesystem and shell tools.",
+      "impact": "A repository instruction or command can access credentials and capabilities unrelated to the approved task.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/claude-runner/src/index.ts",
+          "symbol": "invokePlanningClaude / invokeExecutionClaude",
+          "observation": "Both invocation paths spread process.env into the child environment and add the Claude OAuth token."
+        },
+        {
+          "source": "repository",
+          "location": "packages/git-runner/src/index.ts",
+          "symbol": "run validation command",
+          "observation": "Validation subprocesses use env: {...process.env}."
+        },
+        {
+          "source": "repository",
+          "location": "packages/claude-runner/src/index.ts",
+          "symbol": "execution tool arguments",
+          "observation": "Execution tool policy enables filesystem and shell-capable tools rather than an OS-level authority boundary."
+        }
+      ],
+      "root_cause": "Child-process authority is inherited by default and prompt/tool declarations are treated as the isolation boundary.",
+      "recommendation": "Pass an explicit environment allowlist, separate required credentials by process role, and enforce worktree/path scope outside the prompt.",
+      "acceptance_criteria": [
+        "Child environments contain only documented variables.",
+        "A repository command cannot read GitHub/deploy/notification credentials.",
+        "Agent writes outside the assigned worktree are rejected."
+      ],
+      "tests": [
+        "environment allowlist",
+        "credential canary",
+        "outside-worktree write refusal"
+      ],
+      "dependencies": [],
+      "interface_changes": [
+        "Record the operation policy and environment profile without secret values."
+      ]
+    },
+    {
+      "id": "G02-F04",
+      "group_id": "G02-execution-safety",
+      "kind": "reliability",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Execution worktrees are not guaranteed to start fresh and be reclaimed",
+      "summary": "Execution can use a stale local default branch, and cleanup tooling does not prove complete lifecycle recovery.",
+      "impact": "Changes can be based on an obsolete revision or leave worktrees that interfere with later attempts.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/git-runner/src/index.ts",
+          "symbol": "createExecutionWorktree / validateProject",
+          "observation": "Worktree creation and repository validation are separate operations; a current remote default-branch proof is not persisted with the attempt."
+        },
+        {
+          "source": "repository",
+          "location": "scripts/cleanup-worktrees.ts",
+          "symbol": "script body",
+          "observation": "Cleanup scans a configured directory but is not coupled to attempt lease ownership or publication state."
+        }
+      ],
+      "root_cause": "Worktree creation, freshness proof, ownership, and cleanup are separate conventions rather than one attempt lifecycle.",
+      "recommendation": "Create from a freshly verified base SHA, persist it on the attempt, and reclaim only worktrees whose attempt lease is terminal or expired.",
+      "acceptance_criteria": [
+        "Attempt base SHA equals the freshly resolved protected branch SHA.",
+        "Dirty or stale repositories fail before agent launch.",
+        "Cleanup never removes a live attempt and reclaims expired terminal worktrees."
+      ],
+      "tests": [
+        "stale branch refusal",
+        "live-worktree protection",
+        "expired cleanup"
+      ],
+      "dependencies": [
+        "G01-F01",
+        "G09-F03"
+      ],
+      "interface_changes": [
+        "Expose base SHA and worktree lifecycle status."
+      ]
+    },
+    {
+      "id": "G02-F05",
+      "group_id": "G02-execution-safety",
+      "kind": "correctness",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Conflict-resolution permissions and path scope are inconsistent",
+      "summary": "The conflict agent is asked to edit a worktree without a persisted allowlist limited to conflicted files.",
+      "impact": "It can fail to edit or modify unrelated paths while still reaching validation and publication.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "runPrConflictResolution",
+          "observation": "The prompt contains conflicted file contents and the agent runs in the full worktree; validation occurs after invocation, with no pre-invocation write allowlist persisted."
+        },
+        {
+          "source": "repository",
+          "location": "packages/domain/src/prompts.ts",
+          "symbol": "renderConflictResolutionPrompt",
+          "observation": "The prompt requests conflict resolution, so correctness depends on tool allowance and enforced file scope matching that request."
+        }
+      ],
+      "root_cause": "Prompt intent, tool permissions, and filesystem enforcement are not derived from one scoped conflict-operation policy.",
+      "recommendation": "Generate one policy that permits edits only to conflicted paths plus explicitly required merge metadata, and enforce it during and after execution.",
+      "acceptance_criteria": [
+        "The agent can edit every conflicted file.",
+        "Writes outside the approved conflict set fail.",
+        "Remaining conflicts or unrelated diffs prevent publication."
+      ],
+      "tests": [
+        "conflicted-file edit",
+        "unrelated write refusal",
+        "remaining-marker refusal"
+      ],
+      "dependencies": [
+        "G02-F03"
+      ],
+      "interface_changes": [
+        "Persist allowed paths and tool policy for the conflict attempt."
+      ]
+    },
+    {
+      "id": "G02-F06",
+      "group_id": "G02-execution-safety",
+      "kind": "reliability",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Planning output finalization is not crash-safe",
+      "summary": "Plan files, run completion, and database plan/version rows are finalized through separate filesystem and database operations.",
+      "impact": "Timeout or process loss can leave a running stream, orphan plan artifact, or database row pointing at incomplete state.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "runPlanning / storePlan / storeRevisedPlan",
+          "observation": "Planning writes prompt and plan artifacts around separate agent_run and transactional plan/version updates."
+        },
+        {
+          "source": "repository",
+          "location": "packages/claude-runner/src/index.ts",
+          "symbol": "invokePlanningClaude",
+          "observation": "Invocation is bounded by CLI turns but has no independently persisted finalization lease tying stream completion to artifact commit."
+        }
+      ],
+      "root_cause": "Filesystem artifacts and run/plan state have no recoverable staging protocol with a final atomic publish marker.",
+      "recommendation": "Use a bounded timeout and staged artifact state; finalize the row and rename/publish artifact idempotently, with recovery for interrupted attempts.",
+      "acceptance_criteria": [
+        "Timed-out planning terminates and records a final state.",
+        "A crash before DB commit leaves no active plan pointing to an orphan artifact.",
+        "Recovery finalizes or removes staged artifacts idempotently."
+      ],
+      "tests": [
+        "planning timeout",
+        "crash before commit",
+        "staged artifact recovery"
+      ],
+      "dependencies": [
+        "G01-F01",
+        "G09-F03"
+      ],
+      "interface_changes": [
+        "Add artifact staging/finalization status."
       ]
     },
     {
@@ -1408,37 +1911,34 @@
       "group_id": "G05-deployment-safety",
       "kind": "security",
       "priority": "P1",
-      "confidence": "high",
+      "confidence": "confirmed",
       "status": "open",
-      "title": "Webhook and shell boundaries do not fail closed consistently",
-      "summary": "Request body handling, external response checks, and shell command construction use bespoke paths.",
-      "impact": "Oversize input, failed notification responses, or unsafe interpolation can create denial-of-service or misleading success behavior.",
+      "title": "Oversize webhook bodies terminate without an HTTP response",
+      "summary": "The server destroys the request after the byte limit but does not send a stable 413 response or prevent end handling explicitly.",
+      "impact": "Clients and operators can see a reset or ambiguous failure instead of an attributable rejected delivery.",
       "evidence": [
         {
           "source": "repository",
           "location": "webhook-server.js",
-          "symbol": "handleRequest / notify / runDeployDetached",
-          "observation": "The server accumulates and parses request bodies, notification fetch does not require an OK response, and deployment launches sh -c with constructed paths."
+          "symbol": "http.createServer data/end handlers",
+          "observation": "The data handler increments size and calls req.destroy() after MAX, while the end handler still owns response handling and no 413 response is written."
         }
       ],
-      "root_cause": "Untrusted HTTP data and configured paths cross request, network, and shell boundaries without one bounded validation/error contract.",
-      "recommendation": "Bound and reject request bodies before buffering, require checked external responses, and invoke deployment with argv rather than shell interpolation.",
+      "root_cause": "The request-size guard aborts the transport instead of completing one explicit bounded HTTP rejection state.",
+      "recommendation": "Stop buffering at the limit, mark the request rejected, and send one stable 413 response without invoking signature or JSON processing.",
       "acceptance_criteria": [
-        "Oversize bodies terminate with a stable 413 response.",
-        "External non-2xx responses are recorded as failures.",
-        "Configured paths cannot inject shell syntax."
+        "A body above MAX receives exactly one 413 response.",
+        "Oversize content is not parsed, authenticated, or deployed.",
+        "The rejection is logged without body content."
       ],
       "tests": [
-        "oversize webhook",
-        "notification non-2xx",
-        "path metacharacters"
+        "just-under-limit request",
+        "oversize 413",
+        "data/end race"
       ],
-      "dependencies": [
-        "G05-F03",
-        "G07-F03"
-      ],
+      "dependencies": [],
       "interface_changes": [
-        "Return stable webhook and notification failure codes."
+        "Return a stable webhook_body_too_large code."
       ]
     },
     {
@@ -1474,6 +1974,80 @@
         "G07-F03"
       ],
       "interface_changes": []
+    },
+    {
+      "id": "G05-F06",
+      "group_id": "G05-deployment-safety",
+      "kind": "reliability",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "Deployment notification HTTP failures are treated as success",
+      "summary": "The notification helper awaits fetch but does not reject or record non-2xx responses.",
+      "impact": "A deployment notification can be lost while the webhook path appears successful.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "webhook-server.js",
+          "symbol": "sendNotification",
+          "observation": "The helper awaits fetch and catches thrown network errors, but never checks Response.ok or status."
+        }
+      ],
+      "root_cause": "Notification delivery treats transport completion as provider acceptance.",
+      "recommendation": "Check the response status, record a redacted failure for non-2xx results, and keep notification failure distinct from deployment outcome.",
+      "acceptance_criteria": [
+        "Every non-2xx response is recorded as a notification failure.",
+        "Deployment success is not rewritten by notification failure.",
+        "Errors contain no authorization header, recipient, or response body secrets."
+      ],
+      "tests": [
+        "notification 204",
+        "notification 400/500",
+        "redacted failure"
+      ],
+      "dependencies": [
+        "G07-F03"
+      ],
+      "interface_changes": [
+        "Expose a separate notification outcome code on deployment history."
+      ]
+    },
+    {
+      "id": "G05-F07",
+      "group_id": "G05-deployment-safety",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "Deployment launch interpolates configured paths into a shell command",
+      "summary": "The deploy executable, marker, and log paths are quoted into one sh -c string.",
+      "impact": "A configured path containing shell syntax can alter the launched command despite single-quote wrapping assumptions.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "webhook-server.js",
+          "symbol": "launchDeploy",
+          "observation": "spawn runs sh -c with a constructed command containing DEPLOY_SH_PATH, marker, and logPath interpolation."
+        }
+      ],
+      "root_cause": "Process execution delegates argument and redirection boundaries to shell parsing.",
+      "recommendation": "Invoke the deploy script with an argv array and open/pass log descriptors without a shell.",
+      "acceptance_criteria": [
+        "No sh -c or interpolated command is used for deployment.",
+        "Paths containing whitespace or shell metacharacters remain literal arguments.",
+        "Detached execution and completion tracking still work."
+      ],
+      "tests": [
+        "path whitespace",
+        "shell metacharacters",
+        "detached completion"
+      ],
+      "dependencies": [
+        "G05-F03"
+      ],
+      "interface_changes": [
+        "Define the deploy argv and log-descriptor contract."
+      ]
     },
     {
       "id": "G06-F01",
@@ -1694,233 +2268,6 @@
       ]
     },
     {
-      "id": "G07-F01",
-      "group_id": "G07-auth-secrets",
-      "kind": "security",
-      "priority": "P1",
-      "confidence": "high",
-      "status": "open",
-      "title": "Authenticated HTTP security depends on optional runtime configuration",
-      "summary": "Security headers are incomplete and Secure cookies depend on NODE_ENV being set correctly.",
-      "impact": "A deployment configuration error can weaken session transport and browser defenses.",
-      "evidence": [
-        {
-          "source": "repository",
-          "location": "apps/web/src/server.ts",
-          "symbol": "production / login response / response helpers",
-          "observation": "The production flag is NODE_ENV === production and is used to conditionally secure cookies; a complete authenticated security-header policy is not centralized."
-        },
-        {
-          "source": "repository",
-          "location": "deploy.sh",
-          "symbol": "process restart",
-          "observation": "The deploy script restarts processes without proving NODE_ENV=production or other secure boot requirements."
-        }
-      ],
-      "root_cause": "Secure HTTP behavior is conditional and distributed instead of validated as a production boot invariant.",
-      "recommendation": "Fail production boot closed without secure cookie/origin configuration and centralize headers including CSP-compatible policy, frame, MIME, and referrer controls.",
-      "acceptance_criteria": [
-        "Production cannot start with insecure cookie configuration.",
-        "Authenticated responses include the documented header baseline.",
-        "Development behavior is explicit and separately tested."
-      ],
-      "tests": [
-        "secure boot",
-        "header matrix",
-        "cookie attributes"
-      ],
-      "dependencies": [
-        "G05-F02"
-      ],
-      "interface_changes": [
-        "Expose non-secret secure-config health fields."
-      ]
-    },
-    {
-      "id": "G07-F02",
-      "group_id": "G07-auth-secrets",
-      "kind": "security",
-      "priority": "P1",
-      "confidence": "high",
-      "status": "open",
-      "title": "Session, CSRF, proxy, and login-throttle controls are not one hardened boundary",
-      "summary": "Expired session cleanup, proxy identity, username lockout behavior, and CSRF comparison use separate custom logic.",
-      "impact": "Attackers can target accounts for denial of service, influence client identity, or exploit inconsistent token handling.",
-      "evidence": [
-        {
-          "source": "repository",
-          "location": "apps/web/src/server.ts",
-          "symbol": "requireAdmin / login / ipOf / CSRF check",
-          "observation": "Authentication uses custom session, login-attempt, proxy-IP, and CSRF logic; CSRF hashes are compared as strings rather than one constant-time byte comparison path."
-        },
-        {
-          "source": "repository",
-          "location": "packages/database/migrations/001_foundation.sql",
-          "symbol": "admin_sessions / login_attempts",
-          "observation": "Session expiry and login attempts are stored, but the schema does not schedule cleanup or define an account-safe throttle policy."
-        }
-      ],
-      "root_cause": "Authentication protections are implemented as independent route checks without one threat-modeled session and client-identity policy.",
-      "recommendation": "Use trusted-proxy client identity, constant-time token comparison, expiry cleanup, and throttling that limits sources without enabling permanent username-targeted lockout.",
-      "acceptance_criteria": [
-        "Expired sessions are rejected and cleaned.",
-        "CSRF comparison uses equal-length constant-time bytes.",
-        "Forwarding-header spoofing fails.",
-        "One attacker cannot lock out a username globally."
-      ],
-      "tests": [
-        "expired session",
-        "CSRF mismatch",
-        "proxy spoof",
-        "targeted lockout"
-      ],
-      "dependencies": [
-        "G07-F01"
-      ],
-      "interface_changes": [
-        "Return stable auth failure classes without account disclosure."
-      ]
-    },
-    {
-      "id": "G07-F03",
-      "group_id": "G07-auth-secrets",
-      "kind": "security",
-      "priority": "P1",
-      "confidence": "high",
-      "status": "open",
-      "title": "Secret storage and redaction accept literal credentials",
-      "summary": "Notification configuration can store authorization headers directly and error redaction covers only selected paths.",
-      "impact": "Secrets can persist in JSON, logs, or returned errors beyond the intended secret boundary.",
-      "evidence": [
-        {
-          "source": "repository",
-          "location": "packages/notification-provider/src/index.ts",
-          "symbol": "Configuration / createNotificationProvider",
-          "observation": "Configuration accepts authorization_header directly as well as a secret reference."
-        },
-        {
-          "source": "repository",
-          "location": "apps/web/src/server.ts",
-          "symbol": "notification provider save / redactConfiguration",
-          "observation": "The write route accepts authorization_header, while the response helper only hides it from selected output."
-        },
-        {
-          "source": "repository",
-          "location": "packages/notification-provider/src/index.ts",
-          "symbol": "redactNotificationError",
-          "observation": "Notification error redaction is provider-specific rather than a process-wide structured logging policy."
-        }
-      ],
-      "root_cause": "Credential values are allowed in general configuration and redaction is applied after errors are formatted.",
-      "recommendation": "Require secret references or encrypted storage, remove literals, and apply structured allowlisted error/log serialization before persistence or response.",
-      "acceptance_criteria": [
-        "Literal credentials are rejected.",
-        "Known secret canaries never appear in rows, logs, or responses.",
-        "Rotation changes a reference without rewriting unrelated config."
-      ],
-      "tests": [
-        "literal credential rejection",
-        "error/log canary",
-        "rotation"
-      ],
-      "dependencies": [
-        "G09-F02"
-      ],
-      "interface_changes": [
-        "Expose only secret reference identifiers and configured booleans."
-      ]
-    },
-    {
-      "id": "G07-F04",
-      "group_id": "G07-auth-secrets",
-      "kind": "security",
-      "priority": "P0",
-      "confidence": "high",
-      "status": "open",
-      "title": "Web handlers hold direct GitHub write and deployment authority",
-      "summary": "Authenticated web routes can perform provider mutations instead of only enqueueing durable least-privilege jobs.",
-      "impact": "A web-process compromise can gain broad repository or deployment side effects.",
-      "evidence": [
-        {
-          "source": "repository",
-          "location": "apps/web/src/server.ts",
-          "symbol": "pull-request admin routes / providerConfigFrom",
-          "observation": "The web server imports provider operations and owns routes that trigger review/merge or other GitHub-related mutations."
-        },
-        {
-          "source": "repository",
-          "location": "packages/domain/src/pr-merge.ts",
-          "symbol": "approveAndMergePullRequest",
-          "observation": "Merge is a callable domain/provider side effect rather than exclusively a worker job boundary."
-        }
-      ],
-      "root_cause": "Process roles are divided by convention while the web process retains credentials and direct write call paths.",
-      "recommendation": "Give web only read/enqueue capability; execute GitHub writes and deploys in audited jobs with narrower credentials and policy checks.",
-      "acceptance_criteria": [
-        "Web runs without GitHub write or deployment credentials.",
-        "Every write has a durable job, actor, approved target, and idempotency key.",
-        "Worker credentials are scoped to the exact provider operations required."
-      ],
-      "tests": [
-        "web credential absence",
-        "write job audit",
-        "least-privilege credential"
-      ],
-      "dependencies": [
-        "G01-F03"
-      ],
-      "interface_changes": [
-        "Publish process-role capability health without credential values."
-      ]
-    },
-    {
-      "id": "G07-F05",
-      "group_id": "G07-auth-secrets",
-      "kind": "security",
-      "priority": "P1",
-      "confidence": "high",
-      "status": "open",
-      "title": "Password tooling leaks arguments and compiles native code at runtime",
-      "summary": "Admin creation accepts a password command-line argument and the password module compiles a C helper into /tmp during module load.",
-      "impact": "Passwords can appear in process history, long/newline edge cases can truncate, and authentication can fail on hosts without compiler/runtime libraries.",
-      "evidence": [
-        {
-          "source": "repository",
-          "location": "scripts/create-admin.ts",
-          "symbol": "--password argument",
-          "observation": "The non-interactive CLI reads the password from a command-line flag."
-        },
-        {
-          "source": "repository",
-          "location": "packages/database/src/password.ts",
-          "symbol": "module initialization / execute",
-          "observation": "The module invokes gcc at runtime and passes newline-delimited password input to a helper."
-        },
-        {
-          "source": "repository",
-          "location": "packages/database/native/argon2-helper.c",
-          "symbol": "read_line / password buffer",
-          "observation": "The helper uses a fixed 4096-byte line buffer."
-        }
-      ],
-      "root_cause": "Password input and hashing portability are delegated to ad hoc CLI/native process conventions.",
-      "recommendation": "Read secrets from stdin or a protected file descriptor, reject unsupported edge cases explicitly, and package/document a reproducible Argon2 runtime.",
-      "acceptance_criteria": [
-        "Password never appears in argv.",
-        "Length/newline behavior is explicit and tested.",
-        "Production authentication starts without a compiler and with pinned Argon2 support."
-      ],
-      "tests": [
-        "argv secrecy",
-        "length/newline",
-        "compiler-absent runtime"
-      ],
-      "dependencies": [],
-      "interface_changes": [
-        "Document supported password input contract."
-      ]
-    },
-    {
       "id": "G08-F01",
       "group_id": "G08-notifications",
       "kind": "correctness",
@@ -2093,176 +2440,6 @@
       ],
       "interface_changes": [
         "Expose validated provider capabilities, not raw credentials."
-      ]
-    },
-    {
-      "id": "G09-F01",
-      "group_id": "G09-data-lifecycle",
-      "kind": "integrity",
-      "priority": "P1",
-      "confidence": "high",
-      "status": "open",
-      "title": "Migration execution is neither serialized nor uniquely ordered",
-      "summary": "The runner checks/applies files without an advisory lock, and migration filenames can share numeric prefixes.",
-      "impact": "Concurrent deploys or ambiguous ordering can diverge database schema state.",
-      "evidence": [
-        {
-          "source": "repository",
-          "location": "packages/database/src/migrate.ts",
-          "symbol": "migration runner",
-          "observation": "The runner creates schema_migrations and loops files without a PostgreSQL advisory lock."
-        },
-        {
-          "source": "repository",
-          "location": "packages/database/migrations",
-          "symbol": "migration filenames",
-          "observation": "The directory contains numeric migration naming managed only by full filename uniqueness, not a unique monotonic prefix policy."
-        }
-      ],
-      "root_cause": "Migration coordination and ordering rely on deployment convention rather than a database lock and validated naming rule.",
-      "recommendation": "Acquire a transaction/session advisory lock, validate unique monotonic prefixes, and fail before applying an ambiguous set.",
-      "acceptance_criteria": [
-        "Concurrent migration processes serialize.",
-        "Duplicate or out-of-order prefixes fail before DDL.",
-        "A failed migration leaves an actionable recorded state."
-      ],
-      "tests": [
-        "concurrent migrate",
-        "duplicate prefix",
-        "failed DDL"
-      ],
-      "dependencies": [],
-      "interface_changes": [
-        "Document migration lock key and naming contract."
-      ]
-    },
-    {
-      "id": "G09-F02",
-      "group_id": "G09-data-lifecycle",
-      "kind": "integrity",
-      "priority": "P1",
-      "confidence": "high",
-      "status": "open",
-      "title": "Core status and append-only invariants rely on application code",
-      "summary": "Several tables store free-form statuses or audit/provenance rows without complete database-enforced lifecycle constraints.",
-      "impact": "A bug or maintenance query can create impossible transitions or delete required history.",
-      "evidence": [
-        {
-          "source": "repository",
-          "location": "packages/database/migrations/001_foundation.sql",
-          "symbol": "jobs / audit_events / tickets / agent_runs",
-          "observation": "Multiple workflow status columns are text without table-level state/data checks, and audit history is not protected from deletion."
-        },
-        {
-          "source": "repository",
-          "location": "packages/database/migrations/004_prompt_system.sql",
-          "symbol": "prompt_versions / prompt_snapshots",
-          "observation": "Some hash/scope constraints exist, demonstrating that other lifecycle invariants can also be enforced at the DB boundary."
-        }
-      ],
-      "root_cause": "The database is treated as storage while workflow validity and append-only guarantees live mainly in callers.",
-      "recommendation": "Add targeted CHECK/foreign-key/trigger protections for stable invariants and review indexes against actual high-value queries before adding any.",
-      "acceptance_criteria": [
-        "Invalid stable statuses and broken required relationships fail in PostgreSQL.",
-        "Append-only audit/provenance deletion is blocked or tightly privileged.",
-        "Every added index is justified by an EXPLAIN-backed query."
-      ],
-      "tests": [
-        "constraint rejection",
-        "append-only delete",
-        "query-plan index"
-      ],
-      "dependencies": [
-        "G09-F01"
-      ],
-      "interface_changes": [
-        "Document database-enforced invariants."
-      ]
-    },
-    {
-      "id": "G09-F03",
-      "group_id": "G09-data-lifecycle",
-      "kind": "integrity",
-      "priority": "P1",
-      "confidence": "high",
-      "status": "open",
-      "title": "Filesystem artifacts and database references are not atomically published",
-      "summary": "Plan, log, upload, and worktree artifacts are written outside PostgreSQL transactions that reference them.",
-      "impact": "Crashes can create orphan files or live rows with missing content.",
-      "evidence": [
-        {
-          "source": "repository",
-          "location": "apps/worker/src/worker.ts",
-          "symbol": "storePlan / log path / worktree paths",
-          "observation": "Filesystem paths are created and then stored in run/plan/attempt metadata across separate operations."
-        },
-        {
-          "source": "repository",
-          "location": "apps/web/src/server.ts",
-          "symbol": "upload/submission handlers",
-          "observation": "Upload files and attachment/database rows require manual compensation across failure paths."
-        }
-      ],
-      "root_cause": "Artifact lifecycle has no shared staged/finalized state or reconciliation job across filesystem and database boundaries.",
-      "recommendation": "Write to staged identities, commit the row, atomically rename/finalize, and reconcile expired staged or missing artifacts.",
-      "acceptance_criteria": [
-        "No active row points to a missing artifact after recovery.",
-        "Expired staged files are removed safely.",
-        "Finalized artifacts have an integrity hash and owner record."
-      ],
-      "tests": [
-        "crash before row",
-        "crash after row",
-        "reconciler"
-      ],
-      "dependencies": [
-        "G09-F02"
-      ],
-      "interface_changes": [
-        "Add artifact state, owner, hash, and finalization timestamp."
-      ]
-    },
-    {
-      "id": "G09-F04",
-      "group_id": "G09-data-lifecycle",
-      "kind": "reliability",
-      "priority": "P1",
-      "confidence": "high",
-      "status": "open",
-      "title": "Backup and retention claims do not cover complete tested recovery",
-      "summary": "The backup script dumps PostgreSQL only, while filesystem artifacts/configuration, scheduling, retention, and restore verification are separate or absent.",
-      "impact": "A nominal backup can be unusable for restoring the service's full state.",
-      "evidence": [
-        {
-          "source": "repository",
-          "location": "scripts/backup.sh",
-          "symbol": "backup script",
-          "observation": "The script runs pg_dump to data/backups and does not manifest artifact/configuration content or perform a restore verification."
-        },
-        {
-          "source": "repository",
-          "location": "apps/web/src/pages/operate.ts",
-          "symbol": "settings/operations rendering",
-          "observation": "Operator surfaces expose operational configuration but do not provide a verified restore result or implemented scheduler contract."
-        }
-      ],
-      "root_cause": "Backup is a database command rather than a versioned full-service recovery product with lifecycle and drill evidence.",
-      "recommendation": "Create a manifest for database, required artifacts, and configuration references; implement truthful retention/scheduling and an isolated restore drill.",
-      "acceptance_criteria": [
-        "Manifest covers DB, artifacts, and configuration references.",
-        "Retention and schedule match the displayed contract.",
-        "An isolated restore verifies service health and records the result."
-      ],
-      "tests": [
-        "backup manifest",
-        "retention",
-        "isolated restore drill"
-      ],
-      "dependencies": [
-        "G09-F03"
-      ],
-      "interface_changes": [
-        "Add backup/restore manifest and verification record."
       ]
     },
     {
@@ -2781,49 +2958,42 @@
       "group_id": "G12-ci-maintainability",
       "kind": "maintainability",
       "priority": "P2",
-      "confidence": "high",
+      "confidence": "confirmed",
       "status": "open",
-      "title": "Tooling and workspace setup are not reproducible from one contract",
-      "summary": "Action/tool versions, production scripts, workspace dependency declarations, and setup prerequisites are scattered.",
-      "impact": "A clean machine or deploy host can resolve different tools or fail on undocumented native requirements.",
+      "title": "The repository has no root verification command",
+      "summary": "Contributors must know and compose the TypeScript and scoped Vitest commands themselves.",
+      "impact": "Local, CI, and agent verification can drift or accidentally run the unrelated unscoped harness.",
       "evidence": [
         {
           "source": "repository",
           "location": "package.json",
-          "symbol": "scripts / dependencies",
-          "observation": "There is no single root verify script covering the requested scoped contract, and tool versions use range declarations."
+          "symbol": "scripts",
+          "observation": "The root scripts include dev, admin:create, and projects:import but no verify, typecheck, or test contract."
         },
         {
           "source": "repository",
           "location": ".github/workflows/ci.yml",
-          "symbol": "actions and setup",
-          "observation": "CI setup and versions live in workflow steps rather than one documented workspace prerequisite contract."
-        },
-        {
-          "source": "repository",
-          "location": "packages/database/src/password.ts",
-          "symbol": "runtime gcc invocation",
-          "observation": "Authentication has an undocumented native compiler/library prerequisite at runtime."
+          "symbol": "TypeScript and Vitest steps",
+          "observation": "CI spells the verification commands separately rather than calling a root script."
         }
       ],
-      "root_cause": "Reproducibility information is distributed across package manifests, CI, deploy scripts, and runtime code.",
-      "recommendation": "Define one root verify command and document/pin the minimum Node/pnpm/native/workspace prerequisites used by CI and production.",
+      "root_cause": "The authoritative verification sequence is duplicated outside the package script contract.",
+      "recommendation": "Add one root script using the existing TypeScript and scoped Vitest commands, and make CI/documentation call it.",
       "acceptance_criteria": [
-        "Fresh documented setup runs verification without undeclared prerequisites.",
-        "CI and production use the same frozen dependency graph.",
-        "Native runtime requirements are prebuilt or explicitly checked at startup."
+        "One documented root command runs the intended product checks.",
+        "CI calls the same root command.",
+        "The command excludes the unrelated .lfd harness intentionally."
       ],
       "tests": [
-        "clean setup",
-        "root verify",
-        "frozen install"
+        "root verify command",
+        "CI command parity",
+        "scope check"
       ],
       "dependencies": [
-        "G12-F01",
-        "G07-F05"
+        "G12-F01"
       ],
       "interface_changes": [
-        "Publish workspace prerequisite and verification contracts."
+        "Publish the root verification command."
       ]
     },
     {
@@ -2953,6 +3123,139 @@
         "G12-F05"
       ],
       "interface_changes": []
+    },
+    {
+      "id": "G12-F07",
+      "group_id": "G12-ci-maintainability",
+      "kind": "maintainability",
+      "priority": "P2",
+      "confidence": "high",
+      "status": "open",
+      "title": "Dependency and package-manager versions are not fully pinned",
+      "summary": "Root dependency ranges and CI's latest pnpm selection allow tool resolution to change without a repository diff.",
+      "impact": "Fresh installs can use different test/browser/database tooling or package-manager behavior.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "package.json",
+          "symbol": "devDependencies",
+          "observation": "Several root packages use caret ranges and the manifest has no packageManager field."
+        },
+        {
+          "source": "repository",
+          "location": ".github/workflows/ci.yml",
+          "symbol": "pnpm/action-setup",
+          "observation": "The workflow requests version: latest."
+        }
+      ],
+      "root_cause": "The repository does not declare one exact package-manager/toolchain identity at the manifest boundary.",
+      "recommendation": "Declare the intended package manager version and pin direct tool versions where reproducibility requires it; continue using the frozen lockfile.",
+      "acceptance_criteria": [
+        "The package-manager version is declared in the repository.",
+        "CI uses that declared version rather than latest.",
+        "Frozen install resolves the committed lockfile without drift."
+      ],
+      "tests": [
+        "declared package manager",
+        "frozen clean install",
+        "version drift canary"
+      ],
+      "dependencies": [],
+      "interface_changes": [
+        "Add package-manager/toolchain version metadata."
+      ]
+    },
+    {
+      "id": "G12-F08",
+      "group_id": "G12-ci-maintainability",
+      "kind": "maintainability",
+      "priority": "P2",
+      "confidence": "high",
+      "status": "open",
+      "title": "CI setup is not a complete workspace prerequisite contract",
+      "summary": "Node, pnpm, cache, native, and workspace assumptions live in workflow YAML without matching manifest/setup documentation.",
+      "impact": "A clean developer or production host can satisfy package install yet fail on an undeclared prerequisite.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": ".github/workflows/ci.yml",
+          "symbol": "setup steps",
+          "observation": "The workflow selects Node 22, pnpm setup, cache, and install behavior directly."
+        },
+        {
+          "source": "repository",
+          "location": "package.json",
+          "symbol": "root manifest",
+          "observation": "The manifest does not declare engines or a packageManager version."
+        },
+        {
+          "source": "repository",
+          "location": "pnpm-workspace.yaml",
+          "symbol": "workspace and allowBuilds",
+          "observation": "Workspace packages and esbuild build permission are defined separately from the root setup contract."
+        }
+      ],
+      "root_cause": "Environment prerequisites are encoded in automation implementation rather than one repository-owned setup contract.",
+      "recommendation": "Document and validate the minimum Node, package manager, workspace, and native prerequisites shared by CI and supported hosts.",
+      "acceptance_criteria": [
+        "A clean supported host can follow one setup contract.",
+        "Unsupported Node/package-manager versions fail early with guidance.",
+        "CI validates the same prerequisites it documents."
+      ],
+      "tests": [
+        "clean workspace setup",
+        "unsupported runtime",
+        "workspace install"
+      ],
+      "dependencies": [
+        "G12-F07"
+      ],
+      "interface_changes": [
+        "Publish supported runtime and workspace prerequisites."
+      ]
+    },
+    {
+      "id": "G12-F09",
+      "group_id": "G12-ci-maintainability",
+      "kind": "reliability",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "Authentication compiles native Argon2 code at module load",
+      "summary": "Importing the password module invokes gcc and links a host library into a temporary executable.",
+      "impact": "Production authentication can fail to start on hosts without the compiler, linker library, writable temp path, or compatible ABI.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/database/src/password.ts",
+          "symbol": "module initialization",
+          "observation": "execFileSync runs gcc before hashPassword or verifyPassword is called."
+        },
+        {
+          "source": "repository",
+          "location": "packages/database/src/password.ts",
+          "symbol": "binary path",
+          "observation": "The compiled helper is written under tmpdir with the process ID."
+        }
+      ],
+      "root_cause": "A production runtime dependency is built dynamically during module initialization instead of being provisioned and verified before process start.",
+      "recommendation": "Package or provision the helper during a reproducible build/install step, then fail startup with a focused prerequisite error if unavailable.",
+      "acceptance_criteria": [
+        "Production authentication starts without gcc installed.",
+        "The Argon2 implementation and ABI are reproducibly provisioned.",
+        "Missing/incompatible native support fails with an actionable startup error."
+      ],
+      "tests": [
+        "compiler-absent startup",
+        "missing library",
+        "hash/verify smoke"
+      ],
+      "dependencies": [
+        "G12-F08"
+      ],
+      "interface_changes": [
+        "Add an Argon2 runtime capability/preflight contract."
+      ]
     }
   ],
   "roadmap": [
@@ -2971,11 +3274,11 @@
             "side-effect-free operational reads"
           ],
           "acceptance_criteria": [
-            "G12-F01 and G01-F01 have verified exits",
+            "G09-F02, G12-F01, and G01-F01 have verified exits",
             "GET routes do not mutate state",
             "worker health uses renewable heartbeat"
           ],
-          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R0-01 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Make CI truthful and implement the minimum shared lease/heartbeat/reaper and read-side truth required by G12-F01, G01-F01, G10-F01, and G10-F05."
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R0-01 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Make CI truthful and implement the minimum shared lease/heartbeat/reaper and read-side truth required by G09-F02, G12-F01, G01-F01, G10-F01, and G10-F05."
         },
         {
           "id": "R0-02",
@@ -3019,8 +3322,7 @@
           "name": "Terminal rerun and web authority exit",
           "dependencies": [
             "R0-01",
-            "R0-02",
-            "R0-03"
+            "R0-02"
           ],
           "outcomes": [
             "immutable rerun identity",
@@ -3042,16 +3344,16 @@
             "R0-04"
           ],
           "outcomes": [
-            "authoritative final policy snapshot",
+            "authoritative review/check snapshot",
             "expected-SHA merge",
             "durable audit"
           ],
           "acceptance_criteria": [
-            "G04-F05 has a verified exit",
-            "changed head or missing required check/review refuses merge",
-            "merged SHA is recorded"
+            "G04-F02 and G04-F05 have verified exits",
+            "Changed head or missing required check/review refuses merge",
+            "Merged SHA and policy snapshot are recorded"
           ],
-          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R0-05 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Implement the final authoritative head/check/review snapshot and expected-SHA merge refusal required by G04-F05."
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R0-05 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Implement the final authoritative head/check/review snapshot and expected-SHA merge refusal required by G04-F02 and G04-F05."
         },
         {
           "id": "R0-06",
@@ -3067,11 +3369,11 @@
             "deployment history"
           ],
           "acceptance_criteria": [
-            "G05-F01 and G05-F02 have verified exits",
-            "only current protected head deploys",
-            "failed health has tested rollback or blocked recovery"
+            "G09-F01, G05-F01, and G05-F02 have verified exits",
+            "Only current protected head deploys",
+            "Failed health has tested rollback or blocked recovery"
           ],
-          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R0-06 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Complete deployment safety for G05-F01 and G05-F02 before any dependent automation: protected-head proof, frozen staged release, migration, health, rollback, and durable history."
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R0-06 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Complete deployment safety for G09-F01, G05-F01, and G05-F02 before any dependent automation: protected-head proof, frozen staged release, migration, health, rollback, and durable history."
         },
         {
           "id": "R0-07",
