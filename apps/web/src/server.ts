@@ -1103,6 +1103,46 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     if (!from || !to) return json(response, 404, { error: "prompt versions not found" });
     return json(response, 200, { from, to, diff: lineDiff(from.content, to.content) });
   }
+  const projectPromptsBulkMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/prompts\/bulk$/i);
+  if (projectPromptsBulkMatch && request.method === "POST") {
+    const body = await bodyOf(request);
+    const action = body.action;
+    if (!["activate", "deactivate", "delete"].includes(action)) return json(response, 400, { error: "invalid action" });
+    const ids = Array.isArray(body.ids) && body.ids.every((id: unknown): id is string => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) ? body.ids : [];
+    if (!ids.length) return json(response, 400, { error: "no prompts selected" });
+    const project = (await pool.query("SELECT id FROM projects WHERE id=$1", [projectPromptsBulkMatch[1]])).rows[0];
+    if (!project) return json(response, 404, { error: "project not found" });
+    const result = await inTransaction(async (client) => {
+      const files = (await client.query(
+        "SELECT id FROM prompt_files WHERE id=ANY($1::uuid[]) AND scope='project' AND project_id=$2",
+        [ids, project.id],
+      )).rows;
+      if (!files.length) return { updated: 0 };
+      const fileIds = files.map((file: any) => file.id);
+      if (action === "delete") {
+        await client.query("UPDATE prompt_files SET active_version_id=NULL WHERE id=ANY($1::uuid[])", [fileIds]);
+        await client.query("DELETE FROM prompt_versions WHERE prompt_file_id=ANY($1::uuid[])", [fileIds]);
+        await client.query("DELETE FROM prompt_files WHERE id=ANY($1::uuid[])", [fileIds]);
+      } else if (action === "deactivate") {
+        await client.query("UPDATE prompt_files SET active_version_id=NULL,updated_at=now() WHERE id=ANY($1::uuid[])", [fileIds]);
+      } else {
+        await client.query(
+          `UPDATE prompt_files pf SET active_version_id=v.id,updated_at=now()
+           FROM (
+             SELECT DISTINCT ON (prompt_file_id) prompt_file_id,id
+             FROM prompt_versions WHERE prompt_file_id=ANY($1::uuid[])
+             ORDER BY prompt_file_id,version DESC
+           ) v WHERE pf.id=v.prompt_file_id`,
+          [fileIds],
+        );
+      }
+      for (const file of files) {
+        await audit({ actorType: "admin", actorId: session.user_id, action: `prompt.bulk.${action}`, entityType: "prompt_file", entityId: file.id, ip: ipOf(request) }, client);
+      }
+      return { updated: files.length };
+    });
+    return json(response, 200, result);
+  }
   if (request.method === "GET" && url.pathname === "/api/admin/projects") return json(response, 200, { projects: (await pool.query("SELECT * FROM projects ORDER BY name")).rows });
   if (request.method === "POST" && url.pathname === "/api/admin/projects") {
     const body = await bodyOf(request);
