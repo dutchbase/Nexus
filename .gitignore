@@ -11,3 +11,4 @@ dist/
 .next/
 test-results/
 .deploy-state/
+.gstack/

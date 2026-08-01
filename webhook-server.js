@@ -143,8 +143,7 @@ function launchDeploy(sha) {
   const marker = path.join(COMPLETIONS_DIR, `${sha}.done`);
   const logPath = path.join(LOGS_DIR, `${sha}.log`);
   const child = spawn('sh', ['-c',
-    `'${DEPLOY_SH_PATH}' '${sha}' > '${logPath}' 2>&1; ec=$?; ` +
-    `printf '%s' "$ec" > '${marker}.tmp' && mv '${marker}.tmp' '${marker}'`,
+    `'${DEPLOY_SH_PATH}' '${sha}' '${marker}' > '${logPath}' 2>&1`,
   ], { detached: true, stdio: 'ignore' });
   child.unref();
   return { sha, startedAt, childPid: child.pid, markerPath: marker };
@@ -169,12 +168,18 @@ function startCompletionPoll(ref, sha, markerPath, startedAt) {
 }
 
 async function finalizeDeploy(ref, sha, markerPath) {
-  let ec = '1';
-  try { ec = fs.readFileSync(markerPath, 'utf8').trim(); } catch { /* marker unreadable, treat as failed */ }
-  try { fs.unlinkSync(markerPath); } catch { /* already gone */ }
+  let outcome = null;
   let promoted = null;
   await mutateState((state) => {
-    state.shaOutcomes[sha] = ec === '0' ? 'success' : 'failed';
+    if (state.shaOutcomes[sha] === 'success' || state.shaOutcomes[sha] === 'failed') {
+      delete state.running[ref];
+      return;
+    }
+    let ec = '1';
+    try { ec = fs.readFileSync(markerPath, 'utf8').trim(); } catch { /* marker unreadable, treat as failed */ }
+    try { fs.unlinkSync(markerPath); } catch { /* already gone */ }
+    outcome = ec === '0' ? 'success' : 'failed';
+    state.shaOutcomes[sha] = outcome;
     delete state.running[ref];
     if (state.queued[ref]) {
       const queuedSha = state.queued[ref];
@@ -184,10 +189,11 @@ async function finalizeDeploy(ref, sha, markerPath) {
       state.shaOutcomes[queuedSha] = 'running';
     }
   });
-  console.log(ec === '0'
+  if (!outcome) return; // already finalized by another process
+  console.log(outcome === 'success'
     ? `[webhook] deploy OK for SHA ${sha.slice(0, 8)}`
     : `[webhook] deploy FAILED for SHA ${sha.slice(0, 8)}. Check server logs.`);
-  sendNotification(ec === '0'
+  sendNotification(outcome === 'success'
     ? `dev-control deploy OK: ${sha.slice(0, 8)}`
     : `dev-control deploy FAILED: ${sha.slice(0, 8)}`);
   if (promoted) startCompletionPoll(ref, promoted.sha, promoted.markerPath, promoted.startedAt);
