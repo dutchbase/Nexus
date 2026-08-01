@@ -65,6 +65,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
     <nav class="nav" aria-label="Primary">${nav}</nav><footer class="sidebar-footer"><div class="theme"><button data-theme-choice="light">Light</button><button data-theme-choice="auto">Auto</button><button data-theme-choice="dark">Dark</button></div><p>${escapeHtml(username)} · administrator</p></footer></aside>
     <button class="scrim" type="button" data-scrim hidden aria-label="Close navigation menu"></button>
     <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}<span class="worker">● worker-01 healthy</span><a class="button" href="/f/website-feedback">Public form</a></header><main class="main">${body}</main></div></div>`, `
+      const cc=document.cookie.match(/(?:^|;\\s*)dcc_csrf=([^;]*)/);if(cc)sessionStorage.setItem("dccCsrf",cc[1]);
       const choice=localStorage.getItem("dccTheme")||"auto";
       const apply=(value)=>{const dark=value==="dark"||(value==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light";document.querySelectorAll("[data-theme-choice]").forEach(b=>b.classList.toggle("selected",b.dataset.themeChoice===value))};
       apply(choice);matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{if((localStorage.getItem("dccTheme")||"auto")==="auto")apply("auto")});
@@ -174,7 +175,26 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         document.querySelector("[data-skill-search]")?.addEventListener("input",event=>document.querySelectorAll("[data-skill-option]").forEach(option=>option.hidden=!option.dataset.search.includes(event.target.value.toLowerCase())));
         const ticketNumber=window.location.pathname.match(/\\/tickets\\/([^\\/]+)/)?.[1]||"";
         async function ticketAction(endpoint){const response=await fetch("/api/admin/tickets/"+ticketNumber+"/"+endpoint,{method:"POST",headers:{"x-csrf-token":csrf}});if(response.ok)location.reload();else{const result=await response.json();alert(result.error)}}
-        document.querySelector("[data-approve-planning]")?.addEventListener("click",()=>ticketAction("approve-planning"));
+        const commitDialog=document.querySelector("[data-commit-dialog]"),commitFiles=commitDialog?.querySelector("[data-commit-files]");
+        async function approvePlanning(commitMessage){
+          const response=await fetch("/api/admin/tickets/"+ticketNumber+"/approve-planning",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(commitMessage?{commit_message:commitMessage}:{})});
+          const result=await response.json();
+          if(response.ok)return location.reload();
+          if(response.status===409&&result.changed_files?.length&&commitDialog){
+            commitFiles.replaceChildren(...result.changed_files.map(file=>{const li=document.createElement("li");li.textContent=file;return li}));
+            commitDialog.querySelector(".error").textContent=result.error||"";
+            commitDialog.showModal();
+            return;
+          }
+          alert(result.error||"request failed");
+        }
+        document.querySelector("[data-approve-planning]")?.addEventListener("click",()=>approvePlanning());
+        commitDialog?.querySelector("[data-close-commit-dialog]")?.addEventListener("click",()=>commitDialog.close());
+        commitDialog?.querySelector("[data-submit-commit]")?.addEventListener("click",async()=>{
+          const message=(commitDialog.querySelector("[name=commit_message]").value||"").trim();
+          if(!message){commitDialog.querySelector(".error").textContent="Commit message is required";return}
+          await approvePlanning(message);
+        });
         document.querySelector("[data-reject-ticket]")?.addEventListener("click",()=>{if(confirm("Reject this ticket?"))ticketAction("reject")});
         document.querySelector("[data-cancel-ticket]")?.addEventListener("click",()=>{if(confirm("Cancel this ticket? In-flight work stops."))ticketAction("cancel")});
         document.querySelector("[data-archive-ticket]")?.addEventListener("click",()=>{if(confirm("Archive this ticket?"))ticketAction("archive")});
@@ -462,6 +482,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             if(response.ok)location.reload();else alert(result.error);
           }finally{button.disabled=false}
         });
+        document.querySelector("select[name=repository]")?.addEventListener("change",function(){this.form.submit()});
       `:""}
       ${/^\/admin\/pull-requests\/[^/]+(\/\d+)?$/.test(path)?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";
@@ -529,13 +550,11 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             }catch{}
           },4000);
         }
-        const createTicketBtn=document.querySelector("[data-open-create-ticket]"),createTicketDialog=document.querySelector("[data-create-ticket-dialog]"),createTicketForm=createTicketDialog?.querySelector("[data-create-ticket-form]"),generateDescription=createTicketDialog?.querySelector("[data-generate-follow-up-description]"),createButton=createTicketForm?.querySelector("[type=submit]");let followUpGeneration=0;
+        const createTicketBtn=document.querySelector("[data-open-create-ticket]"),createTicketDialog=document.querySelector("[data-create-ticket-dialog]"),createTicketForm=createTicketDialog?.querySelector("[data-create-ticket-form]");
         createTicketBtn?.addEventListener("click",()=>{
-          followUpGeneration++;
           createTicketForm.querySelector("[name=title]").value=createTicketBtn.dataset.title;
           createTicketForm.querySelector("[name=feedback]").value="";
-          const description=createTicketForm.querySelector("[name=description]");description.value="";description.readOnly=true;
-          createButton.disabled=true;generateDescription.disabled=false;createTicketForm.querySelector(".error").textContent="";
+          createTicketForm.querySelector("[name=description]").value="";createTicketForm.querySelector("[name=generate_description]").checked=true;createTicketForm.querySelector(".error").textContent="";
           createTicketDialog.showModal();
         });
         createTicketDialog?.querySelector("[data-close-dialog]")?.addEventListener("click",()=>createTicketDialog.close());
@@ -547,38 +566,17 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(event.shiftKey&&(document.activeElement===first||!createTicketDialog.contains(document.activeElement))){event.preventDefault();last.focus()}
           else if(!event.shiftKey&&(document.activeElement===last||!createTicketDialog.contains(document.activeElement))){event.preventDefault();first.focus()}
         });
-        async function pollFollowUpDescription(jobId,generation){
-          try{
-            const response=await fetch("/api/admin/pull-requests/follow-up-descriptions/"+jobId),result=await response.json();
-            if(generation!==followUpGeneration||!createTicketDialog.open)return;
-            if(!response.ok)throw new Error(result.error||"Unable to generate description");
-            if(result.status==="completed"&&typeof result.generated_description==="string"){
-              const description=createTicketForm.querySelector("[name=description]");description.value=result.generated_description;description.readOnly=false;
-              createButton.disabled=false;generateDescription.disabled=false;createTicketForm.querySelector("[name=feedback]").disabled=false;return;
-            }
-            if(result.status==="queued"||result.status==="running"){setTimeout(()=>pollFollowUpDescription(jobId,generation),2000);return}
-            throw new Error(result.error||"Description generation failed");
-          }catch(error){if(generation===followUpGeneration&&createTicketDialog.open){createTicketForm.querySelector(".error").textContent=error.message;generateDescription.disabled=false;createTicketForm.querySelector("[name=feedback]").disabled=false}}
-        }
-        generateDescription?.addEventListener("click",async()=>{
-          const feedback=createTicketForm.querySelector("[name=feedback]").value.trim();
-          if(!feedback){createTicketForm.querySelector(".error").textContent="Feedback is required";return}
-          const generation=++followUpGeneration,description=createTicketForm.querySelector("[name=description]");
-          description.value="";description.readOnly=true;createButton.disabled=true;generateDescription.disabled=true;createTicketForm.querySelector("[name=feedback]").disabled=true;createTicketForm.querySelector(".error").textContent="";
-          try{
-            const response=await fetch("/api/admin/pull-requests/"+prId+"/follow-up-description",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({feedback})}),result=await response.json();
-            if(generation!==followUpGeneration||!createTicketDialog.open)return;
-            if(!response.ok||!result.job?.id)throw new Error(result.error||"Unable to start description generation");
-            pollFollowUpDescription(result.job.id,generation);
-          }catch(error){if(generation===followUpGeneration&&createTicketDialog.open){createTicketForm.querySelector(".error").textContent=error.message;generateDescription.disabled=false;createTicketForm.querySelector("[name=feedback]").disabled=false}}
-        });
         createTicketForm?.addEventListener("submit",async(event)=>{
           event.preventDefault();
-          const description=createTicketForm.querySelector("[name=description]");if(createButton.disabled||description.readOnly||!description.value.trim())return;
+          const description=createTicketForm.querySelector("[name=description]"),feedback=createTicketForm.querySelector("[name=feedback]").value.trim(),generate=createTicketForm.querySelector("[name=generate_description]").checked;
+          if(!description.value.trim()&&generate&&feedback)description.value=feedback;
+          if(!description.value.trim()){createTicketForm.querySelector(".error").textContent="Description is required";return}
           const data=new FormData(createTicketForm);
           const response=await fetch("/api/admin/tickets",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({project_id:createTicketBtn.dataset.projectId,title:data.get("title"),description:data.get("description")})});
           const result=await response.json();
-          if(response.ok){createTicketDialog.close();location.reload()}else{createTicketForm.querySelector(".error").textContent=result.error}
+          if(!response.ok){createTicketForm.querySelector(".error").textContent=result.error;return}
+          if(generate&&feedback)fetch("/api/admin/pull-requests/"+prId+"/follow-up-description",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({feedback,ticket_id:result.ticket.id,initial_description:description.value}),keepalive:true});
+          createTicketDialog.close();location.reload();
         });
       `:""}
       ${path==="/admin/skills"?`

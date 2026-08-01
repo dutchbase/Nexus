@@ -159,7 +159,7 @@ async function planningInputs(ticket: any) {
   });
   const values = {
     "project.slug": project.slug, "project.name": project.name,
-    "project.repository_path": project.repository_path, "project.default_branch": project.default_branch,
+    "project.repository_path": project.repository_path, "project.agent_start_path": project.agent_start_path ?? project.repository_path, "project.default_branch": project.default_branch,
     "ticket.title": ticket.title, "ticket.description": ticket.description,
     "ticket.category": ticket.category, "ticket.priority": ticket.priority,
   };
@@ -174,7 +174,7 @@ async function planningInputs(ticket: any) {
     projectPlanningInstructions: renderTemplate(projectPlanning.content ?? "", values),
     projectPathsAndRepositoryMetadata: {
       default_branch: project.default_branch, github_owner: project.github_owner,
-      github_repository: project.github_repository, repository_path: project.repository_path, slug: project.slug,
+      github_repository: project.github_repository, repository_path: project.repository_path, agent_start_path: project.agent_start_path ?? project.repository_path, slug: project.slug,
     },
     resolvedAiConfiguration: ai,
     resolvedSkills: skills.map((skill) => ({
@@ -226,7 +226,7 @@ async function executionInputs(ticket: any, phase: "execution" | "repair", appro
   });
   const values = {
     "project.slug": project.slug, "project.name": project.name,
-    "project.repository_path": project.repository_path, "project.default_branch": project.default_branch,
+    "project.repository_path": project.repository_path, "project.agent_start_path": project.agent_start_path ?? project.repository_path, "project.default_branch": project.default_branch,
     "ticket.title": ticket.title, "ticket.description": ticket.description,
     "ticket.category": ticket.category, "ticket.priority": ticket.priority,
   };
@@ -386,10 +386,11 @@ async function runPlanning(job: any) {
     input.promptVersionIds["global.plan-revision"] = revisionInstructions.active_version_id;
   }
   const repository = await validateProject({
-    repositoryPath: input.project.repository_path, defaultBranch: input.project.default_branch, requireRemote: false,
+    repositoryPath: input.project.repository_path, defaultBranch: input.project.default_branch, requireRemote: false, agentStartPath: input.project.agent_start_path,
   });
   if (!repository.valid) throw new Error(`repository is not available for planning: ${repository.errors.join("; ")}`);
 
+  const planningStartPath = input.project.agent_start_path ?? input.project.repository_path;
   const runId = randomUUID();
   // ponytail: --session-id asks the CLI to start a NEW session under that id;
   // reusing the original planning run's id collides ("already in use"). The
@@ -402,7 +403,7 @@ async function runPlanning(job: any) {
      (id,ticket_id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
      VALUES ($1,$2,$3,$4,'running',NULL,$5,$6,$7,now(),$8)`,
     [runId, ticket.id, input.project.id, runType, input.ai.model, input.ai.reasoning_level,
-      input.project.repository_path, { job_id: job.id, project_config_version: input.project.config_version }],
+      planningStartPath, { job_id: job.id, project_config_version: input.project.config_version, planning_start_path: planningStartPath }],
   );
   await transitionToPlanning(ticket.id, job.id, runId);
 
@@ -419,7 +420,7 @@ async function runPlanning(job: any) {
     model: input.ai.model, reasoningLevel: input.ai.reasoning_level, skillSnapshotId: skillSnapshot.id,
     metadata: {
       promptVersionIds: input.promptVersionIds, projectConfigVersion: input.project.config_version,
-      ticketVersion: ticket.updated_at, runType,
+      ticketVersion: ticket.updated_at, runType, planningStartPath,
     },
   });
   await pool.query(
@@ -439,7 +440,7 @@ async function runPlanning(job: any) {
         ? `Return a complete revised implementation plan for ticket ${ticket.ticket_number}, applying the administrator feedback.`
         : `Create the implementation plan for ticket ${ticket.ticket_number}.`,
       sessionId, model: input.ai.model, effort: input.ai.reasoning_level, promptFile,
-      skillBundleDir: skillBundle, workingDirectory: input.project.repository_path,
+      skillBundleDir: skillBundle, workingDirectory: planningStartPath,
       maxTurns: Number(input.project.config_json?.planning_max_turns ?? 20),
       oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
       scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
@@ -907,9 +908,10 @@ async function publishExecutionAttempt(input: {
       );
     });
   } catch (error) {
+    const err = error as Error;
     // A commit-time secret/protected-path trip is a validation failure, not a
     // PR-creation failure — the diff was never safe to commit in the first place.
-    const blocked = error instanceof WorktreeValidationError;
+    const blocked = err instanceof WorktreeValidationError;
     const status = blocked ? "Validation Failed" : "PR Creation Failed";
     // A blocked commit never produced one; a failed *push* must keep its local
     // commit (PRD §28.9) so the retry can resume without re-invoking Claude.
@@ -923,7 +925,7 @@ async function publishExecutionAttempt(input: {
       blocked
         ? `UPDATE agent_runs SET status='failed',error_code='validation_failed',error_message=$2 WHERE id=$1`
         : `UPDATE agent_runs SET status='failed',error_code='pr_creation_failed',error_message=$2 WHERE id=$1`,
-      [input.runId, error.message],
+      [input.runId, err.message],
     );
     await inTransaction(async (client) => {
       const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
@@ -936,7 +938,7 @@ async function publishExecutionAttempt(input: {
           input.ticket.id, current.status, status,
           blocked
             ? "Commit-time secret/protected-path scan blocked the commit"
-            : `Worker-controlled push or pull-request creation failed: ${error.message}`,
+            : `Worker-controlled push or pull-request creation failed: ${err.message}`,
           input.jobId, input.runId, input.attempt.plan_version_id,
         ],
       );
@@ -1133,7 +1135,7 @@ async function runPrAiReview(job: any) {
 }
 
 async function runFollowUpDescription(job: any) {
-  const payload = job.payload_json as { pull_request_id: string; feedback: string };
+  const payload = job.payload_json as { pull_request_id: string; feedback: string; ticket_id?: string; initial_description?: string };
   let runId: string | null = null;
   try {
     const pullRequest = (await pool.query("SELECT * FROM pull_requests WHERE id=$1", [payload.pull_request_id])).rows[0];
@@ -1168,7 +1170,10 @@ async function runFollowUpDescription(job: any) {
         oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
       });
       const description = formatFollowUpDescription({ number: pullRequest.number, title: pullRequest.title, url: pullRequest.url }, result.markdown);
-      await pool.query("UPDATE jobs SET payload_json=payload_json || jsonb_build_object($2,$3::text),updated_at=now() WHERE id=$1", [job.id, "generated_description", description]);
+      await pool.query("UPDATE jobs SET payload_json=payload_json || jsonb_build_object($2::text,$3::text),updated_at=now() WHERE id=$1", [job.id, "generated_description", description]);
+      if (payload.ticket_id && payload.initial_description) {
+        await pool.query("UPDATE tickets SET description=$2,updated_at=now() WHERE id=$1 AND description=$3", [payload.ticket_id, description, payload.initial_description]);
+      }
       await pool.query("UPDATE agent_runs SET status=$2,claude_session_id=$3,finished_at=now(),exit_code=$4 WHERE id=$1", [runId, "completed", sessionId, result.exitCode]);
     } finally {
       await rm(temporary, { recursive: true, force: true });
@@ -1416,7 +1421,7 @@ while (!stopping) {
       const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [job.payload_json.project_id])).rows[0];
       if (!project) throw new Error("project not found");
       const result = await validateProject({
-        repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: true,
+        repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: true, agentStartPath: project.agent_start_path,
       });
       await pool.query(
         "UPDATE projects SET health_status=$2,last_validated_at=now(),updated_at=now() WHERE id=$1",

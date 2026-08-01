@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
+import { promisify } from "node:util";
 import { pool, inTransaction } from "@dcc/database";
 import {
   AiConfigurationError, approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
@@ -14,7 +16,7 @@ import {
   resolveSkills, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
 } from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
-import { validateProject } from "@dcc/project-config";
+import { normalizeAgentStartPath, validateAgentStartPath, validateProject } from "@dcc/project-config";
 import { adminPage, escapeHtml, loginPage, publicFormPage, submittedPage } from "./ui.ts";
 import { allowedTemplateVariables, fieldsFor, lineDiff, validStatuses } from "./pages/shared.ts";
 import * as dashboardPage from "./pages/dashboard.ts";
@@ -38,6 +40,7 @@ const lockoutWindowMinutes = 15;
 const sessionHours = 8;
 const maxJsonBytes = 1024 * 1024;
 const maxUploadBytes = 5 * 1024 * 1024;
+const exec = promisify(execFile);
 const defaultRateLimit = 15;
 const dummyHash = await hashPassword(randomBytes(32).toString("hex"));
 const systemOnlyStatuses = new Set(["Planning", "Executing", "Validating", "PR Ready for Review", "Merged"]);
@@ -154,6 +157,7 @@ async function promptInputsFor(ticket: any, phase: "planning" | "execution", app
     "project.slug": project.slug,
     "project.name": project.name,
     "project.repository_path": project.repository_path,
+    "project.agent_start_path": project.agent_start_path ?? project.repository_path,
     "project.default_branch": project.default_branch,
     "ticket.title": ticket.title,
     "ticket.description": ticket.description,
@@ -187,6 +191,7 @@ async function promptInputsFor(ticket: any, phase: "planning" | "execution", app
           github_owner: project.github_owner,
           github_repository: project.github_repository,
           repository_path: project.repository_path,
+          agent_start_path: project.agent_start_path ?? project.repository_path,
           slug: project.slug,
         },
         resolvedAiConfiguration: ai,
@@ -225,8 +230,8 @@ async function promptInputsFor(ticket: any, phase: "planning" | "execution", app
   };
 }
 
-function json(response: ServerResponse, status: number, body: unknown, headers: Record<string, string> = {}) {
-  response.writeHead(status, { "content-type": "application/json; charset=utf-8", ...headers });
+function json(response: ServerResponse, status: number, body: unknown, headers: Record<string, string | string[]> = {}) {
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8", ...(headers as Record<string, string | string[]>) });
   response.end(JSON.stringify(body));
 }
 
@@ -364,9 +369,10 @@ async function login(request: IncomingMessage, response: ServerResponse) {
     await client.query("UPDATE users SET last_login_at = now(), updated_at = now() WHERE id = $1", [user.id]);
     await audit({ actorType: "admin", actorId: user.id, action: "login", entityType: "user", entityId: user.id, after: { success: true }, ip: ipOf(request) }, client);
   });
-  const attributes = [`dcc_session=${token}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${sessionHours * 3600}`];
-  if (production) attributes.push("Secure");
-  json(response, 200, { user: { id: user.id, username: user.username, role: user.role }, csrfToken: csrf }, { "set-cookie": attributes.join("; ") });
+  const sessionAttributes = [`dcc_session=${token}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${sessionHours * 3600}`];
+  const csrfAttributes = [`dcc_csrf=${csrf}`, "Path=/", "SameSite=Lax", `Max-Age=${sessionHours * 3600}`];
+  if (production) { sessionAttributes.push("Secure"); csrfAttributes.push("Secure"); }
+  json(response, 200, { user: { id: user.id, username: user.username, role: user.role }, csrfToken: csrf }, { "set-cookie": [sessionAttributes.join("; "), csrfAttributes.join("; ")] });
 }
 
 async function publicForm(slug: string) {
@@ -581,7 +587,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
   if (request.method === "POST" && url.pathname === "/api/admin/logout") {
     await pool.query("UPDATE admin_sessions SET invalidated_at = now() WHERE id = $1", [session.id]);
     await audit({ actorType: "admin", actorId: session.user_id, action: "logout", entityType: "user", entityId: session.user_id, ip: ipOf(request) });
-    return json(response, 200, { ok: true }, { "set-cookie": "dcc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0" });
+    return json(response, 200, { ok: true }, { "set-cookie": ["dcc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0", "dcc_csrf=; Path=/; SameSite=Lax; Max-Age=0"] });
   }
   if (url.pathname === "/api/admin/pull-requests" && request.method === "GET") {
     const params: any[] = [];
@@ -771,11 +777,16 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     const submittedFeedback = typeof body.feedback === "string" ? body.feedback : "";
     const feedback = submittedFeedback.trim();
     if (!feedback || submittedFeedback.length > 10_000) return json(response, 400, { error: "feedback is required" });
-    const pullRequest = (await pool.query("SELECT id FROM pull_requests WHERE id=$1", [followUpDescriptionMatch[1]])).rows[0];
+    const pullRequest = (await pool.query("SELECT id,project_id FROM pull_requests WHERE id=$1", [followUpDescriptionMatch[1]])).rows[0];
     if (!pullRequest) return json(response, 404, { error: "pull request not found" });
+    const ticketId = typeof body.ticket_id === "string" ? body.ticket_id : "";
+    const initialDescription = typeof body.initial_description === "string" ? body.initial_description : "";
+    if (ticketId && !(await pool.query("SELECT 1 FROM tickets WHERE id::text=$1 AND project_id=$2", [ticketId, pullRequest.project_id])).rowCount) {
+      return json(response, 400, { error: "ticket must belong to the pull request project" });
+    }
     const job = await enqueueJob({
       type: "pr.follow_up_description",
-      payload: { pull_request_id: pullRequest.id, feedback },
+      payload: { pull_request_id: pullRequest.id, feedback, ticket_id: ticketId || undefined, initial_description: initialDescription || undefined },
       priority: "low",
       idempotencyKey: `pr-follow-up-description:${pullRequest.id}:${randomUUID()}`,
     });
@@ -1096,10 +1107,13 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
   if (request.method === "GET" && url.pathname === "/api/admin/projects") return json(response, 200, { projects: (await pool.query("SELECT * FROM projects ORDER BY name")).rows });
   if (request.method === "POST" && url.pathname === "/api/admin/projects") {
     const body = await bodyOf(request);
+    const agentStartPath = normalizeAgentStartPath(body.agent_start_path);
+    const agentStartPathErrors = await validateAgentStartPath(body.agent_start_path);
+    if (agentStartPathErrors.length) return json(response, 400, { error: agentStartPathErrors.join("; ") });
     const result = await pool.query(
-      `INSERT INTO projects (slug,name,description,enabled,repository_path,github_owner,github_repository,default_branch,config_json)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [body.slug, body.name, body.description ?? null, body.enabled ?? true, body.repository_path, body.github_owner ?? null, body.github_repository ?? null, body.default_branch ?? "main", body.config_json ?? {}],
+      `INSERT INTO projects (slug,name,description,enabled,repository_path,agent_start_path,github_owner,github_repository,default_branch,config_json)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
+      [body.slug, body.name, body.description ?? null, body.enabled ?? true, body.repository_path, agentStartPath, body.github_owner ?? null, body.github_repository ?? null, body.default_branch ?? "main", body.config_json ?? {}],
     );
     await audit({ actorType: "admin", actorId: session.user_id, action: "project.create", entityType: "project", entityId: result.rows[0].id, after: result.rows[0], ip: ipOf(request) });
     return json(response, 201, { project: result.rows[0] });
@@ -1113,8 +1127,13 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     const before = (await pool.query("SELECT * FROM projects WHERE id = $1", [projectMatch[1]])).rows[0];
     if (!before) return json(response, 404, { error: "project not found" });
     const body = await bodyOf(request);
-    const allowed = ["name", "description", "enabled", "repository_path", "github_owner", "github_repository", "default_branch", "config_json"];
-    const entries = Object.entries(body).filter(([key]) => allowed.includes(key));
+    const agentStartPath = normalizeAgentStartPath(body.agent_start_path);
+    if (Object.hasOwn(body, "agent_start_path")) {
+      const agentStartPathErrors = await validateAgentStartPath(body.agent_start_path);
+      if (agentStartPathErrors.length) return json(response, 400, { error: agentStartPathErrors.join("; ") });
+    }
+    const allowed = ["name", "description", "enabled", "repository_path", "agent_start_path", "github_owner", "github_repository", "default_branch", "config_json"];
+    const entries = Object.entries(body).filter(([key]) => allowed.includes(key)).map(([key, value]) => [key, key === "agent_start_path" ? agentStartPath : value]);
     if (!entries.length) return json(response, 400, { error: "no supported fields" });
     // config_json is shallow-merged into the existing value (not replaced) so a
     // partial save from the UI (e.g. just `commands` + `branch_prefix`) never
@@ -1393,24 +1412,60 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     const ticket = (await pool.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
     if (!ticket) return json(response, 404, { error: "ticket not found" });
     const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
-    // PRD §28.4: a dirty repository blocks planning outright, checked before
-    // any workflow-status guard since it's an environment precondition, not
-    // a business-state one.
+    // PRD §28.4: a dirty repository blocks planning outright unless the admin
+    // supplies a commit_message to snapshot the working tree first. It's an
+    // environment precondition, not a business-state one, so the commit only
+    // happens once the request can actually proceed.
     const repoCheck = await validateProject({
-      repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false,
+      repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false, agentStartPath: project.agent_start_path,
     });
-    if (repoCheck.changedFiles.length) {
-      return json(response, 409, {
-        error: "repository has uncommitted changes and cannot be planned or executed",
-        changed_files: repoCheck.changedFiles,
-      });
-    }
+    const commitMessage = typeof body.commit_message === "string" ? body.commit_message.trim() : "";
     const selection = resolvedAiFor(ticket, project, "planning");
     validateAiSelection({
       model: typeof body.model === "string" ? body.model : selection.model,
       reasoning_level: typeof body.reasoning_level === "string" ? body.reasoning_level : selection.reasoning_level,
     });
     await resolvedSkillsFor(ticket, "planning");
+    if (repoCheck.changedFiles.length) {
+      if (!commitMessage) {
+        return json(response, 409, {
+          error: "repository has uncommitted changes and cannot be planned or executed",
+          changed_files: repoCheck.changedFiles,
+        });
+      }
+      if (!["Triage", "Needs Information"].includes(ticket.status)) {
+        return json(response, 409, { error: "ticket cannot be approved from " + ticket.status });
+      }
+      // A global master-guard hook (~/.githooks, via core.hooksPath) blocks
+      // direct commits on master/main unless a fresh MASTER_UNLOCK marker
+      // exists in the repo — the same mechanism ~/.claude/scripts/git-master.sh
+      // uses. This commit is an explicit, human-approved admin action (the
+      // Commit & Approve button), so mirror the sanctioned unlock/commit/lock
+      // sequence around it.
+      const commonDir = (await exec("git", ["-C", project.repository_path, "rev-parse", "--git-common-dir"])).stdout.trim();
+      const unlockPath = resolve(project.repository_path, commonDir, "MASTER_UNLOCK");
+      await writeFile(unlockPath, "");
+      try {
+        await exec("git", ["-C", project.repository_path, "add", "--all"]);
+        await exec("git", ["-C", project.repository_path, "commit", "-m", commitMessage]);
+      } catch (error) {
+        return json(response, 409, {
+          error: "could not commit uncommitted changes: " + (error instanceof Error ? error.message : "git commit failed"),
+          changed_files: repoCheck.changedFiles,
+        });
+      } finally {
+        await rm(unlockPath, { force: true });
+      }
+      const recheck = await validateProject({
+        repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false, agentStartPath: project.agent_start_path,
+      });
+      if (recheck.changedFiles.length) {
+        return json(response, 409, {
+          error: "repository still has uncommitted changes after committing",
+          changed_files: recheck.changedFiles,
+        });
+      }
+    }
     const result = await inTransaction(async (client) => {
       const before = (await client.query(
         "SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE",
