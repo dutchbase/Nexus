@@ -10,3 +10,4 @@ secrets/
 dist/
 .next/
 test-results/
+.deploy-state/
