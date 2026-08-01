@@ -853,7 +853,7 @@ async function publishExecutionAttempt(input: {
       `SELECT * FROM pull_requests
        WHERE execution_attempt_id=$1
           OR (project_id=$2 AND head_branch=$3)
-       ORDER BY (execution_attempt_id=$1) DESC, created_at_provider DESC
+       ORDER BY (execution_attempt_id IS NOT DISTINCT FROM $1) DESC, created_at_provider DESC
        LIMIT 1`,
       [input.attempt.id, input.project.id, input.attempt.branch_name],
     )).rows[0];

@@ -37,7 +37,7 @@ it("looks up an existing pull_requests row by branch too, not just execution_att
 
 it("orders the branch-widened lookup so the attempt's own row always wins over an unrelated same-branch row", async () => {
   const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
-  expect(worker).toContain("ORDER BY (execution_attempt_id=$1) DESC, created_at_provider DESC");
+  expect(worker).toContain("ORDER BY (execution_attempt_id IS NOT DISTINCT FROM $1) DESC, created_at_provider DESC");
 });
 
 it("claims ticket_id/execution_attempt_id on a found row left NULL by the sync job, before falling into the insert-only path", async () => {
