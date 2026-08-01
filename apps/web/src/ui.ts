@@ -175,7 +175,26 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         document.querySelector("[data-skill-search]")?.addEventListener("input",event=>document.querySelectorAll("[data-skill-option]").forEach(option=>option.hidden=!option.dataset.search.includes(event.target.value.toLowerCase())));
         const ticketNumber=window.location.pathname.match(/\\/tickets\\/([^\\/]+)/)?.[1]||"";
         async function ticketAction(endpoint){const response=await fetch("/api/admin/tickets/"+ticketNumber+"/"+endpoint,{method:"POST",headers:{"x-csrf-token":csrf}});if(response.ok)location.reload();else{const result=await response.json();alert(result.error)}}
-        document.querySelector("[data-approve-planning]")?.addEventListener("click",()=>ticketAction("approve-planning"));
+        const commitDialog=document.querySelector("[data-commit-dialog]"),commitFiles=commitDialog?.querySelector("[data-commit-files]");
+        async function approvePlanning(commitMessage){
+          const response=await fetch("/api/admin/tickets/"+ticketNumber+"/approve-planning",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(commitMessage?{commit_message:commitMessage}:{})});
+          const result=await response.json();
+          if(response.ok)return location.reload();
+          if(response.status===409&&result.changed_files?.length&&commitDialog){
+            commitFiles.replaceChildren(...result.changed_files.map(file=>{const li=document.createElement("li");li.textContent=file;return li}));
+            commitDialog.querySelector(".error").textContent=result.error||"";
+            commitDialog.showModal();
+            return;
+          }
+          alert(result.error||"request failed");
+        }
+        document.querySelector("[data-approve-planning]")?.addEventListener("click",()=>approvePlanning());
+        commitDialog?.querySelector("[data-close-commit-dialog]")?.addEventListener("click",()=>commitDialog.close());
+        commitDialog?.querySelector("[data-submit-commit]")?.addEventListener("click",async()=>{
+          const message=(commitDialog.querySelector("[name=commit_message]").value||"").trim();
+          if(!message){commitDialog.querySelector(".error").textContent="Commit message is required";return}
+          await approvePlanning(message);
+        });
         document.querySelector("[data-reject-ticket]")?.addEventListener("click",()=>{if(confirm("Reject this ticket?"))ticketAction("reject")});
         document.querySelector("[data-cancel-ticket]")?.addEventListener("click",()=>{if(confirm("Cancel this ticket? In-flight work stops."))ticketAction("cancel")});
         document.querySelector("[data-archive-ticket]")?.addEventListener("click",()=>{if(confirm("Archive this ticket?"))ticketAction("archive")});
@@ -463,6 +482,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             if(response.ok)location.reload();else alert(result.error);
           }finally{button.disabled=false}
         });
+        document.querySelector("select[name=repository]")?.addEventListener("change",function(){this.form.submit()});
       `:""}
       ${/^\/admin\/pull-requests\/[^/]+(\/\d+)?$/.test(path)?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";

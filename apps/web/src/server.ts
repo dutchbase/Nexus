@@ -1,7 +1,9 @@
+import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
+import { promisify } from "node:util";
 import { pool, inTransaction } from "@dcc/database";
 import {
   AiConfigurationError, approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
@@ -38,6 +40,7 @@ const lockoutWindowMinutes = 15;
 const sessionHours = 8;
 const maxJsonBytes = 1024 * 1024;
 const maxUploadBytes = 5 * 1024 * 1024;
+const exec = promisify(execFile);
 const defaultRateLimit = 15;
 const dummyHash = await hashPassword(randomBytes(32).toString("hex"));
 const systemOnlyStatuses = new Set(["Planning", "Executing", "Validating", "PR Ready for Review", "Merged"]);
@@ -1409,24 +1412,49 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     const ticket = (await pool.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
     if (!ticket) return json(response, 404, { error: "ticket not found" });
     const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
-    // PRD §28.4: a dirty repository blocks planning outright, checked before
-    // any workflow-status guard since it's an environment precondition, not
-    // a business-state one.
+    // PRD §28.4: a dirty repository blocks planning outright unless the admin
+    // supplies a commit_message to snapshot the working tree first. It's an
+    // environment precondition, not a business-state one, so the commit only
+    // happens once the request can actually proceed.
     const repoCheck = await validateProject({
       repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false, agentStartPath: project.agent_start_path,
     });
-    if (repoCheck.changedFiles.length) {
-      return json(response, 409, {
-        error: "repository has uncommitted changes and cannot be planned or executed",
-        changed_files: repoCheck.changedFiles,
-      });
-    }
+    const commitMessage = typeof body.commit_message === "string" ? body.commit_message.trim() : "";
     const selection = resolvedAiFor(ticket, project, "planning");
     validateAiSelection({
       model: typeof body.model === "string" ? body.model : selection.model,
       reasoning_level: typeof body.reasoning_level === "string" ? body.reasoning_level : selection.reasoning_level,
     });
     await resolvedSkillsFor(ticket, "planning");
+    if (repoCheck.changedFiles.length) {
+      if (!commitMessage) {
+        return json(response, 409, {
+          error: "repository has uncommitted changes and cannot be planned or executed",
+          changed_files: repoCheck.changedFiles,
+        });
+      }
+      if (!["Triage", "Needs Information"].includes(ticket.status)) {
+        return json(response, 409, { error: "ticket cannot be approved from " + ticket.status });
+      }
+      try {
+        await exec("git", ["-C", project.repository_path, "add", "--all"]);
+        await exec("git", ["-C", project.repository_path, "commit", "-m", commitMessage]);
+      } catch (error) {
+        return json(response, 409, {
+          error: "could not commit uncommitted changes: " + (error instanceof Error ? error.message : "git commit failed"),
+          changed_files: repoCheck.changedFiles,
+        });
+      }
+      const recheck = await validateProject({
+        repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false, agentStartPath: project.agent_start_path,
+      });
+      if (recheck.changedFiles.length) {
+        return json(response, 409, {
+          error: "repository still has uncommitted changes after committing",
+          changed_files: recheck.changedFiles,
+        });
+      }
+    }
     const result = await inTransaction(async (client) => {
       const before = (await client.query(
         "SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE",
