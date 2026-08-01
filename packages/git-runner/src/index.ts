@@ -217,6 +217,13 @@ export async function validateExecutionWorktree(input: {
 }) {
   const results: ValidationResult[] = [];
   const files = await changedWorktreeFiles(input.worktreePath, input.baseCommit);
+  if (!files.length) {
+    throw new WorktreeValidationError(
+      "changed-file inspection",
+      "no files were modified by the Claude agent execution",
+      results,
+    );
+  }
   results.push({ check: "changed-file inspection", status: "passed", detail: `${files.length} changed file(s)` });
 
   const protectedMatches = files.filter((file) =>
@@ -315,6 +322,13 @@ export async function commitExecutionChanges(input: {
   // gates hold against the content actually being committed.
   const staged = (await git(input.worktreePath, ["diff", "--cached", "--name-only", "-z"]))
     .stdout.split("\0").filter(Boolean);
+  if (!staged.length) {
+    throw new WorktreeValidationError(
+      "commit verification",
+      "no changes were staged for commit — Claude execution produced no file modifications",
+      [],
+    );
+  }
   const protectedMatches = staged.filter((file) =>
     matchesProtectedPath(file, input.protectedPaths?.length ? input.protectedPaths : DEFAULT_PROTECTED_PATHS));
   if (protectedMatches.length) {
@@ -334,8 +348,13 @@ export async function commitExecutionChanges(input: {
       "secret scan", `secret scan found ${secretCount} credential-shaped pattern(s) in the staged commit`, [],
     );
   }
-  await git(input.worktreePath, ["commit", "--allow-empty", "-m", input.message]);
+  await git(input.worktreePath, ["commit", "-m", input.message]);
   return (await git(input.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+}
+
+export async function commitDiffIsEmpty(worktreePath: string, baseCommit: string) {
+  const result = await git(worktreePath, ["diff", "--stat", `${baseCommit}..HEAD`]);
+  return !result.stdout.trim();
 }
 
 export async function pushExecutionBranch(worktreePath: string, branchName: string) {
