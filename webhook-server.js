@@ -19,6 +19,21 @@ const REF = 'refs/heads/master';
 
 if (!SECRET) { console.error('WEBHOOK_SECRET is not set'); process.exit(1); }
 
+const WHATSAPP_API_URL = process.env.WHATSAPP_API_URL;
+const WHATSAPP_API_SECRET = process.env.WHATSAPP_API_SECRET;
+const WHATSAPP_PHONE = process.env.WHATSAPP_PHONE || '31612952820';
+
+async function sendNotification(message) {
+  if (!WHATSAPP_API_URL || !WHATSAPP_API_SECRET) return;
+  try {
+    await fetch(`${WHATSAPP_API_URL}/send/text`, {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${WHATSAPP_API_SECRET}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify({ to: WHATSAPP_PHONE, message }),
+    });
+  } catch (e) { console.error('[notify] failed:', e.message); }
+}
+
 const STATE_FILE = path.join(DEPLOY_STATE_DIR, 'state.json');
 const LOCK_FILE = path.join(DEPLOY_STATE_DIR, 'state.lock');
 const COMPLETIONS_DIR = path.join(DEPLOY_STATE_DIR, 'completions');
@@ -172,6 +187,9 @@ async function finalizeDeploy(ref, sha, markerPath) {
   console.log(ec === '0'
     ? `[webhook] deploy OK for SHA ${sha.slice(0, 8)}`
     : `[webhook] deploy FAILED for SHA ${sha.slice(0, 8)}. Check server logs.`);
+  sendNotification(ec === '0'
+    ? `dev-control deploy OK: ${sha.slice(0, 8)}`
+    : `dev-control deploy FAILED: ${sha.slice(0, 8)}`);
   if (promoted) startCompletionPoll(ref, promoted.sha, promoted.markerPath, promoted.startedAt);
 }
 
@@ -209,6 +227,7 @@ async function handleDeploy(res, sha, deliveryId) {
       if (deliveryId) state.processedDeliveries[deliveryId] = { sha, at: new Date().toISOString() };
     });
     console.warn(`[webhook] CI gate rejected ${sha}: ${ci.reason}`);
+    sendNotification(`dev-control deploy REJECTED: ${sha.slice(0, 8)} — CI '${REQUIRED_CI_CHECK}' ${ci.reason}`);
     respond(res, 409, `CI check '${REQUIRED_CI_CHECK}' not successful for ${sha}`);
     return;
   }
@@ -236,6 +255,7 @@ async function handleDeploy(res, sha, deliveryId) {
     if (deliveryId) state.processedDeliveries[deliveryId] = { sha, at: new Date().toISOString() };
   });
   if (launched) startCompletionPoll(REF, sha, launched.markerPath, launched.startedAt);
+  sendNotification(`dev-control deploying ${sha.slice(0, 8)}`);
   respond(res, code, msg);
 }
 
