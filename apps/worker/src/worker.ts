@@ -15,7 +15,7 @@ import {
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
-  abortMerge, commitExecutionChanges, conflictedFiles, createConflictResolutionWorktree, createExecutionWorktree,
+  abortMerge, commitDiffIsEmpty, commitExecutionChanges, conflictedFiles, createConflictResolutionWorktree, createExecutionWorktree,
   mergeBaseIntoWorktree, pushExecutionBranch, validateExecutionWorktree, WorktreeValidationError, worktreeDiff,
 } from "../../../packages/git-runner/src/index.ts";
 import {
@@ -834,6 +834,13 @@ async function publishExecutionAttempt(input: {
          VALUES ('worker','execution.commit','execution_attempt',$1,$2)`,
         [input.attempt.id, { commit }],
       );
+      if (await commitDiffIsEmpty(input.attempt.worktree_path, input.attempt.base_commit)) {
+        throw new WorktreeValidationError(
+          "diff verification",
+          "committed changes produce an empty diff against the base branch",
+          [],
+        );
+      }
     }
     await pushExecutionBranch(input.attempt.worktree_path, input.attempt.branch_name);
     await pool.query(
