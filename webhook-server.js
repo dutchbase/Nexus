@@ -269,6 +269,23 @@ async function handleRequest(req, res, body) {
   let payload;
   try { payload = JSON.parse(body); } catch { respond(res, 400, 'Bad Request'); return; }
 
+  const event = req.headers['x-github-event'] || '';
+
+  if (event === 'check_run') {
+    if (payload.action !== 'completed') { respond(res, 200, 'Ignored (not completed)'); return; }
+    const cr = payload.check_run;
+    if (!cr || cr.name !== REQUIRED_CI_CHECK) { respond(res, 200, 'Ignored (wrong check)'); return; }
+    if (cr.conclusion !== 'success') {
+      console.log(`[webhook] check_run ${cr.name} conclusion=${cr.conclusion}, skipping deploy`);
+      respond(res, 200, 'CI not successful'); return;
+    }
+    const sha = cr.head_sha;
+    if (!sha || !VALID_SHA_RE.test(sha)) { respond(res, 400, 'Bad Request'); return; }
+    console.log(`[webhook] check_run success -> evaluating ${sha}`);
+    await handleDeploy(res, sha, req.headers['x-github-delivery'] || '');
+    return;
+  }
+
   if (payload.ref !== REF) {
     console.log(`[webhook] push to ${payload.ref} ignored`);
     respond(res, 200, 'Ignored'); return;
