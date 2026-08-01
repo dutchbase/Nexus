@@ -1,5 +1,5 @@
 // SEC-14 [HARD-FAIL]: every planning.generate / planning.revise job's
-// mock-claude invocation must be logged with --permission-mode plan and a
+// mock-claude invocation must be logged with --permission-mode dontAsk and a
 // --tools value drawn only from the read-oriented set (Read, Glob, Grep,
 // Bash) — never Edit or Write. PRD §18.2/§18.3.
 //
@@ -42,7 +42,7 @@ function toolsValueFor(entry: any): string | null {
 
 function assertReadOnlyInvocation(entry: any, label: string) {
   expect(entry, `${label}: no mock-claude log entry found`).toBeTruthy();
-  expect(entry.parsed?.permission_mode, `${label}: --permission-mode`).toBe("plan");
+  expect(entry.parsed?.permission_mode, `${label}: --permission-mode`).toBe("dontAsk");
   const tools = toolsValueFor(entry);
   expect(tools, `${label}: --tools value`).toBeTruthy();
   expect(tools).not.toContain("Edit");

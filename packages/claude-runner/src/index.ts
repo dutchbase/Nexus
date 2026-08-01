@@ -69,8 +69,11 @@ export function buildPlanningArguments(input: PlanningInvocation) {
     // ponytail: --permission-mode plan expects the agent to conclude by
     // calling ExitPlanMode, which isn't available in headless -p mode —
     // the agent then wrote a stray local file instead of the plan markdown.
-    // "manual" enforces the same read-only tool set without that dead end.
-    "--permission-mode", "manual", "--tools", input.tools?.join(",") ?? "Read,Glob,Grep,Bash",
+    // "manual" denied every Bash call in headless -p (no interactive
+    // approver), so planning burned its turns on denied read-only commands.
+    // "dontAsk" auto-allows read-only Bash and denies everything else —
+    // read-only planning whose tools actually work.
+    "--permission-mode", "dontAsk", "--tools", input.tools?.join(",") ?? "Read,Glob,Grep,Bash",
     "--append-system-prompt-file", input.promptFile, "--add-dir", input.skillBundleDir,
     "--output-format", "json", "--max-turns", String(input.maxTurns),
   ];
@@ -92,7 +95,7 @@ export function summarizeClaudeFailure(stdout: string, stderr: string) {
 
 export async function invokePlanningClaude(input: PlanningInvocation) {
   assertSubscriptionOnlyEnvironment();
-  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken };
+  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken, AGENT_CONTROL_DISABLE: "1" };
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
   const result = await runClaude(buildPlanningArguments(input), { cwd: input.workingDirectory, env });
   if (result.exitCode !== 0) {
@@ -129,7 +132,7 @@ export function buildExecutionArguments(input: ExecutionInvocation) {
 
 export async function invokeExecutionClaude(input: ExecutionInvocation) {
   assertSubscriptionOnlyEnvironment();
-  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken };
+  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken, AGENT_CONTROL_DISABLE: "1" };
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
   await appendFile(input.logPath, "");
   return new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {

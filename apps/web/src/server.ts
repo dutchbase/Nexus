@@ -1433,7 +1433,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
           changed_files: repoCheck.changedFiles,
         });
       }
-      if (!["Triage", "Needs Information"].includes(ticket.status)) {
+      if (!["Triage", "Needs Information", "Planning Failed"].includes(ticket.status)) {
         return json(response, 409, { error: "ticket cannot be approved from " + ticket.status });
       }
       // A global master-guard hook (~/.githooks, via core.hooksPath) blocks
@@ -1472,7 +1472,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
         [ref],
       )).rows[0];
       if (!before) return null;
-      if (!["Triage", "Needs Information"].includes(before.status)) {
+      if (!["Triage", "Needs Information", "Planning Failed"].includes(before.status)) {
         throw Object.assign(new Error(`ticket cannot be approved from ${before.status}`), { status: 409 });
       }
       await client.query("UPDATE tickets SET status='Approved for Planning',updated_at=now() WHERE id=$1", [before.id]);
@@ -1546,7 +1546,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
       // only starts once the ticket hits Execution Queued, and the approval
       // gate already re-blocks Start execution once a new version supersedes
       // the approved one (see checkPlanApprovalGate's current_version_id check).
-      if (!["Plan Ready for Review", "Plan Approved", "Needs Information"].includes(plan.status)) {
+      if (!["Plan Ready for Review", "Plan Approved", "Needs Information", "Planning Failed"].includes(plan.status)) {
         throw Object.assign(new Error(`revision cannot be requested from ${plan.status}`), { status: 409 });
       }
       const current = (await client.query(

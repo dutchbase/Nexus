@@ -1407,6 +1407,7 @@ Rejected
 Approved for Planning
 Planning Queued
 Planning
+Planning Failed
 Plan Ready for Review
 Plan Revision Requested
 Plan Revision Queued
@@ -1436,6 +1437,7 @@ Archived
 | Ticket approved                | Triage                             | Approved for Planning   |
 | Planning job created           | Approved for Planning              | Planning Queued         |
 | Worker starts Claude planning  | Planning Queued                    | Planning                |
+| Planning job fails             | Planning                           | Planning Failed         |
 | Valid plan stored              | Planning                           | Plan Ready for Review   |
 | Plan feedback submitted        | Plan Ready for Review              | Plan Revision Requested |
 | Revision job created           | Plan Revision Requested            | Plan Revision Queued    |
@@ -1530,7 +1532,7 @@ claude -p \
   --session-id "$SESSION_ID" \
   --model "$MODEL" \
   --effort "$REASONING_LEVEL" \
-  --permission-mode plan \
+  --permission-mode dontAsk \
   --tools "Read,Glob,Grep,Bash" \
   --append-system-prompt-file "$PROMPT_FILE" \
   --add-dir "$SKILL_BUNDLE_DIR" \

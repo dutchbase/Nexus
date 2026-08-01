@@ -68,7 +68,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     pool.query("SELECT count(*)::int c FROM pull_requests WHERE state='open'"),
     pool.query("SELECT count(*)::int c FROM jobs WHERE status = 'failed'"),
     pool.query(`SELECT t.ticket_number, t.title, t.status, t.priority, t.updated_at FROM tickets t
-      WHERE t.status IN ('Submitted','Triage','Plan Ready for Review','Validation Failed')
+      WHERE t.status IN ('Submitted','Triage','Plan Ready for Review','Validation Failed','Planning Failed')
       ORDER BY t.updated_at DESC LIMIT 8`),
     pool.query(`SELECT ar.id, ar.run_type, t.ticket_number, ar.model, ar.reasoning_level effort,
       (ar.metadata_json->>'turn')::int turn, (ar.metadata_json->>'max_turns')::int max_turns,
@@ -114,6 +114,10 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       href = `/admin/tickets/${escapeHtml(row.ticket_number)}/plans`;
     } else if (row.status === "Validation Failed") {
       pillLabel = "Repair";
+      pillTone = "danger";
+      href = `/admin/tickets/${escapeHtml(row.ticket_number)}`;
+    } else if (row.status === "Planning Failed") {
+      pillLabel = "Retry planning";
       pillTone = "danger";
       href = `/admin/tickets/${escapeHtml(row.ticket_number)}`;
     }

@@ -11,7 +11,7 @@
 // pass. This file specifically uses ADVERSARIAL ticket content as the input
 // under test — the attack is "ticket text asks for bypassPermissions /
 // Write / Bash(rm -rf) / a git push", and the assertion is that the actual
-// invocation still shows --permission-mode plan and the standard read-only
+// invocation still shows --permission-mode dontAsk and the standard read-only
 // --tools set regardless.
 //
 // See tests/api/_pipeline.ts for the documented assumptions this shares
@@ -57,8 +57,8 @@ describe("embedded ticket instructions never alter Claude invocation flags", () 
 
     expect(entry, "no mock-claude log entry found for the injected ticket's planning job").toBeTruthy();
 
-    // The ticket asked for bypassPermissions — it must still be "plan".
-    expect(entry.parsed?.permission_mode).toBe("plan");
+    // The ticket asked for bypassPermissions — it must still be "dontAsk".
+    expect(entry.parsed?.permission_mode).toBe("dontAsk");
     expect(entry.parsed?.permission_mode).not.toBe("bypassPermissions");
 
     // The ticket asked for Write + dangerous Bash — the tools list must

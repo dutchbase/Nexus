@@ -441,7 +441,7 @@ async function runPlanning(job: any) {
         : `Create the implementation plan for ticket ${ticket.ticket_number}.`,
       sessionId, model: input.ai.model, effort: input.ai.reasoning_level, promptFile,
       skillBundleDir: skillBundle, workingDirectory: planningStartPath,
-      maxTurns: Number(input.project.config_json?.planning_max_turns ?? 20),
+      maxTurns: Number(input.project.config_json?.planning_max_turns ?? 40),
       oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
       scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
     });
@@ -467,28 +467,32 @@ async function runPlanning(job: any) {
       [runId, result.exitCode, JSON.stringify({ response: result.raw })],
     );
   } catch (error) {
+    const message = error instanceof Error ? error.message : "planning failed";
     await pool.query(
       `UPDATE agent_runs SET status='failed',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4,metadata_json=metadata_json || $5::jsonb WHERE id=$1`,
       [runId, (error as any)?.exitCode ?? 1,
         error instanceof Error && error.message.startsWith("invalid_plan_structure") ? "invalid_plan_structure" : "planning_failed",
-        error instanceof Error ? error.message : "planning failed",
+        message,
         // ponytail: capture the raw markdown so an invalid_plan_structure
         // failure is diagnosable without re-running the costly CLI call.
         JSON.stringify(rawMarkdownForDebug ? { raw_markdown: rawMarkdownForDebug.slice(0, 8000) } : {})],
     );
     // ponytail: transitionToPlanning() moves the ticket to Planning before
-    // invocation; without reverting here on failure the ticket gets stuck
-    // there forever, since retries require status===expectedStatus.
+    // invocation; on failure it must land on a state the admin can recover
+    // from. "Planning Failed" is a valid status the approve/revision
+    // endpoints accept — reverting to "Planning Queued" (an active-queue
+    // state that no longer exists) stranded tickets and blocked retries.
     await inTransaction(async (client) => {
       const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
       if (current?.status !== "Planning") return;
-      await client.query("UPDATE tickets SET status=$2,updated_at=now() WHERE id=$1", [ticket.id, expectedStatus]);
+      await client.query("UPDATE tickets SET status='Planning Failed',updated_at=now() WHERE id=$1", [ticket.id]);
       await client.query(
         `INSERT INTO ticket_status_history
          (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
-         VALUES ($1,'Planning',$2,'Planning job failed','worker',$3,$4)`,
-        [ticket.id, expectedStatus, job.id, runId],
+         VALUES ($1,'Planning','Planning Failed',$2,'worker',$3,$4)`,
+        [ticket.id, `Planning job failed: ${message.slice(0, 500)}`, job.id, runId],
       );
+      await enqueueNotification(client, "planning.failed", ticket.id, runId, { runId });
     });
     throw error;
   } finally {

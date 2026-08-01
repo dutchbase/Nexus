@@ -1,5 +1,5 @@
 export type NotificationEvent =
-  | "ticket.created" | "planning.started" | "plan.ready_for_review"
+  | "ticket.created" | "planning.started" | "planning.failed" | "plan.ready_for_review"
   | "execution.started" | "execution.completed" | "pr.ready_for_review";
 
 export function buildNotificationPayload(input: {

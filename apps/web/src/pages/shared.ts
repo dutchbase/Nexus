@@ -6,7 +6,7 @@ export { pool, adminPage, escapeHtml };
 // Shared by both the admin page renderers and the admin API.
 export const validStatuses = new Set([
   "Submitted", "Triage", "Needs Information", "Rejected", "Approved for Planning", "Planning Queued",
-  "Planning", "Plan Ready for Review", "Plan Revision Requested", "Plan Revision Queued", "Plan Approved",
+  "Planning", "Planning Failed", "Plan Ready for Review", "Plan Revision Requested", "Plan Revision Queued", "Plan Approved",
   "Execution Queued", "Executing", "Validating", "Validation Failed", "Execution Failed", "PR Creation Failed",
   "PR Ready for Review", "PR Changes Requested", "PR Approved", "Merged", "Closed Without Merge", "Completed",
   "Cancelled", "Archived",
