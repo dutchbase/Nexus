@@ -888,6 +888,15 @@ async function publishExecutionAttempt(input: {
           created_at_provider,updated_at_provider,merged_at,closed_at,last_synced_at,changed_files)
          VALUES ($1,$2,$3,'github',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
                  $17,$18,$19,$20,now(),$21)
+         ON CONFLICT (project_id,number) DO UPDATE SET
+           ticket_id=EXCLUDED.ticket_id,execution_attempt_id=EXCLUDED.execution_attempt_id,
+           url=EXCLUDED.url,title=EXCLUDED.title,author=EXCLUDED.author,state=EXCLUDED.state,
+           review_state=EXCLUDED.review_state,check_state=EXCLUDED.check_state,is_draft=EXCLUDED.is_draft,
+           head_branch=EXCLUDED.head_branch,base_branch=EXCLUDED.base_branch,head_sha=EXCLUDED.head_sha,
+           merge_commit_sha=EXCLUDED.merge_commit_sha,created_at_provider=EXCLUDED.created_at_provider,
+           updated_at_provider=EXCLUDED.updated_at_provider,merged_at=EXCLUDED.merged_at,
+           closed_at=EXCLUDED.closed_at,last_synced_at=now(),changed_files=EXCLUDED.changed_files,
+           updated_at=now()
          RETURNING *`,
         [
           input.project.id, input.ticket.id, input.attempt.id,
