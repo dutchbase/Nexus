@@ -7,7 +7,7 @@ import { promisify } from "node:util";
 import { pool, inTransaction } from "@dcc/database";
 import {
   AiConfigurationError, approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
-  globalPromptTypes, enqueueNotification, importGithubPullRequests, projectPromptTypes, promptContentHash, PullRequestMergeError,
+  globalPromptTypes, enqueueNotification, importGithubPullRequests, promptContentHash, PullRequestMergeError,
   resolveAiConfiguration, setPullRequestTicketStatus, syncOpenPullRequests, syncPullRequest, validateAiSelection, type AiPhase,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
@@ -1004,7 +1004,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
   if (url.pathname === "/api/admin/prompts" && request.method === "POST") {
     const body = await bodyOf(request);
     const scope = body.scope === "project" ? "project" : body.scope === "global" ? "global" : null;
-    const validTypes: readonly string[] = scope === "global" ? globalPromptTypes : projectPromptTypes;
+    const validTypes: readonly string[] = globalPromptTypes;
     if (!scope || !validTypes.includes(body.prompt_type)) return json(response, 400, { error: "invalid prompt scope or type" });
     if ((scope === "project") !== Boolean(body.project_id)) return json(response, 400, { error: "project prompts require project_id" });
     validatePromptTemplate(body.content ?? "");
