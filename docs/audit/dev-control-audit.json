@@ -337,6 +337,24 @@
           "location": "apps/web/src/ui.ts",
           "symbol": "fontsHead / document",
           "observation": "Every rendered document includes external Google Fonts links plus inline style and script content, which constrains a strict CSP and adds third-party font requests."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/ui.ts",
+          "symbol": "adminPage mobile navigation opener",
+          "observation": "The mobile navigation trigger has an aria-label, but its click handler only toggles sidebar.open and the scrim; it does not expose expanded/controlled state or an Escape-key close path."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/design-tokens.css",
+          "symbol": "@media(max-width:979px) interactive control rules",
+          "observation": "The mobile rules give common buttons, links, inputs, and the hamburger a 44px minimum height, but do not set a corresponding minimum width; skill-chip buttons have no component-specific target sizing."
+        },
+        {
+          "source": "repository",
+          "location": ".github/workflows/ci.yml",
+          "symbol": "ci job steps",
+          "observation": "CI runs installation, TypeScript, and Vitest only; it contains no browser or contrast-validation step for the design-token color combinations."
         }
       ],
       "root_cause": ["Tab keyboard behavior, focus management, mobile navigation semantics, touch targets, reduced motion, contrast verification, and responsive data labeling need work.", "Some fixed-width layouts overflow.", "Attachments are not surfaced.", "Inline scripts/styles complicate CSP.", "External fonts add privacy/performance cost.", "Lower-priority accent-border inconsistencies should remain P3."],
