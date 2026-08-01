@@ -1,0 +1,2833 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="report-id" content="dev-control-engineering-audit-2026-08-01">
+  <meta name="source-commit" content="00b8539e645ebb8bb6ce8641223d4fb17d04e053">
+  <meta name="schema-version" content="1.2.0">
+  <meta name="json-sha256" content="c5f9b176173821651f7710512c956041935180a950d0e7e9c35db11267003e3d">
+  <meta name="json-path" content="docs/audit/dev-control-audit.json">
+  <meta name="html-path" content="docs/audit/dev-control-audit.html">
+  <title>Dev Control engineering audit</title>
+  <style>
+    :root { color-scheme: light; --ink:#17202a; --muted:#52606d; --line:#c7d0d9; --paper:#fff; --wash:#f4f7f9; --link:#0645ad; --p0:#8b1020; --p1:#8a4b08;
+      --p2:#315c1b; --p3:#475569; }
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body { margin:0; background:var(--wash); color:var(--ink); font:16px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+      }
+    main { max-width:1180px; margin:auto; background:var(--paper); min-height:100vh; padding:2rem clamp(1rem,4vw,4rem) 5rem; }
+    h1,h2,h3,h4,h5 { line-height:1.2; }
+    h1 { font-size:clamp(2rem,5vw,3.5rem); margin-bottom:.25rem; }
+    h2 { border-bottom:2px solid var(--ink); padding-bottom:.35rem; margin-top:3rem; }
+    a { color:var(--link); }
+    a:focus-visible, summary:focus-visible { outline:3px solid #ffbf47; outline-offset:3px; }
+    code,pre { font-family:ui-monospace,SFMono-Regular,Consolas,monospace; }
+    code { overflow-wrap:anywhere; }
+    .lede,.muted { color:var(--muted); }
+    .metadata { display:grid; grid-template-columns:minmax(10rem,14rem) 1fr; gap:.4rem 1rem; }
+    .metadata dt { font-weight:700; }
+    .metadata dd { margin:0; overflow-wrap:anywhere; }
+    .toc { columns:2 20rem; }
+    .priority { display:inline-block; border:1px solid currentColor; border-radius:.25rem; padding:.08rem .4rem; font-weight:800; }
+    .P0 { color:var(--p0); } .P1 { color:var(--p1); } .P2 { color:var(--p2); } .P3 { color:var(--p3); }
+    .group { border:1px solid var(--line); border-radius:.4rem; margin:1rem 0; background:#fff; }
+    .group > summary { cursor:pointer; font-weight:800; padding:1rem; background:var(--wash); }
+    .group-body { padding:0 1rem 1rem; }
+    .finding,.roadmap-item { border-left:4px solid var(--line); padding:.2rem 0 .5rem 1rem; margin:2rem 0; }
+    .prompt { max-width:100%; overflow:auto; white-space:pre-wrap; overflow-wrap:anywhere; background:#101820; color:#f6f8fa; padding:1rem; border-radius:.35rem;
+      }
+    table { border-collapse:collapse; width:100%; }
+    th,td { border:1px solid var(--line); padding:.55rem; text-align:left; vertical-align:top; }
+    th { background:var(--wash); }
+    @media (max-width:700px) { main { padding:1rem; } .metadata { grid-template-columns:1fr; } .metadata dd { margin-bottom:.6rem; } .toc { columns:1;
+      } }
+    @media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } *,*::before,*::after { animation-duration:.01ms !important; animation-iteration-count:1
+      !important; transition-duration:.01ms !important; } }
+    @media print { body { background:#fff; font-size:10pt; } main { max-width:none; padding:0; } details > * { display:block !important; } .group
+      { break-before:page; border:0; } a { color:inherit; text-decoration:none; } .prompt { color:#000; background:#fff; border:1px solid #777;
+      } }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <p class="muted">Engineering audit · generated 2026-08-01</p>
+    <h1>Dev Control engineering audit</h1>
+    <p class="lede">Complete and verify every P0 stabilization exit before any Phase 1-4 feature work.</p>
+  </header>
+
+  <section aria-labelledby="provenance">
+    <h2 id="provenance">Provenance</h2>
+    <dl class="metadata">
+      <dt>Report ID</dt><dd>dev-control-engineering-audit-2026-08-01</dd>
+      <dt>Schema version</dt><dd>1.2.0</dd>
+      <dt>Source commit</dt><dd><code>00b8539e645ebb8bb6ce8641223d4fb17d04e053</code></dd>
+      <dt>Canonical JSON</dt><dd><a href="./dev-control-audit.json">docs/audit/dev-control-audit.json</a></dd>
+      <dt>Stable HTML</dt><dd>docs/audit/dev-control-audit.html</dd>
+      <dt>Exact JSON SHA-256</dt><dd><code>c5f9b176173821651f7710512c956041935180a950d0e7e9c35db11267003e3d</code></dd>
+    </dl>
+    <p>/admin/audit remains the operational database audit-log UI; it is not a stable path for this engineering report.</p>
+    <p>Read-only code, configuration, workflow, and aggregate runtime-observation audit of Dev Control. No production mutation, secret access,
+      or destructive test was performed.</p>
+    <p>Every finding cites direct repository symbol, runtime aggregate, or official documentation evidence. Evidence is scoped to the source commit
+      and must be revalidated before remediation.</p>
+    <p>Credentials, environment values, ticket or prompt content, personal data, raw rows, raw logs, upload contents, and notification destinations
+      are excluded.</p>
+  </section>
+
+  <nav aria-labelledby="contents">
+    <h2 id="contents">Contents</h2>
+    <ol class="toc">
+      <li><a href="#executive-summary">Executive summary</a></li>
+      <li><a href="#contract">Product contract</a></li>
+      <li><a href="#verification">Verification evidence</a></li>
+      <li><a href="#remediation">Remediation groups and findings</a></li>
+      <li><a href="#roadmap">Roadmap</a></li>
+      <li><a href="#limitations">Limitations</a></li>
+    </ol>
+  </nav>
+
+  <section id="executive-summary">
+    <h2>Executive summary</h2>
+    <p><strong>Overall risk:</strong> high.</p>
+    <p><strong>Findings:</strong> 67 total — P0 10, P1 44, P2 13, P3 0.</p>
+    <p><strong>P0 exits:</strong> <a href="#G07-F04">G07-F04</a>, <a href="#G03-F01">G03-F01</a>, <a href="#G03-F02">G03-F02</a>, <a href="#G01-F01">G01-F01</a>,
+      <a href="#G01-F02">G01-F02</a>, <a href="#G02-F01">G02-F01</a>, <a href="#G02-F03">G02-F03</a>, <a href="#G04-F05">G04-F05</a>, <a href="#G05-F01">G05-F01</a>,
+      <a href="#G05-F02">G05-F02</a>.</p>
+    <p><strong>Top risks:</strong> <a href="#G03-F01">G03-F01</a>, <a href="#G04-F05">G04-F05</a>, <a href="#G02-F01">G02-F01</a>, <a href="#G05-F01">G05-F01</a>,
+      <a href="#G05-F02">G05-F02</a>, <a href="#G07-F04">G07-F04</a>, <a href="#G01-F02">G01-F02</a>.</p>
+    <h3>Remediation order</h3>
+    <ol><li><a href="#G09-data-lifecycle">G09-data-lifecycle</a></li>
+      <li><a href="#G07-auth-secrets">G07-auth-secrets</a></li>
+      <li><a href="#G03-approval-reproducibility">G03-approval-reproducibility</a></li>
+      <li><a href="#G01-workflow-state">G01-workflow-state</a></li>
+      <li><a href="#G02-execution-safety">G02-execution-safety</a></li>
+      <li><a href="#G04-github-integrity">G04-github-integrity</a></li>
+      <li><a href="#G05-deployment-safety">G05-deployment-safety</a></li>
+      <li><a href="#G06-public-intake">G06-public-intake</a></li>
+      <li><a href="#G08-notifications">G08-notifications</a></li>
+      <li><a href="#G10-operational-truth">G10-operational-truth</a></li>
+      <li><a href="#G11-frontend-quality">G11-frontend-quality</a></li>
+      <li><a href="#G12-ci-maintainability">G12-ci-maintainability</a></li></ol>
+    <h3>Strengths</h3>
+<ul>
+  <li>Queue claim uses a transaction and SKIP LOCKED.</li>
+  <li>Health and scoped test baselines were available at the audit point.</li>
+  <li>Deploy handling validates webhook signatures and deduplicates delivery identifiers.</li>
+</ul>
+  </section>
+
+  <section id="contract">
+    <h2>Product contract</h2>
+    <p>Dev Control is an operator-controlled system for planning, executing, validating, reviewing, and publishing repository changes. Existing
+      merge and deploy behavior is intentional; remediation hardens rather than removes it.</p>
+    <h3>Safety invariants</h3>
+<ul>
+  <li>Every externally visible state transition is attributable, durable, and recoverable.</li>
+  <li>Repair, review, merge, and deploy act only on approved current immutable input and target revision.</li>
+  <li>The web process does not hold broad write or deployment authority when a durable job can own it.</li>
+  <li>Public intake is validated, rate-limited, scoped, and cleaned on every failure path.</li>
+  <li>Operational status distinguishes observations from guarantees and never masks verification failure.</li>
+</ul>
+    <h3>Priority definitions</h3>
+    <table><thead><tr><th>Priority</th><th>Definition</th></tr></thead><tbody>
+      <tr><td><span class="priority P0">P0</span></td><td>Unsafe publication/deployment, data loss, severe security, or a core workflow that lies
+        about success.</td></tr>
+      <tr><td><span class="priority P1">P1</span></td><td>Major correctness, security, or reliability risk.</td></tr>
+      <tr><td><span class="priority P2">P2</span></td><td>Meaningful UX, performance, or maintainability opportunity.</td></tr>
+      <tr><td><span class="priority P3">P3</span></td><td>Polish with no current material operational impact.</td></tr>
+    </tbody></table>
+    <h3>Official references</h3>
+    <ul><li><a href="https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28">GitHub pull requests</a></li>
+      <li><a href="https://docs.github.com/en/rest/pulls/reviews?apiVersion=2022-11-28">GitHub
+      pull request reviews</a></li>
+      <li><a href="https://docs.github.com/en/rest/pulls/review-requests?apiVersion=2022-11-28">GitHub review requests</a></li>
+      <li><a href="https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api?apiVersion=2022-11-28">GitHub
+      REST pagination</a></li>
+      <li><a href="https://code.claude.com/docs/en/cli-reference">Claude Code CLI permissions and model flags</a></li>
+      <li><a href="https://code.claude.com/docs/en/iam">Claude
+      Code authentication and access management</a></li></ul>
+  </section>
+
+  <section id="verification">
+    <h2>Verification evidence</h2>
+    <table><thead><tr><th>Check</th><th>Status</th><th>Evidence</th></tr></thead><tbody>
+      <tr><td>TypeScript</td><td>passed</td><td>pnpm exec tsc --noEmit</td></tr>
+      <tr><td>Scoped Vitest</td><td>passed</td><td>pnpm exec vitest run apps packages — 46/46 tests passed at the audit point; rerun for this
+        correction.</td></tr>
+      <tr><td>CI test handling</td><td>failed_control</td><td>.github/workflows/ci.yml — Vitest is wrapped with a success-producing fallback,
+        so CI can report success after test failure.</td></tr>
+      <tr><td>Health endpoint</td><td>passed_at_observation</td><td>GET /api/health — 200; database=ok; web=ok</td></tr>
+      <tr><td>Production dependency audit</td><td>passed_at_observation</td><td> — 15 production dependencies checked; zero known advisories</td></tr>
+    </tbody></table>
+    <h3>Point-in-time aggregate runtime observations</h3>
+    <p>These counts are observations, not invariants or trends. No raw rows or personal data are included.</p>
+    <table><tbody><tr><th>completed_jobs</th><td>55</td></tr>
+      <tr><th>failed_jobs</th><td>11</td></tr>
+      <tr><th>completed_agent_runs</th><td>44</td></tr>
+      <tr><th>failed_agent_runs</th><td>28</td></tr>
+      <tr><th>completed_jobs_linked_to_failed_runs</th><td>15</td></tr>
+      <tr><th>expired_active_sessions</th><td>11</td></tr>
+      <tr><th>stale_plans</th><td>2</td></tr>
+      <tr><th>current_running_jobs_over_one_hour</th><td>0</td></tr>
+      <tr><th>current_running_agent_runs_over_one_hour</th><td>0</td></tr>
+      <tr><th>orphan_attachments</th><td>0</td></tr></tbody></table>
+  </section>
+
+  <section id="remediation">
+    <h2>Remediation groups and findings</h2>
+<details class="group" id="G09-data-lifecycle" open>
+  <summary><span class="priority P1">P1</span> G09-data-lifecycle — order 1</summary>
+  <div class="group-body">
+    <p>Protect database and filesystem integrity through serialized migrations, enforceable invariants, atomic artifacts, retention, and tested
+      restore.</p>
+    <p><strong>Group dependencies:</strong> None</p>
+    <p><strong>Finding IDs:</strong> <a href="#G09-F01">G09-F01</a>, <a href="#G09-F02">G09-F02</a>, <a href="#G09-F03">G09-F03</a>, <a href="#G09-F04">G09-F04</a></p>
+    <h3>Group agent prompt</h3>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the G09-data-lifecycle entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Remediate only G09-F01, G09-F02, G09-F03, G09-F04.</pre>
+<article class="finding" id="G09-F01">
+  <h4><span class="priority P1">P1</span> G09-F01 — Migration execution is neither serialized nor uniquely ordered</h4>
+  <p><strong>Kind:</strong> integrity · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The runner checks/applies files without an advisory lock, and migration filenames can share numeric prefixes.</p>
+  <p><strong>Impact:</strong> Concurrent deploys or ambiguous ordering can diverge database schema state.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/database/src/migrate.ts</code> · <code>migration runner</code> — The runner creates schema_migrations and loops files without
+      a PostgreSQL advisory lock.</li>
+    <li><code>packages/database/migrations</code> · <code>migration filenames</code> — The directory contains numeric migration naming managed
+      only by full filename uniqueness, not a unique monotonic prefix policy.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Migration coordination and ordering rely on deployment convention rather than a database lock and validated
+    naming rule.</p>
+  <p><strong>Recommendation:</strong> Acquire a transaction/session advisory lock, validate unique monotonic prefixes, and fail before applying
+    an ambiguous set.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Concurrent migration processes serialize.</li>
+  <li>Duplicate or out-of-order prefixes fail before DDL.</li>
+  <li>A failed migration leaves an actionable recorded state.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>concurrent migrate</li>
+  <li>duplicate prefix</li>
+  <li>failed DDL</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> Document migration lock key and naming contract.</p>
+</article>
+<article class="finding" id="G09-F02">
+  <h4><span class="priority P1">P1</span> G09-F02 — Core status and append-only invariants rely on application code</h4>
+  <p><strong>Kind:</strong> integrity · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Several tables store free-form statuses or audit/provenance rows without complete database-enforced lifecycle constraints.</p>
+  <p><strong>Impact:</strong> A bug or maintenance query can create impossible transitions or delete required history.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/database/migrations/001_foundation.sql</code> · <code>jobs / audit_events / tickets / agent_runs</code> — Multiple workflow
+      status columns are text without table-level state/data checks, and audit history is not protected from deletion.</li>
+    <li><code>packages/database/migrations/004_prompt_system.sql</code> · <code>prompt_versions / prompt_snapshots</code> — Some hash/scope constraints
+      exist, demonstrating that other lifecycle invariants can also be enforced at the DB boundary.</li>
+  </ul>
+  <p><strong>Root cause:</strong> The database is treated as storage while workflow validity and append-only guarantees live mainly in callers.</p>
+  <p><strong>Recommendation:</strong> Add targeted CHECK/foreign-key/trigger protections for stable invariants and review indexes against actual
+    high-value queries before adding any.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Invalid stable statuses and broken required relationships fail in PostgreSQL.</li>
+  <li>Append-only audit/provenance deletion is blocked or tightly privileged.</li>
+  <li>Every added index is justified by an EXPLAIN-backed query.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>constraint rejection</li>
+  <li>append-only delete</li>
+  <li>query-plan index</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G09-F01">G09-F01</a></p>
+  <p><strong>Interface changes:</strong> Document database-enforced invariants.</p>
+</article>
+<article class="finding" id="G09-F03">
+  <h4><span class="priority P1">P1</span> G09-F03 — Filesystem artifacts and database references are not atomically published</h4>
+  <p><strong>Kind:</strong> integrity · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Plan, log, upload, and worktree artifacts are written outside PostgreSQL transactions that reference them.</p>
+  <p><strong>Impact:</strong> Crashes can create orphan files or live rows with missing content.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/worker/src/worker.ts</code> · <code>storePlan / log path / worktree paths</code> — Filesystem paths are created and then stored
+      in run/plan/attempt metadata across separate operations.</li>
+    <li><code>apps/web/src/server.ts</code> · <code>upload/submission handlers</code> — Upload files and attachment/database rows require manual
+      compensation across failure paths.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Artifact lifecycle has no shared staged/finalized state or reconciliation job across filesystem and database
+    boundaries.</p>
+  <p><strong>Recommendation:</strong> Write to staged identities, commit the row, atomically rename/finalize, and reconcile expired staged or
+    missing artifacts.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>No active row points to a missing artifact after recovery.</li>
+  <li>Expired staged files are removed safely.</li>
+  <li>Finalized artifacts have an integrity hash and owner record.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>crash before row</li>
+  <li>crash after row</li>
+  <li>reconciler</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G09-F02">G09-F02</a></p>
+  <p><strong>Interface changes:</strong> Add artifact state, owner, hash, and finalization timestamp.</p>
+</article>
+<article class="finding" id="G09-F04">
+  <h4><span class="priority P1">P1</span> G09-F04 — Backup and retention claims do not cover complete tested recovery</h4>
+  <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The backup script dumps PostgreSQL only, while filesystem artifacts/configuration, scheduling, retention, and restore
+    verification are separate or absent.</p>
+  <p><strong>Impact:</strong> A nominal backup can be unusable for restoring the service's full state.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>scripts/backup.sh</code> · <code>backup script</code> — The script runs pg_dump to data/backups and does not manifest artifact/configuration
+      content or perform a restore verification.</li>
+    <li><code>apps/web/src/pages/operate.ts</code> · <code>settings/operations rendering</code> — Operator surfaces expose operational configuration
+      but do not provide a verified restore result or implemented scheduler contract.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Backup is a database command rather than a versioned full-service recovery product with lifecycle and drill
+    evidence.</p>
+  <p><strong>Recommendation:</strong> Create a manifest for database, required artifacts, and configuration references; implement truthful retention/scheduling
+    and an isolated restore drill.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Manifest covers DB, artifacts, and configuration references.</li>
+  <li>Retention and schedule match the displayed contract.</li>
+  <li>An isolated restore verifies service health and records the result.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>backup manifest</li>
+  <li>retention</li>
+  <li>isolated restore drill</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G09-F03">G09-F03</a></p>
+  <p><strong>Interface changes:</strong> Add backup/restore manifest and verification record.</p>
+</article>
+  </div>
+</details>
+<details class="group" id="G07-auth-secrets" open>
+  <summary><span class="priority P0">P0</span> G07-auth-secrets — order 2</summary>
+  <div class="group-body">
+    <p>Enforce secure HTTP, secret, authentication, and process authority boundaries.</p>
+    <p><strong>Group dependencies:</strong> <a href="#G09-data-lifecycle">G09-data-lifecycle</a></p>
+    <p><strong>Finding IDs:</strong> <a href="#G07-F01">G07-F01</a>, <a href="#G07-F02">G07-F02</a>, <a href="#G07-F03">G07-F03</a>, <a href="#G07-F04">G07-F04</a>,
+      <a href="#G07-F05">G07-F05</a>, <a href="#G07-F06">G07-F06</a>, <a href="#G07-F07">G07-F07</a>, <a href="#G07-F08">G07-F08</a></p>
+    <h3>Group agent prompt</h3>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the G07-auth-secrets entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Remediate only G07-F01, G07-F02, G07-F03, G07-F04, G07-F05, G07-F06, G07-F07, G07-F08.</pre>
+<article class="finding" id="G07-F01">
+  <h4><span class="priority P1">P1</span> G07-F01 — Authenticated HTTP security depends on optional runtime configuration</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Security headers are incomplete and Secure cookies depend on NODE_ENV being set correctly.</p>
+  <p><strong>Impact:</strong> A deployment configuration error can weaken session transport and browser defenses.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>production / login response / response helpers</code> — The production flag is NODE_ENV ===
+      production and is used to conditionally secure cookies; a complete authenticated security-header policy is not centralized.</li>
+    <li><code>deploy.sh</code> · <code>process restart</code> — The deploy script restarts processes without proving NODE_ENV=production or other
+      secure boot requirements.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Secure HTTP behavior is conditional and distributed instead of validated as a production boot invariant.</p>
+  <p><strong>Recommendation:</strong> Fail production boot closed without secure cookie/origin configuration and centralize headers including
+    CSP-compatible policy, frame, MIME, and referrer controls.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Production cannot start with insecure cookie configuration.</li>
+  <li>Authenticated responses include the documented header baseline.</li>
+  <li>Development behavior is explicit and separately tested.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>secure boot</li>
+  <li>header matrix</li>
+  <li>cookie attributes</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> Expose non-secret secure-config health fields.</p>
+</article>
+<article class="finding" id="G07-F02">
+  <h4><span class="priority P1">P1</span> G07-F02 — Expired admin sessions are rejected but never cleaned</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Authentication filters expired rows on read without deleting or expiring them operationally.</p>
+  <p><strong>Impact:</strong> Session storage grows indefinitely and settings cannot truthfully claim a cleanup lifecycle.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>sessionFor</code> — The session query requires expires_at &gt; now(), but the server contains
+      no expired-session deletion path.</li>
+    <li><code>packages/database/migrations/001_foundation.sql</code> · <code>admin_sessions.expires_at</code> — The schema stores expiry but defines
+      no database cleanup mechanism.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Session expiry is enforced as a read predicate without a retention or cleanup owner.</p>
+  <p><strong>Recommendation:</strong> Add bounded scheduled cleanup or delete expired rows during an existing maintenance pass, with an observable
+    result.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Expired sessions cannot authenticate.</li>
+  <li>Expired rows are removed within the documented interval.</li>
+  <li>Cleanup never deletes unexpired sessions.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>expired rejection</li>
+  <li>cleanup boundary</li>
+  <li>active-session preservation</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G09-F04">G09-F04</a></p>
+  <p><strong>Interface changes:</strong> Expose session cleanup freshness and count without actor data.</p>
+</article>
+<article class="finding" id="G07-F03">
+  <h4><span class="priority P1">P1</span> G07-F03 — Secret storage and redaction accept literal credentials</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Notification configuration can store authorization headers directly and error redaction covers only selected paths.</p>
+  <p><strong>Impact:</strong> Secrets can persist in JSON, logs, or returned errors beyond the intended secret boundary.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/notification-provider/src/index.ts</code> · <code>Configuration / createNotificationProvider</code> — Configuration accepts
+      authorization_header directly as well as a secret reference.</li>
+    <li><code>apps/web/src/server.ts</code> · <code>notification provider save / redactConfiguration</code> — The write route accepts authorization_header,
+      while the response helper only hides it from selected output.</li>
+    <li><code>packages/notification-provider/src/index.ts</code> · <code>redactNotificationError</code> — Notification error redaction is provider-specific
+      rather than a process-wide structured logging policy.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Credential values are allowed in general configuration and redaction is applied after errors are formatted.</p>
+  <p><strong>Recommendation:</strong> Require secret references or encrypted storage, remove literals, and apply structured allowlisted error/log
+    serialization before persistence or response.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Literal credentials are rejected.</li>
+  <li>Known secret canaries never appear in rows, logs, or responses.</li>
+  <li>Rotation changes a reference without rewriting unrelated config.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>literal credential rejection</li>
+  <li>error/log canary</li>
+  <li>rotation</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G09-F02">G09-F02</a></p>
+  <p><strong>Interface changes:</strong> Expose only secret reference identifiers and configured booleans.</p>
+</article>
+<article class="finding" id="G07-F04">
+  <h4><span class="priority P0">P0</span> G07-F04 — Web handlers hold direct GitHub write and deployment authority</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Authenticated web routes can perform provider mutations instead of only enqueueing durable least-privilege jobs.</p>
+  <p><strong>Impact:</strong> A web-process compromise can gain broad repository or deployment side effects.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>pull-request admin routes / providerConfigFrom</code> — The web server imports provider operations
+      and owns routes that trigger review/merge or other GitHub-related mutations.</li>
+    <li><code>packages/domain/src/pr-merge.ts</code> · <code>approveAndMergePullRequest</code> — Merge is a callable domain/provider side effect
+      rather than exclusively a worker job boundary.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Process roles are divided by convention while the web process retains credentials and direct write call paths.</p>
+  <p><strong>Recommendation:</strong> Give web only read/enqueue capability; execute GitHub writes and deploys in audited jobs with narrower credentials
+    and policy checks.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Web runs without GitHub write or deployment credentials.</li>
+  <li>Every write has a durable job, actor, approved target, and idempotency key.</li>
+  <li>Worker credentials are scoped to the exact provider operations required.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>web credential absence</li>
+  <li>write job audit</li>
+  <li>least-privilege credential</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> Publish process-role capability health without credential values.</p>
+</article>
+<article class="finding" id="G07-F05">
+  <h4><span class="priority P1">P1</span> G07-F05 — Password administration exposes secrets and truncates edge-case input</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Admin creation reads a password from argv, and the line-based native helper has fixed buffers and newline semantics.</p>
+  <p><strong>Impact:</strong> Passwords can appear in process listings or be silently truncated or altered at newline boundaries.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>scripts/create-admin.ts</code> · <code>--password argument</code> — The non-interactive command reads the password from process.argv.</li>
+    <li><code>packages/database/native/argon2-helper.c</code> · <code>read_line / password buffer</code> — The helper reads a line into a fixed
+      4096-byte buffer and strips CR/LF.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Password transport uses command-line and line-oriented process conventions instead of a protected binary-safe
+    input contract.</p>
+  <p><strong>Recommendation:</strong> Read the password from stdin or a protected descriptor and reject unsupported length/newline input explicitly.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Password values never appear in argv.</li>
+  <li>Length and newline limits are explicit and fail closed.</li>
+  <li>Hash and verify use the same binary-safe input contract.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>argv secrecy</li>
+  <li>maximum length</li>
+  <li>embedded newline</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> Document the supported password-input contract.</p>
+</article>
+<article class="finding" id="G07-F06">
+  <h4><span class="priority P1">P1</span> G07-F06 — CSRF verification uses ordinary string comparison</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The request token is hashed and compared to the stored hash with JavaScript string inequality.</p>
+  <p><strong>Impact:</strong> The security boundary lacks an explicit equal-length constant-time comparison.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>requireAdmin CSRF branch</code> — The branch evaluates hash(csrf) !== session.csrf_token_hash.</li>
+  </ul>
+  <p><strong>Root cause:</strong> CSRF verification uses general string equality rather than a constant-time byte comparison helper.</p>
+  <p><strong>Recommendation:</strong> Decode equal-length hash bytes and compare them with timingSafeEqual; reject malformed lengths before comparison.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Valid tokens pass.</li>
+  <li>Malformed and unequal-length tokens fail without throwing.</li>
+  <li>The comparison path uses timingSafeEqual.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>valid CSRF</li>
+  <li>invalid CSRF</li>
+  <li>unequal-length CSRF</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> Keep the existing 403 contract with a stable csrf_invalid code.</p>
+</article>
+<article class="finding" id="G07-F07">
+  <h4><span class="priority P1">P1</span> G07-F07 — Client identity ignores trusted reverse-proxy configuration</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Audit and throttle identity always uses the socket peer address.</p>
+  <p><strong>Impact:</strong> Behind a reverse proxy, every client can collapse to one proxy address and source-based controls become inaccurate.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>ipOf</code> — The helper returns request.socket.remoteAddress and has no trusted-proxy policy
+      or forwarded-address parsing.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Client IP derivation has no explicit deployment trust model.</p>
+  <p><strong>Recommendation:</strong> Configure trusted proxy hops and accept forwarded client addresses only from those peers; otherwise retain
+    the socket address.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Direct untrusted forwarding headers are ignored.</li>
+  <li>A configured trusted proxy yields the intended client address.</li>
+  <li>Audit output never stores an unvalidated address chain.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>direct socket</li>
+  <li>spoofed forwarded header</li>
+  <li>trusted proxy chain</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G07-F01">G07-F01</a></p>
+  <p><strong>Interface changes:</strong> Document trusted-proxy configuration and identity source.</p>
+</article>
+<article class="finding" id="G07-F08">
+  <h4><span class="priority P1">P1</span> G07-F08 — Login throttling permits username-targeted denial of service</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Failure counting is keyed only by username, then blocks the account after a fixed threshold.</p>
+  <p><strong>Impact:</strong> An attacker can intentionally lock an administrator account regardless of source identity.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>login failure query and lockout branch</code> — The failure query filters by username and
+      time only, then returns account temporarily locked at lockoutThreshold.</li>
+    <li><code>packages/database/migrations/001_foundation.sql</code> · <code>login_attempts</code> — The table stores username, attempted_at,
+      and succeeded but no client/network key used by the query.</li>
+  </ul>
+  <p><strong>Root cause:</strong> The throttle budget is account-global rather than combining source-sensitive limits with account-safe backoff.</p>
+  <p><strong>Recommendation:</strong> Use bounded source and account signals that slow attacks without allowing one source to lock an account
+    globally; preserve uniform credential errors.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>One hostile source cannot globally lock a username.</li>
+  <li>High-rate failures are throttled.</li>
+  <li>Unknown and valid usernames remain indistinguishable.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>targeted username attack</li>
+  <li>source burst</li>
+  <li>unknown-user parity</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G07-F07">G07-F07</a></p>
+  <p><strong>Interface changes:</strong> Return retry timing without disclosing account existence.</p>
+</article>
+  </div>
+</details>
+<details class="group" id="G03-approval-reproducibility" open>
+  <summary><span class="priority P0">P0</span> G03-approval-reproducibility — order 3</summary>
+  <div class="group-body">
+    <p>Bind approval to one immutable reproducible execution input.</p>
+    <p><strong>Group dependencies:</strong> <a href="#G09-data-lifecycle">G09-data-lifecycle</a>, <a href="#G07-auth-secrets">G07-auth-secrets</a></p>
+    <p><strong>Finding IDs:</strong> <a href="#G03-F01">G03-F01</a>, <a href="#G03-F02">G03-F02</a>, <a href="#G03-F03">G03-F03</a>, <a href="#G03-F04">G03-F04</a>,
+      <a href="#G03-F05">G03-F05</a></p>
+    <h3>Group agent prompt</h3>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the G03-approval-reproducibility entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Remediate only G03-F01, G03-F02, G03-F03, G03-F04, G03-F05.</pre>
+<article class="finding" id="G03-F01">
+  <h4><span class="priority P0">P0</span> G03-F01 — Execution does not consume one immutable approved input snapshot</h4>
+  <p><strong>Kind:</strong> integrity · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Execution re-resolves prompts, skills, project configuration, and model rather than loading one approved bundle.</p>
+  <p><strong>Impact:</strong> The worker can execute inputs different from those the administrator reviewed.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/worker/src/worker.ts</code> · <code>executionInputs / resolvedPrompt / resolvedSkillsFor</code> — Execution queries current
+      prompt versions, skills, project config, and AI configuration at run time.</li>
+    <li><code>apps/worker/src/worker.ts</code> · <code>runExecution</code> — Skill snapshot selection uses the earliest ticket snapshot ordered
+      by created_at rather than an approval-bound snapshot.</li>
+    <li><code>apps/web/src/server.ts</code> · <code>plan approval route</code> — Approval stores several version fields, but the execution resolver
+      does not load one immutable approved snapshot object.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Approval metadata is recorded field-by-field while execution independently resolves effective inputs.</p>
+  <p><strong>Recommendation:</strong> Persist one content-addressed approved snapshot containing plan, prompts, skills, model, project revision,
+    and policy; execute only that snapshot.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Preview, approval, and worker report the same input hash.</li>
+  <li>Any material input change invalidates approval.</li>
+  <li>The approved model and skill versions are used exactly.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>approved snapshot selection</li>
+  <li>prompt/skill/model drift</li>
+  <li>preview/worker hash equality</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G09-F02">G09-F02</a></p>
+  <p><strong>Interface changes:</strong> Add approved_snapshot_id and input_hash to plan and execution APIs.</p>
+</article>
+<article class="finding" id="G03-F02">
+  <h4><span class="priority P0">P0</span> G03-F02 — Approval and rejection transitions are not one compare-and-swap</h4>
+  <p><strong>Kind:</strong> correctness · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Status checks, version checks, metadata updates, and queueing span multiple reads and writes.</p>
+  <p><strong>Impact:</strong> Concurrent approval, rejection, or revision can leave active approval metadata inconsistent with the current plan.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>plan approve / reject / execute routes</code> — Routes query current versions and then update
+      ticket approval/status fields in transactions, but do not use one version-and-status compare-and-swap predicate for the complete transition.</li>
+    <li><code>packages/domain/src/plan-approval.ts</code> · <code>checkPlanApprovalGate</code> — The gate checks current version/hash/staleness,
+      then callers perform later transitions that require their own locked recheck.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Approval state is distributed across ticket and plan fields without a single immutable approval record and CAS
+    transition.</p>
+  <p><strong>Recommendation:</strong> Create an append-only approval decision record and atomically transition only from the expected plan/status/version
+    hash; clear all active approval references on rejection.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Exactly one concurrent decision wins.</li>
+  <li>Rejection leaves history but no active approval reference.</li>
+  <li>Execution queueing and approval consumption share the locked expected snapshot.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>approval/rejection race</li>
+  <li>revision race</li>
+  <li>metadata clearing</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G03-F01">G03-F01</a></p>
+  <p><strong>Interface changes:</strong> Return stable approval conflict codes and current snapshot ID.</p>
+</article>
+<article class="finding" id="G03-F03">
+  <h4><span class="priority P1">P1</span> G03-F03 — Skill and mandatory prompt policy is not enforced as an approved contract</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Required skill phases, ticket override permissions, and mandatory safety instructions are resolved through separate
+    configuration paths.</p>
+  <p><strong>Impact:</strong> An execution can omit a required control or apply an override that was not visible at approval.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/worker/src/worker.ts</code> · <code>resolvedSkillsFor</code> — The SQL collects global, automatic, ticket-selected, and phase-required
+      candidates, then resolves them at runtime.</li>
+    <li><code>packages/database/migrations/001_foundation.sql</code> · <code>project_skills.allow_ticket_override</code> — The schema stores override
+      policy, but resolvedSkillsFor does not select or enforce allow_ticket_override.</li>
+    <li><code>packages/domain/src/prompts.ts</code> · <code>buildPlanningPrompt / buildExecutionPrompt</code> — Safety sections are prompt inputs,
+      so their presence must be part of the approved immutable contract.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Policy sources are resolved dynamically and are not validated into one approval-bound allow/deny decision.</p>
+  <p><strong>Recommendation:</strong> Resolve required skills, override permission, and mandatory safety prompts during preflight; fail closed
+    and bind the result to the approved snapshot.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>A missing required skill blocks approval.</li>
+  <li>Disallowed ticket overrides are rejected.</li>
+  <li>Mandatory safety text cannot be disabled and its hash is visible before approval.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>required skill missing</li>
+  <li>override policy</li>
+  <li>mandatory prompt hash</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G03-F01">G03-F01</a></p>
+  <p><strong>Interface changes:</strong> Expose policy resolution sources and hashes.</p>
+</article>
+<article class="finding" id="G03-F04">
+  <h4><span class="priority P1">P1</span> G03-F04 — Configuration provenance and staleness signals can diverge</h4>
+  <p><strong>Kind:</strong> maintainability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Prompt previews, imported project updates, and validation timestamps do not all use the same versioned input identity.</p>
+  <p><strong>Impact:</strong> Operators can be asked to reapprove unchanged inputs or miss a material unversioned change.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>prompt-preview / project update / GitHub import routes</code> — Preview resolves current inputs;
+      normal project updates increment config_version, while imported/synchronized fields and validation metadata follow separate update paths.</li>
+    <li><code>apps/worker/src/worker.ts</code> · <code>planningInputs / executionInputs promptVersionIds</code> — Prompt provenance stores scoped
+      values under generic keys and is recomputed separately in web and worker code.</li>
+  </ul>
+  <p><strong>Root cause:</strong> No canonical material-input hash separates approval-relevant configuration from operational metadata across
+    all writers.</p>
+  <p><strong>Recommendation:</strong> Define material approval inputs, version every writer that changes them, and exclude operational validation
+    metadata from the hash.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Material changes always change the input hash.</li>
+  <li>Validation timestamps alone never invalidate approval.</li>
+  <li>Preview and execution provenance use identical scoped keys.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>material config import</li>
+  <li>validation-only update</li>
+  <li>provenance key equality</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G03-F01">G03-F01</a></p>
+  <p><strong>Interface changes:</strong> Publish material-input hash and changed-field reasons.</p>
+</article>
+<article class="finding" id="G03-F05">
+  <h4><span class="priority P1">P1</span> G03-F05 — Plan ingestion depends on rigid Markdown headings</h4>
+  <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The parser requires a fixed ordered list of headings in generated Markdown.</p>
+  <p><strong>Impact:</strong> Semantically usable plans can fail and strand workflow because of harmless formatting variation.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/claude-runner/src/index.ts</code> · <code>parsePlanMarkdown / REQUIRED_PLAN_HEADINGS</code> — The parser validates an exact
+      ordered heading contract and throws invalid_plan_structure when headings differ.</li>
+    <li><code>runtime aggregate observation</code> · <code>failed_agent_runs / stale_plans</code> — The audit observed 28 failed agent runs and
+      2 stale plans, without attributing every count to this parser.</li>
+  </ul>
+  <p><strong>Root cause:</strong> A presentation format is used as the machine contract instead of parsing or requesting a structured result with
+    explicit fields.</p>
+  <p><strong>Recommendation:</strong> Accept a structured plan envelope or tolerant section parser while preserving required semantic sections
+    and human-readable Markdown.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Required semantic sections remain enforced.</li>
+  <li>Equivalent heading punctuation/order variations do not fail.</li>
+  <li>Malformed or missing required content returns an actionable code.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>heading variants</li>
+  <li>missing semantic section</li>
+  <li>legacy plan compatibility</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G03-F01">G03-F01</a></p>
+  <p><strong>Interface changes:</strong> Version the plan schema separately from Markdown rendering.</p>
+</article>
+  </div>
+</details>
+<details class="group" id="G01-workflow-state" open>
+  <summary><span class="priority P0">P0</span> G01-workflow-state — order 4</summary>
+  <div class="group-body">
+    <p>Make workflow ownership, recovery, idempotency, and publication transitions durable.</p>
+    <p><strong>Group dependencies:</strong> <a href="#G09-data-lifecycle">G09-data-lifecycle</a>, <a href="#G03-approval-reproducibility">G03-approval-reproducibility</a></p>
+    <p><strong>Finding IDs:</strong> <a href="#G01-F01">G01-F01</a>, <a href="#G01-F02">G01-F02</a>, <a href="#G01-F03">G01-F03</a>, <a href="#G01-F04">G01-F04</a></p>
+    <h3>Group agent prompt</h3>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the G01-workflow-state entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Remediate only G01-F01, G01-F02, G01-F03, G01-F04.</pre>
+<article class="finding" id="G01-F01">
+  <h4><span class="priority P0">P0</span> G01-F01 — Running work has no renewable ownership or automatic recovery</h4>
+  <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Jobs and notification deliveries are claimed without a lease heartbeat or bounded reaper.</p>
+  <p><strong>Impact:</strong> Process loss or authentication refusal can strand work and leave related records stale.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/domain/src/index.ts</code> · <code>claimJob / failJob</code> — Job claims set claimed_at and claimed_by, but no lease expiry
+      or heartbeat is stored or checked.</li>
+    <li><code>apps/worker/src/worker.ts</code> · <code>refuseQueuedClaudeJobs / deliverDueNotification</code> — Authentication refusal updates
+      queued jobs, while notification delivery changes a row to sending without renewable ownership or recovery.</li>
+    <li><code>runtime aggregate observation</code> · <code>expired_active_sessions / stale_plans</code> — The read-only audit observed 11 expired
+      active sessions and 2 stale plans; these are point-in-time counts, not invariants.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Workflow ownership is represented by one-time timestamps and statuses instead of renewable leases with expiry
+    and recovery transitions.</p>
+  <p><strong>Recommendation:</strong> Add lease owner, expiry, heartbeat, and bounded reaper semantics shared by jobs and deliveries; couple recovery
+    to ticket/run history.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Only the live lease owner can complete or fail work.</li>
+  <li>Expired work is recovered once with an audit event.</li>
+  <li>Authentication refusal leaves every related ticket and run in an actionable terminal or queued state.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>job lease expiry and reclaim</li>
+  <li>notification sending recovery</li>
+  <li>authentication-refusal state matrix</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G09-F02">G09-F02</a></p>
+  <p><strong>Interface changes:</strong> Expose lease expiry, owner, and recovery reason in operator APIs.</p>
+</article>
+<article class="finding" id="G01-F02">
+  <h4><span class="priority P0">P0</span> G01-F02 — Idempotency keys do not distinguish legitimate terminal reruns</h4>
+  <p><strong>Kind:</strong> correctness · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Enqueue conflicts return the existing job even when its terminal history should remain immutable and a new attempt
+    is requested.</p>
+  <p><strong>Impact:</strong> A rerun can be blocked, or retry code can make failed review/conflict work look completed before replacement work
+    succeeds.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/domain/src/index.ts</code> · <code>enqueueJob</code> — ON CONFLICT(idempotency_key) performs a no-op update and returns
+      the pre-existing row regardless of terminal status.</li>
+    <li><code>apps/worker/src/worker.ts</code> · <code>runPrAiReview / runPrConflictResolution / main dispatch</code> — Retryable handlers share
+      the jobs-table lifecycle, so their domain status and job completion must remain correlated across attempts.</li>
+  </ul>
+  <p><strong>Root cause:</strong> One permanent idempotency identity is used for both duplicate suppression and user-requested attempt identity.</p>
+  <p><strong>Recommendation:</strong> Keep the original job immutable and create an explicitly linked rerun identity; complete domain work only
+    after the replacement attempt succeeds.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>A terminal job can be rerun through a new linked identity.</li>
+  <li>Duplicate enqueue during an active attempt remains idempotent.</li>
+  <li>Failed review or conflict history never becomes completed merely because a retry was queued.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>terminal rerun identity</li>
+  <li>active duplicate suppression</li>
+  <li>review/conflict retry state matrix</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G01-F01">G01-F01</a></p>
+  <p><strong>Interface changes:</strong> Add immutable rerun_of and attempt identity fields.</p>
+</article>
+<article class="finding" id="G01-F03">
+  <h4><span class="priority P1">P1</span> G01-F03 — Publication and state events are not one atomic transition</h4>
+  <p><strong>Kind:</strong> integrity · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Several workflow paths update work state, history, and external publication in separate operations.</p>
+  <p><strong>Impact:</strong> A partial failure can leave the UI, audit history, and externally visible result disagreeing.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/worker/src/worker.ts</code> · <code>publishExecutionAttempt</code> — Publication performs multiple database and provider operations
+      around commit and pull-request state rather than one durable publication state machine.</li>
+    <li><code>packages/domain/src/index.ts</code> · <code>completeJob / failJob</code> — Job completion and failure update only the jobs row;
+      related ticket/run/event updates are performed by callers.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Workflow transitions have no shared transaction/outbox boundary tying domain state, history, and external side-effect
+    intent together.</p>
+  <p><strong>Recommendation:</strong> Use a transactional state transition plus durable outbox/publication record, then make external effects
+    idempotent.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>A database failure cannot publish an unrecorded result.</li>
+  <li>A provider failure preserves a retryable publication record and prior history.</li>
+  <li>Every externally visible transition has one attributable audit event.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>transaction rollback</li>
+  <li>provider failure retry</li>
+  <li>duplicate publication</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G01-F01">G01-F01</a>, <a href="#G09-F02">G09-F02</a></p>
+  <p><strong>Interface changes:</strong> Persist publication state and external idempotency key.</p>
+</article>
+<article class="finding" id="G01-F04">
+  <h4><span class="priority P2">P2</span> G01-F04 — The worker serializes unrelated job classes</h4>
+  <p><strong>Kind:</strong> performance · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> One loop claims and awaits at most one job while also polling synchronization and notification work.</p>
+  <p><strong>Impact:</strong> Throughput and recovery latency scale with the slowest operation despite operator surfaces implying general queue
+    capacity.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/worker/src/worker.ts</code> · <code>while (!stopping) main loop</code> — The loop awaits sync, delivery, one claim, and one
+      handler sequentially before the next iteration.</li>
+    <li><code>apps/web/src/pages/queue.ts</code> · <code>queue rendering</code> — The operator view reports queued/running work but has no documented
+      single-concurrency capacity contract.</li>
+  </ul>
+  <p><strong>Root cause:</strong> All job types share one sequential event loop without per-capability concurrency or a truthful capacity setting.</p>
+  <p><strong>Recommendation:</strong> Either label the worker as single-concurrency or add bounded per-capability concurrency after lease safety
+    is complete.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Displayed capacity matches actual behavior.</li>
+  <li>If concurrency is enabled, independent jobs overlap without double claims.</li>
+  <li>Shutdown waits for or safely expires active leases.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>capacity label</li>
+  <li>bounded concurrency</li>
+  <li>graceful shutdown</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G01-F01">G01-F01</a></p>
+  <p><strong>Interface changes:</strong> Expose configured and observed worker capacity.</p>
+</article>
+  </div>
+</details>
+<details class="group" id="G02-execution-safety" open>
+  <summary><span class="priority P0">P0</span> G02-execution-safety — order 5</summary>
+  <div class="group-body">
+    <p>Bind agent execution, repair, worktrees, and artifacts to scoped fresh attempts.</p>
+    <p><strong>Group dependencies:</strong> <a href="#G01-workflow-state">G01-workflow-state</a>, <a href="#G03-approval-reproducibility">G03-approval-reproducibility</a>,
+      <a href="#G07-auth-secrets">G07-auth-secrets</a>, <a href="#G09-data-lifecycle">G09-data-lifecycle</a></p>
+    <p><strong>Finding IDs:</strong> <a href="#G02-F01">G02-F01</a>, <a href="#G02-F02">G02-F02</a>, <a href="#G02-F03">G02-F03</a>, <a href="#G02-F04">G02-F04</a>,
+      <a href="#G02-F05">G02-F05</a>, <a href="#G02-F06">G02-F06</a></p>
+    <h3>Group agent prompt</h3>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the G02-execution-safety entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Remediate only G02-F01, G02-F02, G02-F03, G02-F04, G02-F05, G02-F06.</pre>
+<article class="finding" id="G02-F01">
+  <h4><span class="priority P0">P0</span> G02-F01 — Repair publication can reuse a prior attempt commit</h4>
+  <p><strong>Kind:</strong> integrity · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Repair and publication paths read stored result_commit/worktree metadata that can outlive the attempt being repaired.</p>
+  <p><strong>Impact:</strong> A repair can publish an old commit rather than the newly validated result.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/worker/src/worker.ts</code> · <code>publishExecutionAttempt / retryPublication</code> — Publication initializes commit from
+      execution_attempts.result_commit and retryPublication requires the stored commit, worktree, and branch.</li>
+    <li><code>apps/worker/src/worker.ts</code> · <code>runExecution validation failure updates</code> — Some failure paths clear result_commit,
+      showing correctness depends on every path resetting mutable attempt state.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Mutable publication fields are reused across attempts instead of binding each repair to a fresh immutable attempt
+    result.</p>
+  <p><strong>Recommendation:</strong> Clear publication state before repair and bind validation and publication to the new attempt ID, base commit,
+    result commit, and worktree.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>A repair cannot publish any prior attempt commit.</li>
+  <li>Publication rejects a commit not produced and validated by its attempt.</li>
+  <li>Prior attempt metadata remains immutable history.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>stale-commit repair regression</li>
+  <li>attempt/commit binding</li>
+  <li>publication retry</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G03-F01">G03-F01</a></p>
+  <p><strong>Interface changes:</strong> Persist immutable attempt input and result identities.</p>
+</article>
+<article class="finding" id="G02-F02">
+  <h4><span class="priority P1">P1</span> G02-F02 — Secret scanning assumes changed paths still exist in the index</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The validation flow can inspect staged content through git show :path even when a change deletes that path.</p>
+  <p><strong>Impact:</strong> A valid deletion can fail validation or bypass consistent scanning behavior.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/git-runner/src/index.ts</code> · <code>scanSecrets / validateExecutionWorktree</code> — Secret scanning derives content
+      from changed paths and invokes Git index content reads; deleted paths need explicit handling.</li>
+  </ul>
+  <p><strong>Root cause:</strong> The scanner models every changed path as an index blob and does not classify deletions before content inspection.</p>
+  <p><strong>Recommendation:</strong> Classify change status first; scan added/modified blobs and treat deletions as content-free while retaining
+    path-policy checks.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>A staged deletion validates without an invalid index read.</li>
+  <li>Added and modified secrets still fail closed.</li>
+  <li>Rename and binary behavior is documented and tested.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>staged deletion</li>
+  <li>rename</li>
+  <li>binary/secret fixture</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> None</p>
+</article>
+<article class="finding" id="G02-F03">
+  <h4><span class="priority P0">P0</span> G02-F03 — Agent and validation children inherit worker authority</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Claude and git validation subprocesses inherit process.env, while execution grants broad filesystem and shell tools.</p>
+  <p><strong>Impact:</strong> A repository instruction or command can access credentials and capabilities unrelated to the approved task.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/claude-runner/src/index.ts</code> · <code>invokePlanningClaude / invokeExecutionClaude</code> — Both invocation paths spread
+      process.env into the child environment and add the Claude OAuth token.</li>
+    <li><code>packages/git-runner/src/index.ts</code> · <code>run validation command</code> — Validation subprocesses use env: {...process.env}.</li>
+    <li><code>packages/claude-runner/src/index.ts</code> · <code>execution tool arguments</code> — Execution tool policy enables filesystem and
+      shell-capable tools rather than an OS-level authority boundary.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Child-process authority is inherited by default and prompt/tool declarations are treated as the isolation boundary.</p>
+  <p><strong>Recommendation:</strong> Pass an explicit environment allowlist, separate required credentials by process role, and enforce worktree/path
+    scope outside the prompt.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Child environments contain only documented variables.</li>
+  <li>A repository command cannot read GitHub/deploy/notification credentials.</li>
+  <li>Agent writes outside the assigned worktree are rejected.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>environment allowlist</li>
+  <li>credential canary</li>
+  <li>outside-worktree write refusal</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> Record the operation policy and environment profile without secret values.</p>
+</article>
+<article class="finding" id="G02-F04">
+  <h4><span class="priority P1">P1</span> G02-F04 — Execution worktrees are not guaranteed to start fresh and be reclaimed</h4>
+  <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Execution can use a stale local default branch, and cleanup tooling does not prove complete lifecycle recovery.</p>
+  <p><strong>Impact:</strong> Changes can be based on an obsolete revision or leave worktrees that interfere with later attempts.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/git-runner/src/index.ts</code> · <code>createExecutionWorktree / validateProject</code> — Worktree creation and repository
+      validation are separate operations; a current remote default-branch proof is not persisted with the attempt.</li>
+    <li><code>scripts/cleanup-worktrees.ts</code> · <code>script body</code> — Cleanup scans a configured directory but is not coupled to attempt
+      lease ownership or publication state.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Worktree creation, freshness proof, ownership, and cleanup are separate conventions rather than one attempt
+    lifecycle.</p>
+  <p><strong>Recommendation:</strong> Create from a freshly verified base SHA, persist it on the attempt, and reclaim only worktrees whose attempt
+    lease is terminal or expired.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Attempt base SHA equals the freshly resolved protected branch SHA.</li>
+  <li>Dirty or stale repositories fail before agent launch.</li>
+  <li>Cleanup never removes a live attempt and reclaims expired terminal worktrees.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>stale branch refusal</li>
+  <li>live-worktree protection</li>
+  <li>expired cleanup</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G01-F01">G01-F01</a>, <a href="#G09-F03">G09-F03</a></p>
+  <p><strong>Interface changes:</strong> Expose base SHA and worktree lifecycle status.</p>
+</article>
+<article class="finding" id="G02-F05">
+  <h4><span class="priority P1">P1</span> G02-F05 — Conflict-resolution permissions and path scope are inconsistent</h4>
+  <p><strong>Kind:</strong> correctness · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The conflict agent is asked to edit a worktree without a persisted allowlist limited to conflicted files.</p>
+  <p><strong>Impact:</strong> It can fail to edit or modify unrelated paths while still reaching validation and publication.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/worker/src/worker.ts</code> · <code>runPrConflictResolution</code> — The prompt contains conflicted file contents and the agent
+      runs in the full worktree; validation occurs after invocation, with no pre-invocation write allowlist persisted.</li>
+    <li><code>packages/domain/src/prompts.ts</code> · <code>renderConflictResolutionPrompt</code> — The prompt requests conflict resolution, so
+      correctness depends on tool allowance and enforced file scope matching that request.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Prompt intent, tool permissions, and filesystem enforcement are not derived from one scoped conflict-operation
+    policy.</p>
+  <p><strong>Recommendation:</strong> Generate one policy that permits edits only to conflicted paths plus explicitly required merge metadata,
+    and enforce it during and after execution.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>The agent can edit every conflicted file.</li>
+  <li>Writes outside the approved conflict set fail.</li>
+  <li>Remaining conflicts or unrelated diffs prevent publication.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>conflicted-file edit</li>
+  <li>unrelated write refusal</li>
+  <li>remaining-marker refusal</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G02-F03">G02-F03</a></p>
+  <p><strong>Interface changes:</strong> Persist allowed paths and tool policy for the conflict attempt.</p>
+</article>
+<article class="finding" id="G02-F06">
+  <h4><span class="priority P1">P1</span> G02-F06 — Planning output finalization is not crash-safe</h4>
+  <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Plan files, run completion, and database plan/version rows are finalized through separate filesystem and database
+    operations.</p>
+  <p><strong>Impact:</strong> Timeout or process loss can leave a running stream, orphan plan artifact, or database row pointing at incomplete
+    state.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/worker/src/worker.ts</code> · <code>runPlanning / storePlan / storeRevisedPlan</code> — Planning writes prompt and plan artifacts
+      around separate agent_run and transactional plan/version updates.</li>
+    <li><code>packages/claude-runner/src/index.ts</code> · <code>invokePlanningClaude</code> — Invocation is bounded by CLI turns but has no independently
+      persisted finalization lease tying stream completion to artifact commit.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Filesystem artifacts and run/plan state have no recoverable staging protocol with a final atomic publish marker.</p>
+  <p><strong>Recommendation:</strong> Use a bounded timeout and staged artifact state; finalize the row and rename/publish artifact idempotently,
+    with recovery for interrupted attempts.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Timed-out planning terminates and records a final state.</li>
+  <li>A crash before DB commit leaves no active plan pointing to an orphan artifact.</li>
+  <li>Recovery finalizes or removes staged artifacts idempotently.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>planning timeout</li>
+  <li>crash before commit</li>
+  <li>staged artifact recovery</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G01-F01">G01-F01</a>, <a href="#G09-F03">G09-F03</a></p>
+  <p><strong>Interface changes:</strong> Add artifact staging/finalization status.</p>
+</article>
+  </div>
+</details>
+<details class="group" id="G04-github-integrity" open>
+  <summary><span class="priority P0">P0</span> G04-github-integrity — order 6</summary>
+  <div class="group-body">
+    <p>Make GitHub synchronization, review, and merge decisions authoritative and head-bound.</p>
+    <p><strong>Group dependencies:</strong> <a href="#G01-workflow-state">G01-workflow-state</a>, <a href="#G03-approval-reproducibility">G03-approval-reproducibility</a>,
+      <a href="#G07-auth-secrets">G07-auth-secrets</a></p>
+    <p><strong>Finding IDs:</strong> <a href="#G04-F01">G04-F01</a>, <a href="#G04-F02">G04-F02</a>, <a href="#G04-F03">G04-F03</a>, <a href="#G04-F04">G04-F04</a>,
+      <a href="#G04-F05">G04-F05</a></p>
+    <h3>Group agent prompt</h3>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the G04-github-integrity entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Remediate only G04-F01, G04-F02, G04-F03, G04-F04, G04-F05.</pre>
+<article class="finding" id="G04-F01">
+  <h4><span class="priority P1">P1</span> G04-F01 — PR discovery is owner-ambiguous and single-page</h4>
+  <p><strong>Kind:</strong> correctness · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Open-head lookup omits owner qualification and list synchronization retrieves only one page.</p>
+  <p><strong>Impact:</strong> The system can match the wrong fork branch or silently miss pull requests beyond the first page.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/github-provider/src/index.ts</code> · <code>findOpenPullRequestForHead / listPullRequests</code> — The head query sends
+      the supplied ref without adding owner:, and listPullRequests requests per_page=100 with no Link-page traversal.</li>
+    <li><code>GitHub REST pull requests</code> · <code>List pull requests</code> — GitHub documents owner:ref head filtering and paginated list
+      responses. <a href="https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28">Official reference</a></li>
+  </ul>
+  <p><strong>Root cause:</strong> The provider adapter treats a page and branch name as complete repository identity.</p>
+  <p><strong>Recommendation:</strong> Require owner-qualified heads and traverse all Link pages with bounded cursors.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Fork branches with equal names are distinguished.</li>
+  <li>All pages synchronize without duplicates.</li>
+  <li>Interrupted pagination resumes or reports stale partial state.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>owner-qualified head</li>
+  <li>two-page list</li>
+  <li>pagination interruption</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> Expose synchronization cursor and completeness.</p>
+</article>
+<article class="finding" id="G04-F02">
+  <h4><span class="priority P1">P1</span> G04-F02 — Review and check truth is not materialized from authoritative APIs</h4>
+  <p><strong>Kind:</strong> integrity · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> PR list data is stored as review/check state even though the REST pull-request list does not supply complete policy
+    inputs.</p>
+  <p><strong>Impact:</strong> Operator and merge logic can act on absent, stale, or invented review/check state.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/domain/src/pull-request-sync.ts</code> · <code>importGithubPullRequests / updateStoredPullRequest</code> — Sync copies
+      remote.review_state and remote.check_state fields from provider list results into pull_requests.</li>
+    <li><code>apps/web/src/pages/prs.ts</code> · <code>review/check badges</code> — The page comments acknowledge REST PR responses do not populate
+      review_state and falls back to internal/AI state.</li>
+    <li><code>GitHub REST reviews and review requests</code> · <code>Reviews / requested reviewers</code> — GitHub exposes reviews and requested
+      reviewers through separate endpoints. <a href="https://docs.github.com/en/rest/pulls/reviews?apiVersion=2022-11-28">Official reference</a></li>
+  </ul>
+  <p><strong>Root cause:</strong> Synchronization does not aggregate reviews, requested reviewers, checks, head SHA, and source timestamps into
+    one authoritative policy snapshot.</p>
+  <p><strong>Recommendation:</strong> Fetch and store the proper review/check/reviewer/head inputs with freshness and rate-limit-aware polling
+    or webhook updates.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Displayed review/check state identifies its source and timestamp.</li>
+  <li>Requested reviewers and current head SHA are synchronized.</li>
+  <li>Rate limiting produces labeled stale state, not fabricated freshness.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>review aggregation</li>
+  <li>check aggregation</li>
+  <li>rate-limit stale state</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G04-F01">G04-F01</a></p>
+  <p><strong>Interface changes:</strong> Expose head SHA, policy inputs, and source freshness.</p>
+</article>
+<article class="finding" id="G04-F03">
+  <h4><span class="priority P1">P1</span> G04-F03 — GitHub transport policy is incomplete and inconsistent</h4>
+  <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> REST and GraphQL paths differ in API base behavior and lack one bounded retry/timeout/version policy.</p>
+  <p><strong>Impact:</strong> Enterprise/custom-base installations and transient failures can behave differently or hang without actionable state.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/github-provider/src/index.ts</code> · <code>request / requestWithoutBody / graphqlRequest</code> — GraphQL hardcodes https://api.github.com/graphql
+      while REST derives an environment API base; fetch calls have no shared timeout/retry/version wrapper.</li>
+    <li><code>packages/github-provider/src/index.ts</code> · <code>apiBaseUrl / authToken</code> — Environment fallback and validation are implemented
+      separately from user-facing configuration documentation.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Provider requests are individual fetch calls rather than one configured transport adapter.</p>
+  <p><strong>Recommendation:</strong> Centralize base URLs, API version headers, timeout, bounded retry/backoff, rate-limit metadata, and redacted
+    errors.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>REST and GraphQL honor the configured API base.</li>
+  <li>Every request has a timeout and bounded retry policy.</li>
+  <li>Rate-limit and transport errors return stable recovery metadata.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>custom API base</li>
+  <li>timeout</li>
+  <li>retry/backoff</li>
+  <li>redaction</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G04-F01">G04-F01</a></p>
+  <p><strong>Interface changes:</strong> Return provider freshness and retry-after metadata.</p>
+</article>
+<article class="finding" id="G04-F04">
+  <h4><span class="priority P1">P1</span> G04-F04 — AI review retry and verdict handling are not one idempotent state machine</h4>
+  <p><strong>Kind:</strong> correctness · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Review invocation, comment publication, verdict parsing, and row completion are separate operations.</p>
+  <p><strong>Impact:</strong> A retry can duplicate a comment or corrupt history after a partial failure, and ambiguous model output can be accepted
+    inconsistently.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/worker/src/worker.ts</code> · <code>runPrAiReview</code> — The handler invokes Claude, parses a verdict, posts a comment, then
+      updates review state through separate effects.</li>
+    <li><code>packages/domain/src/pr-review.ts</code> · <code>parsePrReviewVerdict</code> — Verdict extraction searches a JSON block and validates
+      selected fields, making parser strictness part of delivery state.</li>
+  </ul>
+  <p><strong>Root cause:</strong> No idempotent review-attempt/publication record binds model output, parsed verdict, external comment, and completion.</p>
+  <p><strong>Recommendation:</strong> Persist immutable review attempts and parsed envelopes before an idempotent comment outbox; never overwrite
+    prior failure history.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Retry after a posted comment does not post twice.</li>
+  <li>Malformed or ambiguous output fails with an actionable parser code.</li>
+  <li>Each attempt remains visible and terminal.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>post/update failure</li>
+  <li>duplicate retry</li>
+  <li>ambiguous verdict</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G01-F03">G01-F03</a>, <a href="#G03-F01">G03-F01</a></p>
+  <p><strong>Interface changes:</strong> Expose review attempt and publication IDs.</p>
+</article>
+<article class="finding" id="G04-F05">
+  <h4><span class="priority P0">P0</span> G04-F05 — Merge is not bound to the final head SHA, required checks, and reviews</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The merge provider call accepts repository, pull number, method, and message but no expected head SHA.</p>
+  <p><strong>Impact:</strong> A head update or missing policy input can be merged after approval, making the core workflow report success for
+    an unreviewed revision.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/github-provider/src/index.ts</code> · <code>mergePullRequest</code> — The merge request body does not send sha and the
+      function does not retrieve required checks/reviews immediately before merging.</li>
+    <li><code>packages/domain/src/pr-merge.ts</code> · <code>approveAndMergePullRequest</code> — The domain operation calls mergePullRequest after
+      local state checks without passing an expected head SHA.</li>
+    <li><code>GitHub REST pull requests</code> · <code>Merge a pull request</code> — GitHub's merge API supports an expected head SHA and reports
+      conflicts when it changes. <a href="https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28">Official reference</a></li>
+  </ul>
+  <p><strong>Root cause:</strong> Approval and merge are not a compare-and-swap against an authoritative final GitHub policy snapshot.</p>
+  <p><strong>Recommendation:</strong> Immediately re-read head, required checks, and required reviews; merge with expected SHA and record the
+    verified snapshot and response.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Changed head always refuses merge.</li>
+  <li>Missing or stale required checks/reviews refuse merge.</li>
+  <li>Success records the exact merged SHA and policy snapshot.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>head-race refusal</li>
+  <li>missing check</li>
+  <li>missing review</li>
+  <li>expected-SHA merge</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G03-F01">G03-F01</a>, <a href="#G04-F02">G04-F02</a></p>
+  <p><strong>Interface changes:</strong> Require expected_head_sha and policy_snapshot_id on merge jobs.</p>
+</article>
+  </div>
+</details>
+<details class="group" id="G05-deployment-safety" open>
+  <summary><span class="priority P0">P0</span> G05-deployment-safety — order 7</summary>
+  <div class="group-body">
+    <p>Allow deployment only through verified protected targets and recoverable release transactions.</p>
+    <p><strong>Group dependencies:</strong> <a href="#G02-execution-safety">G02-execution-safety</a>, <a href="#G04-github-integrity">G04-github-integrity</a>,
+      <a href="#G07-auth-secrets">G07-auth-secrets</a>, <a href="#G09-data-lifecycle">G09-data-lifecycle</a></p>
+    <p><strong>Finding IDs:</strong> <a href="#G05-F01">G05-F01</a>, <a href="#G05-F02">G05-F02</a>, <a href="#G05-F03">G05-F03</a>, <a href="#G05-F04">G05-F04</a>,
+      <a href="#G05-F05">G05-F05</a>, <a href="#G05-F06">G05-F06</a>, <a href="#G05-F07">G05-F07</a></p>
+    <h3>Group agent prompt</h3>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the G05-deployment-safety entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Remediate only G05-F01, G05-F02, G05-F03, G05-F04, G05-F05, G05-F06, G05-F07.</pre>
+<article class="finding" id="G05-F01">
+  <h4><span class="priority P0">P0</span> G05-F01 — Successful check events can deploy a non-protected-branch SHA</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The check_run handler passes a successful check's head SHA directly to deployment without proving it is the current
+    protected branch head.</p>
+  <p><strong>Impact:</strong> An unintended revision with a successful check can be released.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>webhook-server.js</code> · <code>check_run branch / handleDeploy</code> — A successful matching check_run calls handleDeploy with
+      check_run.head_sha; no protected-branch head lookup precedes deployment.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Deployment authorization equates a successful named check with protected-branch membership and freshness.</p>
+  <p><strong>Recommendation:</strong> Resolve the protected branch head at decision time and require exact SHA equality before creating a deployment
+    job.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Only the current protected branch head can deploy.</li>
+  <li>A stale or feature-branch successful check is rejected and audited.</li>
+  <li>The protected branch is explicit configuration, not an implicit checkout command.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>feature-branch check rejection</li>
+  <li>stale head rejection</li>
+  <li>protected-head success</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G04-F05">G04-F05</a></p>
+  <p><strong>Interface changes:</strong> Persist protected branch and verified target SHA.</p>
+</article>
+<article class="finding" id="G05-F02">
+  <h4><span class="priority P0">P0</span> G05-F02 — Deploy is not a health-gated recoverable release transaction</h4>
+  <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The script checks out master, installs dependencies, and restarts processes without migration, post-health, atomic
+    release, or rollback stages.</p>
+  <p><strong>Impact:</strong> A release can expose incompatible code or partial state and still lack a proven recovery path.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>deploy.sh</code> · <code>deploy script</code> — The script runs git checkout/reset, pnpm install, and pm2 restart; it has no database
+      migration, release directory swap, health gate, or rollback step.</li>
+    <li><code>.github/workflows/ci.yml</code> · <code>dependency install</code> — CI uses pnpm install --frozen-lockfile while deploy.sh uses
+      a non-frozen install.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Deployment is an in-place shell sequence rather than a staged transaction with explicit preflight, migration,
+    health, and rollback states.</p>
+  <p><strong>Recommendation:</strong> Create a staged release using the frozen lockfile, explicit migration policy, post-release health checks,
+    and tested rollback or a clearly blocked recovery state.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Dependency resolution is frozen.</li>
+  <li>Migration outcome is recorded before traffic/process cutover.</li>
+  <li>Failed health rolls back or blocks with tested recovery instructions.</li>
+  <li>The prior release remains recoverable.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>migration failure</li>
+  <li>health failure rollback</li>
+  <li>frozen install</li>
+  <li>partial restart</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G05-F01">G05-F01</a>, <a href="#G09-F01">G09-F01</a></p>
+  <p><strong>Interface changes:</strong> Persist release stages, health evidence, and rollback target.</p>
+</article>
+<article class="finding" id="G05-F03">
+  <h4><span class="priority P1">P1</span> G05-F03 — Deploy lock and result state are not a durable audited history</h4>
+  <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> PID/marker files coordinate deployment locally and can be reset after timeout or corruption.</p>
+  <p><strong>Impact:</strong> A crash can leave ambiguous state, unsafe retries, or no operator-grade history of approval and outcome.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>webhook-server.js</code> · <code>acquireDeployLock / runDeployDetached / pollDeployResult</code> — Local lock, state, and exit-code
+      marker files determine stuck recovery and completion.</li>
+    <li><code>webhook-server.js</code> · <code>DEPLOY_STUCK_TIMEOUT_MS</code> — Timeout-based lock reset is configured without a durable deployment
+      attempt/lease record.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Deployment ownership, approval, retry, and outcome exist only in local mutable files rather than an append-only
+    durable attempt model.</p>
+  <p><strong>Recommendation:</strong> Represent each deployment as a leased job with immutable target/approval and append-only stage events; treat
+    local process markers as implementation detail.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>A corrupt marker cannot authorize a new deployment.</li>
+  <li>Expired ownership is recovered once with operator-visible reason.</li>
+  <li>Approval, retry, and every stage outcome are queryable history.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>corrupt marker</li>
+  <li>stuck lease recovery</li>
+  <li>duplicate delivery</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G01-F01">G01-F01</a>, <a href="#G05-F02">G05-F02</a></p>
+  <p><strong>Interface changes:</strong> Add deployment attempt and event records.</p>
+</article>
+<article class="finding" id="G05-F04">
+  <h4><span class="priority P1">P1</span> G05-F04 — Oversize webhook bodies terminate without an HTTP response</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The server destroys the request after the byte limit but does not send a stable 413 response or prevent end handling
+    explicitly.</p>
+  <p><strong>Impact:</strong> Clients and operators can see a reset or ambiguous failure instead of an attributable rejected delivery.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>webhook-server.js</code> · <code>http.createServer data/end handlers</code> — The data handler increments size and calls req.destroy()
+      after MAX, while the end handler still owns response handling and no 413 response is written.</li>
+  </ul>
+  <p><strong>Root cause:</strong> The request-size guard aborts the transport instead of completing one explicit bounded HTTP rejection state.</p>
+  <p><strong>Recommendation:</strong> Stop buffering at the limit, mark the request rejected, and send one stable 413 response without invoking
+    signature or JSON processing.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>A body above MAX receives exactly one 413 response.</li>
+  <li>Oversize content is not parsed, authenticated, or deployed.</li>
+  <li>The rejection is logged without body content.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>just-under-limit request</li>
+  <li>oversize 413</li>
+  <li>data/end race</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> Return a stable webhook_body_too_large code.</p>
+</article>
+<article class="finding" id="G05-F05">
+  <h4><span class="priority P1">P1</span> G05-F05 — Deployment notifications have an implicit hardcoded recipient</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The webhook server falls back to a literal phone destination when configuration is absent.</p>
+  <p><strong>Impact:</strong> A deployment message can be routed to an unintended recipient and the value is embedded in source history.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>webhook-server.js</code> · <code>WHATSAPP_PHONE</code> — The destination uses process.env.WHATSAPP_PHONE || a literal phone number.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Notification destination configuration fails open to a source-coded value.</p>
+  <p><strong>Recommendation:</strong> Remove the fallback, require an explicit secret-managed recipient, and fail deployment notification configuration
+    closed without logging the destination.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>No recipient literal remains in source.</li>
+  <li>Missing recipient disables or fails notification explicitly.</li>
+  <li>Logs and audit records contain no destination value.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>missing recipient</li>
+  <li>redaction scan</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G07-F03">G07-F03</a></p>
+  <p><strong>Interface changes:</strong> None</p>
+</article>
+<article class="finding" id="G05-F06">
+  <h4><span class="priority P1">P1</span> G05-F06 — Deployment notification HTTP failures are treated as success</h4>
+  <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The notification helper awaits fetch but does not reject or record non-2xx responses.</p>
+  <p><strong>Impact:</strong> A deployment notification can be lost while the webhook path appears successful.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>webhook-server.js</code> · <code>sendNotification</code> — The helper awaits fetch and catches thrown network errors, but never
+      checks Response.ok or status.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Notification delivery treats transport completion as provider acceptance.</p>
+  <p><strong>Recommendation:</strong> Check the response status, record a redacted failure for non-2xx results, and keep notification failure
+    distinct from deployment outcome.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Every non-2xx response is recorded as a notification failure.</li>
+  <li>Deployment success is not rewritten by notification failure.</li>
+  <li>Errors contain no authorization header, recipient, or response body secrets.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>notification 204</li>
+  <li>notification 400/500</li>
+  <li>redacted failure</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G07-F03">G07-F03</a></p>
+  <p><strong>Interface changes:</strong> Expose a separate notification outcome code on deployment history.</p>
+</article>
+<article class="finding" id="G05-F07">
+  <h4><span class="priority P1">P1</span> G05-F07 — Deployment launch interpolates configured paths into a shell command</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The deploy executable, marker, and log paths are quoted into one sh -c string.</p>
+  <p><strong>Impact:</strong> A configured path containing shell syntax can alter the launched command despite single-quote wrapping assumptions.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>webhook-server.js</code> · <code>launchDeploy</code> — spawn runs sh -c with a constructed command containing DEPLOY_SH_PATH, marker,
+      and logPath interpolation.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Process execution delegates argument and redirection boundaries to shell parsing.</p>
+  <p><strong>Recommendation:</strong> Invoke the deploy script with an argv array and open/pass log descriptors without a shell.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>No sh -c or interpolated command is used for deployment.</li>
+  <li>Paths containing whitespace or shell metacharacters remain literal arguments.</li>
+  <li>Detached execution and completion tracking still work.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>path whitespace</li>
+  <li>shell metacharacters</li>
+  <li>detached completion</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G05-F03">G05-F03</a></p>
+  <p><strong>Interface changes:</strong> Define the deploy argv and log-descriptor contract.</p>
+</article>
+  </div>
+</details>
+<details class="group" id="G06-public-intake" open>
+  <summary><span class="priority P1">P1</span> G06-public-intake — order 8</summary>
+  <div class="group-body">
+    <p>Validate, authorize, throttle, assign, and clean public intake at every trust boundary.</p>
+    <p><strong>Group dependencies:</strong> <a href="#G07-auth-secrets">G07-auth-secrets</a>, <a href="#G09-data-lifecycle">G09-data-lifecycle</a></p>
+    <p><strong>Finding IDs:</strong> <a href="#G06-F01">G06-F01</a>, <a href="#G06-F02">G06-F02</a>, <a href="#G06-F03">G06-F03</a>, <a href="#G06-F04">G06-F04</a>,
+      <a href="#G06-F05">G06-F05</a></p>
+    <h3>Group agent prompt</h3>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the G06-public-intake entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Remediate only G06-F01, G06-F02, G06-F03, G06-F04, G06-F05.</pre>
+<article class="finding" id="G06-F01">
+  <h4><span class="priority P1">P1</span> G06-F01 — Public form values are not validated against one complete field schema</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Optional email/URL values, URL schemes, field types, and configured options are not all enforced server-side.</p>
+  <p><strong>Impact:</strong> Malformed or hostile clients can bypass browser controls and store values outside the form contract.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>validateFields / public submission route</code> — Custom validation handles public fields
+      but does not establish one exhaustive server-side schema contract for every field type, optional value, option, and URL scheme.</li>
+    <li><code>apps/web/src/ui.ts</code> · <code>publicForm</code> — Browser input types provide client hints, which are bypassable and therefore
+      cannot be the authoritative validation boundary.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Rendering and submission validation interpret field configuration separately instead of sharing an exhaustive
+    schema.</p>
+  <p><strong>Recommendation:</strong> Compile form configuration into one validated schema used by admin save, rendering, and submission; allow
+    only documented URL schemes.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Present invalid optional email/URL values fail.</li>
+  <li>Select/radio/multiselect values must belong to configured options.</li>
+  <li>Unsupported field configuration is rejected before publication.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>field-type matrix</li>
+  <li>optional invalid values</li>
+  <li>URL scheme</li>
+  <li>option tampering</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G07-F01">G07-F01</a></p>
+  <p><strong>Interface changes:</strong> Return stable per-field validation codes.</p>
+</article>
+<article class="finding" id="G06-F02">
+  <h4><span class="priority P2">P2</span> G06-F02 — Form rendering and advertised settings diverge from implemented behavior</h4>
+  <p><strong>Kind:</strong> correctness · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Radio, multiselect, static, attachment, CAPTCHA, notification, and rate-limit settings are not consistently rendered
+    or enforced.</p>
+  <p><strong>Impact:</strong> Operators can publish a form whose displayed controls and promised protections do not match submission behavior.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/ui.ts</code> · <code>publicForm field rendering</code> — The renderer maps most types to generic controls and does
+      not implement every configured field/settings behavior.</li>
+    <li><code>apps/web/src/pages/forms.ts</code> · <code>form preview</code> — Preview renders non-static fields through generic disabled inputs
+      and does not demonstrate all attachment/static/multiselect behavior.</li>
+  </ul>
+  <p><strong>Root cause:</strong> The settings model exposes capabilities without a single supported-capability registry shared by editor, preview,
+    renderer, and server.</p>
+  <p><strong>Recommendation:</strong> Create one native capability map; implement supported behavior and reject or label everything else unavailable.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Editor, preview, public form, and server agree for each supported field type.</li>
+  <li>Unsupported CAPTCHA/notification/rate/attachment settings cannot be advertised as active.</li>
+  <li>Static content is never submitted as user data.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>render/submit matrix</li>
+  <li>unsupported setting</li>
+  <li>static field</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G06-F01">G06-F01</a></p>
+  <p><strong>Interface changes:</strong> Expose supported capability flags.</p>
+</article>
+<article class="finding" id="G06-F03">
+  <h4><span class="priority P1">P1</span> G06-F03 — Uploads are bearer identifiers without complete content and download policy</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Upload identifiers are not bound to a form/session capability, and multipart/image/download controls are incomplete.</p>
+  <p><strong>Impact:</strong> An identifier can be replayed or attached outside its intended submission, and spoofed content or unauthorized download
+    can cross the trust boundary.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>public upload and submission handlers</code> — Upload lifecycle is implemented through custom
+      UUID records and filesystem paths; authorization binding and download handling are not represented as one short-lived capability.</li>
+    <li><code>packages/database/migrations/002_forms_and_tickets.sql</code> · <code>uploads / attachments</code> — The schema stores upload and
+      attachment rows but no form/session capability hash or expiry boundary.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Upload identity is used as authorization instead of a scoped, expiring capability with validated content and
+    explicit download checks.</p>
+  <p><strong>Recommendation:</strong> Issue short-lived form/session-scoped capabilities, stream with size/type checks, and authorize attachment
+    conversion and download.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>An upload cannot attach to another form/session.</li>
+  <li>Spoofed or oversize multipart content fails before persistence.</li>
+  <li>Only authorized operators can download attachments.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>capability replay</li>
+  <li>multipart spoof</li>
+  <li>oversize stream</li>
+  <li>download authorization</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G06-F01">G06-F01</a>, <a href="#G07-F02">G07-F02</a></p>
+  <p><strong>Interface changes:</strong> Add upload capability expiry/scope and authorized attachment metadata.</p>
+</article>
+<article class="finding" id="G06-F04">
+  <h4><span class="priority P1">P1</span> G06-F04 — Submission throttling trusts proxy input and counts too late</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Rate limiting relies on derived client IP and accepted submission records rather than an atomic attempt budget.</p>
+  <p><strong>Impact:</strong> Concurrent or forged requests can bypass limits or penalize the wrong client.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>ipOf / public_submission_attempts / submission route</code> — Proxy-derived IP and submission-attempt
+      handling are custom; accepted-workflow timing is not a single atomic consume operation.</li>
+    <li><code>packages/database/migrations/002_forms_and_tickets.sql</code> · <code>public_submission_attempts</code> — The attempts table exists
+      without a database-enforced atomic per-window quota.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Trusted proxy resolution and rate-budget consumption are not one configured, atomic trust-boundary operation.</p>
+  <p><strong>Recommendation:</strong> Define trusted proxies and atomically consume a per-form/client attempt before validation-heavy or upload
+    work.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Untrusted forwarding headers do not change client identity.</li>
+  <li>Concurrent requests cannot exceed the configured budget.</li>
+  <li>Rejected attempts follow the documented counting policy.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>proxy spoof</li>
+  <li>concurrent limiter</li>
+  <li>rejected attempt policy</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G09-F02">G09-F02</a></p>
+  <p><strong>Interface changes:</strong> Return rate-limit reset and stable error code.</p>
+</article>
+<article class="finding" id="G06-F05">
+  <h4><span class="priority P1">P1</span> G06-F05 — Submission failures can orphan files or silently choose a project</h4>
+  <p><strong>Kind:</strong> integrity · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Filesystem upload creation and database submission/assignment happen across separate failure paths, with fallback
+    project selection.</p>
+  <p><strong>Impact:</strong> Failed submissions can leave artifacts, and valid input can be routed to the wrong project without operator visibility.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>public submission transaction / upload cleanup / project selection</code> — The route coordinates
+      filesystem uploads and ticket creation manually and selects project context when the form does not provide an explicit valid target.</li>
+    <li><code>packages/database/migrations/001_foundation.sql</code> · <code>forms.fixed_project_id</code> — Project assignment is nullable in
+      the form schema, so fallback behavior must be explicit rather than silent.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Artifact compensation and assignment outcome are implicit branches around the database transaction.</p>
+  <p><strong>Recommendation:</strong> Stage uploads until ticket commit, compensate every failure path, and require an explicit form/project assignment
+    outcome.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Every failed submission removes or expires its staged files.</li>
+  <li>DB rollback cannot leave an attached or orphan artifact.</li>
+  <li>Missing/invalid project assignment fails visibly instead of falling back.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>DB failure cleanup</li>
+  <li>client abort cleanup</li>
+  <li>missing project assignment</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G09-F03">G09-F03</a></p>
+  <p><strong>Interface changes:</strong> Expose explicit assignment outcome and cleanup status.</p>
+</article>
+  </div>
+</details>
+<details class="group" id="G08-notifications" open>
+  <summary><span class="priority P1">P1</span> G08-notifications — order 9</summary>
+  <div class="group-body">
+    <p>Route configured events through leased idempotent and validated notification delivery.</p>
+    <p><strong>Group dependencies:</strong> <a href="#G01-workflow-state">G01-workflow-state</a>, <a href="#G07-auth-secrets">G07-auth-secrets</a>,
+      <a href="#G09-data-lifecycle">G09-data-lifecycle</a></p>
+    <p><strong>Finding IDs:</strong> <a href="#G08-F01">G08-F01</a>, <a href="#G08-F02">G08-F02</a>, <a href="#G08-F03">G08-F03</a>, <a href="#G08-F04">G08-F04</a></p>
+    <h3>Group agent prompt</h3>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the G08-notifications entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Remediate only G08-F01, G08-F02, G08-F03, G08-F04.</pre>
+<article class="finding" id="G08-F01">
+  <h4><span class="priority P1">P1</span> G08-F01 — Notification providers receive events without persisted rule evaluation</h4>
+  <p><strong>Kind:</strong> correctness · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Enqueue creates deliveries for every enabled provider, while the event union and admin rule list cover different
+    subsets.</p>
+  <p><strong>Impact:</strong> Providers can receive unintended events or miss expected workflow events.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/domain/src/notifications.ts</code> · <code>NotificationEvent / enqueueNotification</code> — The event union is a fixed
+      subset and enqueueNotification inserts for every enabled provider without a rule predicate.</li>
+    <li><code>apps/web/src/pages/notifications.ts</code> · <code>event rule lists</code> — The UI lists enabled and disabled event names that
+      are not represented as persisted provider routing rules.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Event taxonomy and provider routing policy are UI/code constants instead of versioned persisted rules evaluated
+    at enqueue time.</p>
+  <p><strong>Recommendation:</strong> Define one event registry and per-provider allow rules; reject unknown events and record the matched rule.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>A provider receives only enabled events.</li>
+  <li>All emitted workflow events exist in the registry.</li>
+  <li>Rule changes are audited and do not rewrite prior deliveries.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>rule allow/deny</li>
+  <li>event registry coverage</li>
+  <li>rule history</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G09-F02">G09-F02</a></p>
+  <p><strong>Interface changes:</strong> Add event_type, matched_rule_id, and taxonomy version.</p>
+</article>
+<article class="finding" id="G08-F02">
+  <h4><span class="priority P1">P1</span> G08-F02 — Delivery retry budgets and sending recovery ignore provider policy</h4>
+  <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The worker retries failed rows indefinitely on a fixed backoff and sending rows have no lease recovery.</p>
+  <p><strong>Impact:</strong> Failed or crashed sends can retry beyond configuration or remain stuck forever.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/worker/src/worker.ts</code> · <code>deliverDueNotification</code> — Selection includes queued/failed but not expired sending
+      rows; update increments attempt_count and reschedules without reading provider max_attempts.</li>
+    <li><code>apps/web/src/pages/notifications.ts</code> · <code>max_attempts field</code> — The UI exposes max attempts although the worker delivery
+      path does not enforce it.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Delivery state lacks lease expiry and a terminal retry-budget transition tied to provider configuration.</p>
+  <p><strong>Recommendation:</strong> Lease sending deliveries, enforce a validated max-attempt count, and move exhausted deliveries to a terminal
+    actionable state.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Expired sending recovers once.</li>
+  <li>No delivery exceeds its configured attempts.</li>
+  <li>Exhaustion is terminal and operator-visible.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>lease expiry</li>
+  <li>max attempts</li>
+  <li>terminal exhaustion</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G01-F01">G01-F01</a>, <a href="#G08-F01">G08-F01</a></p>
+  <p><strong>Interface changes:</strong> Expose delivery lease and terminal reason.</p>
+</article>
+<article class="finding" id="G08-F03">
+  <h4><span class="priority P1">P1</span> G08-F03 — Manual retry can race the worker and duplicate a send</h4>
+  <p><strong>Kind:</strong> integrity · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The admin retry route calls the provider directly without acquiring the worker's delivery transition.</p>
+  <p><strong>Impact:</strong> One delivery can be sent twice and receive conflicting final status updates.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>notificationRetryMatch</code> — The route fetches a delivery, invokes provider.send directly,
+      and updates it without a compare-and-swap ownership predicate.</li>
+    <li><code>apps/worker/src/worker.ts</code> · <code>deliverDueNotification</code> — The worker independently claims eligible rows and performs
+      the same send side effect.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Manual and automated delivery paths bypass a shared leased idempotent send command.</p>
+  <p><strong>Recommendation:</strong> Make manual retry enqueue or transition the same delivery job under CAS; use a stable provider idempotency
+    key where supported.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Manual retry never sends concurrently with a worker.</li>
+  <li>Repeated clicks create at most one external send.</li>
+  <li>Status history identifies the retry actor and attempt.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>manual/worker race</li>
+  <li>double click</li>
+  <li>provider idempotency</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G08-F02">G08-F02</a>, <a href="#G07-F04">G07-F04</a></p>
+  <p><strong>Interface changes:</strong> Return retry job ID instead of synchronous provider result.</p>
+</article>
+<article class="finding" id="G08-F04">
+  <h4><span class="priority P1">P1</span> G08-F04 — Provider endpoint, method, timeout, and credential configuration is weakly validated</h4>
+  <p><strong>Kind:</strong> security · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Configuration accepts parseable URLs, arbitrary methods/timeouts/headers, and literal authorization values.</p>
+  <p><strong>Impact:</strong> Misconfiguration can leak credentials, target unintended endpoints, or create unbounded delivery behavior.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/notification-provider/src/index.ts</code> · <code>Configuration / endpointFor / createNotificationProvider</code> — Endpoint
+      validation is URL parsing; method, timeout, headers, and direct authorization_header values feed fetch behavior.</li>
+    <li><code>apps/web/src/server.ts</code> · <code>notification provider save</code> — Numeric and credential configuration is accepted from
+      request fields with limited cross-field policy validation.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Provider configuration is treated as transport options rather than a validated outbound-request security policy.</p>
+  <p><strong>Recommendation:</strong> Allow only supported HTTPS destinations/methods, bound timeout and attempts, require secret references,
+    and test without external sends.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Non-HTTPS or disallowed destinations are rejected.</li>
+  <li>Timeout and attempts stay within documented bounds.</li>
+  <li>Test sends use the same validation and leave normal delivery state unchanged.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>endpoint scheme</li>
+  <li>timeout bounds</li>
+  <li>credential reference</li>
+  <li>test-send isolation</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G07-F03">G07-F03</a></p>
+  <p><strong>Interface changes:</strong> Expose validated provider capabilities, not raw credentials.</p>
+</article>
+  </div>
+</details>
+<details class="group" id="G10-operational-truth" open>
+  <summary><span class="priority P1">P1</span> G10-operational-truth — order 10</summary>
+  <div class="group-body">
+    <p>Expose accurate health, progress, history, pagination, and recovery guidance.</p>
+    <p><strong>Group dependencies:</strong> <a href="#G01-workflow-state">G01-workflow-state</a>, <a href="#G04-github-integrity">G04-github-integrity</a>,
+      <a href="#G05-deployment-safety">G05-deployment-safety</a>, <a href="#G08-notifications">G08-notifications</a>, <a href="#G09-data-lifecycle">G09-data-lifecycle</a></p>
+    <p><strong>Finding IDs:</strong> <a href="#G10-F01">G10-F01</a>, <a href="#G10-F02">G10-F02</a>, <a href="#G10-F03">G10-F03</a>, <a href="#G10-F04">G10-F04</a>,
+      <a href="#G10-F05">G10-F05</a></p>
+    <h3>Group agent prompt</h3>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the G10-operational-truth entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Remediate only G10-F01, G10-F02, G10-F03, G10-F04, G10-F05.</pre>
+<article class="finding" id="G10-F01">
+  <h4><span class="priority P1">P1</span> G10-F01 — Worker health is inferred from job activity</h4>
+  <p><strong>Kind:</strong> observability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Dashboards use the latest job claimed_at and configured values rather than a renewable worker heartbeat.</p>
+  <p><strong>Impact:</strong> An idle healthy worker can look stale and a dead worker can look healthy after recent activity.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/pages/dashboard.ts</code> · <code>healthData</code> — Worker heartbeat is SELECT MAX(claimed_at) from jobs.</li>
+    <li><code>apps/web/src/pages/operate.ts</code> · <code>health queries</code> — Operate derives worker identity/time from claimed job rows
+      rather than a worker lease.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Activity timestamps are used as health signals because workers have no renewable identity/heartbeat record.</p>
+  <p><strong>Recommendation:</strong> Persist worker heartbeat, capability, version, and lease freshness separately from job activity.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Idle live workers remain healthy.</li>
+  <li>Dead workers become unhealthy after the documented interval.</li>
+  <li>Health identifies supported capabilities and timestamp source.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>idle worker</li>
+  <li>dead worker expiry</li>
+  <li>capability reporting</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G01-F01">G01-F01</a></p>
+  <p><strong>Interface changes:</strong> Expose heartbeat freshness and worker capability set.</p>
+</article>
+<article class="finding" id="G10-F02">
+  <h4><span class="priority P1">P1</span> G10-F02 — Settings and GitHub health advertise capabilities they do not prove</h4>
+  <p><strong>Kind:</strong> correctness · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Operator settings describe limits, cleanup, backups, or merge behavior not implemented by the underlying paths,
+    and GitHub health checks configuration rather than the needed capability.</p>
+  <p><strong>Impact:</strong> Operators can rely on a control that is inactive or mistake a configured URL/token for working authority.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/pages/operate.ts</code> · <code>settings and capability fields</code> — The page renders environment/configuration-derived
+      operational values and GitHub configuration state.</li>
+    <li><code>apps/web/src/pages/dashboard.ts</code> · <code>githubConfigured</code> — GitHub status is derived from whether GITHUB_API_BASE_URL
+      is present, not an authenticated read/write capability probe.</li>
+    <li><code>scripts/backup.sh</code> · <code>backup behavior</code> — The implemented backup behavior is narrower than a complete retention/restore
+      capability.</li>
+  </ul>
+  <p><strong>Root cause:</strong> UI labels are sourced from configuration intent instead of verified implementation/capability status.</p>
+  <p><strong>Recommendation:</strong> Remove unsupported settings or label them unavailable; probe the exact required GitHub capability with freshness
+    and no mutation.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Every setting maps to an implemented behavior or is explicitly unavailable.</li>
+  <li>GitHub health distinguishes read, write, and merge capability without mutating remote state.</li>
+  <li>Capability status includes source and freshness.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>settings contract</li>
+  <li>GitHub capability probe</li>
+  <li>stale probe</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G04-F03">G04-F03</a>, <a href="#G09-F04">G09-F04</a></p>
+  <p><strong>Interface changes:</strong> Expose capability status, reason, and checked_at.</p>
+</article>
+<article class="finding" id="G10-F03">
+  <h4><span class="priority P1">P1</span> G10-F03 — Run progress and pull-request staleness are not represented</h4>
+  <p><strong>Kind:</strong> observability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Agent runs store status but progress is not updated, and synchronized PR data lacks visible source staleness.</p>
+  <p><strong>Impact:</strong> Operators cannot distinguish slow progress from a stuck run or current PR state from old cached data.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/worker/src/worker.ts</code> · <code>agent_runs inserts/updates</code> — Run rows move between running and terminal states,
+      but no periodic progress field is updated during invocation.</li>
+    <li><code>packages/domain/src/pull-request-sync.ts</code> · <code>pull request sync</code> — Stored PR fields are updated from polling results
+      without a completeness/freshness contract surfaced to operators.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Long-running work and cached provider state have coarse statuses but no renewable progress/freshness model.</p>
+  <p><strong>Recommendation:</strong> Record bounded progress events/heartbeat and display PR source timestamp, completeness, and stale threshold.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Running work updates progress or heartbeat at a documented cadence.</li>
+  <li>Stale PR data is visibly labeled.</li>
+  <li>Progress never fabricates percent completion when only phase is known.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>progress heartbeat</li>
+  <li>stale PR display</li>
+  <li>unknown progress</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G10-F01">G10-F01</a>, <a href="#G04-F02">G04-F02</a></p>
+  <p><strong>Interface changes:</strong> Add run phase/heartbeat and PR source freshness.</p>
+</article>
+<article class="finding" id="G10-F04">
+  <h4><span class="priority P1">P1</span> G10-F04 — Repair history and list/log reads are not durable or paginated</h4>
+  <p><strong>Kind:</strong> observability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Repair can replace log linkage, while many list pages cap rows or load logs without a cursor contract.</p>
+  <p><strong>Impact:</strong> Historical evidence becomes inaccessible and operators silently miss older records or load unbounded content.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/worker/src/worker.ts</code> · <code>runExecution agent_run metadata log_path</code> — Each attempt stores log_path in mutable
+      run metadata; repair history depends on preserving every run link.</li>
+    <li><code>apps/web/src/pages/tickets.ts</code> · <code>ticket list</code> — Ticket list orders results and applies LIMIT 200 without a pagination
+      cursor.</li>
+    <li><code>apps/web/src/pages/notifications.ts</code> · <code>delivery list</code> — Delivery history uses LIMIT 200 without a pagination contract.</li>
+    <li><code>apps/web/src/pages/audit.ts</code> · <code>audit list</code> — Audit log UI is the operational DB-backed /admin/audit surface and
+      uses LIMIT 200; it is not the static engineering audit report.</li>
+  </ul>
+  <p><strong>Root cause:</strong> History is addressed through mutable latest-run metadata and fixed caps instead of immutable artifact references
+    plus cursor pagination.</p>
+  <p><strong>Recommendation:</strong> Preserve one log artifact per attempt and paginate every list/log endpoint with bounded page sizes and stable
+    cursors.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Every repair retains links to prior logs.</li>
+  <li>Every list/log API documents limit and cursor.</li>
+  <li>Browsing all pages returns each record once under stable ordering.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>repair log history</li>
+  <li>cursor traversal</li>
+  <li>bounded log page</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G09-F03">G09-F03</a></p>
+  <p><strong>Interface changes:</strong> Add immutable log artifact ID and pagination cursors.</p>
+</article>
+<article class="finding" id="G10-F05">
+  <h4><span class="priority P1">P1</span> G10-F05 — Read routes mutate workflow and errors lack stable recovery contracts</h4>
+  <p><strong>Kind:</strong> correctness · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Ticket detail GET can change ticket status, while many errors return text without stable codes and next actions.</p>
+  <p><strong>Impact:</strong> Refreshing a page can alter state and operators cannot automate or reliably recover from failures.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/pages/tickets.ts</code> · <code>ticket detail render</code> — The GET render path updates early ticket state/history
+      when the detail page is viewed.</li>
+    <li><code>apps/web/src/server.ts</code> · <code>route error handling</code> — Routes frequently return or throw message strings; stable error
+      codes and recovery metadata are not centralized.</li>
+  </ul>
+  <p><strong>Root cause:</strong> HTTP method semantics and operational error taxonomy are not enforced by shared route boundaries.</p>
+  <p><strong>Recommendation:</strong> Make GET side-effect-free; move acknowledgement to an explicit audited command and return stable code/message/recovery
+    fields.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Repeated GETs make no database changes.</li>
+  <li>Viewing requires no hidden status transition.</li>
+  <li>Every surfaced operational error has a stable code and actionable recovery step.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>GET no mutation</li>
+  <li>explicit acknowledge</li>
+  <li>error schema</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G01-F03">G01-F03</a></p>
+  <p><strong>Interface changes:</strong> Standardize error_code and recovery_action.</p>
+</article>
+  </div>
+</details>
+<details class="group" id="G11-frontend-quality" open>
+  <summary><span class="priority P2">P2</span> G11-frontend-quality — order 11</summary>
+  <div class="group-body">
+    <p>Improve accessible, responsive, privacy-conscious operator and intake interfaces.</p>
+    <p><strong>Group dependencies:</strong> <a href="#G06-public-intake">G06-public-intake</a>, <a href="#G10-operational-truth">G10-operational-truth</a></p>
+    <p><strong>Finding IDs:</strong> <a href="#G11-F01">G11-F01</a>, <a href="#G11-F02">G11-F02</a>, <a href="#G11-F03">G11-F03</a>, <a href="#G11-F04">G11-F04</a>,
+      <a href="#G11-F05">G11-F05</a></p>
+    <h3>Group agent prompt</h3>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the G11-frontend-quality entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Remediate only G11-F01, G11-F02, G11-F03, G11-F04, G11-F05.</pre>
+<article class="finding" id="G11-F01">
+  <h4><span class="priority P2">P2</span> G11-F01 — Tabs and mobile navigation lack complete keyboard/focus semantics</h4>
+  <p><strong>Kind:</strong> accessibility · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Tabs respond to clicks without roving focus keys, and mobile navigation does not expose expanded state or Escape
+    behavior.</p>
+  <p><strong>Impact:</strong> Keyboard and assistive-technology users can lose context or fail to operate navigation efficiently.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/ui.ts</code> · <code>tablist click handler</code> — The handler toggles aria-selected and hidden panels on click but
+      has no Arrow/Home/End focus movement.</li>
+    <li><code>apps/web/src/ui.ts</code> · <code>adminPage mobile navigation opener</code> — The opener toggles sidebar and scrim without aria-expanded/aria-controls
+      synchronization or Escape close handling.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Interactive behavior implements pointer visibility changes without a shared keyboard and focus-management contract.</p>
+  <p><strong>Recommendation:</strong> Implement native ARIA tab keyboard behavior and explicit mobile nav expanded/focus/Escape lifecycle.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Tabs support Arrow, Home, End, and activation semantics.</li>
+  <li>Opening nav moves or preserves focus predictably and updates aria-expanded.</li>
+  <li>Escape closes and restores focus.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>keyboard tab smoke</li>
+  <li>mobile nav focus</li>
+  <li>Escape restore</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> None</p>
+</article>
+<article class="finding" id="G11-F02">
+  <h4><span class="priority P2">P2</span> G11-F02 — Responsive layouts and touch targets are incomplete</h4>
+  <p><strong>Kind:</strong> accessibility · <strong>Confidence:</strong> medium · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Some grids retain fixed desktop columns, data rows lose labels on small screens, and some controls lack two-dimensional
+    target sizing.</p>
+  <p><strong>Impact:</strong> Small-screen and touch users can encounter horizontal overflow or ambiguous unlabeled values.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/design-tokens.css</code> · <code>mobile media rules</code> — Mobile rules hide list headers and set minimum height
+      for common controls but do not supply labels for every specialized grid or minimum width for all interactive components.</li>
+    <li><code>apps/web/src/pages/tickets.ts</code> · <code>filter and board grids</code> — Several controls use min-width:600px or fixed repeated
+      columns.</li>
+    <li><code>apps/web/src/pages/prs.ts</code> · <code>target branch controls</code> — Merge target inputs use fixed inline width values.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Desktop grid structure is reused responsively without component-level labels, wrapping rules, and target-size
+    guarantees.</p>
+  <p><strong>Recommendation:</strong> Add per-row labels or semantic tables, remove page-level fixed-width overflow, and guarantee supported touch
+    target dimensions.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>No horizontal page overflow at supported mobile widths.</li>
+  <li>Every compact row retains its field labels.</li>
+  <li>Interactive targets meet the documented minimum size.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>mobile viewport</li>
+  <li>responsive labels</li>
+  <li>touch target audit</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G11-F01">G11-F01</a></p>
+  <p><strong>Interface changes:</strong> None</p>
+</article>
+<article class="finding" id="G11-F03">
+  <h4><span class="priority P2">P2</span> G11-F03 — Animations ignore reduced-motion preference</h4>
+  <p><strong>Kind:</strong> accessibility · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The design tokens define pulsing and entrance animations without a prefers-reduced-motion override.</p>
+  <p><strong>Impact:</strong> Motion-sensitive users cannot ask the interface to suppress nonessential animation.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/design-tokens.css</code> · <code>dccPulse / dccIn / media rules</code> — Animation keyframes and uses exist, but the
+      stylesheet has no prefers-reduced-motion: reduce rule.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Motion is encoded as unconditional component styling rather than a user-preference-aware token.</p>
+  <p><strong>Recommendation:</strong> Add a global reduced-motion override that removes smooth scrolling and minimizes nonessential animation/transition
+    duration.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Reduced-motion mode disables smooth scrolling and nonessential animation.</li>
+  <li>State changes remain perceivable without motion.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>reduced-motion media smoke</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> None</p>
+</article>
+<article class="finding" id="G11-F04">
+  <h4><span class="priority P2">P2</span> G11-F04 — Attachments are not surfaced consistently in preview and operator flows</h4>
+  <p><strong>Kind:</strong> correctness · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Form preview does not represent attachment controls, and ticket/operator detail does not expose a complete authorized
+    attachment affordance.</p>
+  <p><strong>Impact:</strong> Users cannot confirm configured attachment behavior or retrieve submitted evidence.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/pages/forms.ts</code> · <code>previewPanel</code> — The preview renders every non-static field as a generic disabled
+      input, not an attachment-specific control.</li>
+    <li><code>apps/web/src/pages/tickets.ts</code> · <code>ticket detail</code> — The detail page renders ticket fields, plans, runs, and activity
+      without an attachment section.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Attachment metadata/download authorization is not part of the shared form and ticket view model.</p>
+  <p><strong>Recommendation:</strong> Expose authorized attachment metadata and render native upload/preview/download affordances consistently.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Form preview identifies attachment fields.</li>
+  <li>Authorized ticket detail lists attachments with safe metadata.</li>
+  <li>Unauthorized users receive no attachment content or path.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>preview attachment</li>
+  <li>authorized display</li>
+  <li>unauthorized access</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G06-F03">G06-F03</a></p>
+  <p><strong>Interface changes:</strong> Add authorized attachment metadata to form/ticket view models.</p>
+</article>
+<article class="finding" id="G11-F05">
+  <h4><span class="priority P2">P2</span> G11-F05 — Inline assets and external fonts constrain CSP and privacy</h4>
+  <p><strong>Kind:</strong> performance · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Every document emits inline style/script content and Google Fonts requests.</p>
+  <p><strong>Impact:</strong> A strict CSP is difficult to deploy and every page adds third-party font latency and privacy exposure.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/ui.ts</code> · <code>fontsHead / document</code> — The document helper emits external Google Fonts links plus inline
+      style and script content.</li>
+    <li><code>apps/web/src/design-tokens.css</code> · <code>color and component tokens</code> — Most visual styling already has a local stylesheet
+      home, so inline styles can be migrated incrementally without a new framework.</li>
+  </ul>
+  <p><strong>Root cause:</strong> The document renderer treats scripts/styles/fonts as per-page strings instead of local CSP-compatible assets
+    and tokens.</p>
+  <p><strong>Recommendation:</strong> Move reusable inline content to local assets, use nonce/hash only where necessary, and prefer system/local
+    fonts; retain minor accent-border cleanup as P3 token maintenance rather than a separate cosmetic finding.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Pages run under the documented CSP without unsafe-inline where avoidable.</li>
+  <li>No external font request is required.</li>
+  <li>Visual regression checks cover changed tokens and WCAG-conscious contrast.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>CSP smoke</li>
+  <li>no external font</li>
+  <li>contrast/token snapshot</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G07-F01">G07-F01</a></p>
+  <p><strong>Interface changes:</strong> None</p>
+</article>
+  </div>
+</details>
+<details class="group" id="G12-ci-maintainability" open>
+  <summary><span class="priority P1">P1</span> G12-ci-maintainability — order 12</summary>
+  <div class="group-body">
+    <p>Make verification honest, reproducible, focused, and maintainable.</p>
+    <p><strong>Group dependencies:</strong> <a href="#G01-workflow-state">G01-workflow-state</a>, <a href="#G05-deployment-safety">G05-deployment-safety</a>,
+      <a href="#G06-public-intake">G06-public-intake</a>, <a href="#G09-data-lifecycle">G09-data-lifecycle</a></p>
+    <p><strong>Finding IDs:</strong> <a href="#G12-F01">G12-F01</a>, <a href="#G12-F02">G12-F02</a>, <a href="#G12-F03">G12-F03</a>, <a href="#G12-F04">G12-F04</a>,
+      <a href="#G12-F05">G12-F05</a>, <a href="#G12-F06">G12-F06</a>, <a href="#G12-F07">G12-F07</a>, <a href="#G12-F08">G12-F08</a>, <a href="#G12-F09">G12-F09</a></p>
+    <h3>Group agent prompt</h3>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the G12-ci-maintainability entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Remediate only G12-F01, G12-F02, G12-F03, G12-F04, G12-F05, G12-F06, G12-F07, G12-F08, G12-F09.</pre>
+<article class="finding" id="G12-F01">
+  <h4><span class="priority P1">P1</span> G12-F01 — CI explicitly masks Vitest failure</h4>
+  <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The CI test step converts a failing Vitest process into a successful shell command.</p>
+  <p><strong>Impact:</strong> Regressions can merge while the required check reports success.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>.github/workflows/ci.yml</code> · <code>Vitest step</code> — pnpm exec vitest run is followed by || echo, which produces a zero
+      exit status after failure.</li>
+  </ul>
+  <p><strong>Root cause:</strong> The workflow treats test failure as optional tool absence instead of distinguishing configuration setup from
+    a failing test run.</p>
+  <p><strong>Recommendation:</strong> Run the scoped product suite directly and let every failure fail the job.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>An intentional failing test makes CI fail.</li>
+  <li>The scoped product suite command matches the documented local command.</li>
+  <li>Missing test setup fails with actionable output.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>CI failing-test canary</li>
+  <li>local/CI command equality</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> Document one root verification command.</p>
+</article>
+<article class="finding" id="G12-F02">
+  <h4><span class="priority P1">P1</span> G12-F02 — Critical boundaries lack focused integration coverage</h4>
+  <p><strong>Kind:</strong> quality · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> The suite has unit tests but no meaningful route/worker/database/webhook/upload journey coverage, while Playwright
+    is installed but unused.</p>
+  <p><strong>Impact:</strong> High-risk regressions at transaction and process boundaries can escape green unit tests.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>package.json</code> · <code>devDependencies</code> — @playwright/test is installed.</li>
+    <li><code>.github/workflows/ci.yml</code> · <code>ci steps</code> — CI runs installation, TypeScript, and Vitest only; no browser or boundary
+      journey step exists.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Verification is organized around modules rather than the few high-risk trust and state transitions.</p>
+  <p><strong>Recommendation:</strong> Add minimal database-backed boundary tests and use existing Playwright only for flows that require browser
+    evidence.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Route-to-job-to-state recovery has one automated journey.</li>
+  <li>Webhook signature/deploy gate and upload cleanup have failure-path coverage.</li>
+  <li>Browser artifacts are optional, redacted, and bounded.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>route-worker-db smoke</li>
+  <li>webhook gate</li>
+  <li>upload lifecycle</li>
+  <li>optional browser smoke</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G12-F01">G12-F01</a></p>
+  <p><strong>Interface changes:</strong> None</p>
+</article>
+<article class="finding" id="G12-F03">
+  <h4><span class="priority P2">P2</span> G12-F03 — The repository has no root verification command</h4>
+  <p><strong>Kind:</strong> maintainability · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Contributors must know and compose the TypeScript and scoped Vitest commands themselves.</p>
+  <p><strong>Impact:</strong> Local, CI, and agent verification can drift or accidentally run the unrelated unscoped harness.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>package.json</code> · <code>scripts</code> — The root scripts include dev, admin:create, and projects:import but no verify, typecheck,
+      or test contract.</li>
+    <li><code>.github/workflows/ci.yml</code> · <code>TypeScript and Vitest steps</code> — CI spells the verification commands separately rather
+      than calling a root script.</li>
+  </ul>
+  <p><strong>Root cause:</strong> The authoritative verification sequence is duplicated outside the package script contract.</p>
+  <p><strong>Recommendation:</strong> Add one root script using the existing TypeScript and scoped Vitest commands, and make CI/documentation
+    call it.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>One documented root command runs the intended product checks.</li>
+  <li>CI calls the same root command.</li>
+  <li>The command excludes the unrelated .lfd harness intentionally.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>root verify command</li>
+  <li>CI command parity</li>
+  <li>scope check</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G12-F01">G12-F01</a></p>
+  <p><strong>Interface changes:</strong> Publish the root verification command.</p>
+</article>
+<article class="finding" id="G12-F04">
+  <h4><span class="priority P2">P2</span> G12-F04 — Placeholder scripts and empty packages advertise nonexistent capability</h4>
+  <p><strong>Kind:</strong> maintainability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Repository entry points exist without complete behavior.</p>
+  <p><strong>Impact:</strong> Operators and developers can invoke a command or package that appears supported but does not perform the promised
+    lifecycle.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>scripts/cleanup-worktrees.ts</code> · <code>script body</code> — Cleanup exists as a standalone scan without the attempt ownership/recovery
+      guarantees implied by lifecycle cleanup.</li>
+    <li><code>pnpm-workspace.yaml</code> · <code>workspace package patterns</code> — Workspace discovery includes package directories regardless
+      of whether they expose a meaningful supported contract.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Scaffolding was retained as product surface before its behavior and ownership contract were complete.</p>
+  <p><strong>Recommendation:</strong> Delete misleading entry points or implement only the currently required behavior with a focused check.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Every advertised script/package has a documented supported outcome and verification.</li>
+  <li>Unused empty surfaces are removed without replacement abstractions.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>script contract smoke</li>
+  <li>workspace package inventory</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G12-F03">G12-F03</a></p>
+  <p><strong>Interface changes:</strong> None</p>
+</article>
+<article class="finding" id="G12-F05">
+  <h4><span class="priority P2">P2</span> G12-F05 — Web and worker duplicate input resolution logic</h4>
+  <p><strong>Kind:</strong> maintainability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Both processes resolve prompts, skills, and AI configuration through separate implementations.</p>
+  <p><strong>Impact:</strong> The preview and execution paths can drift even when each local test passes.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>resolvedSkillsFor / promptInputsFor</code> — The web server resolves skill and prompt preview
+      inputs.</li>
+    <li><code>apps/worker/src/worker.ts</code> · <code>resolvedSkillsFor / planningInputs / executionInputs</code> — The worker contains a separate
+      resolver with its own provenance behavior.</li>
+  </ul>
+  <p><strong>Root cause:</strong> A shared domain rule is copied into process modules rather than reused from one tested pure resolver/query boundary.</p>
+  <p><strong>Recommendation:</strong> Extract only the common input-resolution contract and parity tests; keep process-specific I/O in place.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Web preview and worker execution produce identical hashes for the same fixture.</li>
+  <li>There is one implementation of resolution precedence.</li>
+  <li>No speculative framework or dependency is added.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>resolver parity</li>
+  <li>precedence fixture</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G03-F01">G03-F01</a></p>
+  <p><strong>Interface changes:</strong> Expose one resolved-input contract.</p>
+</article>
+<article class="finding" id="G12-F06">
+  <h4><span class="priority P2">P2</span> G12-F06 — Oversized process modules inhibit boundary testing</h4>
+  <p><strong>Kind:</strong> maintainability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Primary web, worker, and UI files combine routing, persistence, rendering, provider, and workflow concerns.</p>
+  <p><strong>Impact:</strong> Small changes require broad context and make focused failure injection difficult.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>apps/web/src/server.ts</code> · <code>primary server module</code> — One large module owns many unrelated admin/public routes and
+      shared helpers.</li>
+    <li><code>apps/worker/src/worker.ts</code> · <code>primary worker module</code> — One large module owns planning, execution, publication,
+      GitHub review/conflict, notifications, polling, and dispatch.</li>
+    <li><code>apps/web/src/ui.ts</code> · <code>document and client behavior</code> — One module combines document rendering and many inline client
+      behaviors.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Process entry modules accumulated unrelated responsibilities without extraction at tested state or trust boundaries.</p>
+  <p><strong>Recommendation:</strong> Split only where current remediation needs a test seam: route commands, worker handlers, and reusable client
+    assets; avoid broad architectural rewrites.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>High-risk handlers can be tested without booting unrelated services.</li>
+  <li>Entrypoints remain thin and behavior-compatible.</li>
+  <li>Extraction follows existing module patterns and adds no dependency.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>handler isolation</li>
+  <li>entrypoint smoke</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G12-F02">G12-F02</a>, <a href="#G12-F05">G12-F05</a></p>
+  <p><strong>Interface changes:</strong> None</p>
+</article>
+<article class="finding" id="G12-F07">
+  <h4><span class="priority P2">P2</span> G12-F07 — Dependency and package-manager versions are not fully pinned</h4>
+  <p><strong>Kind:</strong> maintainability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Root dependency ranges and CI's latest pnpm selection allow tool resolution to change without a repository diff.</p>
+  <p><strong>Impact:</strong> Fresh installs can use different test/browser/database tooling or package-manager behavior.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>package.json</code> · <code>devDependencies</code> — Several root packages use caret ranges and the manifest has no packageManager
+      field.</li>
+    <li><code>.github/workflows/ci.yml</code> · <code>pnpm/action-setup</code> — The workflow requests version: latest.</li>
+  </ul>
+  <p><strong>Root cause:</strong> The repository does not declare one exact package-manager/toolchain identity at the manifest boundary.</p>
+  <p><strong>Recommendation:</strong> Declare the intended package manager version and pin direct tool versions where reproducibility requires
+    it; continue using the frozen lockfile.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>The package-manager version is declared in the repository.</li>
+  <li>CI uses that declared version rather than latest.</li>
+  <li>Frozen install resolves the committed lockfile without drift.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>declared package manager</li>
+  <li>frozen clean install</li>
+  <li>version drift canary</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> None</p>
+  <p><strong>Interface changes:</strong> Add package-manager/toolchain version metadata.</p>
+</article>
+<article class="finding" id="G12-F08">
+  <h4><span class="priority P2">P2</span> G12-F08 — CI setup is not a complete workspace prerequisite contract</h4>
+  <p><strong>Kind:</strong> maintainability · <strong>Confidence:</strong> high · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Node, pnpm, cache, native, and workspace assumptions live in workflow YAML without matching manifest/setup documentation.</p>
+  <p><strong>Impact:</strong> A clean developer or production host can satisfy package install yet fail on an undeclared prerequisite.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>.github/workflows/ci.yml</code> · <code>setup steps</code> — The workflow selects Node 22, pnpm setup, cache, and install behavior
+      directly.</li>
+    <li><code>package.json</code> · <code>root manifest</code> — The manifest does not declare engines or a packageManager version.</li>
+    <li><code>pnpm-workspace.yaml</code> · <code>workspace and allowBuilds</code> — Workspace packages and esbuild build permission are defined
+      separately from the root setup contract.</li>
+  </ul>
+  <p><strong>Root cause:</strong> Environment prerequisites are encoded in automation implementation rather than one repository-owned setup contract.</p>
+  <p><strong>Recommendation:</strong> Document and validate the minimum Node, package manager, workspace, and native prerequisites shared by CI
+    and supported hosts.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>A clean supported host can follow one setup contract.</li>
+  <li>Unsupported Node/package-manager versions fail early with guidance.</li>
+  <li>CI validates the same prerequisites it documents.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>clean workspace setup</li>
+  <li>unsupported runtime</li>
+  <li>workspace install</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G12-F07">G12-F07</a></p>
+  <p><strong>Interface changes:</strong> Publish supported runtime and workspace prerequisites.</p>
+</article>
+<article class="finding" id="G12-F09">
+  <h4><span class="priority P1">P1</span> G12-F09 — Authentication compiles native Argon2 code at module load</h4>
+  <p><strong>Kind:</strong> reliability · <strong>Confidence:</strong> confirmed · <strong>Status:</strong> open</p>
+  <p><strong>Summary:</strong> Importing the password module invokes gcc and links a host library into a temporary executable.</p>
+  <p><strong>Impact:</strong> Production authentication can fail to start on hosts without the compiler, linker library, writable temp path, or
+    compatible ABI.</p>
+  <h5>Evidence</h5>
+  <ul>
+    <li><code>packages/database/src/password.ts</code> · <code>module initialization</code> — execFileSync runs gcc before hashPassword or verifyPassword
+      is called.</li>
+    <li><code>packages/database/src/password.ts</code> · <code>binary path</code> — The compiled helper is written under tmpdir with the process
+      ID.</li>
+  </ul>
+  <p><strong>Root cause:</strong> A production runtime dependency is built dynamically during module initialization instead of being provisioned
+    and verified before process start.</p>
+  <p><strong>Recommendation:</strong> Package or provision the helper during a reproducible build/install step, then fail startup with a focused
+    prerequisite error if unavailable.</p>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Production authentication starts without gcc installed.</li>
+  <li>The Argon2 implementation and ABI are reproducibly provisioned.</li>
+  <li>Missing/incompatible native support fails with an actionable startup error.</li>
+</ul>
+  <h5>Regression coverage</h5>
+<ul>
+  <li>compiler-absent startup</li>
+  <li>missing library</li>
+  <li>hash/verify smoke</li>
+</ul>
+  <p><strong>Finding dependencies:</strong> <a href="#G12-F08">G12-F08</a></p>
+  <p><strong>Interface changes:</strong> Add an Argon2 runtime capability/preflight contract.</p>
+</article>
+  </div>
+</details>
+  </section>
+
+  <section id="roadmap">
+    <h2>Stabilization-first roadmap</h2>
+    <p>Every Phase 1-4 item depends on R0-07 directly or through an explicitly listed gate. Phase 3 and later are prohibited until every P0 finding
+      has a verified exit.</p>
+<section class="phase">
+  <h3>Phase 0 stabilization</h3>
+  <p><strong>Gate:</strong> All items are stabilization exits; no feature phase may begin until R0-07 verifies every P0 finding.</p>
+  <p>Restore trustworthy approval, publication, merge, deployment, authority, and recovery before feature work.</p>
+<article class="roadmap-item" id="R0-01">
+  <h4>R0-01 — Truthful verification and workflow ownership</h4>
+  <p><strong>Dependencies:</strong> None</p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>CI fails honestly</li>
+  <li>leased recoverable work</li>
+  <li>side-effect-free operational reads</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>G09-F02, G12-F01, and G01-F01 have verified exits</li>
+  <li>GET routes do not mutate state</li>
+  <li>worker health uses renewable heartbeat</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R0-01 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Make CI truthful and implement the minimum shared lease/heartbeat/reaper and read-side truth required by G09-F02, G12-F01, G01-F01, G10-F01, and G10-F05.</pre>
+</article>
+<article class="roadmap-item" id="R0-02">
+  <h4>R0-02 — Approval reproducibility exit</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-01">R0-01</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>immutable approved input</li>
+  <li>atomic approval decision</li>
+  <li>policy-bound provenance</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>G03-F01 and G03-F02 have verified exits</li>
+  <li>preview, approval, and execution input hashes are identical</li>
+  <li>concurrent decisions have one winner</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R0-02 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Create the immutable approved snapshot and atomic decision record required by G03-F01 and G03-F02; do not add workflow features.</pre>
+</article>
+<article class="roadmap-item" id="R0-03">
+  <h4>R0-03 — Repair publication exit</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-01">R0-01</a>, <a href="#R0-02">R0-02</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>attempt-bound repair commit</li>
+  <li>scoped agent authority</li>
+  <li>crash-safe artifacts</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>G02-F01 and G02-F03 have verified exits</li>
+  <li>old commits cannot be republished</li>
+  <li>child credentials and writes are scoped</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R0-03 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Bind repair and publication to fresh immutable attempts, scrub child environments, and enforce worktree/path policy for G02-F01 and G02-F03.</pre>
+</article>
+<article class="roadmap-item" id="R0-04">
+  <h4>R0-04 — Terminal rerun and web authority exit</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-01">R0-01</a>, <a href="#R0-02">R0-02</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>immutable rerun identity</li>
+  <li>durable provider jobs</li>
+  <li>least-privilege web</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>G01-F02 and G07-F04 have verified exits</li>
+  <li>terminal reruns preserve history</li>
+  <li>web has no write/deploy credentials</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R0-04 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Implement immutable rerun identity and move all provider/deploy writes behind durable least-privilege jobs for G01-F02 and G07-F04.</pre>
+</article>
+<article class="roadmap-item" id="R0-05">
+  <h4>R0-05 — Head-bound GitHub merge exit</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-02">R0-02</a>, <a href="#R0-04">R0-04</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>authoritative review/check snapshot</li>
+  <li>expected-SHA merge</li>
+  <li>durable audit</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>G04-F02 and G04-F05 have verified exits</li>
+  <li>Changed head or missing required check/review refuses merge</li>
+  <li>Merged SHA and policy snapshot are recorded</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R0-05 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Implement the final authoritative head/check/review snapshot and expected-SHA merge refusal required by G04-F02 and G04-F05.</pre>
+</article>
+<article class="roadmap-item" id="R0-06">
+  <h4>R0-06 — Protected health-gated deployment exit</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-03">R0-03</a>, <a href="#R0-04">R0-04</a>, <a href="#R0-05">R0-05</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>protected-head deployment</li>
+  <li>staged migration/health/rollback</li>
+  <li>deployment history</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>G09-F01, G05-F01, and G05-F02 have verified exits</li>
+  <li>Only current protected head deploys</li>
+  <li>Failed health has tested rollback or blocked recovery</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R0-06 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Complete deployment safety for G09-F01, G05-F01, and G05-F02 before any dependent automation: protected-head proof, frozen staged release, migration, health, rollback, and durable history.</pre>
+</article>
+<article class="roadmap-item" id="R0-07">
+  <h4>R0-07 — All-P0 verified exit gate</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-01">R0-01</a>, <a href="#R0-02">R0-02</a>, <a href="#R0-03">R0-03</a>, <a href="#R0-04">R0-04</a>,
+    <a href="#R0-05">R0-05</a>, <a href="#R0-06">R0-06</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>independent evidence for every P0</li>
+  <li>explicit authorization for feature phases</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Every P0 finding has a verified exit: G01-F01, G01-F02, G02-F01, G02-F03, G03-F01, G03-F02, G04-F05, G05-F01, G05-F02, G07-F04</li>
+  <li>TypeScript and scoped Vitest pass without masking</li>
+  <li>Phase 1 through Phase 4 remain blocked until this item passes</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R0-07 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Verify, do not broaden, every P0 exit: G01-F01, G01-F02, G02-F01, G02-F03, G03-F01, G03-F02, G04-F05, G05-F01, G05-F02, G07-F04. Record evidence and keep all later phases blocked on any failure.</pre>
+</article>
+</section>
+<section class="phase">
+  <h3>Phase 1 deterministic and secure operation</h3>
+  <p><strong>Gate:</strong> Blocked on R0-07.</p>
+  <p>Complete deterministic preflight, provider synchronization, and credential policy after all P0 exits.</p>
+<article class="roadmap-item" id="R1-01">
+  <h4>R1-01 — Unified project preflight</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-07">R0-07</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>fresh revision proof</li>
+  <li>configuration/skill/runtime validation</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Planning and execution use the same immutable preflight result</li>
+  <li>Stale branches and missing prerequisites fail before launch</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R1-01 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Create one minimal shared project preflight from existing validation capabilities and persist its immutable result.</pre>
+</article>
+<article class="roadmap-item" id="R1-02">
+  <h4>R1-02 — Event-driven GitHub sync with polling fallback</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-07">R0-07</a>, <a href="#R1-01">R1-01</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>paginated authoritative sync</li>
+  <li>webhook updates</li>
+  <li>rate-aware fallback</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>All pages sync</li>
+  <li>Stale state is visible</li>
+  <li>Writes remain durable jobs</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R1-02 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Implement authoritative event-driven GitHub synchronization with bounded rate-aware polling fallback and source freshness.</pre>
+</article>
+<article class="roadmap-item" id="R1-03">
+  <h4>R1-03 — GitHub App credentials and policy modes</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-06">R0-06</a>, <a href="#R0-07">R0-07</a>, <a href="#R1-02">R1-02</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>least-privilege installation credentials</li>
+  <li>explicit audited merge/deploy modes</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Credential scope is separate from web read capability</li>
+  <li>Manual and automated modes never bypass R0-05 or R0-06 gates</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R1-03 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Introduce GitHub App installation credentials and explicit policy modes only after deployment safety R0-06 and the all-P0 gate R0-07.</pre>
+</article>
+</section>
+<section class="phase">
+  <h3>Phase 2 operator confidence</h3>
+  <p><strong>Gate:</strong> Blocked on R0-07; deployment-dependent work also requires R0-06.</p>
+  <p>Make release, restore, intake, and delivery operation recoverable and inspectable.</p>
+<article class="roadmap-item" id="R2-01">
+  <h4>R2-01 — Deployment control center</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-06">R0-06</a>, <a href="#R0-07">R0-07</a>, <a href="#R1-03">R1-03</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>release history</li>
+  <li>health evidence</li>
+  <li>approval/retry/rollback controls</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Every action preserves R0-06 safety</li>
+  <li>Recovery history is durable and attributable</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R2-01 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Expose the already-safe deployment transaction as a minimal control center; do not create a second deploy path.</pre>
+</article>
+<article class="roadmap-item" id="R2-02">
+  <h4>R2-02 — Backup and restore drills</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-07">R0-07</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>complete manifest</li>
+  <li>truthful retention</li>
+  <li>isolated restore verification</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>DB, artifacts, and configuration references restore</li>
+  <li>No drill mutates production</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R2-02 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Implement the smallest complete backup manifest and isolated restore drill required by G09-F04.</pre>
+</article>
+<article class="roadmap-item" id="R2-03">
+  <h4>R2-03 — Safe intake and notification recovery</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-07">R0-07</a>, <a href="#R1-01">R1-01</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>scoped uploads</li>
+  <li>atomic limits</li>
+  <li>rule-based leased notifications</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Failed intake cleans artifacts</li>
+  <li>Notification retries cannot duplicate sends</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R2-03 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Harden existing public intake and notification trust boundaries; keep unsupported settings unavailable.</pre>
+</article>
+</section>
+<section class="phase">
+  <h3>Phase 3 workflow acceleration</h3>
+  <p><strong>Gate:</strong> Prohibited until R0-07 verifies every P0 exit.</p>
+  <p>Add repeatable workflow features only after stabilization is verified.</p>
+<article class="roadmap-item" id="R3-01">
+  <h4>R3-01 — Reviewer-comment repairs</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-07">R0-07</a>, <a href="#R0-03">R0-03</a>, <a href="#R0-05">R0-05</a>, <a href="#R0-06">R0-06</a>,
+    <a href="#R2-01">R2-01</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>comment-scoped repair</li>
+  <li>fresh-head attempt</li>
+  <li>preserved history</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Repair is tied to one comment and current head</li>
+  <li>Old commit cannot be republished</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R3-01 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Add reviewer-comment repair as a new immutable attempt reusing the verified repair, merge, and deploy gates.</pre>
+</article>
+<article class="roadmap-item" id="R3-02">
+  <h4>R3-02 — Reusable ticket/project templates</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-07">R0-07</a>, <a href="#R0-02">R0-02</a>, <a href="#R1-01">R1-01</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>versioned reusable inputs</li>
+  <li>audited overrides</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Template version and overrides are approval-bound</li>
+  <li>No generic workflow engine is introduced</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R3-02 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Add minimal versioned templates using existing config/prompt storage only after measured repeated demand.</pre>
+</article>
+<article class="roadmap-item" id="R3-03">
+  <h4>R3-03 — Optional Playwright/browser artifacts</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-07">R0-07</a>, <a href="#R2-03">R2-03</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>critical browser evidence</li>
+  <li>redacted bounded artifacts</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Only flows needing browser proof use Playwright</li>
+  <li>Artifacts exclude secrets and have retention</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R3-03 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Use the already-installed Playwright for a few critical journeys and bounded redacted artifacts.</pre>
+</article>
+</section>
+<section class="phase">
+  <h3>Phase 4 controlled automation and insight</h3>
+  <p><strong>Gate:</strong> Prohibited until R0-07; each candidate also requires demonstrated need.</p>
+  <p>Introduce analytics and policy automation only with measured safety and value.</p>
+<article class="roadmap-item" id="R4-01">
+  <h4>R4-01 — Cost, latency, and failure analytics</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-07">R0-07</a>, <a href="#R1-01">R1-01</a>, <a href="#R2-01">R2-01</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>redacted aggregates</li>
+  <li>failure taxonomy</li>
+  <li>capacity evidence</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>No raw prompts, secrets, or personal data are stored</li>
+  <li>Estimates and point-in-time values are labeled</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R4-01 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Add bounded redacted aggregates from durable records only when they answer an operator decision.</pre>
+</article>
+<article class="roadmap-item" id="R4-02">
+  <h4>R4-02 — Candidate workflow conveniences</h4>
+  <p><strong>Dependencies:</strong> <a href="#R0-07">R0-07</a>, <a href="#R4-01">R4-01</a></p>
+  <h5>Outcomes</h5>
+<ul>
+  <li>measured proposals</li>
+  <li>policy-gated reversible automation</li>
+</ul>
+  <h5>Acceptance criteria</h5>
+<ul>
+  <li>Each convenience has demonstrated demand and rollback</li>
+  <li>No approval, merge, or deploy gate can be bypassed</li>
+</ul>
+  <h5>Agent prompt</h5>
+<pre class="prompt">Read docs/audit/dev-control-audit.json and the R4-02 entry before changing code.
+Revalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.
+Trace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.
+Avoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.
+Implement only this roadmap item: Treat conveniences as candidates; implement only the smallest approved reversible one after evidence of need.</pre>
+</article>
+</section>
+  </section>
+
+  <section id="limitations">
+    <h2>Limitations</h2>
+<ul>
+  <li>No penetration test was performed.</li>
+  <li>No destructive chaos or recovery test was performed.</li>
+  <li>No remote GitHub mutation was performed.</li>
+  <li>No production deployment was performed.</li>
+  <li>Runtime counts are point-in-time aggregates, not invariants or trend claims.</li>
+  <li>Findings are evidence-backed at the source commit but must be revalidated against current HEAD before remediation.</li>
+</ul>
+  </section>
+</main>
+</body>
+</html>

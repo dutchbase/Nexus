@@ -1,0 +1,3638 @@
+{
+  "schema_version": "1.2.0",
+  "report": {
+    "id": "dev-control-engineering-audit-2026-08-01",
+    "title": "Dev Control engineering audit",
+    "source_commit": "00b8539e645ebb8bb6ce8641223d4fb17d04e053",
+    "branch": "agent/dev-control-audit",
+    "generated_on": "2026-08-01",
+    "scope": "Read-only code, configuration, workflow, and aggregate runtime-observation audit of Dev Control. No production mutation, secret access, or destructive test was performed.",
+    "evidence_policy": "Every finding cites direct repository symbol, runtime aggregate, or official documentation evidence. Evidence is scoped to the source commit and must be revalidated before remediation.",
+    "redaction_policy": "Credentials, environment values, ticket or prompt content, personal data, raw rows, raw logs, upload contents, and notification destinations are excluded.",
+    "stable_paths": {
+      "json": "docs/audit/dev-control-audit.json",
+      "html": "docs/audit/dev-control-audit.html"
+    },
+    "path_note": "/admin/audit remains the operational database audit-log UI; it is not a stable path for this engineering report."
+  },
+  "product_contract": {
+    "intent": "Dev Control is an operator-controlled system for planning, executing, validating, reviewing, and publishing repository changes. Existing merge and deploy behavior is intentional; remediation hardens rather than removes it.",
+    "safety_invariants": [
+      "Every externally visible state transition is attributable, durable, and recoverable.",
+      "Repair, review, merge, and deploy act only on approved current immutable input and target revision.",
+      "The web process does not hold broad write or deployment authority when a durable job can own it.",
+      "Public intake is validated, rate-limited, scoped, and cleaned on every failure path.",
+      "Operational status distinguishes observations from guarantees and never masks verification failure."
+    ],
+    "priority_definitions": {
+      "P0": "Unsafe publication/deployment, data loss, severe security, or a core workflow that lies about success.",
+      "P1": "Major correctness, security, or reliability risk.",
+      "P2": "Meaningful UX, performance, or maintainability opportunity.",
+      "P3": "Polish with no current material operational impact."
+    },
+    "official_references": [
+      {
+        "topic": "GitHub pull requests",
+        "url": "https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28"
+      },
+      {
+        "topic": "GitHub pull request reviews",
+        "url": "https://docs.github.com/en/rest/pulls/reviews?apiVersion=2022-11-28"
+      },
+      {
+        "topic": "GitHub review requests",
+        "url": "https://docs.github.com/en/rest/pulls/review-requests?apiVersion=2022-11-28"
+      },
+      {
+        "topic": "GitHub REST pagination",
+        "url": "https://docs.github.com/en/rest/using-the-rest-api/using-pagination-in-the-rest-api?apiVersion=2022-11-28"
+      },
+      {
+        "topic": "Claude Code CLI permissions and model flags",
+        "url": "https://code.claude.com/docs/en/cli-reference"
+      },
+      {
+        "topic": "Claude Code authentication and access management",
+        "url": "https://code.claude.com/docs/en/iam"
+      }
+    ]
+  },
+  "verification": {
+    "source_checks": [
+      {
+        "name": "TypeScript",
+        "status": "passed",
+        "command": "pnpm exec tsc --noEmit"
+      },
+      {
+        "name": "Scoped Vitest",
+        "status": "passed",
+        "command": "pnpm exec vitest run apps packages",
+        "result": "46/46 tests passed at the audit point; rerun for this correction."
+      },
+      {
+        "name": "CI test handling",
+        "status": "failed_control",
+        "source": ".github/workflows/ci.yml",
+        "observation": "Vitest is wrapped with a success-producing fallback, so CI can report success after test failure."
+      },
+      {
+        "name": "Health endpoint",
+        "status": "passed_at_observation",
+        "command": "GET /api/health",
+        "result": "200; database=ok; web=ok"
+      },
+      {
+        "name": "Production dependency audit",
+        "status": "passed_at_observation",
+        "result": "15 production dependencies checked; zero known advisories"
+      }
+    ],
+    "runtime_observations": {
+      "classification": "point_in_time_only_not_invariants",
+      "completed_jobs": 55,
+      "failed_jobs": 11,
+      "completed_agent_runs": 44,
+      "failed_agent_runs": 28,
+      "completed_jobs_linked_to_failed_runs": 15,
+      "expired_active_sessions": 11,
+      "stale_plans": 2,
+      "current_running_jobs_over_one_hour": 0,
+      "current_running_agent_runs_over_one_hour": 0,
+      "orphan_attachments": 0,
+      "redaction_note": "Only aggregate counts are retained; no identifiers, actors, logs, payloads, paths, or contents are included."
+    }
+  },
+  "summary": {
+    "overall_risk": "high",
+    "decision": "Complete and verify every P0 stabilization exit before any Phase 1-4 feature work.",
+    "finding_count": 67,
+    "priority_counts": {
+      "P0": 10,
+      "P1": 44,
+      "P2": 13,
+      "P3": 0
+    },
+    "p0_finding_ids": [
+      "G07-F04",
+      "G03-F01",
+      "G03-F02",
+      "G01-F01",
+      "G01-F02",
+      "G02-F01",
+      "G02-F03",
+      "G04-F05",
+      "G05-F01",
+      "G05-F02"
+    ],
+    "top_risks": [
+      "G03-F01",
+      "G04-F05",
+      "G02-F01",
+      "G05-F01",
+      "G05-F02",
+      "G07-F04",
+      "G01-F02"
+    ],
+    "remediation_order": [
+      "G09-data-lifecycle",
+      "G07-auth-secrets",
+      "G03-approval-reproducibility",
+      "G01-workflow-state",
+      "G02-execution-safety",
+      "G04-github-integrity",
+      "G05-deployment-safety",
+      "G06-public-intake",
+      "G08-notifications",
+      "G10-operational-truth",
+      "G11-frontend-quality",
+      "G12-ci-maintainability"
+    ],
+    "strengths": [
+      "Queue claim uses a transaction and SKIP LOCKED.",
+      "Health and scoped test baselines were available at the audit point.",
+      "Deploy handling validates webhook signatures and deduplicates delivery identifiers."
+    ]
+  },
+  "groups": [
+    {
+      "id": "G09-data-lifecycle",
+      "remediation_order": 1,
+      "objective": "Protect database and filesystem integrity through serialized migrations, enforceable invariants, atomic artifacts, retention, and tested restore.",
+      "priority": "P1",
+      "dependencies": [],
+      "finding_ids": [
+        "G09-F01",
+        "G09-F02",
+        "G09-F03",
+        "G09-F04"
+      ],
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G09-data-lifecycle entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G09-F01, G09-F02, G09-F03, G09-F04."
+    },
+    {
+      "id": "G07-auth-secrets",
+      "remediation_order": 2,
+      "objective": "Enforce secure HTTP, secret, authentication, and process authority boundaries.",
+      "priority": "P0",
+      "dependencies": [
+        "G09-data-lifecycle"
+      ],
+      "finding_ids": [
+        "G07-F01",
+        "G07-F02",
+        "G07-F03",
+        "G07-F04",
+        "G07-F05",
+        "G07-F06",
+        "G07-F07",
+        "G07-F08"
+      ],
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G07-auth-secrets entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G07-F01, G07-F02, G07-F03, G07-F04, G07-F05, G07-F06, G07-F07, G07-F08."
+    },
+    {
+      "id": "G03-approval-reproducibility",
+      "remediation_order": 3,
+      "objective": "Bind approval to one immutable reproducible execution input.",
+      "priority": "P0",
+      "dependencies": [
+        "G09-data-lifecycle",
+        "G07-auth-secrets"
+      ],
+      "finding_ids": [
+        "G03-F01",
+        "G03-F02",
+        "G03-F03",
+        "G03-F04",
+        "G03-F05"
+      ],
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G03-approval-reproducibility entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G03-F01, G03-F02, G03-F03, G03-F04, G03-F05."
+    },
+    {
+      "id": "G01-workflow-state",
+      "remediation_order": 4,
+      "objective": "Make workflow ownership, recovery, idempotency, and publication transitions durable.",
+      "priority": "P0",
+      "dependencies": [
+        "G09-data-lifecycle",
+        "G03-approval-reproducibility"
+      ],
+      "finding_ids": [
+        "G01-F01",
+        "G01-F02",
+        "G01-F03",
+        "G01-F04"
+      ],
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G01-workflow-state entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G01-F01, G01-F02, G01-F03, G01-F04."
+    },
+    {
+      "id": "G02-execution-safety",
+      "remediation_order": 5,
+      "objective": "Bind agent execution, repair, worktrees, and artifacts to scoped fresh attempts.",
+      "priority": "P0",
+      "dependencies": [
+        "G01-workflow-state",
+        "G03-approval-reproducibility",
+        "G07-auth-secrets",
+        "G09-data-lifecycle"
+      ],
+      "finding_ids": [
+        "G02-F01",
+        "G02-F02",
+        "G02-F03",
+        "G02-F04",
+        "G02-F05",
+        "G02-F06"
+      ],
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G02-execution-safety entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G02-F01, G02-F02, G02-F03, G02-F04, G02-F05, G02-F06."
+    },
+    {
+      "id": "G04-github-integrity",
+      "remediation_order": 6,
+      "objective": "Make GitHub synchronization, review, and merge decisions authoritative and head-bound.",
+      "priority": "P0",
+      "dependencies": [
+        "G01-workflow-state",
+        "G03-approval-reproducibility",
+        "G07-auth-secrets"
+      ],
+      "finding_ids": [
+        "G04-F01",
+        "G04-F02",
+        "G04-F03",
+        "G04-F04",
+        "G04-F05"
+      ],
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G04-github-integrity entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G04-F01, G04-F02, G04-F03, G04-F04, G04-F05."
+    },
+    {
+      "id": "G05-deployment-safety",
+      "remediation_order": 7,
+      "objective": "Allow deployment only through verified protected targets and recoverable release transactions.",
+      "priority": "P0",
+      "dependencies": [
+        "G02-execution-safety",
+        "G04-github-integrity",
+        "G07-auth-secrets",
+        "G09-data-lifecycle"
+      ],
+      "finding_ids": [
+        "G05-F01",
+        "G05-F02",
+        "G05-F03",
+        "G05-F04",
+        "G05-F05",
+        "G05-F06",
+        "G05-F07"
+      ],
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G05-deployment-safety entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G05-F01, G05-F02, G05-F03, G05-F04, G05-F05, G05-F06, G05-F07."
+    },
+    {
+      "id": "G06-public-intake",
+      "remediation_order": 8,
+      "objective": "Validate, authorize, throttle, assign, and clean public intake at every trust boundary.",
+      "priority": "P1",
+      "dependencies": [
+        "G07-auth-secrets",
+        "G09-data-lifecycle"
+      ],
+      "finding_ids": [
+        "G06-F01",
+        "G06-F02",
+        "G06-F03",
+        "G06-F04",
+        "G06-F05"
+      ],
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G06-public-intake entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G06-F01, G06-F02, G06-F03, G06-F04, G06-F05."
+    },
+    {
+      "id": "G08-notifications",
+      "remediation_order": 9,
+      "objective": "Route configured events through leased idempotent and validated notification delivery.",
+      "priority": "P1",
+      "dependencies": [
+        "G01-workflow-state",
+        "G07-auth-secrets",
+        "G09-data-lifecycle"
+      ],
+      "finding_ids": [
+        "G08-F01",
+        "G08-F02",
+        "G08-F03",
+        "G08-F04"
+      ],
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G08-notifications entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G08-F01, G08-F02, G08-F03, G08-F04."
+    },
+    {
+      "id": "G10-operational-truth",
+      "remediation_order": 10,
+      "objective": "Expose accurate health, progress, history, pagination, and recovery guidance.",
+      "priority": "P1",
+      "dependencies": [
+        "G01-workflow-state",
+        "G04-github-integrity",
+        "G05-deployment-safety",
+        "G08-notifications",
+        "G09-data-lifecycle"
+      ],
+      "finding_ids": [
+        "G10-F01",
+        "G10-F02",
+        "G10-F03",
+        "G10-F04",
+        "G10-F05"
+      ],
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G10-operational-truth entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G10-F01, G10-F02, G10-F03, G10-F04, G10-F05."
+    },
+    {
+      "id": "G11-frontend-quality",
+      "remediation_order": 11,
+      "objective": "Improve accessible, responsive, privacy-conscious operator and intake interfaces.",
+      "priority": "P2",
+      "dependencies": [
+        "G06-public-intake",
+        "G10-operational-truth"
+      ],
+      "finding_ids": [
+        "G11-F01",
+        "G11-F02",
+        "G11-F03",
+        "G11-F04",
+        "G11-F05"
+      ],
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G11-frontend-quality entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G11-F01, G11-F02, G11-F03, G11-F04, G11-F05."
+    },
+    {
+      "id": "G12-ci-maintainability",
+      "remediation_order": 12,
+      "objective": "Make verification honest, reproducible, focused, and maintainable.",
+      "priority": "P1",
+      "dependencies": [
+        "G01-workflow-state",
+        "G05-deployment-safety",
+        "G06-public-intake",
+        "G09-data-lifecycle"
+      ],
+      "finding_ids": [
+        "G12-F01",
+        "G12-F02",
+        "G12-F03",
+        "G12-F04",
+        "G12-F05",
+        "G12-F06",
+        "G12-F07",
+        "G12-F08",
+        "G12-F09"
+      ],
+      "agent_prompt": "Read docs/audit/dev-control-audit.json and the G12-ci-maintainability entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run the acceptance criteria's focused tests plus pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nRemediate only G12-F01, G12-F02, G12-F03, G12-F04, G12-F05, G12-F06, G12-F07, G12-F08, G12-F09."
+    }
+  ],
+  "findings": [
+    {
+      "id": "G09-F01",
+      "group_id": "G09-data-lifecycle",
+      "kind": "integrity",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Migration execution is neither serialized nor uniquely ordered",
+      "summary": "The runner checks/applies files without an advisory lock, and migration filenames can share numeric prefixes.",
+      "impact": "Concurrent deploys or ambiguous ordering can diverge database schema state.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/database/src/migrate.ts",
+          "symbol": "migration runner",
+          "observation": "The runner creates schema_migrations and loops files without a PostgreSQL advisory lock."
+        },
+        {
+          "source": "repository",
+          "location": "packages/database/migrations",
+          "symbol": "migration filenames",
+          "observation": "The directory contains numeric migration naming managed only by full filename uniqueness, not a unique monotonic prefix policy."
+        }
+      ],
+      "root_cause": "Migration coordination and ordering rely on deployment convention rather than a database lock and validated naming rule.",
+      "recommendation": "Acquire a transaction/session advisory lock, validate unique monotonic prefixes, and fail before applying an ambiguous set.",
+      "acceptance_criteria": [
+        "Concurrent migration processes serialize.",
+        "Duplicate or out-of-order prefixes fail before DDL.",
+        "A failed migration leaves an actionable recorded state."
+      ],
+      "tests": [
+        "concurrent migrate",
+        "duplicate prefix",
+        "failed DDL"
+      ],
+      "dependencies": [],
+      "interface_changes": [
+        "Document migration lock key and naming contract."
+      ]
+    },
+    {
+      "id": "G09-F02",
+      "group_id": "G09-data-lifecycle",
+      "kind": "integrity",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Core status and append-only invariants rely on application code",
+      "summary": "Several tables store free-form statuses or audit/provenance rows without complete database-enforced lifecycle constraints.",
+      "impact": "A bug or maintenance query can create impossible transitions or delete required history.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/database/migrations/001_foundation.sql",
+          "symbol": "jobs / audit_events / tickets / agent_runs",
+          "observation": "Multiple workflow status columns are text without table-level state/data checks, and audit history is not protected from deletion."
+        },
+        {
+          "source": "repository",
+          "location": "packages/database/migrations/004_prompt_system.sql",
+          "symbol": "prompt_versions / prompt_snapshots",
+          "observation": "Some hash/scope constraints exist, demonstrating that other lifecycle invariants can also be enforced at the DB boundary."
+        }
+      ],
+      "root_cause": "The database is treated as storage while workflow validity and append-only guarantees live mainly in callers.",
+      "recommendation": "Add targeted CHECK/foreign-key/trigger protections for stable invariants and review indexes against actual high-value queries before adding any.",
+      "acceptance_criteria": [
+        "Invalid stable statuses and broken required relationships fail in PostgreSQL.",
+        "Append-only audit/provenance deletion is blocked or tightly privileged.",
+        "Every added index is justified by an EXPLAIN-backed query."
+      ],
+      "tests": [
+        "constraint rejection",
+        "append-only delete",
+        "query-plan index"
+      ],
+      "dependencies": [
+        "G09-F01"
+      ],
+      "interface_changes": [
+        "Document database-enforced invariants."
+      ]
+    },
+    {
+      "id": "G09-F03",
+      "group_id": "G09-data-lifecycle",
+      "kind": "integrity",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Filesystem artifacts and database references are not atomically published",
+      "summary": "Plan, log, upload, and worktree artifacts are written outside PostgreSQL transactions that reference them.",
+      "impact": "Crashes can create orphan files or live rows with missing content.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "storePlan / log path / worktree paths",
+          "observation": "Filesystem paths are created and then stored in run/plan/attempt metadata across separate operations."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "upload/submission handlers",
+          "observation": "Upload files and attachment/database rows require manual compensation across failure paths."
+        }
+      ],
+      "root_cause": "Artifact lifecycle has no shared staged/finalized state or reconciliation job across filesystem and database boundaries.",
+      "recommendation": "Write to staged identities, commit the row, atomically rename/finalize, and reconcile expired staged or missing artifacts.",
+      "acceptance_criteria": [
+        "No active row points to a missing artifact after recovery.",
+        "Expired staged files are removed safely.",
+        "Finalized artifacts have an integrity hash and owner record."
+      ],
+      "tests": [
+        "crash before row",
+        "crash after row",
+        "reconciler"
+      ],
+      "dependencies": [
+        "G09-F02"
+      ],
+      "interface_changes": [
+        "Add artifact state, owner, hash, and finalization timestamp."
+      ]
+    },
+    {
+      "id": "G09-F04",
+      "group_id": "G09-data-lifecycle",
+      "kind": "reliability",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Backup and retention claims do not cover complete tested recovery",
+      "summary": "The backup script dumps PostgreSQL only, while filesystem artifacts/configuration, scheduling, retention, and restore verification are separate or absent.",
+      "impact": "A nominal backup can be unusable for restoring the service's full state.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "scripts/backup.sh",
+          "symbol": "backup script",
+          "observation": "The script runs pg_dump to data/backups and does not manifest artifact/configuration content or perform a restore verification."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/operate.ts",
+          "symbol": "settings/operations rendering",
+          "observation": "Operator surfaces expose operational configuration but do not provide a verified restore result or implemented scheduler contract."
+        }
+      ],
+      "root_cause": "Backup is a database command rather than a versioned full-service recovery product with lifecycle and drill evidence.",
+      "recommendation": "Create a manifest for database, required artifacts, and configuration references; implement truthful retention/scheduling and an isolated restore drill.",
+      "acceptance_criteria": [
+        "Manifest covers DB, artifacts, and configuration references.",
+        "Retention and schedule match the displayed contract.",
+        "An isolated restore verifies service health and records the result."
+      ],
+      "tests": [
+        "backup manifest",
+        "retention",
+        "isolated restore drill"
+      ],
+      "dependencies": [
+        "G09-F03"
+      ],
+      "interface_changes": [
+        "Add backup/restore manifest and verification record."
+      ]
+    },
+    {
+      "id": "G07-F01",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Authenticated HTTP security depends on optional runtime configuration",
+      "summary": "Security headers are incomplete and Secure cookies depend on NODE_ENV being set correctly.",
+      "impact": "A deployment configuration error can weaken session transport and browser defenses.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "production / login response / response helpers",
+          "observation": "The production flag is NODE_ENV === production and is used to conditionally secure cookies; a complete authenticated security-header policy is not centralized."
+        },
+        {
+          "source": "repository",
+          "location": "deploy.sh",
+          "symbol": "process restart",
+          "observation": "The deploy script restarts processes without proving NODE_ENV=production or other secure boot requirements."
+        }
+      ],
+      "root_cause": "Secure HTTP behavior is conditional and distributed instead of validated as a production boot invariant.",
+      "recommendation": "Fail production boot closed without secure cookie/origin configuration and centralize headers including CSP-compatible policy, frame, MIME, and referrer controls.",
+      "acceptance_criteria": [
+        "Production cannot start with insecure cookie configuration.",
+        "Authenticated responses include the documented header baseline.",
+        "Development behavior is explicit and separately tested."
+      ],
+      "tests": [
+        "secure boot",
+        "header matrix",
+        "cookie attributes"
+      ],
+      "dependencies": [],
+      "interface_changes": [
+        "Expose non-secret secure-config health fields."
+      ]
+    },
+    {
+      "id": "G07-F02",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "Expired admin sessions are rejected but never cleaned",
+      "summary": "Authentication filters expired rows on read without deleting or expiring them operationally.",
+      "impact": "Session storage grows indefinitely and settings cannot truthfully claim a cleanup lifecycle.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "sessionFor",
+          "observation": "The session query requires expires_at > now(), but the server contains no expired-session deletion path."
+        },
+        {
+          "source": "repository",
+          "location": "packages/database/migrations/001_foundation.sql",
+          "symbol": "admin_sessions.expires_at",
+          "observation": "The schema stores expiry but defines no database cleanup mechanism."
+        }
+      ],
+      "root_cause": "Session expiry is enforced as a read predicate without a retention or cleanup owner.",
+      "recommendation": "Add bounded scheduled cleanup or delete expired rows during an existing maintenance pass, with an observable result.",
+      "acceptance_criteria": [
+        "Expired sessions cannot authenticate.",
+        "Expired rows are removed within the documented interval.",
+        "Cleanup never deletes unexpired sessions."
+      ],
+      "tests": [
+        "expired rejection",
+        "cleanup boundary",
+        "active-session preservation"
+      ],
+      "dependencies": [
+        "G09-F04"
+      ],
+      "interface_changes": [
+        "Expose session cleanup freshness and count without actor data."
+      ]
+    },
+    {
+      "id": "G07-F03",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Secret storage and redaction accept literal credentials",
+      "summary": "Notification configuration can store authorization headers directly and error redaction covers only selected paths.",
+      "impact": "Secrets can persist in JSON, logs, or returned errors beyond the intended secret boundary.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/notification-provider/src/index.ts",
+          "symbol": "Configuration / createNotificationProvider",
+          "observation": "Configuration accepts authorization_header directly as well as a secret reference."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "notification provider save / redactConfiguration",
+          "observation": "The write route accepts authorization_header, while the response helper only hides it from selected output."
+        },
+        {
+          "source": "repository",
+          "location": "packages/notification-provider/src/index.ts",
+          "symbol": "redactNotificationError",
+          "observation": "Notification error redaction is provider-specific rather than a process-wide structured logging policy."
+        }
+      ],
+      "root_cause": "Credential values are allowed in general configuration and redaction is applied after errors are formatted.",
+      "recommendation": "Require secret references or encrypted storage, remove literals, and apply structured allowlisted error/log serialization before persistence or response.",
+      "acceptance_criteria": [
+        "Literal credentials are rejected.",
+        "Known secret canaries never appear in rows, logs, or responses.",
+        "Rotation changes a reference without rewriting unrelated config."
+      ],
+      "tests": [
+        "literal credential rejection",
+        "error/log canary",
+        "rotation"
+      ],
+      "dependencies": [
+        "G09-F02"
+      ],
+      "interface_changes": [
+        "Expose only secret reference identifiers and configured booleans."
+      ]
+    },
+    {
+      "id": "G07-F04",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
+      "priority": "P0",
+      "confidence": "high",
+      "status": "open",
+      "title": "Web handlers hold direct GitHub write and deployment authority",
+      "summary": "Authenticated web routes can perform provider mutations instead of only enqueueing durable least-privilege jobs.",
+      "impact": "A web-process compromise can gain broad repository or deployment side effects.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "pull-request admin routes / providerConfigFrom",
+          "observation": "The web server imports provider operations and owns routes that trigger review/merge or other GitHub-related mutations."
+        },
+        {
+          "source": "repository",
+          "location": "packages/domain/src/pr-merge.ts",
+          "symbol": "approveAndMergePullRequest",
+          "observation": "Merge is a callable domain/provider side effect rather than exclusively a worker job boundary."
+        }
+      ],
+      "root_cause": "Process roles are divided by convention while the web process retains credentials and direct write call paths.",
+      "recommendation": "Give web only read/enqueue capability; execute GitHub writes and deploys in audited jobs with narrower credentials and policy checks.",
+      "acceptance_criteria": [
+        "Web runs without GitHub write or deployment credentials.",
+        "Every write has a durable job, actor, approved target, and idempotency key.",
+        "Worker credentials are scoped to the exact provider operations required."
+      ],
+      "tests": [
+        "web credential absence",
+        "write job audit",
+        "least-privilege credential"
+      ],
+      "dependencies": [],
+      "interface_changes": [
+        "Publish process-role capability health without credential values."
+      ]
+    },
+    {
+      "id": "G07-F05",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Password administration exposes secrets and truncates edge-case input",
+      "summary": "Admin creation reads a password from argv, and the line-based native helper has fixed buffers and newline semantics.",
+      "impact": "Passwords can appear in process listings or be silently truncated or altered at newline boundaries.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "scripts/create-admin.ts",
+          "symbol": "--password argument",
+          "observation": "The non-interactive command reads the password from process.argv."
+        },
+        {
+          "source": "repository",
+          "location": "packages/database/native/argon2-helper.c",
+          "symbol": "read_line / password buffer",
+          "observation": "The helper reads a line into a fixed 4096-byte buffer and strips CR/LF."
+        }
+      ],
+      "root_cause": "Password transport uses command-line and line-oriented process conventions instead of a protected binary-safe input contract.",
+      "recommendation": "Read the password from stdin or a protected descriptor and reject unsupported length/newline input explicitly.",
+      "acceptance_criteria": [
+        "Password values never appear in argv.",
+        "Length and newline limits are explicit and fail closed.",
+        "Hash and verify use the same binary-safe input contract."
+      ],
+      "tests": [
+        "argv secrecy",
+        "maximum length",
+        "embedded newline"
+      ],
+      "dependencies": [],
+      "interface_changes": [
+        "Document the supported password-input contract."
+      ]
+    },
+    {
+      "id": "G07-F06",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "CSRF verification uses ordinary string comparison",
+      "summary": "The request token is hashed and compared to the stored hash with JavaScript string inequality.",
+      "impact": "The security boundary lacks an explicit equal-length constant-time comparison.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "requireAdmin CSRF branch",
+          "observation": "The branch evaluates hash(csrf) !== session.csrf_token_hash."
+        }
+      ],
+      "root_cause": "CSRF verification uses general string equality rather than a constant-time byte comparison helper.",
+      "recommendation": "Decode equal-length hash bytes and compare them with timingSafeEqual; reject malformed lengths before comparison.",
+      "acceptance_criteria": [
+        "Valid tokens pass.",
+        "Malformed and unequal-length tokens fail without throwing.",
+        "The comparison path uses timingSafeEqual."
+      ],
+      "tests": [
+        "valid CSRF",
+        "invalid CSRF",
+        "unequal-length CSRF"
+      ],
+      "dependencies": [],
+      "interface_changes": [
+        "Keep the existing 403 contract with a stable csrf_invalid code."
+      ]
+    },
+    {
+      "id": "G07-F07",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "Client identity ignores trusted reverse-proxy configuration",
+      "summary": "Audit and throttle identity always uses the socket peer address.",
+      "impact": "Behind a reverse proxy, every client can collapse to one proxy address and source-based controls become inaccurate.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "ipOf",
+          "observation": "The helper returns request.socket.remoteAddress and has no trusted-proxy policy or forwarded-address parsing."
+        }
+      ],
+      "root_cause": "Client IP derivation has no explicit deployment trust model.",
+      "recommendation": "Configure trusted proxy hops and accept forwarded client addresses only from those peers; otherwise retain the socket address.",
+      "acceptance_criteria": [
+        "Direct untrusted forwarding headers are ignored.",
+        "A configured trusted proxy yields the intended client address.",
+        "Audit output never stores an unvalidated address chain."
+      ],
+      "tests": [
+        "direct socket",
+        "spoofed forwarded header",
+        "trusted proxy chain"
+      ],
+      "dependencies": [
+        "G07-F01"
+      ],
+      "interface_changes": [
+        "Document trusted-proxy configuration and identity source."
+      ]
+    },
+    {
+      "id": "G07-F08",
+      "group_id": "G07-auth-secrets",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "Login throttling permits username-targeted denial of service",
+      "summary": "Failure counting is keyed only by username, then blocks the account after a fixed threshold.",
+      "impact": "An attacker can intentionally lock an administrator account regardless of source identity.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "login failure query and lockout branch",
+          "observation": "The failure query filters by username and time only, then returns account temporarily locked at lockoutThreshold."
+        },
+        {
+          "source": "repository",
+          "location": "packages/database/migrations/001_foundation.sql",
+          "symbol": "login_attempts",
+          "observation": "The table stores username, attempted_at, and succeeded but no client/network key used by the query."
+        }
+      ],
+      "root_cause": "The throttle budget is account-global rather than combining source-sensitive limits with account-safe backoff.",
+      "recommendation": "Use bounded source and account signals that slow attacks without allowing one source to lock an account globally; preserve uniform credential errors.",
+      "acceptance_criteria": [
+        "One hostile source cannot globally lock a username.",
+        "High-rate failures are throttled.",
+        "Unknown and valid usernames remain indistinguishable."
+      ],
+      "tests": [
+        "targeted username attack",
+        "source burst",
+        "unknown-user parity"
+      ],
+      "dependencies": [
+        "G07-F07"
+      ],
+      "interface_changes": [
+        "Return retry timing without disclosing account existence."
+      ]
+    },
+    {
+      "id": "G03-F01",
+      "group_id": "G03-approval-reproducibility",
+      "kind": "integrity",
+      "priority": "P0",
+      "confidence": "high",
+      "status": "open",
+      "title": "Execution does not consume one immutable approved input snapshot",
+      "summary": "Execution re-resolves prompts, skills, project configuration, and model rather than loading one approved bundle.",
+      "impact": "The worker can execute inputs different from those the administrator reviewed.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "executionInputs / resolvedPrompt / resolvedSkillsFor",
+          "observation": "Execution queries current prompt versions, skills, project config, and AI configuration at run time."
+        },
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "runExecution",
+          "observation": "Skill snapshot selection uses the earliest ticket snapshot ordered by created_at rather than an approval-bound snapshot."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "plan approval route",
+          "observation": "Approval stores several version fields, but the execution resolver does not load one immutable approved snapshot object."
+        }
+      ],
+      "root_cause": "Approval metadata is recorded field-by-field while execution independently resolves effective inputs.",
+      "recommendation": "Persist one content-addressed approved snapshot containing plan, prompts, skills, model, project revision, and policy; execute only that snapshot.",
+      "acceptance_criteria": [
+        "Preview, approval, and worker report the same input hash.",
+        "Any material input change invalidates approval.",
+        "The approved model and skill versions are used exactly."
+      ],
+      "tests": [
+        "approved snapshot selection",
+        "prompt/skill/model drift",
+        "preview/worker hash equality"
+      ],
+      "dependencies": [
+        "G09-F02"
+      ],
+      "interface_changes": [
+        "Add approved_snapshot_id and input_hash to plan and execution APIs."
+      ]
+    },
+    {
+      "id": "G03-F02",
+      "group_id": "G03-approval-reproducibility",
+      "kind": "correctness",
+      "priority": "P0",
+      "confidence": "high",
+      "status": "open",
+      "title": "Approval and rejection transitions are not one compare-and-swap",
+      "summary": "Status checks, version checks, metadata updates, and queueing span multiple reads and writes.",
+      "impact": "Concurrent approval, rejection, or revision can leave active approval metadata inconsistent with the current plan.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "plan approve / reject / execute routes",
+          "observation": "Routes query current versions and then update ticket approval/status fields in transactions, but do not use one version-and-status compare-and-swap predicate for the complete transition."
+        },
+        {
+          "source": "repository",
+          "location": "packages/domain/src/plan-approval.ts",
+          "symbol": "checkPlanApprovalGate",
+          "observation": "The gate checks current version/hash/staleness, then callers perform later transitions that require their own locked recheck."
+        }
+      ],
+      "root_cause": "Approval state is distributed across ticket and plan fields without a single immutable approval record and CAS transition.",
+      "recommendation": "Create an append-only approval decision record and atomically transition only from the expected plan/status/version hash; clear all active approval references on rejection.",
+      "acceptance_criteria": [
+        "Exactly one concurrent decision wins.",
+        "Rejection leaves history but no active approval reference.",
+        "Execution queueing and approval consumption share the locked expected snapshot."
+      ],
+      "tests": [
+        "approval/rejection race",
+        "revision race",
+        "metadata clearing"
+      ],
+      "dependencies": [
+        "G03-F01"
+      ],
+      "interface_changes": [
+        "Return stable approval conflict codes and current snapshot ID."
+      ]
+    },
+    {
+      "id": "G03-F03",
+      "group_id": "G03-approval-reproducibility",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Skill and mandatory prompt policy is not enforced as an approved contract",
+      "summary": "Required skill phases, ticket override permissions, and mandatory safety instructions are resolved through separate configuration paths.",
+      "impact": "An execution can omit a required control or apply an override that was not visible at approval.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "resolvedSkillsFor",
+          "observation": "The SQL collects global, automatic, ticket-selected, and phase-required candidates, then resolves them at runtime."
+        },
+        {
+          "source": "repository",
+          "location": "packages/database/migrations/001_foundation.sql",
+          "symbol": "project_skills.allow_ticket_override",
+          "observation": "The schema stores override policy, but resolvedSkillsFor does not select or enforce allow_ticket_override."
+        },
+        {
+          "source": "repository",
+          "location": "packages/domain/src/prompts.ts",
+          "symbol": "buildPlanningPrompt / buildExecutionPrompt",
+          "observation": "Safety sections are prompt inputs, so their presence must be part of the approved immutable contract."
+        }
+      ],
+      "root_cause": "Policy sources are resolved dynamically and are not validated into one approval-bound allow/deny decision.",
+      "recommendation": "Resolve required skills, override permission, and mandatory safety prompts during preflight; fail closed and bind the result to the approved snapshot.",
+      "acceptance_criteria": [
+        "A missing required skill blocks approval.",
+        "Disallowed ticket overrides are rejected.",
+        "Mandatory safety text cannot be disabled and its hash is visible before approval."
+      ],
+      "tests": [
+        "required skill missing",
+        "override policy",
+        "mandatory prompt hash"
+      ],
+      "dependencies": [
+        "G03-F01"
+      ],
+      "interface_changes": [
+        "Expose policy resolution sources and hashes."
+      ]
+    },
+    {
+      "id": "G03-F04",
+      "group_id": "G03-approval-reproducibility",
+      "kind": "maintainability",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Configuration provenance and staleness signals can diverge",
+      "summary": "Prompt previews, imported project updates, and validation timestamps do not all use the same versioned input identity.",
+      "impact": "Operators can be asked to reapprove unchanged inputs or miss a material unversioned change.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "prompt-preview / project update / GitHub import routes",
+          "observation": "Preview resolves current inputs; normal project updates increment config_version, while imported/synchronized fields and validation metadata follow separate update paths."
+        },
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "planningInputs / executionInputs promptVersionIds",
+          "observation": "Prompt provenance stores scoped values under generic keys and is recomputed separately in web and worker code."
+        }
+      ],
+      "root_cause": "No canonical material-input hash separates approval-relevant configuration from operational metadata across all writers.",
+      "recommendation": "Define material approval inputs, version every writer that changes them, and exclude operational validation metadata from the hash.",
+      "acceptance_criteria": [
+        "Material changes always change the input hash.",
+        "Validation timestamps alone never invalidate approval.",
+        "Preview and execution provenance use identical scoped keys."
+      ],
+      "tests": [
+        "material config import",
+        "validation-only update",
+        "provenance key equality"
+      ],
+      "dependencies": [
+        "G03-F01"
+      ],
+      "interface_changes": [
+        "Publish material-input hash and changed-field reasons."
+      ]
+    },
+    {
+      "id": "G03-F05",
+      "group_id": "G03-approval-reproducibility",
+      "kind": "reliability",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Plan ingestion depends on rigid Markdown headings",
+      "summary": "The parser requires a fixed ordered list of headings in generated Markdown.",
+      "impact": "Semantically usable plans can fail and strand workflow because of harmless formatting variation.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/claude-runner/src/index.ts",
+          "symbol": "parsePlanMarkdown / REQUIRED_PLAN_HEADINGS",
+          "observation": "The parser validates an exact ordered heading contract and throws invalid_plan_structure when headings differ."
+        },
+        {
+          "source": "runtime",
+          "location": "runtime aggregate observation",
+          "symbol": "failed_agent_runs / stale_plans",
+          "observation": "The audit observed 28 failed agent runs and 2 stale plans, without attributing every count to this parser."
+        }
+      ],
+      "root_cause": "A presentation format is used as the machine contract instead of parsing or requesting a structured result with explicit fields.",
+      "recommendation": "Accept a structured plan envelope or tolerant section parser while preserving required semantic sections and human-readable Markdown.",
+      "acceptance_criteria": [
+        "Required semantic sections remain enforced.",
+        "Equivalent heading punctuation/order variations do not fail.",
+        "Malformed or missing required content returns an actionable code."
+      ],
+      "tests": [
+        "heading variants",
+        "missing semantic section",
+        "legacy plan compatibility"
+      ],
+      "dependencies": [
+        "G03-F01"
+      ],
+      "interface_changes": [
+        "Version the plan schema separately from Markdown rendering."
+      ]
+    },
+    {
+      "id": "G01-F01",
+      "group_id": "G01-workflow-state",
+      "kind": "reliability",
+      "priority": "P0",
+      "confidence": "high",
+      "status": "open",
+      "title": "Running work has no renewable ownership or automatic recovery",
+      "summary": "Jobs and notification deliveries are claimed without a lease heartbeat or bounded reaper.",
+      "impact": "Process loss or authentication refusal can strand work and leave related records stale.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/domain/src/index.ts",
+          "symbol": "claimJob / failJob",
+          "observation": "Job claims set claimed_at and claimed_by, but no lease expiry or heartbeat is stored or checked."
+        },
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "refuseQueuedClaudeJobs / deliverDueNotification",
+          "observation": "Authentication refusal updates queued jobs, while notification delivery changes a row to sending without renewable ownership or recovery."
+        },
+        {
+          "source": "runtime",
+          "location": "runtime aggregate observation",
+          "symbol": "expired_active_sessions / stale_plans",
+          "observation": "The read-only audit observed 11 expired active sessions and 2 stale plans; these are point-in-time counts, not invariants."
+        }
+      ],
+      "root_cause": "Workflow ownership is represented by one-time timestamps and statuses instead of renewable leases with expiry and recovery transitions.",
+      "recommendation": "Add lease owner, expiry, heartbeat, and bounded reaper semantics shared by jobs and deliveries; couple recovery to ticket/run history.",
+      "acceptance_criteria": [
+        "Only the live lease owner can complete or fail work.",
+        "Expired work is recovered once with an audit event.",
+        "Authentication refusal leaves every related ticket and run in an actionable terminal or queued state."
+      ],
+      "tests": [
+        "job lease expiry and reclaim",
+        "notification sending recovery",
+        "authentication-refusal state matrix"
+      ],
+      "dependencies": [
+        "G09-F02"
+      ],
+      "interface_changes": [
+        "Expose lease expiry, owner, and recovery reason in operator APIs."
+      ]
+    },
+    {
+      "id": "G01-F02",
+      "group_id": "G01-workflow-state",
+      "kind": "correctness",
+      "priority": "P0",
+      "confidence": "high",
+      "status": "open",
+      "title": "Idempotency keys do not distinguish legitimate terminal reruns",
+      "summary": "Enqueue conflicts return the existing job even when its terminal history should remain immutable and a new attempt is requested.",
+      "impact": "A rerun can be blocked, or retry code can make failed review/conflict work look completed before replacement work succeeds.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/domain/src/index.ts",
+          "symbol": "enqueueJob",
+          "observation": "ON CONFLICT(idempotency_key) performs a no-op update and returns the pre-existing row regardless of terminal status."
+        },
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "runPrAiReview / runPrConflictResolution / main dispatch",
+          "observation": "Retryable handlers share the jobs-table lifecycle, so their domain status and job completion must remain correlated across attempts."
+        }
+      ],
+      "root_cause": "One permanent idempotency identity is used for both duplicate suppression and user-requested attempt identity.",
+      "recommendation": "Keep the original job immutable and create an explicitly linked rerun identity; complete domain work only after the replacement attempt succeeds.",
+      "acceptance_criteria": [
+        "A terminal job can be rerun through a new linked identity.",
+        "Duplicate enqueue during an active attempt remains idempotent.",
+        "Failed review or conflict history never becomes completed merely because a retry was queued."
+      ],
+      "tests": [
+        "terminal rerun identity",
+        "active duplicate suppression",
+        "review/conflict retry state matrix"
+      ],
+      "dependencies": [
+        "G01-F01"
+      ],
+      "interface_changes": [
+        "Add immutable rerun_of and attempt identity fields."
+      ]
+    },
+    {
+      "id": "G01-F03",
+      "group_id": "G01-workflow-state",
+      "kind": "integrity",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Publication and state events are not one atomic transition",
+      "summary": "Several workflow paths update work state, history, and external publication in separate operations.",
+      "impact": "A partial failure can leave the UI, audit history, and externally visible result disagreeing.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "publishExecutionAttempt",
+          "observation": "Publication performs multiple database and provider operations around commit and pull-request state rather than one durable publication state machine."
+        },
+        {
+          "source": "repository",
+          "location": "packages/domain/src/index.ts",
+          "symbol": "completeJob / failJob",
+          "observation": "Job completion and failure update only the jobs row; related ticket/run/event updates are performed by callers."
+        }
+      ],
+      "root_cause": "Workflow transitions have no shared transaction/outbox boundary tying domain state, history, and external side-effect intent together.",
+      "recommendation": "Use a transactional state transition plus durable outbox/publication record, then make external effects idempotent.",
+      "acceptance_criteria": [
+        "A database failure cannot publish an unrecorded result.",
+        "A provider failure preserves a retryable publication record and prior history.",
+        "Every externally visible transition has one attributable audit event."
+      ],
+      "tests": [
+        "transaction rollback",
+        "provider failure retry",
+        "duplicate publication"
+      ],
+      "dependencies": [
+        "G01-F01",
+        "G09-F02"
+      ],
+      "interface_changes": [
+        "Persist publication state and external idempotency key."
+      ]
+    },
+    {
+      "id": "G01-F04",
+      "group_id": "G01-workflow-state",
+      "kind": "performance",
+      "priority": "P2",
+      "confidence": "high",
+      "status": "open",
+      "title": "The worker serializes unrelated job classes",
+      "summary": "One loop claims and awaits at most one job while also polling synchronization and notification work.",
+      "impact": "Throughput and recovery latency scale with the slowest operation despite operator surfaces implying general queue capacity.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "while (!stopping) main loop",
+          "observation": "The loop awaits sync, delivery, one claim, and one handler sequentially before the next iteration."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/queue.ts",
+          "symbol": "queue rendering",
+          "observation": "The operator view reports queued/running work but has no documented single-concurrency capacity contract."
+        }
+      ],
+      "root_cause": "All job types share one sequential event loop without per-capability concurrency or a truthful capacity setting.",
+      "recommendation": "Either label the worker as single-concurrency or add bounded per-capability concurrency after lease safety is complete.",
+      "acceptance_criteria": [
+        "Displayed capacity matches actual behavior.",
+        "If concurrency is enabled, independent jobs overlap without double claims.",
+        "Shutdown waits for or safely expires active leases."
+      ],
+      "tests": [
+        "capacity label",
+        "bounded concurrency",
+        "graceful shutdown"
+      ],
+      "dependencies": [
+        "G01-F01"
+      ],
+      "interface_changes": [
+        "Expose configured and observed worker capacity."
+      ]
+    },
+    {
+      "id": "G02-F01",
+      "group_id": "G02-execution-safety",
+      "kind": "integrity",
+      "priority": "P0",
+      "confidence": "high",
+      "status": "open",
+      "title": "Repair publication can reuse a prior attempt commit",
+      "summary": "Repair and publication paths read stored result_commit/worktree metadata that can outlive the attempt being repaired.",
+      "impact": "A repair can publish an old commit rather than the newly validated result.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "publishExecutionAttempt / retryPublication",
+          "observation": "Publication initializes commit from execution_attempts.result_commit and retryPublication requires the stored commit, worktree, and branch."
+        },
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "runExecution validation failure updates",
+          "observation": "Some failure paths clear result_commit, showing correctness depends on every path resetting mutable attempt state."
+        }
+      ],
+      "root_cause": "Mutable publication fields are reused across attempts instead of binding each repair to a fresh immutable attempt result.",
+      "recommendation": "Clear publication state before repair and bind validation and publication to the new attempt ID, base commit, result commit, and worktree.",
+      "acceptance_criteria": [
+        "A repair cannot publish any prior attempt commit.",
+        "Publication rejects a commit not produced and validated by its attempt.",
+        "Prior attempt metadata remains immutable history."
+      ],
+      "tests": [
+        "stale-commit repair regression",
+        "attempt/commit binding",
+        "publication retry"
+      ],
+      "dependencies": [
+        "G03-F01"
+      ],
+      "interface_changes": [
+        "Persist immutable attempt input and result identities."
+      ]
+    },
+    {
+      "id": "G02-F02",
+      "group_id": "G02-execution-safety",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Secret scanning assumes changed paths still exist in the index",
+      "summary": "The validation flow can inspect staged content through git show :path even when a change deletes that path.",
+      "impact": "A valid deletion can fail validation or bypass consistent scanning behavior.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/git-runner/src/index.ts",
+          "symbol": "scanSecrets / validateExecutionWorktree",
+          "observation": "Secret scanning derives content from changed paths and invokes Git index content reads; deleted paths need explicit handling."
+        }
+      ],
+      "root_cause": "The scanner models every changed path as an index blob and does not classify deletions before content inspection.",
+      "recommendation": "Classify change status first; scan added/modified blobs and treat deletions as content-free while retaining path-policy checks.",
+      "acceptance_criteria": [
+        "A staged deletion validates without an invalid index read.",
+        "Added and modified secrets still fail closed.",
+        "Rename and binary behavior is documented and tested."
+      ],
+      "tests": [
+        "staged deletion",
+        "rename",
+        "binary/secret fixture"
+      ],
+      "dependencies": [],
+      "interface_changes": []
+    },
+    {
+      "id": "G02-F03",
+      "group_id": "G02-execution-safety",
+      "kind": "security",
+      "priority": "P0",
+      "confidence": "high",
+      "status": "open",
+      "title": "Agent and validation children inherit worker authority",
+      "summary": "Claude and git validation subprocesses inherit process.env, while execution grants broad filesystem and shell tools.",
+      "impact": "A repository instruction or command can access credentials and capabilities unrelated to the approved task.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/claude-runner/src/index.ts",
+          "symbol": "invokePlanningClaude / invokeExecutionClaude",
+          "observation": "Both invocation paths spread process.env into the child environment and add the Claude OAuth token."
+        },
+        {
+          "source": "repository",
+          "location": "packages/git-runner/src/index.ts",
+          "symbol": "run validation command",
+          "observation": "Validation subprocesses use env: {...process.env}."
+        },
+        {
+          "source": "repository",
+          "location": "packages/claude-runner/src/index.ts",
+          "symbol": "execution tool arguments",
+          "observation": "Execution tool policy enables filesystem and shell-capable tools rather than an OS-level authority boundary."
+        }
+      ],
+      "root_cause": "Child-process authority is inherited by default and prompt/tool declarations are treated as the isolation boundary.",
+      "recommendation": "Pass an explicit environment allowlist, separate required credentials by process role, and enforce worktree/path scope outside the prompt.",
+      "acceptance_criteria": [
+        "Child environments contain only documented variables.",
+        "A repository command cannot read GitHub/deploy/notification credentials.",
+        "Agent writes outside the assigned worktree are rejected."
+      ],
+      "tests": [
+        "environment allowlist",
+        "credential canary",
+        "outside-worktree write refusal"
+      ],
+      "dependencies": [],
+      "interface_changes": [
+        "Record the operation policy and environment profile without secret values."
+      ]
+    },
+    {
+      "id": "G02-F04",
+      "group_id": "G02-execution-safety",
+      "kind": "reliability",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Execution worktrees are not guaranteed to start fresh and be reclaimed",
+      "summary": "Execution can use a stale local default branch, and cleanup tooling does not prove complete lifecycle recovery.",
+      "impact": "Changes can be based on an obsolete revision or leave worktrees that interfere with later attempts.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/git-runner/src/index.ts",
+          "symbol": "createExecutionWorktree / validateProject",
+          "observation": "Worktree creation and repository validation are separate operations; a current remote default-branch proof is not persisted with the attempt."
+        },
+        {
+          "source": "repository",
+          "location": "scripts/cleanup-worktrees.ts",
+          "symbol": "script body",
+          "observation": "Cleanup scans a configured directory but is not coupled to attempt lease ownership or publication state."
+        }
+      ],
+      "root_cause": "Worktree creation, freshness proof, ownership, and cleanup are separate conventions rather than one attempt lifecycle.",
+      "recommendation": "Create from a freshly verified base SHA, persist it on the attempt, and reclaim only worktrees whose attempt lease is terminal or expired.",
+      "acceptance_criteria": [
+        "Attempt base SHA equals the freshly resolved protected branch SHA.",
+        "Dirty or stale repositories fail before agent launch.",
+        "Cleanup never removes a live attempt and reclaims expired terminal worktrees."
+      ],
+      "tests": [
+        "stale branch refusal",
+        "live-worktree protection",
+        "expired cleanup"
+      ],
+      "dependencies": [
+        "G01-F01",
+        "G09-F03"
+      ],
+      "interface_changes": [
+        "Expose base SHA and worktree lifecycle status."
+      ]
+    },
+    {
+      "id": "G02-F05",
+      "group_id": "G02-execution-safety",
+      "kind": "correctness",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Conflict-resolution permissions and path scope are inconsistent",
+      "summary": "The conflict agent is asked to edit a worktree without a persisted allowlist limited to conflicted files.",
+      "impact": "It can fail to edit or modify unrelated paths while still reaching validation and publication.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "runPrConflictResolution",
+          "observation": "The prompt contains conflicted file contents and the agent runs in the full worktree; validation occurs after invocation, with no pre-invocation write allowlist persisted."
+        },
+        {
+          "source": "repository",
+          "location": "packages/domain/src/prompts.ts",
+          "symbol": "renderConflictResolutionPrompt",
+          "observation": "The prompt requests conflict resolution, so correctness depends on tool allowance and enforced file scope matching that request."
+        }
+      ],
+      "root_cause": "Prompt intent, tool permissions, and filesystem enforcement are not derived from one scoped conflict-operation policy.",
+      "recommendation": "Generate one policy that permits edits only to conflicted paths plus explicitly required merge metadata, and enforce it during and after execution.",
+      "acceptance_criteria": [
+        "The agent can edit every conflicted file.",
+        "Writes outside the approved conflict set fail.",
+        "Remaining conflicts or unrelated diffs prevent publication."
+      ],
+      "tests": [
+        "conflicted-file edit",
+        "unrelated write refusal",
+        "remaining-marker refusal"
+      ],
+      "dependencies": [
+        "G02-F03"
+      ],
+      "interface_changes": [
+        "Persist allowed paths and tool policy for the conflict attempt."
+      ]
+    },
+    {
+      "id": "G02-F06",
+      "group_id": "G02-execution-safety",
+      "kind": "reliability",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Planning output finalization is not crash-safe",
+      "summary": "Plan files, run completion, and database plan/version rows are finalized through separate filesystem and database operations.",
+      "impact": "Timeout or process loss can leave a running stream, orphan plan artifact, or database row pointing at incomplete state.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "runPlanning / storePlan / storeRevisedPlan",
+          "observation": "Planning writes prompt and plan artifacts around separate agent_run and transactional plan/version updates."
+        },
+        {
+          "source": "repository",
+          "location": "packages/claude-runner/src/index.ts",
+          "symbol": "invokePlanningClaude",
+          "observation": "Invocation is bounded by CLI turns but has no independently persisted finalization lease tying stream completion to artifact commit."
+        }
+      ],
+      "root_cause": "Filesystem artifacts and run/plan state have no recoverable staging protocol with a final atomic publish marker.",
+      "recommendation": "Use a bounded timeout and staged artifact state; finalize the row and rename/publish artifact idempotently, with recovery for interrupted attempts.",
+      "acceptance_criteria": [
+        "Timed-out planning terminates and records a final state.",
+        "A crash before DB commit leaves no active plan pointing to an orphan artifact.",
+        "Recovery finalizes or removes staged artifacts idempotently."
+      ],
+      "tests": [
+        "planning timeout",
+        "crash before commit",
+        "staged artifact recovery"
+      ],
+      "dependencies": [
+        "G01-F01",
+        "G09-F03"
+      ],
+      "interface_changes": [
+        "Add artifact staging/finalization status."
+      ]
+    },
+    {
+      "id": "G04-F01",
+      "group_id": "G04-github-integrity",
+      "kind": "correctness",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "PR discovery is owner-ambiguous and single-page",
+      "summary": "Open-head lookup omits owner qualification and list synchronization retrieves only one page.",
+      "impact": "The system can match the wrong fork branch or silently miss pull requests beyond the first page.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/github-provider/src/index.ts",
+          "symbol": "findOpenPullRequestForHead / listPullRequests",
+          "observation": "The head query sends the supplied ref without adding owner:, and listPullRequests requests per_page=100 with no Link-page traversal."
+        },
+        {
+          "source": "official documentation",
+          "location": "GitHub REST pull requests",
+          "symbol": "List pull requests",
+          "observation": "GitHub documents owner:ref head filtering and paginated list responses.",
+          "reference": "https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28"
+        }
+      ],
+      "root_cause": "The provider adapter treats a page and branch name as complete repository identity.",
+      "recommendation": "Require owner-qualified heads and traverse all Link pages with bounded cursors.",
+      "acceptance_criteria": [
+        "Fork branches with equal names are distinguished.",
+        "All pages synchronize without duplicates.",
+        "Interrupted pagination resumes or reports stale partial state."
+      ],
+      "tests": [
+        "owner-qualified head",
+        "two-page list",
+        "pagination interruption"
+      ],
+      "dependencies": [],
+      "interface_changes": [
+        "Expose synchronization cursor and completeness."
+      ]
+    },
+    {
+      "id": "G04-F02",
+      "group_id": "G04-github-integrity",
+      "kind": "integrity",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Review and check truth is not materialized from authoritative APIs",
+      "summary": "PR list data is stored as review/check state even though the REST pull-request list does not supply complete policy inputs.",
+      "impact": "Operator and merge logic can act on absent, stale, or invented review/check state.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/domain/src/pull-request-sync.ts",
+          "symbol": "importGithubPullRequests / updateStoredPullRequest",
+          "observation": "Sync copies remote.review_state and remote.check_state fields from provider list results into pull_requests."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/prs.ts",
+          "symbol": "review/check badges",
+          "observation": "The page comments acknowledge REST PR responses do not populate review_state and falls back to internal/AI state."
+        },
+        {
+          "source": "official documentation",
+          "location": "GitHub REST reviews and review requests",
+          "symbol": "Reviews / requested reviewers",
+          "observation": "GitHub exposes reviews and requested reviewers through separate endpoints.",
+          "reference": "https://docs.github.com/en/rest/pulls/reviews?apiVersion=2022-11-28"
+        }
+      ],
+      "root_cause": "Synchronization does not aggregate reviews, requested reviewers, checks, head SHA, and source timestamps into one authoritative policy snapshot.",
+      "recommendation": "Fetch and store the proper review/check/reviewer/head inputs with freshness and rate-limit-aware polling or webhook updates.",
+      "acceptance_criteria": [
+        "Displayed review/check state identifies its source and timestamp.",
+        "Requested reviewers and current head SHA are synchronized.",
+        "Rate limiting produces labeled stale state, not fabricated freshness."
+      ],
+      "tests": [
+        "review aggregation",
+        "check aggregation",
+        "rate-limit stale state"
+      ],
+      "dependencies": [
+        "G04-F01"
+      ],
+      "interface_changes": [
+        "Expose head SHA, policy inputs, and source freshness."
+      ]
+    },
+    {
+      "id": "G04-F03",
+      "group_id": "G04-github-integrity",
+      "kind": "reliability",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "GitHub transport policy is incomplete and inconsistent",
+      "summary": "REST and GraphQL paths differ in API base behavior and lack one bounded retry/timeout/version policy.",
+      "impact": "Enterprise/custom-base installations and transient failures can behave differently or hang without actionable state.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/github-provider/src/index.ts",
+          "symbol": "request / requestWithoutBody / graphqlRequest",
+          "observation": "GraphQL hardcodes https://api.github.com/graphql while REST derives an environment API base; fetch calls have no shared timeout/retry/version wrapper."
+        },
+        {
+          "source": "repository",
+          "location": "packages/github-provider/src/index.ts",
+          "symbol": "apiBaseUrl / authToken",
+          "observation": "Environment fallback and validation are implemented separately from user-facing configuration documentation."
+        }
+      ],
+      "root_cause": "Provider requests are individual fetch calls rather than one configured transport adapter.",
+      "recommendation": "Centralize base URLs, API version headers, timeout, bounded retry/backoff, rate-limit metadata, and redacted errors.",
+      "acceptance_criteria": [
+        "REST and GraphQL honor the configured API base.",
+        "Every request has a timeout and bounded retry policy.",
+        "Rate-limit and transport errors return stable recovery metadata."
+      ],
+      "tests": [
+        "custom API base",
+        "timeout",
+        "retry/backoff",
+        "redaction"
+      ],
+      "dependencies": [
+        "G04-F01"
+      ],
+      "interface_changes": [
+        "Return provider freshness and retry-after metadata."
+      ]
+    },
+    {
+      "id": "G04-F04",
+      "group_id": "G04-github-integrity",
+      "kind": "correctness",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "AI review retry and verdict handling are not one idempotent state machine",
+      "summary": "Review invocation, comment publication, verdict parsing, and row completion are separate operations.",
+      "impact": "A retry can duplicate a comment or corrupt history after a partial failure, and ambiguous model output can be accepted inconsistently.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "runPrAiReview",
+          "observation": "The handler invokes Claude, parses a verdict, posts a comment, then updates review state through separate effects."
+        },
+        {
+          "source": "repository",
+          "location": "packages/domain/src/pr-review.ts",
+          "symbol": "parsePrReviewVerdict",
+          "observation": "Verdict extraction searches a JSON block and validates selected fields, making parser strictness part of delivery state."
+        }
+      ],
+      "root_cause": "No idempotent review-attempt/publication record binds model output, parsed verdict, external comment, and completion.",
+      "recommendation": "Persist immutable review attempts and parsed envelopes before an idempotent comment outbox; never overwrite prior failure history.",
+      "acceptance_criteria": [
+        "Retry after a posted comment does not post twice.",
+        "Malformed or ambiguous output fails with an actionable parser code.",
+        "Each attempt remains visible and terminal."
+      ],
+      "tests": [
+        "post/update failure",
+        "duplicate retry",
+        "ambiguous verdict"
+      ],
+      "dependencies": [
+        "G01-F03",
+        "G03-F01"
+      ],
+      "interface_changes": [
+        "Expose review attempt and publication IDs."
+      ]
+    },
+    {
+      "id": "G04-F05",
+      "group_id": "G04-github-integrity",
+      "kind": "security",
+      "priority": "P0",
+      "confidence": "high",
+      "status": "open",
+      "title": "Merge is not bound to the final head SHA, required checks, and reviews",
+      "summary": "The merge provider call accepts repository, pull number, method, and message but no expected head SHA.",
+      "impact": "A head update or missing policy input can be merged after approval, making the core workflow report success for an unreviewed revision.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/github-provider/src/index.ts",
+          "symbol": "mergePullRequest",
+          "observation": "The merge request body does not send sha and the function does not retrieve required checks/reviews immediately before merging."
+        },
+        {
+          "source": "repository",
+          "location": "packages/domain/src/pr-merge.ts",
+          "symbol": "approveAndMergePullRequest",
+          "observation": "The domain operation calls mergePullRequest after local state checks without passing an expected head SHA."
+        },
+        {
+          "source": "official documentation",
+          "location": "GitHub REST pull requests",
+          "symbol": "Merge a pull request",
+          "observation": "GitHub's merge API supports an expected head SHA and reports conflicts when it changes.",
+          "reference": "https://docs.github.com/en/rest/pulls/pulls?apiVersion=2022-11-28"
+        }
+      ],
+      "root_cause": "Approval and merge are not a compare-and-swap against an authoritative final GitHub policy snapshot.",
+      "recommendation": "Immediately re-read head, required checks, and required reviews; merge with expected SHA and record the verified snapshot and response.",
+      "acceptance_criteria": [
+        "Changed head always refuses merge.",
+        "Missing or stale required checks/reviews refuse merge.",
+        "Success records the exact merged SHA and policy snapshot."
+      ],
+      "tests": [
+        "head-race refusal",
+        "missing check",
+        "missing review",
+        "expected-SHA merge"
+      ],
+      "dependencies": [
+        "G03-F01",
+        "G04-F02"
+      ],
+      "interface_changes": [
+        "Require expected_head_sha and policy_snapshot_id on merge jobs."
+      ]
+    },
+    {
+      "id": "G05-F01",
+      "group_id": "G05-deployment-safety",
+      "kind": "security",
+      "priority": "P0",
+      "confidence": "high",
+      "status": "open",
+      "title": "Successful check events can deploy a non-protected-branch SHA",
+      "summary": "The check_run handler passes a successful check's head SHA directly to deployment without proving it is the current protected branch head.",
+      "impact": "An unintended revision with a successful check can be released.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "webhook-server.js",
+          "symbol": "check_run branch / handleDeploy",
+          "observation": "A successful matching check_run calls handleDeploy with check_run.head_sha; no protected-branch head lookup precedes deployment."
+        }
+      ],
+      "root_cause": "Deployment authorization equates a successful named check with protected-branch membership and freshness.",
+      "recommendation": "Resolve the protected branch head at decision time and require exact SHA equality before creating a deployment job.",
+      "acceptance_criteria": [
+        "Only the current protected branch head can deploy.",
+        "A stale or feature-branch successful check is rejected and audited.",
+        "The protected branch is explicit configuration, not an implicit checkout command."
+      ],
+      "tests": [
+        "feature-branch check rejection",
+        "stale head rejection",
+        "protected-head success"
+      ],
+      "dependencies": [
+        "G04-F05"
+      ],
+      "interface_changes": [
+        "Persist protected branch and verified target SHA."
+      ]
+    },
+    {
+      "id": "G05-F02",
+      "group_id": "G05-deployment-safety",
+      "kind": "reliability",
+      "priority": "P0",
+      "confidence": "high",
+      "status": "open",
+      "title": "Deploy is not a health-gated recoverable release transaction",
+      "summary": "The script checks out master, installs dependencies, and restarts processes without migration, post-health, atomic release, or rollback stages.",
+      "impact": "A release can expose incompatible code or partial state and still lack a proven recovery path.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "deploy.sh",
+          "symbol": "deploy script",
+          "observation": "The script runs git checkout/reset, pnpm install, and pm2 restart; it has no database migration, release directory swap, health gate, or rollback step."
+        },
+        {
+          "source": "repository",
+          "location": ".github/workflows/ci.yml",
+          "symbol": "dependency install",
+          "observation": "CI uses pnpm install --frozen-lockfile while deploy.sh uses a non-frozen install."
+        }
+      ],
+      "root_cause": "Deployment is an in-place shell sequence rather than a staged transaction with explicit preflight, migration, health, and rollback states.",
+      "recommendation": "Create a staged release using the frozen lockfile, explicit migration policy, post-release health checks, and tested rollback or a clearly blocked recovery state.",
+      "acceptance_criteria": [
+        "Dependency resolution is frozen.",
+        "Migration outcome is recorded before traffic/process cutover.",
+        "Failed health rolls back or blocks with tested recovery instructions.",
+        "The prior release remains recoverable."
+      ],
+      "tests": [
+        "migration failure",
+        "health failure rollback",
+        "frozen install",
+        "partial restart"
+      ],
+      "dependencies": [
+        "G05-F01",
+        "G09-F01"
+      ],
+      "interface_changes": [
+        "Persist release stages, health evidence, and rollback target."
+      ]
+    },
+    {
+      "id": "G05-F03",
+      "group_id": "G05-deployment-safety",
+      "kind": "reliability",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Deploy lock and result state are not a durable audited history",
+      "summary": "PID/marker files coordinate deployment locally and can be reset after timeout or corruption.",
+      "impact": "A crash can leave ambiguous state, unsafe retries, or no operator-grade history of approval and outcome.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "webhook-server.js",
+          "symbol": "acquireDeployLock / runDeployDetached / pollDeployResult",
+          "observation": "Local lock, state, and exit-code marker files determine stuck recovery and completion."
+        },
+        {
+          "source": "repository",
+          "location": "webhook-server.js",
+          "symbol": "DEPLOY_STUCK_TIMEOUT_MS",
+          "observation": "Timeout-based lock reset is configured without a durable deployment attempt/lease record."
+        }
+      ],
+      "root_cause": "Deployment ownership, approval, retry, and outcome exist only in local mutable files rather than an append-only durable attempt model.",
+      "recommendation": "Represent each deployment as a leased job with immutable target/approval and append-only stage events; treat local process markers as implementation detail.",
+      "acceptance_criteria": [
+        "A corrupt marker cannot authorize a new deployment.",
+        "Expired ownership is recovered once with operator-visible reason.",
+        "Approval, retry, and every stage outcome are queryable history."
+      ],
+      "tests": [
+        "corrupt marker",
+        "stuck lease recovery",
+        "duplicate delivery"
+      ],
+      "dependencies": [
+        "G01-F01",
+        "G05-F02"
+      ],
+      "interface_changes": [
+        "Add deployment attempt and event records."
+      ]
+    },
+    {
+      "id": "G05-F04",
+      "group_id": "G05-deployment-safety",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "Oversize webhook bodies terminate without an HTTP response",
+      "summary": "The server destroys the request after the byte limit but does not send a stable 413 response or prevent end handling explicitly.",
+      "impact": "Clients and operators can see a reset or ambiguous failure instead of an attributable rejected delivery.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "webhook-server.js",
+          "symbol": "http.createServer data/end handlers",
+          "observation": "The data handler increments size and calls req.destroy() after MAX, while the end handler still owns response handling and no 413 response is written."
+        }
+      ],
+      "root_cause": "The request-size guard aborts the transport instead of completing one explicit bounded HTTP rejection state.",
+      "recommendation": "Stop buffering at the limit, mark the request rejected, and send one stable 413 response without invoking signature or JSON processing.",
+      "acceptance_criteria": [
+        "A body above MAX receives exactly one 413 response.",
+        "Oversize content is not parsed, authenticated, or deployed.",
+        "The rejection is logged without body content."
+      ],
+      "tests": [
+        "just-under-limit request",
+        "oversize 413",
+        "data/end race"
+      ],
+      "dependencies": [],
+      "interface_changes": [
+        "Return a stable webhook_body_too_large code."
+      ]
+    },
+    {
+      "id": "G05-F05",
+      "group_id": "G05-deployment-safety",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "Deployment notifications have an implicit hardcoded recipient",
+      "summary": "The webhook server falls back to a literal phone destination when configuration is absent.",
+      "impact": "A deployment message can be routed to an unintended recipient and the value is embedded in source history.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "webhook-server.js",
+          "symbol": "WHATSAPP_PHONE",
+          "observation": "The destination uses process.env.WHATSAPP_PHONE || a literal phone number."
+        }
+      ],
+      "root_cause": "Notification destination configuration fails open to a source-coded value.",
+      "recommendation": "Remove the fallback, require an explicit secret-managed recipient, and fail deployment notification configuration closed without logging the destination.",
+      "acceptance_criteria": [
+        "No recipient literal remains in source.",
+        "Missing recipient disables or fails notification explicitly.",
+        "Logs and audit records contain no destination value."
+      ],
+      "tests": [
+        "missing recipient",
+        "redaction scan"
+      ],
+      "dependencies": [
+        "G07-F03"
+      ],
+      "interface_changes": []
+    },
+    {
+      "id": "G05-F06",
+      "group_id": "G05-deployment-safety",
+      "kind": "reliability",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "Deployment notification HTTP failures are treated as success",
+      "summary": "The notification helper awaits fetch but does not reject or record non-2xx responses.",
+      "impact": "A deployment notification can be lost while the webhook path appears successful.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "webhook-server.js",
+          "symbol": "sendNotification",
+          "observation": "The helper awaits fetch and catches thrown network errors, but never checks Response.ok or status."
+        }
+      ],
+      "root_cause": "Notification delivery treats transport completion as provider acceptance.",
+      "recommendation": "Check the response status, record a redacted failure for non-2xx results, and keep notification failure distinct from deployment outcome.",
+      "acceptance_criteria": [
+        "Every non-2xx response is recorded as a notification failure.",
+        "Deployment success is not rewritten by notification failure.",
+        "Errors contain no authorization header, recipient, or response body secrets."
+      ],
+      "tests": [
+        "notification 204",
+        "notification 400/500",
+        "redacted failure"
+      ],
+      "dependencies": [
+        "G07-F03"
+      ],
+      "interface_changes": [
+        "Expose a separate notification outcome code on deployment history."
+      ]
+    },
+    {
+      "id": "G05-F07",
+      "group_id": "G05-deployment-safety",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "Deployment launch interpolates configured paths into a shell command",
+      "summary": "The deploy executable, marker, and log paths are quoted into one sh -c string.",
+      "impact": "A configured path containing shell syntax can alter the launched command despite single-quote wrapping assumptions.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "webhook-server.js",
+          "symbol": "launchDeploy",
+          "observation": "spawn runs sh -c with a constructed command containing DEPLOY_SH_PATH, marker, and logPath interpolation."
+        }
+      ],
+      "root_cause": "Process execution delegates argument and redirection boundaries to shell parsing.",
+      "recommendation": "Invoke the deploy script with an argv array and open/pass log descriptors without a shell.",
+      "acceptance_criteria": [
+        "No sh -c or interpolated command is used for deployment.",
+        "Paths containing whitespace or shell metacharacters remain literal arguments.",
+        "Detached execution and completion tracking still work."
+      ],
+      "tests": [
+        "path whitespace",
+        "shell metacharacters",
+        "detached completion"
+      ],
+      "dependencies": [
+        "G05-F03"
+      ],
+      "interface_changes": [
+        "Define the deploy argv and log-descriptor contract."
+      ]
+    },
+    {
+      "id": "G06-F01",
+      "group_id": "G06-public-intake",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Public form values are not validated against one complete field schema",
+      "summary": "Optional email/URL values, URL schemes, field types, and configured options are not all enforced server-side.",
+      "impact": "Malformed or hostile clients can bypass browser controls and store values outside the form contract.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "validateFields / public submission route",
+          "observation": "Custom validation handles public fields but does not establish one exhaustive server-side schema contract for every field type, optional value, option, and URL scheme."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/ui.ts",
+          "symbol": "publicForm",
+          "observation": "Browser input types provide client hints, which are bypassable and therefore cannot be the authoritative validation boundary."
+        }
+      ],
+      "root_cause": "Rendering and submission validation interpret field configuration separately instead of sharing an exhaustive schema.",
+      "recommendation": "Compile form configuration into one validated schema used by admin save, rendering, and submission; allow only documented URL schemes.",
+      "acceptance_criteria": [
+        "Present invalid optional email/URL values fail.",
+        "Select/radio/multiselect values must belong to configured options.",
+        "Unsupported field configuration is rejected before publication."
+      ],
+      "tests": [
+        "field-type matrix",
+        "optional invalid values",
+        "URL scheme",
+        "option tampering"
+      ],
+      "dependencies": [
+        "G07-F01"
+      ],
+      "interface_changes": [
+        "Return stable per-field validation codes."
+      ]
+    },
+    {
+      "id": "G06-F02",
+      "group_id": "G06-public-intake",
+      "kind": "correctness",
+      "priority": "P2",
+      "confidence": "high",
+      "status": "open",
+      "title": "Form rendering and advertised settings diverge from implemented behavior",
+      "summary": "Radio, multiselect, static, attachment, CAPTCHA, notification, and rate-limit settings are not consistently rendered or enforced.",
+      "impact": "Operators can publish a form whose displayed controls and promised protections do not match submission behavior.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/ui.ts",
+          "symbol": "publicForm field rendering",
+          "observation": "The renderer maps most types to generic controls and does not implement every configured field/settings behavior."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/forms.ts",
+          "symbol": "form preview",
+          "observation": "Preview renders non-static fields through generic disabled inputs and does not demonstrate all attachment/static/multiselect behavior."
+        }
+      ],
+      "root_cause": "The settings model exposes capabilities without a single supported-capability registry shared by editor, preview, renderer, and server.",
+      "recommendation": "Create one native capability map; implement supported behavior and reject or label everything else unavailable.",
+      "acceptance_criteria": [
+        "Editor, preview, public form, and server agree for each supported field type.",
+        "Unsupported CAPTCHA/notification/rate/attachment settings cannot be advertised as active.",
+        "Static content is never submitted as user data."
+      ],
+      "tests": [
+        "render/submit matrix",
+        "unsupported setting",
+        "static field"
+      ],
+      "dependencies": [
+        "G06-F01"
+      ],
+      "interface_changes": [
+        "Expose supported capability flags."
+      ]
+    },
+    {
+      "id": "G06-F03",
+      "group_id": "G06-public-intake",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Uploads are bearer identifiers without complete content and download policy",
+      "summary": "Upload identifiers are not bound to a form/session capability, and multipart/image/download controls are incomplete.",
+      "impact": "An identifier can be replayed or attached outside its intended submission, and spoofed content or unauthorized download can cross the trust boundary.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "public upload and submission handlers",
+          "observation": "Upload lifecycle is implemented through custom UUID records and filesystem paths; authorization binding and download handling are not represented as one short-lived capability."
+        },
+        {
+          "source": "repository",
+          "location": "packages/database/migrations/002_forms_and_tickets.sql",
+          "symbol": "uploads / attachments",
+          "observation": "The schema stores upload and attachment rows but no form/session capability hash or expiry boundary."
+        }
+      ],
+      "root_cause": "Upload identity is used as authorization instead of a scoped, expiring capability with validated content and explicit download checks.",
+      "recommendation": "Issue short-lived form/session-scoped capabilities, stream with size/type checks, and authorize attachment conversion and download.",
+      "acceptance_criteria": [
+        "An upload cannot attach to another form/session.",
+        "Spoofed or oversize multipart content fails before persistence.",
+        "Only authorized operators can download attachments."
+      ],
+      "tests": [
+        "capability replay",
+        "multipart spoof",
+        "oversize stream",
+        "download authorization"
+      ],
+      "dependencies": [
+        "G06-F01",
+        "G07-F02"
+      ],
+      "interface_changes": [
+        "Add upload capability expiry/scope and authorized attachment metadata."
+      ]
+    },
+    {
+      "id": "G06-F04",
+      "group_id": "G06-public-intake",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Submission throttling trusts proxy input and counts too late",
+      "summary": "Rate limiting relies on derived client IP and accepted submission records rather than an atomic attempt budget.",
+      "impact": "Concurrent or forged requests can bypass limits or penalize the wrong client.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "ipOf / public_submission_attempts / submission route",
+          "observation": "Proxy-derived IP and submission-attempt handling are custom; accepted-workflow timing is not a single atomic consume operation."
+        },
+        {
+          "source": "repository",
+          "location": "packages/database/migrations/002_forms_and_tickets.sql",
+          "symbol": "public_submission_attempts",
+          "observation": "The attempts table exists without a database-enforced atomic per-window quota."
+        }
+      ],
+      "root_cause": "Trusted proxy resolution and rate-budget consumption are not one configured, atomic trust-boundary operation.",
+      "recommendation": "Define trusted proxies and atomically consume a per-form/client attempt before validation-heavy or upload work.",
+      "acceptance_criteria": [
+        "Untrusted forwarding headers do not change client identity.",
+        "Concurrent requests cannot exceed the configured budget.",
+        "Rejected attempts follow the documented counting policy."
+      ],
+      "tests": [
+        "proxy spoof",
+        "concurrent limiter",
+        "rejected attempt policy"
+      ],
+      "dependencies": [
+        "G09-F02"
+      ],
+      "interface_changes": [
+        "Return rate-limit reset and stable error code."
+      ]
+    },
+    {
+      "id": "G06-F05",
+      "group_id": "G06-public-intake",
+      "kind": "integrity",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Submission failures can orphan files or silently choose a project",
+      "summary": "Filesystem upload creation and database submission/assignment happen across separate failure paths, with fallback project selection.",
+      "impact": "Failed submissions can leave artifacts, and valid input can be routed to the wrong project without operator visibility.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "public submission transaction / upload cleanup / project selection",
+          "observation": "The route coordinates filesystem uploads and ticket creation manually and selects project context when the form does not provide an explicit valid target."
+        },
+        {
+          "source": "repository",
+          "location": "packages/database/migrations/001_foundation.sql",
+          "symbol": "forms.fixed_project_id",
+          "observation": "Project assignment is nullable in the form schema, so fallback behavior must be explicit rather than silent."
+        }
+      ],
+      "root_cause": "Artifact compensation and assignment outcome are implicit branches around the database transaction.",
+      "recommendation": "Stage uploads until ticket commit, compensate every failure path, and require an explicit form/project assignment outcome.",
+      "acceptance_criteria": [
+        "Every failed submission removes or expires its staged files.",
+        "DB rollback cannot leave an attached or orphan artifact.",
+        "Missing/invalid project assignment fails visibly instead of falling back."
+      ],
+      "tests": [
+        "DB failure cleanup",
+        "client abort cleanup",
+        "missing project assignment"
+      ],
+      "dependencies": [
+        "G09-F03"
+      ],
+      "interface_changes": [
+        "Expose explicit assignment outcome and cleanup status."
+      ]
+    },
+    {
+      "id": "G08-F01",
+      "group_id": "G08-notifications",
+      "kind": "correctness",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Notification providers receive events without persisted rule evaluation",
+      "summary": "Enqueue creates deliveries for every enabled provider, while the event union and admin rule list cover different subsets.",
+      "impact": "Providers can receive unintended events or miss expected workflow events.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/domain/src/notifications.ts",
+          "symbol": "NotificationEvent / enqueueNotification",
+          "observation": "The event union is a fixed subset and enqueueNotification inserts for every enabled provider without a rule predicate."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/notifications.ts",
+          "symbol": "event rule lists",
+          "observation": "The UI lists enabled and disabled event names that are not represented as persisted provider routing rules."
+        }
+      ],
+      "root_cause": "Event taxonomy and provider routing policy are UI/code constants instead of versioned persisted rules evaluated at enqueue time.",
+      "recommendation": "Define one event registry and per-provider allow rules; reject unknown events and record the matched rule.",
+      "acceptance_criteria": [
+        "A provider receives only enabled events.",
+        "All emitted workflow events exist in the registry.",
+        "Rule changes are audited and do not rewrite prior deliveries."
+      ],
+      "tests": [
+        "rule allow/deny",
+        "event registry coverage",
+        "rule history"
+      ],
+      "dependencies": [
+        "G09-F02"
+      ],
+      "interface_changes": [
+        "Add event_type, matched_rule_id, and taxonomy version."
+      ]
+    },
+    {
+      "id": "G08-F02",
+      "group_id": "G08-notifications",
+      "kind": "reliability",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Delivery retry budgets and sending recovery ignore provider policy",
+      "summary": "The worker retries failed rows indefinitely on a fixed backoff and sending rows have no lease recovery.",
+      "impact": "Failed or crashed sends can retry beyond configuration or remain stuck forever.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "deliverDueNotification",
+          "observation": "Selection includes queued/failed but not expired sending rows; update increments attempt_count and reschedules without reading provider max_attempts."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/notifications.ts",
+          "symbol": "max_attempts field",
+          "observation": "The UI exposes max attempts although the worker delivery path does not enforce it."
+        }
+      ],
+      "root_cause": "Delivery state lacks lease expiry and a terminal retry-budget transition tied to provider configuration.",
+      "recommendation": "Lease sending deliveries, enforce a validated max-attempt count, and move exhausted deliveries to a terminal actionable state.",
+      "acceptance_criteria": [
+        "Expired sending recovers once.",
+        "No delivery exceeds its configured attempts.",
+        "Exhaustion is terminal and operator-visible."
+      ],
+      "tests": [
+        "lease expiry",
+        "max attempts",
+        "terminal exhaustion"
+      ],
+      "dependencies": [
+        "G01-F01",
+        "G08-F01"
+      ],
+      "interface_changes": [
+        "Expose delivery lease and terminal reason."
+      ]
+    },
+    {
+      "id": "G08-F03",
+      "group_id": "G08-notifications",
+      "kind": "integrity",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Manual retry can race the worker and duplicate a send",
+      "summary": "The admin retry route calls the provider directly without acquiring the worker's delivery transition.",
+      "impact": "One delivery can be sent twice and receive conflicting final status updates.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "notificationRetryMatch",
+          "observation": "The route fetches a delivery, invokes provider.send directly, and updates it without a compare-and-swap ownership predicate."
+        },
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "deliverDueNotification",
+          "observation": "The worker independently claims eligible rows and performs the same send side effect."
+        }
+      ],
+      "root_cause": "Manual and automated delivery paths bypass a shared leased idempotent send command.",
+      "recommendation": "Make manual retry enqueue or transition the same delivery job under CAS; use a stable provider idempotency key where supported.",
+      "acceptance_criteria": [
+        "Manual retry never sends concurrently with a worker.",
+        "Repeated clicks create at most one external send.",
+        "Status history identifies the retry actor and attempt."
+      ],
+      "tests": [
+        "manual/worker race",
+        "double click",
+        "provider idempotency"
+      ],
+      "dependencies": [
+        "G08-F02",
+        "G07-F04"
+      ],
+      "interface_changes": [
+        "Return retry job ID instead of synchronous provider result."
+      ]
+    },
+    {
+      "id": "G08-F04",
+      "group_id": "G08-notifications",
+      "kind": "security",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Provider endpoint, method, timeout, and credential configuration is weakly validated",
+      "summary": "Configuration accepts parseable URLs, arbitrary methods/timeouts/headers, and literal authorization values.",
+      "impact": "Misconfiguration can leak credentials, target unintended endpoints, or create unbounded delivery behavior.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/notification-provider/src/index.ts",
+          "symbol": "Configuration / endpointFor / createNotificationProvider",
+          "observation": "Endpoint validation is URL parsing; method, timeout, headers, and direct authorization_header values feed fetch behavior."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "notification provider save",
+          "observation": "Numeric and credential configuration is accepted from request fields with limited cross-field policy validation."
+        }
+      ],
+      "root_cause": "Provider configuration is treated as transport options rather than a validated outbound-request security policy.",
+      "recommendation": "Allow only supported HTTPS destinations/methods, bound timeout and attempts, require secret references, and test without external sends.",
+      "acceptance_criteria": [
+        "Non-HTTPS or disallowed destinations are rejected.",
+        "Timeout and attempts stay within documented bounds.",
+        "Test sends use the same validation and leave normal delivery state unchanged."
+      ],
+      "tests": [
+        "endpoint scheme",
+        "timeout bounds",
+        "credential reference",
+        "test-send isolation"
+      ],
+      "dependencies": [
+        "G07-F03"
+      ],
+      "interface_changes": [
+        "Expose validated provider capabilities, not raw credentials."
+      ]
+    },
+    {
+      "id": "G10-F01",
+      "group_id": "G10-operational-truth",
+      "kind": "observability",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Worker health is inferred from job activity",
+      "summary": "Dashboards use the latest job claimed_at and configured values rather than a renewable worker heartbeat.",
+      "impact": "An idle healthy worker can look stale and a dead worker can look healthy after recent activity.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/dashboard.ts",
+          "symbol": "healthData",
+          "observation": "Worker heartbeat is SELECT MAX(claimed_at) from jobs."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/operate.ts",
+          "symbol": "health queries",
+          "observation": "Operate derives worker identity/time from claimed job rows rather than a worker lease."
+        }
+      ],
+      "root_cause": "Activity timestamps are used as health signals because workers have no renewable identity/heartbeat record.",
+      "recommendation": "Persist worker heartbeat, capability, version, and lease freshness separately from job activity.",
+      "acceptance_criteria": [
+        "Idle live workers remain healthy.",
+        "Dead workers become unhealthy after the documented interval.",
+        "Health identifies supported capabilities and timestamp source."
+      ],
+      "tests": [
+        "idle worker",
+        "dead worker expiry",
+        "capability reporting"
+      ],
+      "dependencies": [
+        "G01-F01"
+      ],
+      "interface_changes": [
+        "Expose heartbeat freshness and worker capability set."
+      ]
+    },
+    {
+      "id": "G10-F02",
+      "group_id": "G10-operational-truth",
+      "kind": "correctness",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Settings and GitHub health advertise capabilities they do not prove",
+      "summary": "Operator settings describe limits, cleanup, backups, or merge behavior not implemented by the underlying paths, and GitHub health checks configuration rather than the needed capability.",
+      "impact": "Operators can rely on a control that is inactive or mistake a configured URL/token for working authority.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/operate.ts",
+          "symbol": "settings and capability fields",
+          "observation": "The page renders environment/configuration-derived operational values and GitHub configuration state."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/dashboard.ts",
+          "symbol": "githubConfigured",
+          "observation": "GitHub status is derived from whether GITHUB_API_BASE_URL is present, not an authenticated read/write capability probe."
+        },
+        {
+          "source": "repository",
+          "location": "scripts/backup.sh",
+          "symbol": "backup behavior",
+          "observation": "The implemented backup behavior is narrower than a complete retention/restore capability."
+        }
+      ],
+      "root_cause": "UI labels are sourced from configuration intent instead of verified implementation/capability status.",
+      "recommendation": "Remove unsupported settings or label them unavailable; probe the exact required GitHub capability with freshness and no mutation.",
+      "acceptance_criteria": [
+        "Every setting maps to an implemented behavior or is explicitly unavailable.",
+        "GitHub health distinguishes read, write, and merge capability without mutating remote state.",
+        "Capability status includes source and freshness."
+      ],
+      "tests": [
+        "settings contract",
+        "GitHub capability probe",
+        "stale probe"
+      ],
+      "dependencies": [
+        "G04-F03",
+        "G09-F04"
+      ],
+      "interface_changes": [
+        "Expose capability status, reason, and checked_at."
+      ]
+    },
+    {
+      "id": "G10-F03",
+      "group_id": "G10-operational-truth",
+      "kind": "observability",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Run progress and pull-request staleness are not represented",
+      "summary": "Agent runs store status but progress is not updated, and synchronized PR data lacks visible source staleness.",
+      "impact": "Operators cannot distinguish slow progress from a stuck run or current PR state from old cached data.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "agent_runs inserts/updates",
+          "observation": "Run rows move between running and terminal states, but no periodic progress field is updated during invocation."
+        },
+        {
+          "source": "repository",
+          "location": "packages/domain/src/pull-request-sync.ts",
+          "symbol": "pull request sync",
+          "observation": "Stored PR fields are updated from polling results without a completeness/freshness contract surfaced to operators."
+        }
+      ],
+      "root_cause": "Long-running work and cached provider state have coarse statuses but no renewable progress/freshness model.",
+      "recommendation": "Record bounded progress events/heartbeat and display PR source timestamp, completeness, and stale threshold.",
+      "acceptance_criteria": [
+        "Running work updates progress or heartbeat at a documented cadence.",
+        "Stale PR data is visibly labeled.",
+        "Progress never fabricates percent completion when only phase is known."
+      ],
+      "tests": [
+        "progress heartbeat",
+        "stale PR display",
+        "unknown progress"
+      ],
+      "dependencies": [
+        "G10-F01",
+        "G04-F02"
+      ],
+      "interface_changes": [
+        "Add run phase/heartbeat and PR source freshness."
+      ]
+    },
+    {
+      "id": "G10-F04",
+      "group_id": "G10-operational-truth",
+      "kind": "observability",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Repair history and list/log reads are not durable or paginated",
+      "summary": "Repair can replace log linkage, while many list pages cap rows or load logs without a cursor contract.",
+      "impact": "Historical evidence becomes inaccessible and operators silently miss older records or load unbounded content.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "runExecution agent_run metadata log_path",
+          "observation": "Each attempt stores log_path in mutable run metadata; repair history depends on preserving every run link."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/tickets.ts",
+          "symbol": "ticket list",
+          "observation": "Ticket list orders results and applies LIMIT 200 without a pagination cursor."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/notifications.ts",
+          "symbol": "delivery list",
+          "observation": "Delivery history uses LIMIT 200 without a pagination contract."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/audit.ts",
+          "symbol": "audit list",
+          "observation": "Audit log UI is the operational DB-backed /admin/audit surface and uses LIMIT 200; it is not the static engineering audit report."
+        }
+      ],
+      "root_cause": "History is addressed through mutable latest-run metadata and fixed caps instead of immutable artifact references plus cursor pagination.",
+      "recommendation": "Preserve one log artifact per attempt and paginate every list/log endpoint with bounded page sizes and stable cursors.",
+      "acceptance_criteria": [
+        "Every repair retains links to prior logs.",
+        "Every list/log API documents limit and cursor.",
+        "Browsing all pages returns each record once under stable ordering."
+      ],
+      "tests": [
+        "repair log history",
+        "cursor traversal",
+        "bounded log page"
+      ],
+      "dependencies": [
+        "G09-F03"
+      ],
+      "interface_changes": [
+        "Add immutable log artifact ID and pagination cursors."
+      ]
+    },
+    {
+      "id": "G10-F05",
+      "group_id": "G10-operational-truth",
+      "kind": "correctness",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Read routes mutate workflow and errors lack stable recovery contracts",
+      "summary": "Ticket detail GET can change ticket status, while many errors return text without stable codes and next actions.",
+      "impact": "Refreshing a page can alter state and operators cannot automate or reliably recover from failures.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/tickets.ts",
+          "symbol": "ticket detail render",
+          "observation": "The GET render path updates early ticket state/history when the detail page is viewed."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "route error handling",
+          "observation": "Routes frequently return or throw message strings; stable error codes and recovery metadata are not centralized."
+        }
+      ],
+      "root_cause": "HTTP method semantics and operational error taxonomy are not enforced by shared route boundaries.",
+      "recommendation": "Make GET side-effect-free; move acknowledgement to an explicit audited command and return stable code/message/recovery fields.",
+      "acceptance_criteria": [
+        "Repeated GETs make no database changes.",
+        "Viewing requires no hidden status transition.",
+        "Every surfaced operational error has a stable code and actionable recovery step."
+      ],
+      "tests": [
+        "GET no mutation",
+        "explicit acknowledge",
+        "error schema"
+      ],
+      "dependencies": [
+        "G01-F03"
+      ],
+      "interface_changes": [
+        "Standardize error_code and recovery_action."
+      ]
+    },
+    {
+      "id": "G11-F01",
+      "group_id": "G11-frontend-quality",
+      "kind": "accessibility",
+      "priority": "P2",
+      "confidence": "high",
+      "status": "open",
+      "title": "Tabs and mobile navigation lack complete keyboard/focus semantics",
+      "summary": "Tabs respond to clicks without roving focus keys, and mobile navigation does not expose expanded state or Escape behavior.",
+      "impact": "Keyboard and assistive-technology users can lose context or fail to operate navigation efficiently.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/ui.ts",
+          "symbol": "tablist click handler",
+          "observation": "The handler toggles aria-selected and hidden panels on click but has no Arrow/Home/End focus movement."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/ui.ts",
+          "symbol": "adminPage mobile navigation opener",
+          "observation": "The opener toggles sidebar and scrim without aria-expanded/aria-controls synchronization or Escape close handling."
+        }
+      ],
+      "root_cause": "Interactive behavior implements pointer visibility changes without a shared keyboard and focus-management contract.",
+      "recommendation": "Implement native ARIA tab keyboard behavior and explicit mobile nav expanded/focus/Escape lifecycle.",
+      "acceptance_criteria": [
+        "Tabs support Arrow, Home, End, and activation semantics.",
+        "Opening nav moves or preserves focus predictably and updates aria-expanded.",
+        "Escape closes and restores focus."
+      ],
+      "tests": [
+        "keyboard tab smoke",
+        "mobile nav focus",
+        "Escape restore"
+      ],
+      "dependencies": [],
+      "interface_changes": []
+    },
+    {
+      "id": "G11-F02",
+      "group_id": "G11-frontend-quality",
+      "kind": "accessibility",
+      "priority": "P2",
+      "confidence": "medium",
+      "status": "open",
+      "title": "Responsive layouts and touch targets are incomplete",
+      "summary": "Some grids retain fixed desktop columns, data rows lose labels on small screens, and some controls lack two-dimensional target sizing.",
+      "impact": "Small-screen and touch users can encounter horizontal overflow or ambiguous unlabeled values.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/design-tokens.css",
+          "symbol": "mobile media rules",
+          "observation": "Mobile rules hide list headers and set minimum height for common controls but do not supply labels for every specialized grid or minimum width for all interactive components."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/tickets.ts",
+          "symbol": "filter and board grids",
+          "observation": "Several controls use min-width:600px or fixed repeated columns."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/prs.ts",
+          "symbol": "target branch controls",
+          "observation": "Merge target inputs use fixed inline width values."
+        }
+      ],
+      "root_cause": "Desktop grid structure is reused responsively without component-level labels, wrapping rules, and target-size guarantees.",
+      "recommendation": "Add per-row labels or semantic tables, remove page-level fixed-width overflow, and guarantee supported touch target dimensions.",
+      "acceptance_criteria": [
+        "No horizontal page overflow at supported mobile widths.",
+        "Every compact row retains its field labels.",
+        "Interactive targets meet the documented minimum size."
+      ],
+      "tests": [
+        "mobile viewport",
+        "responsive labels",
+        "touch target audit"
+      ],
+      "dependencies": [
+        "G11-F01"
+      ],
+      "interface_changes": []
+    },
+    {
+      "id": "G11-F03",
+      "group_id": "G11-frontend-quality",
+      "kind": "accessibility",
+      "priority": "P2",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "Animations ignore reduced-motion preference",
+      "summary": "The design tokens define pulsing and entrance animations without a prefers-reduced-motion override.",
+      "impact": "Motion-sensitive users cannot ask the interface to suppress nonessential animation.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/design-tokens.css",
+          "symbol": "dccPulse / dccIn / media rules",
+          "observation": "Animation keyframes and uses exist, but the stylesheet has no prefers-reduced-motion: reduce rule."
+        }
+      ],
+      "root_cause": "Motion is encoded as unconditional component styling rather than a user-preference-aware token.",
+      "recommendation": "Add a global reduced-motion override that removes smooth scrolling and minimizes nonessential animation/transition duration.",
+      "acceptance_criteria": [
+        "Reduced-motion mode disables smooth scrolling and nonessential animation.",
+        "State changes remain perceivable without motion."
+      ],
+      "tests": [
+        "reduced-motion media smoke"
+      ],
+      "dependencies": [],
+      "interface_changes": []
+    },
+    {
+      "id": "G11-F04",
+      "group_id": "G11-frontend-quality",
+      "kind": "correctness",
+      "priority": "P2",
+      "confidence": "high",
+      "status": "open",
+      "title": "Attachments are not surfaced consistently in preview and operator flows",
+      "summary": "Form preview does not represent attachment controls, and ticket/operator detail does not expose a complete authorized attachment affordance.",
+      "impact": "Users cannot confirm configured attachment behavior or retrieve submitted evidence.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/forms.ts",
+          "symbol": "previewPanel",
+          "observation": "The preview renders every non-static field as a generic disabled input, not an attachment-specific control."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/pages/tickets.ts",
+          "symbol": "ticket detail",
+          "observation": "The detail page renders ticket fields, plans, runs, and activity without an attachment section."
+        }
+      ],
+      "root_cause": "Attachment metadata/download authorization is not part of the shared form and ticket view model.",
+      "recommendation": "Expose authorized attachment metadata and render native upload/preview/download affordances consistently.",
+      "acceptance_criteria": [
+        "Form preview identifies attachment fields.",
+        "Authorized ticket detail lists attachments with safe metadata.",
+        "Unauthorized users receive no attachment content or path."
+      ],
+      "tests": [
+        "preview attachment",
+        "authorized display",
+        "unauthorized access"
+      ],
+      "dependencies": [
+        "G06-F03"
+      ],
+      "interface_changes": [
+        "Add authorized attachment metadata to form/ticket view models."
+      ]
+    },
+    {
+      "id": "G11-F05",
+      "group_id": "G11-frontend-quality",
+      "kind": "performance",
+      "priority": "P2",
+      "confidence": "high",
+      "status": "open",
+      "title": "Inline assets and external fonts constrain CSP and privacy",
+      "summary": "Every document emits inline style/script content and Google Fonts requests.",
+      "impact": "A strict CSP is difficult to deploy and every page adds third-party font latency and privacy exposure.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/ui.ts",
+          "symbol": "fontsHead / document",
+          "observation": "The document helper emits external Google Fonts links plus inline style and script content."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/design-tokens.css",
+          "symbol": "color and component tokens",
+          "observation": "Most visual styling already has a local stylesheet home, so inline styles can be migrated incrementally without a new framework."
+        }
+      ],
+      "root_cause": "The document renderer treats scripts/styles/fonts as per-page strings instead of local CSP-compatible assets and tokens.",
+      "recommendation": "Move reusable inline content to local assets, use nonce/hash only where necessary, and prefer system/local fonts; retain minor accent-border cleanup as P3 token maintenance rather than a separate cosmetic finding.",
+      "acceptance_criteria": [
+        "Pages run under the documented CSP without unsafe-inline where avoidable.",
+        "No external font request is required.",
+        "Visual regression checks cover changed tokens and WCAG-conscious contrast."
+      ],
+      "tests": [
+        "CSP smoke",
+        "no external font",
+        "contrast/token snapshot"
+      ],
+      "dependencies": [
+        "G07-F01"
+      ],
+      "interface_changes": []
+    },
+    {
+      "id": "G12-F01",
+      "group_id": "G12-ci-maintainability",
+      "kind": "reliability",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "CI explicitly masks Vitest failure",
+      "summary": "The CI test step converts a failing Vitest process into a successful shell command.",
+      "impact": "Regressions can merge while the required check reports success.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": ".github/workflows/ci.yml",
+          "symbol": "Vitest step",
+          "observation": "pnpm exec vitest run is followed by || echo, which produces a zero exit status after failure."
+        }
+      ],
+      "root_cause": "The workflow treats test failure as optional tool absence instead of distinguishing configuration setup from a failing test run.",
+      "recommendation": "Run the scoped product suite directly and let every failure fail the job.",
+      "acceptance_criteria": [
+        "An intentional failing test makes CI fail.",
+        "The scoped product suite command matches the documented local command.",
+        "Missing test setup fails with actionable output."
+      ],
+      "tests": [
+        "CI failing-test canary",
+        "local/CI command equality"
+      ],
+      "dependencies": [],
+      "interface_changes": [
+        "Document one root verification command."
+      ]
+    },
+    {
+      "id": "G12-F02",
+      "group_id": "G12-ci-maintainability",
+      "kind": "quality",
+      "priority": "P1",
+      "confidence": "high",
+      "status": "open",
+      "title": "Critical boundaries lack focused integration coverage",
+      "summary": "The suite has unit tests but no meaningful route/worker/database/webhook/upload journey coverage, while Playwright is installed but unused.",
+      "impact": "High-risk regressions at transaction and process boundaries can escape green unit tests.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "package.json",
+          "symbol": "devDependencies",
+          "observation": "@playwright/test is installed."
+        },
+        {
+          "source": "repository",
+          "location": ".github/workflows/ci.yml",
+          "symbol": "ci steps",
+          "observation": "CI runs installation, TypeScript, and Vitest only; no browser or boundary journey step exists."
+        }
+      ],
+      "root_cause": "Verification is organized around modules rather than the few high-risk trust and state transitions.",
+      "recommendation": "Add minimal database-backed boundary tests and use existing Playwright only for flows that require browser evidence.",
+      "acceptance_criteria": [
+        "Route-to-job-to-state recovery has one automated journey.",
+        "Webhook signature/deploy gate and upload cleanup have failure-path coverage.",
+        "Browser artifacts are optional, redacted, and bounded."
+      ],
+      "tests": [
+        "route-worker-db smoke",
+        "webhook gate",
+        "upload lifecycle",
+        "optional browser smoke"
+      ],
+      "dependencies": [
+        "G12-F01"
+      ],
+      "interface_changes": []
+    },
+    {
+      "id": "G12-F03",
+      "group_id": "G12-ci-maintainability",
+      "kind": "maintainability",
+      "priority": "P2",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "The repository has no root verification command",
+      "summary": "Contributors must know and compose the TypeScript and scoped Vitest commands themselves.",
+      "impact": "Local, CI, and agent verification can drift or accidentally run the unrelated unscoped harness.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "package.json",
+          "symbol": "scripts",
+          "observation": "The root scripts include dev, admin:create, and projects:import but no verify, typecheck, or test contract."
+        },
+        {
+          "source": "repository",
+          "location": ".github/workflows/ci.yml",
+          "symbol": "TypeScript and Vitest steps",
+          "observation": "CI spells the verification commands separately rather than calling a root script."
+        }
+      ],
+      "root_cause": "The authoritative verification sequence is duplicated outside the package script contract.",
+      "recommendation": "Add one root script using the existing TypeScript and scoped Vitest commands, and make CI/documentation call it.",
+      "acceptance_criteria": [
+        "One documented root command runs the intended product checks.",
+        "CI calls the same root command.",
+        "The command excludes the unrelated .lfd harness intentionally."
+      ],
+      "tests": [
+        "root verify command",
+        "CI command parity",
+        "scope check"
+      ],
+      "dependencies": [
+        "G12-F01"
+      ],
+      "interface_changes": [
+        "Publish the root verification command."
+      ]
+    },
+    {
+      "id": "G12-F04",
+      "group_id": "G12-ci-maintainability",
+      "kind": "maintainability",
+      "priority": "P2",
+      "confidence": "high",
+      "status": "open",
+      "title": "Placeholder scripts and empty packages advertise nonexistent capability",
+      "summary": "Repository entry points exist without complete behavior.",
+      "impact": "Operators and developers can invoke a command or package that appears supported but does not perform the promised lifecycle.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "scripts/cleanup-worktrees.ts",
+          "symbol": "script body",
+          "observation": "Cleanup exists as a standalone scan without the attempt ownership/recovery guarantees implied by lifecycle cleanup."
+        },
+        {
+          "source": "repository",
+          "location": "pnpm-workspace.yaml",
+          "symbol": "workspace package patterns",
+          "observation": "Workspace discovery includes package directories regardless of whether they expose a meaningful supported contract."
+        }
+      ],
+      "root_cause": "Scaffolding was retained as product surface before its behavior and ownership contract were complete.",
+      "recommendation": "Delete misleading entry points or implement only the currently required behavior with a focused check.",
+      "acceptance_criteria": [
+        "Every advertised script/package has a documented supported outcome and verification.",
+        "Unused empty surfaces are removed without replacement abstractions."
+      ],
+      "tests": [
+        "script contract smoke",
+        "workspace package inventory"
+      ],
+      "dependencies": [
+        "G12-F03"
+      ],
+      "interface_changes": []
+    },
+    {
+      "id": "G12-F05",
+      "group_id": "G12-ci-maintainability",
+      "kind": "maintainability",
+      "priority": "P2",
+      "confidence": "high",
+      "status": "open",
+      "title": "Web and worker duplicate input resolution logic",
+      "summary": "Both processes resolve prompts, skills, and AI configuration through separate implementations.",
+      "impact": "The preview and execution paths can drift even when each local test passes.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "resolvedSkillsFor / promptInputsFor",
+          "observation": "The web server resolves skill and prompt preview inputs."
+        },
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "resolvedSkillsFor / planningInputs / executionInputs",
+          "observation": "The worker contains a separate resolver with its own provenance behavior."
+        }
+      ],
+      "root_cause": "A shared domain rule is copied into process modules rather than reused from one tested pure resolver/query boundary.",
+      "recommendation": "Extract only the common input-resolution contract and parity tests; keep process-specific I/O in place.",
+      "acceptance_criteria": [
+        "Web preview and worker execution produce identical hashes for the same fixture.",
+        "There is one implementation of resolution precedence.",
+        "No speculative framework or dependency is added."
+      ],
+      "tests": [
+        "resolver parity",
+        "precedence fixture"
+      ],
+      "dependencies": [
+        "G03-F01"
+      ],
+      "interface_changes": [
+        "Expose one resolved-input contract."
+      ]
+    },
+    {
+      "id": "G12-F06",
+      "group_id": "G12-ci-maintainability",
+      "kind": "maintainability",
+      "priority": "P2",
+      "confidence": "high",
+      "status": "open",
+      "title": "Oversized process modules inhibit boundary testing",
+      "summary": "Primary web, worker, and UI files combine routing, persistence, rendering, provider, and workflow concerns.",
+      "impact": "Small changes require broad context and make focused failure injection difficult.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "apps/web/src/server.ts",
+          "symbol": "primary server module",
+          "observation": "One large module owns many unrelated admin/public routes and shared helpers."
+        },
+        {
+          "source": "repository",
+          "location": "apps/worker/src/worker.ts",
+          "symbol": "primary worker module",
+          "observation": "One large module owns planning, execution, publication, GitHub review/conflict, notifications, polling, and dispatch."
+        },
+        {
+          "source": "repository",
+          "location": "apps/web/src/ui.ts",
+          "symbol": "document and client behavior",
+          "observation": "One module combines document rendering and many inline client behaviors."
+        }
+      ],
+      "root_cause": "Process entry modules accumulated unrelated responsibilities without extraction at tested state or trust boundaries.",
+      "recommendation": "Split only where current remediation needs a test seam: route commands, worker handlers, and reusable client assets; avoid broad architectural rewrites.",
+      "acceptance_criteria": [
+        "High-risk handlers can be tested without booting unrelated services.",
+        "Entrypoints remain thin and behavior-compatible.",
+        "Extraction follows existing module patterns and adds no dependency."
+      ],
+      "tests": [
+        "handler isolation",
+        "entrypoint smoke"
+      ],
+      "dependencies": [
+        "G12-F02",
+        "G12-F05"
+      ],
+      "interface_changes": []
+    },
+    {
+      "id": "G12-F07",
+      "group_id": "G12-ci-maintainability",
+      "kind": "maintainability",
+      "priority": "P2",
+      "confidence": "high",
+      "status": "open",
+      "title": "Dependency and package-manager versions are not fully pinned",
+      "summary": "Root dependency ranges and CI's latest pnpm selection allow tool resolution to change without a repository diff.",
+      "impact": "Fresh installs can use different test/browser/database tooling or package-manager behavior.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "package.json",
+          "symbol": "devDependencies",
+          "observation": "Several root packages use caret ranges and the manifest has no packageManager field."
+        },
+        {
+          "source": "repository",
+          "location": ".github/workflows/ci.yml",
+          "symbol": "pnpm/action-setup",
+          "observation": "The workflow requests version: latest."
+        }
+      ],
+      "root_cause": "The repository does not declare one exact package-manager/toolchain identity at the manifest boundary.",
+      "recommendation": "Declare the intended package manager version and pin direct tool versions where reproducibility requires it; continue using the frozen lockfile.",
+      "acceptance_criteria": [
+        "The package-manager version is declared in the repository.",
+        "CI uses that declared version rather than latest.",
+        "Frozen install resolves the committed lockfile without drift."
+      ],
+      "tests": [
+        "declared package manager",
+        "frozen clean install",
+        "version drift canary"
+      ],
+      "dependencies": [],
+      "interface_changes": [
+        "Add package-manager/toolchain version metadata."
+      ]
+    },
+    {
+      "id": "G12-F08",
+      "group_id": "G12-ci-maintainability",
+      "kind": "maintainability",
+      "priority": "P2",
+      "confidence": "high",
+      "status": "open",
+      "title": "CI setup is not a complete workspace prerequisite contract",
+      "summary": "Node, pnpm, cache, native, and workspace assumptions live in workflow YAML without matching manifest/setup documentation.",
+      "impact": "A clean developer or production host can satisfy package install yet fail on an undeclared prerequisite.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": ".github/workflows/ci.yml",
+          "symbol": "setup steps",
+          "observation": "The workflow selects Node 22, pnpm setup, cache, and install behavior directly."
+        },
+        {
+          "source": "repository",
+          "location": "package.json",
+          "symbol": "root manifest",
+          "observation": "The manifest does not declare engines or a packageManager version."
+        },
+        {
+          "source": "repository",
+          "location": "pnpm-workspace.yaml",
+          "symbol": "workspace and allowBuilds",
+          "observation": "Workspace packages and esbuild build permission are defined separately from the root setup contract."
+        }
+      ],
+      "root_cause": "Environment prerequisites are encoded in automation implementation rather than one repository-owned setup contract.",
+      "recommendation": "Document and validate the minimum Node, package manager, workspace, and native prerequisites shared by CI and supported hosts.",
+      "acceptance_criteria": [
+        "A clean supported host can follow one setup contract.",
+        "Unsupported Node/package-manager versions fail early with guidance.",
+        "CI validates the same prerequisites it documents."
+      ],
+      "tests": [
+        "clean workspace setup",
+        "unsupported runtime",
+        "workspace install"
+      ],
+      "dependencies": [
+        "G12-F07"
+      ],
+      "interface_changes": [
+        "Publish supported runtime and workspace prerequisites."
+      ]
+    },
+    {
+      "id": "G12-F09",
+      "group_id": "G12-ci-maintainability",
+      "kind": "reliability",
+      "priority": "P1",
+      "confidence": "confirmed",
+      "status": "open",
+      "title": "Authentication compiles native Argon2 code at module load",
+      "summary": "Importing the password module invokes gcc and links a host library into a temporary executable.",
+      "impact": "Production authentication can fail to start on hosts without the compiler, linker library, writable temp path, or compatible ABI.",
+      "evidence": [
+        {
+          "source": "repository",
+          "location": "packages/database/src/password.ts",
+          "symbol": "module initialization",
+          "observation": "execFileSync runs gcc before hashPassword or verifyPassword is called."
+        },
+        {
+          "source": "repository",
+          "location": "packages/database/src/password.ts",
+          "symbol": "binary path",
+          "observation": "The compiled helper is written under tmpdir with the process ID."
+        }
+      ],
+      "root_cause": "A production runtime dependency is built dynamically during module initialization instead of being provisioned and verified before process start.",
+      "recommendation": "Package or provision the helper during a reproducible build/install step, then fail startup with a focused prerequisite error if unavailable.",
+      "acceptance_criteria": [
+        "Production authentication starts without gcc installed.",
+        "The Argon2 implementation and ABI are reproducibly provisioned.",
+        "Missing/incompatible native support fails with an actionable startup error."
+      ],
+      "tests": [
+        "compiler-absent startup",
+        "missing library",
+        "hash/verify smoke"
+      ],
+      "dependencies": [
+        "G12-F08"
+      ],
+      "interface_changes": [
+        "Add an Argon2 runtime capability/preflight contract."
+      ]
+    }
+  ],
+  "roadmap": [
+    {
+      "phase": "Phase 0 stabilization",
+      "gate": "All items are stabilization exits; no feature phase may begin until R0-07 verifies every P0 finding.",
+      "goal": "Restore trustworthy approval, publication, merge, deployment, authority, and recovery before feature work.",
+      "items": [
+        {
+          "id": "R0-01",
+          "name": "Truthful verification and workflow ownership",
+          "dependencies": [],
+          "outcomes": [
+            "CI fails honestly",
+            "leased recoverable work",
+            "side-effect-free operational reads"
+          ],
+          "acceptance_criteria": [
+            "G09-F02, G12-F01, and G01-F01 have verified exits",
+            "GET routes do not mutate state",
+            "worker health uses renewable heartbeat"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R0-01 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Make CI truthful and implement the minimum shared lease/heartbeat/reaper and read-side truth required by G09-F02, G12-F01, G01-F01, G10-F01, and G10-F05."
+        },
+        {
+          "id": "R0-02",
+          "name": "Approval reproducibility exit",
+          "dependencies": [
+            "R0-01"
+          ],
+          "outcomes": [
+            "immutable approved input",
+            "atomic approval decision",
+            "policy-bound provenance"
+          ],
+          "acceptance_criteria": [
+            "G03-F01 and G03-F02 have verified exits",
+            "preview, approval, and execution input hashes are identical",
+            "concurrent decisions have one winner"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R0-02 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Create the immutable approved snapshot and atomic decision record required by G03-F01 and G03-F02; do not add workflow features."
+        },
+        {
+          "id": "R0-03",
+          "name": "Repair publication exit",
+          "dependencies": [
+            "R0-01",
+            "R0-02"
+          ],
+          "outcomes": [
+            "attempt-bound repair commit",
+            "scoped agent authority",
+            "crash-safe artifacts"
+          ],
+          "acceptance_criteria": [
+            "G02-F01 and G02-F03 have verified exits",
+            "old commits cannot be republished",
+            "child credentials and writes are scoped"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R0-03 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Bind repair and publication to fresh immutable attempts, scrub child environments, and enforce worktree/path policy for G02-F01 and G02-F03."
+        },
+        {
+          "id": "R0-04",
+          "name": "Terminal rerun and web authority exit",
+          "dependencies": [
+            "R0-01",
+            "R0-02"
+          ],
+          "outcomes": [
+            "immutable rerun identity",
+            "durable provider jobs",
+            "least-privilege web"
+          ],
+          "acceptance_criteria": [
+            "G01-F02 and G07-F04 have verified exits",
+            "terminal reruns preserve history",
+            "web has no write/deploy credentials"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R0-04 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Implement immutable rerun identity and move all provider/deploy writes behind durable least-privilege jobs for G01-F02 and G07-F04."
+        },
+        {
+          "id": "R0-05",
+          "name": "Head-bound GitHub merge exit",
+          "dependencies": [
+            "R0-02",
+            "R0-04"
+          ],
+          "outcomes": [
+            "authoritative review/check snapshot",
+            "expected-SHA merge",
+            "durable audit"
+          ],
+          "acceptance_criteria": [
+            "G04-F02 and G04-F05 have verified exits",
+            "Changed head or missing required check/review refuses merge",
+            "Merged SHA and policy snapshot are recorded"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R0-05 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Implement the final authoritative head/check/review snapshot and expected-SHA merge refusal required by G04-F02 and G04-F05."
+        },
+        {
+          "id": "R0-06",
+          "name": "Protected health-gated deployment exit",
+          "dependencies": [
+            "R0-03",
+            "R0-04",
+            "R0-05"
+          ],
+          "outcomes": [
+            "protected-head deployment",
+            "staged migration/health/rollback",
+            "deployment history"
+          ],
+          "acceptance_criteria": [
+            "G09-F01, G05-F01, and G05-F02 have verified exits",
+            "Only current protected head deploys",
+            "Failed health has tested rollback or blocked recovery"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R0-06 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Complete deployment safety for G09-F01, G05-F01, and G05-F02 before any dependent automation: protected-head proof, frozen staged release, migration, health, rollback, and durable history."
+        },
+        {
+          "id": "R0-07",
+          "name": "All-P0 verified exit gate",
+          "dependencies": [
+            "R0-01",
+            "R0-02",
+            "R0-03",
+            "R0-04",
+            "R0-05",
+            "R0-06"
+          ],
+          "outcomes": [
+            "independent evidence for every P0",
+            "explicit authorization for feature phases"
+          ],
+          "acceptance_criteria": [
+            "Every P0 finding has a verified exit: G01-F01, G01-F02, G02-F01, G02-F03, G03-F01, G03-F02, G04-F05, G05-F01, G05-F02, G07-F04",
+            "TypeScript and scoped Vitest pass without masking",
+            "Phase 1 through Phase 4 remain blocked until this item passes"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R0-07 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Verify, do not broaden, every P0 exit: G01-F01, G01-F02, G02-F01, G02-F03, G03-F01, G03-F02, G04-F05, G05-F01, G05-F02, G07-F04. Record evidence and keep all later phases blocked on any failure."
+        }
+      ]
+    },
+    {
+      "phase": "Phase 1 deterministic and secure operation",
+      "gate": "Blocked on R0-07.",
+      "goal": "Complete deterministic preflight, provider synchronization, and credential policy after all P0 exits.",
+      "items": [
+        {
+          "id": "R1-01",
+          "name": "Unified project preflight",
+          "dependencies": [
+            "R0-07"
+          ],
+          "outcomes": [
+            "fresh revision proof",
+            "configuration/skill/runtime validation"
+          ],
+          "acceptance_criteria": [
+            "Planning and execution use the same immutable preflight result",
+            "Stale branches and missing prerequisites fail before launch"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R1-01 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Create one minimal shared project preflight from existing validation capabilities and persist its immutable result."
+        },
+        {
+          "id": "R1-02",
+          "name": "Event-driven GitHub sync with polling fallback",
+          "dependencies": [
+            "R0-07",
+            "R1-01"
+          ],
+          "outcomes": [
+            "paginated authoritative sync",
+            "webhook updates",
+            "rate-aware fallback"
+          ],
+          "acceptance_criteria": [
+            "All pages sync",
+            "Stale state is visible",
+            "Writes remain durable jobs"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R1-02 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Implement authoritative event-driven GitHub synchronization with bounded rate-aware polling fallback and source freshness."
+        },
+        {
+          "id": "R1-03",
+          "name": "GitHub App credentials and policy modes",
+          "dependencies": [
+            "R0-06",
+            "R0-07",
+            "R1-02"
+          ],
+          "outcomes": [
+            "least-privilege installation credentials",
+            "explicit audited merge/deploy modes"
+          ],
+          "acceptance_criteria": [
+            "Credential scope is separate from web read capability",
+            "Manual and automated modes never bypass R0-05 or R0-06 gates"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R1-03 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Introduce GitHub App installation credentials and explicit policy modes only after deployment safety R0-06 and the all-P0 gate R0-07."
+        }
+      ]
+    },
+    {
+      "phase": "Phase 2 operator confidence",
+      "gate": "Blocked on R0-07; deployment-dependent work also requires R0-06.",
+      "goal": "Make release, restore, intake, and delivery operation recoverable and inspectable.",
+      "items": [
+        {
+          "id": "R2-01",
+          "name": "Deployment control center",
+          "dependencies": [
+            "R0-06",
+            "R0-07",
+            "R1-03"
+          ],
+          "outcomes": [
+            "release history",
+            "health evidence",
+            "approval/retry/rollback controls"
+          ],
+          "acceptance_criteria": [
+            "Every action preserves R0-06 safety",
+            "Recovery history is durable and attributable"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R2-01 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Expose the already-safe deployment transaction as a minimal control center; do not create a second deploy path."
+        },
+        {
+          "id": "R2-02",
+          "name": "Backup and restore drills",
+          "dependencies": [
+            "R0-07"
+          ],
+          "outcomes": [
+            "complete manifest",
+            "truthful retention",
+            "isolated restore verification"
+          ],
+          "acceptance_criteria": [
+            "DB, artifacts, and configuration references restore",
+            "No drill mutates production"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R2-02 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Implement the smallest complete backup manifest and isolated restore drill required by G09-F04."
+        },
+        {
+          "id": "R2-03",
+          "name": "Safe intake and notification recovery",
+          "dependencies": [
+            "R0-07",
+            "R1-01"
+          ],
+          "outcomes": [
+            "scoped uploads",
+            "atomic limits",
+            "rule-based leased notifications"
+          ],
+          "acceptance_criteria": [
+            "Failed intake cleans artifacts",
+            "Notification retries cannot duplicate sends"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R2-03 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Harden existing public intake and notification trust boundaries; keep unsupported settings unavailable."
+        }
+      ]
+    },
+    {
+      "phase": "Phase 3 workflow acceleration",
+      "gate": "Prohibited until R0-07 verifies every P0 exit.",
+      "goal": "Add repeatable workflow features only after stabilization is verified.",
+      "items": [
+        {
+          "id": "R3-01",
+          "name": "Reviewer-comment repairs",
+          "dependencies": [
+            "R0-07",
+            "R0-03",
+            "R0-05",
+            "R0-06",
+            "R2-01"
+          ],
+          "outcomes": [
+            "comment-scoped repair",
+            "fresh-head attempt",
+            "preserved history"
+          ],
+          "acceptance_criteria": [
+            "Repair is tied to one comment and current head",
+            "Old commit cannot be republished"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R3-01 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Add reviewer-comment repair as a new immutable attempt reusing the verified repair, merge, and deploy gates."
+        },
+        {
+          "id": "R3-02",
+          "name": "Reusable ticket/project templates",
+          "dependencies": [
+            "R0-07",
+            "R0-02",
+            "R1-01"
+          ],
+          "outcomes": [
+            "versioned reusable inputs",
+            "audited overrides"
+          ],
+          "acceptance_criteria": [
+            "Template version and overrides are approval-bound",
+            "No generic workflow engine is introduced"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R3-02 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Add minimal versioned templates using existing config/prompt storage only after measured repeated demand."
+        },
+        {
+          "id": "R3-03",
+          "name": "Optional Playwright/browser artifacts",
+          "dependencies": [
+            "R0-07",
+            "R2-03"
+          ],
+          "outcomes": [
+            "critical browser evidence",
+            "redacted bounded artifacts"
+          ],
+          "acceptance_criteria": [
+            "Only flows needing browser proof use Playwright",
+            "Artifacts exclude secrets and have retention"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R3-03 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Use the already-installed Playwright for a few critical journeys and bounded redacted artifacts."
+        }
+      ]
+    },
+    {
+      "phase": "Phase 4 controlled automation and insight",
+      "gate": "Prohibited until R0-07; each candidate also requires demonstrated need.",
+      "goal": "Introduce analytics and policy automation only with measured safety and value.",
+      "items": [
+        {
+          "id": "R4-01",
+          "name": "Cost, latency, and failure analytics",
+          "dependencies": [
+            "R0-07",
+            "R1-01",
+            "R2-01"
+          ],
+          "outcomes": [
+            "redacted aggregates",
+            "failure taxonomy",
+            "capacity evidence"
+          ],
+          "acceptance_criteria": [
+            "No raw prompts, secrets, or personal data are stored",
+            "Estimates and point-in-time values are labeled"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R4-01 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Add bounded redacted aggregates from durable records only when they answer an operator decision."
+        },
+        {
+          "id": "R4-02",
+          "name": "Candidate workflow conveniences",
+          "dependencies": [
+            "R0-07",
+            "R4-01"
+          ],
+          "outcomes": [
+            "measured proposals",
+            "policy-gated reversible automation"
+          ],
+          "acceptance_criteria": [
+            "Each convenience has demonstrated demand and rollback",
+            "No approval, merge, or deploy gate can be bypassed"
+          ],
+          "agent_prompt": "Read docs/audit/dev-control-audit.json and the R4-02 entry before changing code.\nRevalidate its finding IDs against current HEAD. Follow AGENTS.md and work on an isolated branch/worktree.\nTrace callers and fix shared root causes minimally. Add focused regression coverage. Run pnpm exec tsc --noEmit and pnpm exec vitest run apps packages.\nAvoid unrelated findings and roadmap scope. Never commit, merge, or push directly on main/master.\nImplement only this roadmap item: Treat conveniences as candidates; implement only the smallest approved reversible one after evidence of need."
+        }
+      ]
+    }
+  ],
+  "limitations": [
+    "No penetration test was performed.",
+    "No destructive chaos or recovery test was performed.",
+    "No remote GitHub mutation was performed.",
+    "No production deployment was performed.",
+    "Runtime counts are point-in-time aggregates, not invariants or trend claims.",
+    "Findings are evidence-backed at the source commit but must be revalidated against current HEAD before remediation."
+  ]
+}
