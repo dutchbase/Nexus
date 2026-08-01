@@ -13,14 +13,16 @@ try {
             t.status AS ticket_status, t.project_id
      FROM execution_attempts ea
      JOIN tickets t ON t.id = ea.ticket_id
-     WHERE ea.validation_status = 'pr_creation_failed'`,
+     WHERE ea.validation_status = 'pr_creation_failed'
+       AND t.status = 'PR Creation Failed'`,
   )).rows;
 
   let remediated = 0;
   let skipped = 0;
   for (const attempt of stuck) {
     const pr = (await pool.query(
-      `SELECT id FROM pull_requests WHERE project_id=$1 AND head_branch=$2`,
+      `SELECT id FROM pull_requests WHERE project_id=$1 AND head_branch=$2
+       ORDER BY (state='open') DESC, created_at_provider DESC LIMIT 1`,
       [attempt.project_id, attempt.branch_name],
     )).rows[0];
     if (!pr) {
@@ -29,7 +31,7 @@ try {
     }
     await inTransaction(async (client) => {
       await client.query(
-        `UPDATE pull_requests SET execution_attempt_id=$1, ticket_id=$2, updated_at=now() WHERE id=$3`,
+        `UPDATE pull_requests SET execution_attempt_id=COALESCE(execution_attempt_id,$1), ticket_id=COALESCE(ticket_id,$2), updated_at=now() WHERE id=$3`,
         [attempt.attempt_id, attempt.ticket_id, pr.id],
       );
       await client.query(

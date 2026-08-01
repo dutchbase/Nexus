@@ -852,9 +852,21 @@ async function publishExecutionAttempt(input: {
     let stored = (await pool.query(
       `SELECT * FROM pull_requests
        WHERE execution_attempt_id=$1
-          OR (project_id=$2 AND head_branch=$3)`,
+          OR (project_id=$2 AND head_branch=$3)
+       ORDER BY (execution_attempt_id=$1) DESC, created_at_provider DESC
+       LIMIT 1`,
       [input.attempt.id, input.project.id, input.attempt.branch_name],
     )).rows[0];
+    if (stored && (!stored.ticket_id || !stored.execution_attempt_id)) {
+      stored = (await pool.query(
+        `UPDATE pull_requests
+           SET ticket_id=COALESCE(ticket_id,$2),
+               execution_attempt_id=COALESCE(execution_attempt_id,$3),
+               updated_at=now()
+         WHERE id=$1 RETURNING *`,
+        [stored.id, input.ticket.id, input.attempt.id],
+      )).rows[0];
+    }
     if (!stored) {
       const body = buildPullRequestBody({
         ticketNumber: input.ticket.ticket_number,
