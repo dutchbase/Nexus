@@ -908,9 +908,10 @@ async function publishExecutionAttempt(input: {
       );
     });
   } catch (error) {
+    const err = error as Error;
     // A commit-time secret/protected-path trip is a validation failure, not a
     // PR-creation failure — the diff was never safe to commit in the first place.
-    const blocked = error instanceof WorktreeValidationError;
+    const blocked = err instanceof WorktreeValidationError;
     const status = blocked ? "Validation Failed" : "PR Creation Failed";
     // A blocked commit never produced one; a failed *push* must keep its local
     // commit (PRD §28.9) so the retry can resume without re-invoking Claude.
@@ -924,7 +925,7 @@ async function publishExecutionAttempt(input: {
       blocked
         ? `UPDATE agent_runs SET status='failed',error_code='validation_failed',error_message=$2 WHERE id=$1`
         : `UPDATE agent_runs SET status='failed',error_code='pr_creation_failed',error_message=$2 WHERE id=$1`,
-      [input.runId, error.message],
+      [input.runId, err.message],
     );
     await inTransaction(async (client) => {
       const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
@@ -937,7 +938,7 @@ async function publishExecutionAttempt(input: {
           input.ticket.id, current.status, status,
           blocked
             ? "Commit-time secret/protected-path scan blocked the commit"
-            : `Worker-controlled push or pull-request creation failed: ${error.message}`,
+            : `Worker-controlled push or pull-request creation failed: ${err.message}`,
           input.jobId, input.runId, input.attempt.plan_version_id,
         ],
       );

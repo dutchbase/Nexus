@@ -7,5 +7,6 @@
     "strict": true,
     "esModuleInterop": true,
     "skipLibCheck": true
-  }
+  },
+  "exclude": ["apps/worker/data", "data", ".lfd", "logs", "dist", ".next", "node_modules"]
 }
