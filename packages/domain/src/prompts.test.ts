@@ -64,6 +64,19 @@ describe("prompt compiler", () => {
     expect(buildPlanningPrompt(planning)).toContain("\"agent_start_path\":\"/repo/planning\"");
   });
 
+  it("skips sections whose value is empty string while keeping present sections", () => {
+    const input = {
+      ...planning,
+      projectContext: "",
+      globalPlanningInstructions: "",
+    };
+    const result = buildPlanningPrompt(input);
+    expect(result).not.toContain("## Project context");
+    expect(result).not.toContain("## Global planning instructions");
+    expect(result).toContain("## Global base instructions");
+    expect(result).toContain("## Output constraints");
+  });
+
   it("builds byte-identical execution prompts and embeds the approved plan exactly", () => {
     const input = {
       globalBaseInstructions: "Inspect first.",

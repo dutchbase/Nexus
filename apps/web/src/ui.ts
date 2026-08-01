@@ -342,6 +342,14 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(response.ok)alert(result.outcome==="already_up_to_date"?"Already up to date — nothing to merge.":"Merged "+payload.head+" into "+payload.base+".");
           else alert(result.error);
         });
+        document.querySelector("[data-add-override-form]")?.addEventListener("submit",async(event)=>{
+          event.preventDefault();
+          const form=event.currentTarget,button=form.querySelector("button[type=submit]");button.disabled=true;
+          const type=form.querySelector("[data-add-override-select]").value;
+          const response=await fetch("/api/admin/prompts",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({scope:"project",project_id:projectId,prompt_type:type,content:"",active:false})});
+          const result=await response.json();
+          if(response.ok)location.reload();else{button.disabled=false;alert(result.error)}
+        });
       `:""}
       ${path==="/admin/forms/new"?`
         const csrf=sessionStorage.getItem("dccCsrf")||"",form=document.querySelector("[data-new-form-form]");

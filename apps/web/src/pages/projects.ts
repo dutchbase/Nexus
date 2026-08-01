@@ -1,5 +1,6 @@
 import { escapeHtml, pool } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
+import { globalPromptTypes } from "@dcc/domain";
 
 function generateYaml(project: any) {
   const config = project.config_json || {};
@@ -90,9 +91,14 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <div style="display:flex;flex-direction:column;gap:8px">${["Repository path exists and is a Git repository", "Remote reachable · default branch exists · fetch succeeded", "Worktree root writable", "Primary checkout clean", "Prompt files present · automatic skills resolve", "Claude subscription auth · GitHub auth valid"].map((msg) =>
         `<p style="display:flex;gap:8px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:var(--border2);flex-shrink:0"></span>${msg}</p>`,
       ).join("")}</div></div></section>`;
-    const promptsPanel = `<section class="card"><div class="card-head">Project prompt files</div><div class="card-body">${promptsResult.rows.length > 0 ? promptsResult.rows.map((prompt) =>
-      `<p><a href="/admin/prompts/${prompt.id}">${escapeHtml(prompt.prompt_type)}.md v${prompt.active_version || "—"} · ${prompt.active_version ? "active" : "inactive"}</a></p>`,
-    ).join("") : "<p>No project prompts.</p>"}</div></section>`;
+    const overriddenTypes = new Set(promptsResult.rows.map((prompt) => prompt.prompt_type));
+    const availableTypes = globalPromptTypes.filter((type) => !overriddenTypes.has(type));
+    const promptsPanel = `<section class="card"><div class="card-head">Project prompt overrides</div><div class="card-body">
+      ${promptsResult.rows.length > 0 ? `<div class="list-head" style="display:grid;grid-template-columns:minmax(200px,2fr) 1fr;gap:12px;padding:10px 18px;border-bottom:1px solid var(--border);background:var(--surface2)"><span style="font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)">Prompt type</span><span style="font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3);justify-self:end">Status</span></div>${promptsResult.rows.map((prompt) =>
+        `<a href="/admin/prompts/${prompt.id}" style="display:grid;grid-template-columns:minmax(200px,2fr) 1fr;gap:12px;padding:13px 18px;border-bottom:1px solid var(--border);align-items:center;text-decoration:none;cursor:pointer"><div style="min-width:0"><strong>${escapeHtml(prompt.prompt_type)}</strong></div><span class="status ${prompt.active_version ? "ok" : "muted"}" style="justify-self:end">${prompt.active_version ? "Active" : "Inactive"}</span></a>`,
+      ).join("")}` : "<p>This project uses the global prompts. Add an override to customize a prompt type.</p>"}
+      ${availableTypes.length > 0 ? `<form data-add-override-form style="display:flex;gap:8px;align-items:center;padding:13px 18px;border-top:1px solid var(--border)"><select name="prompt_type" data-add-override-select aria-label="Prompt type to override" style="flex:1">${availableTypes.map((type) => `<option value="${type}">${type}</option>`).join("")}</select><button class="button" type="submit">+ Add override</button></form>` : ""}
+    </div></section>`;
     const body = `<div class="eyebrow">Configure / Projects</div><h1>${escapeHtml(project.name)}</h1>
       <div class="toolbar"><button class="button" data-validate-button>Run validation</button><button class="button primary" data-save-button>Save configuration</button></div>
       ${dirty ? `<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px"><strong>Planning and execution are blocked.</strong> <em>The primary checkout has ${escapeHtml(String(config.uncommitted_count || 3))} uncommitted files. Resolve them on the server — the platform never resets a checkout automatically.</em></div>` : ""}

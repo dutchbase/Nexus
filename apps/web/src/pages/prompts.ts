@@ -7,12 +7,19 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       `SELECT pf.*,p.name project_name,pv.version active_version
        FROM prompt_files pf LEFT JOIN projects p ON p.id=pf.project_id
        LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id
-       ORDER BY pf.scope,p.name,pf.prompt_type`,
+       WHERE pf.scope='global'
+       ORDER BY pf.prompt_type`,
     )).rows;
-    const body = `<div class="eyebrow">Configure</div><h1>Prompts</h1><p>Global standards and project-specific instructions are versioned separately.</p>
-      <section class="card"><div class="card-head">Prompt documents</div><div class="card-body">
-      ${prompts.map((prompt) => `<p><a href="/admin/prompts/${prompt.id}"><strong>${escapeHtml(prompt.prompt_type)}</strong></a> · ${escapeHtml(prompt.scope)}${prompt.project_name ? ` · ${escapeHtml(prompt.project_name)}` : ""} · ${prompt.active_version ? `active v${prompt.active_version}` : "inactive"}</p>`).join("") || "<p>No prompt documents yet. Create them through the prompt API.</p>"}
-      </div></section>`;
+    const body = `<div class="eyebrow">Configure</div><h1>Prompts</h1><p>Global prompts apply to every project. Add per-project overrides from a project's Prompts tab.</p>
+      <section class="card"><div class="list-head" style="display:grid;grid-template-columns:minmax(200px,2fr) 1fr 1fr;gap:12px;padding:10px 18px;border-bottom:1px solid var(--border);background:var(--surface2)"><span style="font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)">Prompt type</span><span style="font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)">Active version</span><span style="font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3);justify-self:end">Status</span></div>
+      ${prompts.length > 0 ? prompts.map((prompt) =>
+        `<a class="prompt-list-row" href="/admin/prompts/${prompt.id}" style="display:grid;grid-template-columns:minmax(200px,2fr) 1fr 1fr;gap:12px;padding:13px 18px;border-bottom:1px solid var(--border);align-items:center;text-decoration:none;cursor:pointer">
+          <div style="min-width:0"><strong>${escapeHtml(prompt.prompt_type)}</strong></div>
+          <span style="font-size:13px;color:var(--text2)">${prompt.active_version ? `v${prompt.active_version}` : "—"}</span>
+          <span class="status ${prompt.active_version ? "ok" : "muted"}" style="justify-self:end">${prompt.active_version ? "Active" : "Inactive"}</span>
+        </a>`,
+      ).join("") : `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No prompt documents yet. Create them through the prompt API.</div>`}
+      </section>`;
     return { status: 200, title: "Prompts", body };
   }
   const promptPageMatch = url.pathname.match(/^\/admin\/prompts\/([0-9a-f-]+)$/i);

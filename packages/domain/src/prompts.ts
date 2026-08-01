@@ -5,7 +5,6 @@ import { pool } from "@dcc/database";
 export const globalPromptTypes = [
   "base", "planning", "plan-revision", "execution", "execution-repair", "validation", "pull-request", "pr-review", "pr-conflict-resolution", "follow-up-ticket",
 ] as const;
-export const projectPromptTypes = ["context", "planning", "execution", "testing", "pull-request"] as const;
 
 export type PromptValue =
   | string | number | boolean | null
@@ -26,7 +25,7 @@ function asMarkdown(value: string | PromptValue): string {
 }
 
 function assemble(sections: readonly (readonly [heading: string, value: string | PromptValue])[]) {
-  return `${sections.map(([heading, value]) => `## ${heading}\n\n${asMarkdown(value)}`).join("\n\n")}\n`;
+  return `${sections.filter(([, value]) => value !== "").map(([heading, value]) => `## ${heading}\n\n${asMarkdown(value)}`).join("\n\n")}\n`;
 }
 
 export type PlanningPromptInputs = {

@@ -129,13 +129,15 @@ async function resolvedSkillsFor(ticket: any, phase: "planning" | "execution" | 
   return resolveSkills(candidates, ticket.project_id, phase);
 }
 
-async function activePrompt(scope: "global" | "project", promptType: string, projectId?: string) {
+async function resolvedPrompt(promptType: string, projectId: string) {
   return (await pool.query(
     `SELECT pf.active_version_id,pv.content FROM prompt_files pf
      LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id
-     WHERE pf.scope=$1 AND pf.prompt_type=$2
-       AND (($1='global' AND pf.project_id IS NULL) OR pf.project_id=$3)`,
-    [scope, promptType, projectId ?? null],
+     WHERE pf.prompt_type=$1 AND pf.active_version_id IS NOT NULL
+       AND ((pf.scope='project' AND pf.project_id=$2) OR (pf.scope='global' AND pf.project_id IS NULL))
+     ORDER BY CASE pf.scope WHEN 'project' THEN 0 ELSE 1 END
+     LIMIT 1`,
+    [promptType, projectId],
   )).rows[0] ?? { active_version_id: null, content: "" };
 }
 
@@ -146,9 +148,8 @@ function renderTemplate(content: string, values: Record<string, unknown>) {
 async function planningInputs(ticket: any) {
   const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
   if (!project?.enabled) throw new Error("project is missing or disabled");
-  const [base, globalPlanning, context, projectPlanning, skills] = await Promise.all([
-    activePrompt("global", "base"), activePrompt("global", "planning"),
-    activePrompt("project", "context", project.id), activePrompt("project", "planning", project.id),
+  const [base, planning, skills] = await Promise.all([
+    resolvedPrompt("base", project.id), resolvedPrompt("planning", project.id),
     resolvedSkillsFor(ticket),
   ]);
   const ai = resolveAiConfiguration({
@@ -159,19 +160,21 @@ async function planningInputs(ticket: any) {
   });
   const values = {
     "project.slug": project.slug, "project.name": project.name,
+    "project.description": project.description,
     "project.repository_path": project.repository_path, "project.agent_start_path": project.agent_start_path ?? project.repository_path, "project.default_branch": project.default_branch,
     "ticket.title": ticket.title, "ticket.description": ticket.description,
     "ticket.category": ticket.category, "ticket.priority": ticket.priority,
   };
   const promptVersionIds = Object.fromEntries([
-    ["global.base", base.active_version_id], ["global.planning", globalPlanning.active_version_id],
-    ["project.context", context.active_version_id], ["project.planning", projectPlanning.active_version_id],
+    // ponytail: a project override's version id is recorded under a global.* key;
+    // no consumer reads these keys, scoped keys if audit provenance ever matters.
+    ["global.base", base.active_version_id], ["global.planning", planning.active_version_id],
   ].filter((entry): entry is [string, string] => Boolean(entry[1])));
   const content = buildPlanningPrompt({
     globalBaseInstructions: renderTemplate(base.content ?? "", values),
-    globalPlanningInstructions: renderTemplate(globalPlanning.content ?? "", values),
-    projectContext: renderTemplate(context.content ?? "", values),
-    projectPlanningInstructions: renderTemplate(projectPlanning.content ?? "", values),
+    globalPlanningInstructions: renderTemplate(planning.content ?? "", values),
+    projectContext: "",
+    projectPlanningInstructions: "",
     projectPathsAndRepositoryMetadata: {
       default_branch: project.default_branch, github_owner: project.github_owner,
       github_repository: project.github_repository, repository_path: project.repository_path, agent_start_path: project.agent_start_path ?? project.repository_path, slug: project.slug,
@@ -209,13 +212,10 @@ async function executionInputs(ticket: any, phase: "execution" | "repair", appro
 }) {
   const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
   if (!project?.enabled) throw new Error("project is missing or disabled");
-  const [base, globalExecution, globalRepair, context, projectExecution, testing, skills] = await Promise.all([
-    activePrompt("global", "base"),
-    activePrompt("global", "execution"),
-    phase === "repair" ? activePrompt("global", "execution-repair") : Promise.resolve({ active_version_id: null, content: "" }),
-    activePrompt("project", "context", project.id),
-    activePrompt("project", "execution", project.id),
-    activePrompt("project", "testing", project.id),
+  const [base, execution, repair, skills] = await Promise.all([
+    resolvedPrompt("base", project.id),
+    resolvedPrompt("execution", project.id),
+    phase === "repair" ? resolvedPrompt("execution-repair", project.id) : Promise.resolve({ active_version_id: null, content: "" }),
     resolvedSkillsFor(ticket, phase),
   ]);
   const ai = resolveAiConfiguration({
@@ -226,24 +226,24 @@ async function executionInputs(ticket: any, phase: "execution" | "repair", appro
   });
   const values = {
     "project.slug": project.slug, "project.name": project.name,
+    "project.description": project.description,
     "project.repository_path": project.repository_path, "project.agent_start_path": project.agent_start_path ?? project.repository_path, "project.default_branch": project.default_branch,
     "ticket.title": ticket.title, "ticket.description": ticket.description,
     "ticket.category": ticket.category, "ticket.priority": ticket.priority,
   };
   const promptVersionIds = Object.fromEntries([
+    // ponytail: a project override's version id is recorded under a global.* key;
+    // no consumer reads these keys, scoped keys if audit provenance ever matters.
     ["global.base", base.active_version_id],
-    ["global.execution", globalExecution.active_version_id],
-    ["global.execution-repair", globalRepair.active_version_id],
-    ["project.context", context.active_version_id],
-    ["project.execution", projectExecution.active_version_id],
-    ["project.testing", testing.active_version_id],
+    ["global.execution", execution.active_version_id],
+    ["global.execution-repair", repair.active_version_id],
   ].filter((entry): entry is [string, string] => Boolean(entry[1])));
   let content = buildExecutionPrompt({
     globalBaseInstructions: renderTemplate(base.content ?? "", values),
-    globalExecutionInstructions: renderTemplate(globalExecution.content ?? "", values),
-    projectContext: renderTemplate(context.content ?? "", values),
-    projectExecutionInstructions: renderTemplate(projectExecution.content ?? "", values),
-    projectTestingInstructions: renderTemplate(testing.content ?? "", values),
+    globalExecutionInstructions: renderTemplate(execution.content ?? "", values),
+    projectContext: "",
+    projectExecutionInstructions: "",
+    projectTestingInstructions: "",
     resolvedAiConfiguration: ai,
     resolvedSkills: skills.map((skill) => ({
       id: skill.id, slug: skill.slug, version: skill.version, resolution_sources: skill.resolution_sources,
@@ -258,7 +258,7 @@ async function executionInputs(ticket: any, phase: "execution" | "repair", appro
   });
   if (phase === "repair") {
     content += [
-      "\n## Repair instructions\n", renderTemplate(globalRepair.content ?? "", values),
+      "\n## Repair instructions\n", renderTemplate(repair.content ?? "", values),
       "\n## Current worktree diff\n", details.currentDiff ?? "",
       "\n## Failed validation output\n", JSON.stringify(details.validationOutput ?? {}, null, 2),
       "\n## Administrator feedback\n", details.administratorFeedback ?? "",
@@ -381,7 +381,7 @@ async function runPlanning(job: any) {
   )).rows[0] : null;
   if (revising && !revision) throw new Error("revision inputs are no longer current");
   const input = await planningInputs(ticket);
-  const revisionInstructions = revising ? await activePrompt("global", "plan-revision") : null;
+  const revisionInstructions = revising ? await resolvedPrompt("plan-revision", ticket.project_id) : null;
   if (revisionInstructions?.active_version_id) {
     input.promptVersionIds["global.plan-revision"] = revisionInstructions.active_version_id;
   }
@@ -1036,7 +1036,7 @@ async function runPrAiReview(job: any) {
     const model = payload.model ?? settings.default_model;
     const reasoningLevel = payload.reasoning_level ?? settings.default_reasoning_level;
 
-    const promptRow = await activePrompt("global", "pr-review");
+    const promptRow = await resolvedPrompt("pr-review", project.id);
 
     const [owner, repo] = pullRequest.repository.split("/");
     const diff = await getPullRequestDiff(owner, repo, pullRequest.number);
@@ -1146,7 +1146,7 @@ async function runFollowUpDescription(job: any) {
     if (!pullRequest) throw new Error("pull request not found");
     const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [pullRequest.project_id])).rows[0];
     if (!project) throw new Error("project not found");
-    const promptRow = await activePrompt("global", "follow-up-ticket");
+    const promptRow = await resolvedPrompt("follow-up-ticket", project.id);
     const prompt = renderFollowUpTicketPrompt(promptRow.content ?? "", {
       project: { name: project.name, slug: project.slug, repository_path: project.repository_path },
       pr: {
@@ -1244,7 +1244,7 @@ async function runPrConflictResolution(job: any) {
       content: await readFile(path.join(worktree.worktreePath, file), "utf8"),
     })));
 
-    const promptRow = await activePrompt("global", "pr-conflict-resolution");
+    const promptRow = await resolvedPrompt("pr-conflict-resolution", project.id);
     const prompt = renderConflictResolutionPrompt(promptRow.content ?? "", {
       project: { name: project.name },
       pr: { title: pullRequest.title, headBranch: pullRequest.head_branch, baseBranch: pullRequest.base_branch },
