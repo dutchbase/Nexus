@@ -166,6 +166,8 @@ async function planningInputs(ticket: any) {
     "ticket.category": ticket.category, "ticket.priority": ticket.priority,
   };
   const promptVersionIds = Object.fromEntries([
+    // ponytail: a project override's version id is recorded under a global.* key;
+    // no consumer reads these keys, scoped keys if audit provenance ever matters.
     ["global.base", base.active_version_id], ["global.planning", planning.active_version_id],
   ].filter((entry): entry is [string, string] => Boolean(entry[1])));
   const content = buildPlanningPrompt({
@@ -230,6 +232,8 @@ async function executionInputs(ticket: any, phase: "execution" | "repair", appro
     "ticket.category": ticket.category, "ticket.priority": ticket.priority,
   };
   const promptVersionIds = Object.fromEntries([
+    // ponytail: a project override's version id is recorded under a global.* key;
+    // no consumer reads these keys, scoped keys if audit provenance ever matters.
     ["global.base", base.active_version_id],
     ["global.execution", execution.active_version_id],
     ["global.execution-repair", repair.active_version_id],

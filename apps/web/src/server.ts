@@ -172,6 +172,8 @@ async function promptInputsFor(ticket: any, phase: "planning" | "execution", app
   }));
   const promptVersionIds = Object.fromEntries(
     [
+      // ponytail: a project override's version id is recorded under a global.* key;
+      // no consumer reads these keys, scoped keys if audit provenance ever matters.
       ["global.base", base.active_version_id],
       [`global.${phase}`, phaseResolved.active_version_id],
     ].filter(([, id]) => id),
