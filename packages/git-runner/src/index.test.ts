@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -10,7 +10,9 @@ import {
   conflictedFiles,
   countCredentialShapes,
   createConflictResolutionWorktree,
+  createPrivateExecutionClone,
   executionBranchName,
+  importPrivateExecutionClone,
   matchesProtectedPath,
   mergeBaseIntoWorktree,
   sanitizeValidationOutput,
@@ -178,6 +180,40 @@ describe("worker validation primitives", () => {
 });
 
 describe("execution commit containment", () => {
+  it("imports an agent clone's final tree without importing its history", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-private-clone-"));
+    try {
+      const repository = path.join(tmp, "repository");
+      await initRepo(repository);
+      await writeAndCommit(repository, "base.txt", "base\n", "base commit");
+      const baseCommit = (await git(repository, ["rev-parse", "HEAD"])).stdout.trim();
+      const worker = path.join(tmp, "worker");
+      await git(repository, ["worktree", "add", "-b", "worker", worker, baseCommit]);
+
+      const clone = await createPrivateExecutionClone({ worktreePath: worker });
+      await git(clone.clonePath, ["config", "user.email", "git-runner-test@example.com"]);
+      await git(clone.clonePath, ["config", "user.name", "git-runner test"]);
+      await writeAndCommit(clone.clonePath, "committed.txt", "clone-only commit\n", "agent task commit");
+      await writeFile(path.join(clone.clonePath, "base.txt"), "clone-only uncommitted\n");
+      await writeFile(path.join(clone.clonePath, "untracked.txt"), "clone-only untracked\n");
+
+      await importPrivateExecutionClone({ clonePath: clone.clonePath, worktreePath: worker, baseCommit });
+
+      expect(await readFile(path.join(worker, "committed.txt"), "utf8")).toBe("clone-only commit\n");
+      expect(await readFile(path.join(worker, "base.txt"), "utf8")).toBe("clone-only uncommitted\n");
+      expect(await readFile(path.join(worker, "untracked.txt"), "utf8")).toBe("clone-only untracked\n");
+      expect((await git(worker, ["rev-list", "--count", `${baseCommit}..HEAD`])).stdout.trim()).toBe("0");
+      expect((await git(worker, ["log", "--format=%s", "-1"])).stdout.trim()).toBe("base commit");
+
+      await git(worker, ["add", "--all"]);
+      await git(worker, ["commit", "-m", "worker final commit"]);
+      expect((await git(worker, ["rev-list", "--count", `${baseCommit}..HEAD`])).stdout.trim()).toBe("1");
+      await clone.cleanup();
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("squashes executor commits and uncommitted changes into one commit from the attempt base", async () => {
     const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-execution-"));
     try {

@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
-import { mkdir, readFile, realpath, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
@@ -361,4 +362,66 @@ export async function commitDiffIsEmpty(worktreePath: string, baseCommit: string
 
 export async function pushExecutionBranch(worktreePath: string, branchName: string) {
   await git(worktreePath, ["push", "--set-upstream", "origin", branchName]);
+}
+function requireGitRoot(worktreePath: string) {
+  return git(worktreePath, ["rev-parse", "--show-toplevel"])
+    .then(({ stdout }) => realpath(stdout.trim()));
+}
+
+function requireContainedPath(root: string, candidate: string, label: string) {
+  const relative = path.relative(root, candidate);
+  if (relative.startsWith("..") || path.isAbsolute(relative)) throw new Error(`${label} escapes its root`);
+  return candidate;
+}
+
+export async function createPrivateExecutionClone(input: { worktreePath: string }) {
+  const sourcePath = await realpath(input.worktreePath);
+  const sourceRoot = await requireGitRoot(sourcePath);
+  requireContainedPath(sourceRoot, sourcePath, "worktree path");
+  const privateRoot = await mkdtemp(path.join(tmpdir(), "dcc-execution-clone-"));
+  const clonePath = path.join(privateRoot, "worktree");
+  try {
+    await exec("git", ["clone", "--no-local", sourceRoot, clonePath]);
+    const sourceHead = (await git(sourceRoot, ["rev-parse", "HEAD"])).stdout.trim();
+    await git(clonePath, ["checkout", "--detach", sourceHead]);
+    const dirtyPatch = (await git(sourceRoot, ["diff", "--binary", "HEAD"])).stdout;
+    if (dirtyPatch) {
+      const patchPath = path.join(privateRoot, "source.patch");
+      await writeFile(patchPath, dirtyPatch);
+      await git(clonePath, ["apply", "--binary", patchPath]);
+      await rm(patchPath, { force: true });
+    }
+    const untracked = (await git(sourceRoot, ["ls-files", "--others", "--exclude-standard", "-z"])).stdout.split("\0").filter(Boolean);
+    for (const file of untracked) {
+      const sourceFile = requireContainedPath(sourceRoot, path.resolve(sourceRoot, file), "source file");
+      const cloneFile = requireContainedPath(clonePath, path.resolve(clonePath, file), "clone file");
+      await mkdir(path.dirname(cloneFile), { recursive: true });
+      await cp(sourceFile, cloneFile, { recursive: true, dereference: false });
+    }
+    return { clonePath, cleanup: () => rm(privateRoot, { recursive: true, force: true }) };
+  } catch (error) {
+    await rm(privateRoot, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+export async function importPrivateExecutionClone(input: {
+  clonePath: string;
+  worktreePath: string;
+  baseCommit: string;
+}) {
+  const clonePath = await realpath(input.clonePath);
+  const worktreePath = await realpath(input.worktreePath);
+  if (await requireGitRoot(clonePath) !== clonePath) throw new Error("clone path must be its Git root");
+  if (await requireGitRoot(worktreePath) !== worktreePath) throw new Error("worktree path must be its Git root");
+  const patchPath = requireContainedPath(clonePath, path.join(clonePath, ".git", "execution.patch"), "patch path");
+  await git(clonePath, ["add", "--intent-to-add", "--all"]);
+  await writeFile(patchPath, (await git(clonePath, ["diff", "--binary", input.baseCommit])).stdout);
+  try {
+    await git(worktreePath, ["reset", "--hard", input.baseCommit]);
+    await git(worktreePath, ["clean", "-fd"]);
+    await git(worktreePath, ["apply", "--binary", patchPath]);
+  } finally {
+    await rm(patchPath, { force: true });
+  }
 }
