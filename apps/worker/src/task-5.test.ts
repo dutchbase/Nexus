@@ -15,7 +15,7 @@ test("runs each execution phase from its approved snapshot and materializes only
 
   expect(source).toContain("WHERE id=$1 AND ticket_id=$2");
   expect(source).toContain("ticket.approved_skill_snapshot_id");
-  expect(source).toContain("skillsForPhase(approvedSnapshot.skills_json, phase)");
+  expect(source).toContain("approvedPhaseSkills(approvedSnapshot, ticket.id, phase)");
   expect(source).toContain("skillSnapshotId: approvedSnapshot.id");
   expect(source).toContain("materializeSkillBundle(runId, phaseSkills");
 });
@@ -24,7 +24,7 @@ test("requires a normal execution to invoke Agent before worker validation and p
   const source = await worker();
 
   expect(source).toContain("usedAgent ||= isAgentToolEvent(eventType, event)");
-  expect(source).toContain('if (!repairing && !usedAgent) throw new Error("execution did not invoke Agent tool")');
+  expect(source).toContain("assertExecutionPublicationGate(repairing, usedAgent)");
 });
 
 test("wraps legacy 17-section plans as synthetic Task 1 for execution", async () => {

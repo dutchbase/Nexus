@@ -142,4 +142,41 @@ describe("prompt compiler", () => {
     expect(snapshot.content_hash).toBe(promptContentHash(content));
     expect(JSON.stringify(snapshot.metadata_json)).toContain("Version");
   });
+
+  it("stores an exact immutable PR-review prompt without requiring a linked ticket", async () => {
+    const content = "rendered review prompt\nwith exact diff bytes\n";
+    let parameters: unknown[] = [];
+    const client = {
+      query: async (_sql: string, values: unknown[]) => {
+        parameters = values;
+        return { rows: [{ id: "snapshot-pr", content, content_hash: values[4], metadata_json: values[8] }] };
+      },
+    };
+
+    const snapshot = await snapshotPrompt({
+      ticketId: null,
+      projectId: "project-1",
+      phase: "pr-review",
+      content,
+      model: "sonnet",
+      reasoningLevel: "high",
+      metadata: {
+        promptVersionIds: {
+          "global.pr-review": "prompt-version-1",
+          "global.code-reviewer": "rubric-version-2",
+        },
+        pullRequestId: "pr-1",
+        reviewedHeadSha: "abc123",
+        reviewedBaseBranch: "main",
+      },
+    }, client as never);
+
+    expect(parameters[0]).toBeNull();
+    expect(parameters[2]).toBe("pr-review");
+    expect(snapshot.content_hash).toBe(promptContentHash(content));
+    expect(snapshot.metadata_json.promptVersionIds).toEqual({
+      "global.pr-review": "prompt-version-1",
+      "global.code-reviewer": "rubric-version-2",
+    });
+  });
 });

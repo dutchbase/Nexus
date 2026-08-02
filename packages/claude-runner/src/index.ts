@@ -1,6 +1,7 @@
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { appendFile, chmod, copyFile, mkdtemp, open, readFile, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { appendFile, chmod, copyFile, mkdtemp, open, readFile, rename, rm } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertSubscriptionOnlyEnvironment, ClaudeAuthError } from "./auth-guard.ts";
@@ -62,6 +63,7 @@ export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = pro
 export type PlanningInvocation = {
   task: string; sessionId: string; model: string; effort: string; promptFile: string;
   skillBundleDir?: string; pluginDirectories?: readonly string[]; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string; tools?: string[]; claudeExecutable?: string; guardPath?: string;
+  gitMetadataPaths?: string[]; sensitiveEnvironmentVariables?: string[];
 };
 
 const trustedBashGuard = fileURLToPath(new URL("./bash-guard.mjs", import.meta.url));
@@ -129,8 +131,79 @@ function sessionAgents(input: PlanningInvocation, guardPath = input.guardPath ??
   });
 }
 
-function executionSettings(guardPath: string) {
+const defaultSensitiveEnvironmentVariables = [
+  "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+  "GITHUB_TOKEN", "GH_TOKEN", "DATABASE_URL", "PGPASSWORD", "NPM_TOKEN",
+  "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+];
+const sensitiveHomePaths = [
+  "~/.ssh", "~/.aws", "~/.config", "~/.docker", "~/.kube", "~/.gnupg", "~/.password-store",
+  "~/.git-credentials", "~/.netrc", "~/.npmrc",
+];
+
+function permissionPath(target: string) {
+  return `//${path.resolve(target).slice(1)}`;
+}
+
+async function gitMetadataPaths(workingDirectory: string) {
+  const dotGit = path.join(workingDirectory, ".git");
+  let gitDirectory = dotGit;
+  const pointer = await readFile(dotGit, "utf8").catch(() => "");
+  const match = pointer.match(/^gitdir:\s*(.+)\s*$/m);
+  if (match) gitDirectory = path.resolve(workingDirectory, match[1]);
+  const common = await readFile(path.join(gitDirectory, "commondir"), "utf8").catch(() => "");
+  return [...new Set([dotGit, gitDirectory, ...(common.trim() ? [path.resolve(gitDirectory, common.trim())] : [])])];
+}
+
+async function hideWorktreeGitMetadata(workingDirectory: string) {
+  const dotGit = path.join(workingDirectory, ".git");
+  const hidden = path.join(path.dirname(workingDirectory), `.dcc-git-metadata-${randomUUID()}`);
+  try {
+    await rename(dotGit, hidden);
+  } catch (error: any) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  return {
+    hidden,
+    restore: async () => { await rename(hidden, dotGit); },
+  };
+}
+
+function executionSettings(input: PlanningInvocation, guardPath: string) {
+  const gitMetadataPaths = [...new Set(input.gitMetadataPaths ?? [path.join(input.workingDirectory, ".git")])];
+  const deniedGitPaths = gitMetadataPaths.flatMap((target) => {
+    const rulePath = permissionPath(target);
+    return [`Read(${rulePath})`, `Read(${rulePath}/**)`, `Edit(${rulePath})`, `Edit(${rulePath}/**)`];
+  });
+  const deniedCredentialReads = sensitiveHomePaths.flatMap((target) => [
+    `Read(${target})`, `Read(${target}/**)`,
+  ]);
+  const nodeInstallRoot = path.dirname(path.dirname(process.execPath));
+  const allowRead = [
+    input.workingDirectory, input.skillBundleDir, ...(input.pluginDirectories ?? []), input.promptFile,
+    guardPath, nodeInstallRoot, process.env.COREPACK_HOME, path.join(homedir(), ".cache", "node", "corepack"),
+  ].filter((target): target is string => Boolean(target)).map((target) => path.resolve(target));
   return JSON.stringify({
+    permissions: { deny: [...deniedGitPaths, ...deniedCredentialReads, "WebFetch"] },
+    sandbox: {
+      enabled: true,
+      failIfUnavailable: true,
+      allowUnsandboxedCommands: false,
+      filesystem: {
+        denyRead: [...new Set([homedir(), ...gitMetadataPaths])],
+        allowRead: [...new Set(allowRead)],
+        denyWrite: gitMetadataPaths,
+      },
+      credentials: {
+        files: sensitiveHomePaths.map((file) => ({ path: file, mode: "deny" })),
+        envVars: [...new Set(input.sensitiveEnvironmentVariables ?? defaultSensitiveEnvironmentVariables)]
+          .sort().map((name) => ({ name, mode: "deny" })),
+      },
+      network: {
+        allowedDomains: [], deniedDomains: ["*"], strictAllowlist: true, allowAllUnixSockets: false,
+      },
+    },
     hooks: {
       PreToolUse: [{
         matcher: "Agent",
@@ -198,24 +271,54 @@ export type ExecutionInvocation = PlanningInvocation & {
   onEvent: (event: { eventType: string; event: unknown; raw: string }) => Promise<void>;
 };
 
+export function assertExecutionSandboxVersion(value: string) {
+  const match = value.match(/\b(\d+)\.(\d+)\.(\d+)\b/);
+  const version = match?.slice(1).map(Number);
+  const tooOld = !version || version[0] < 2 || (version[0] === 2 && (version[1] < 1 || (version[1] === 1 && version[2] < 219)));
+  if (tooOld) {
+    throw new Error("execution requires Claude Code 2.1.219 or newer for fail-closed strict sandboxing");
+  }
+}
+
 export function buildExecutionArguments(input: ExecutionInvocation) {
   return [
     "-p", input.task, "--session-id", input.sessionId, "--model", input.model, "--effort", input.effort,
     "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep,Skill,Agent",
-    "--append-system-prompt-file", input.promptFile, ...skillDirectoryArguments(input), "--settings", executionSettings(input.guardPath ?? trustedBashGuard), "--agents", sessionAgents(input),
+    "--append-system-prompt-file", input.promptFile, ...skillDirectoryArguments(input),
+    "--setting-sources", "", "--settings", executionSettings(input, input.guardPath ?? trustedBashGuard),
+    "--agents", sessionAgents(input),
     "--output-format", "stream-json", "--verbose", "--max-turns", String(input.maxTurns),
   ];
 }
 
 export async function invokeExecutionClaude(input: ExecutionInvocation) {
   assertSubscriptionOnlyEnvironment();
-  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken, AGENT_CONTROL_DISABLE: "1" };
+  const env: NodeJS.ProcessEnv = { ...process.env };
+  for (const name of new Set([...defaultSensitiveEnvironmentVariables, ...(input.sensitiveEnvironmentVariables ?? [])])) {
+    delete env[name];
+  }
+  Object.assign(env, {
+    CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken,
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+    AGENT_CONTROL_DISABLE: "1",
+  });
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
+  const version = await runClaude(["--version"], { env, executable: input.claudeExecutable });
+  if (version.exitCode !== 0) throw new Error("could not verify Claude Code sandbox support");
+  assertExecutionSandboxVersion(version.stdout);
   const guard = await materializeBashGuard();
+  let hiddenGitMetadata: Awaited<ReturnType<typeof hideWorktreeGitMetadata>> = null;
   try {
   await appendFile(input.logPath, "");
+  const metadataPaths = input.gitMetadataPaths ?? await gitMetadataPaths(input.workingDirectory);
+  hiddenGitMetadata = await hideWorktreeGitMetadata(input.workingDirectory);
   return await new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
-    const child = spawn(input.claudeExecutable ?? "claude", buildExecutionArguments({ ...input, guardPath: guard.path }), {
+    const child = spawn(input.claudeExecutable ?? "claude", buildExecutionArguments({
+      ...input,
+      guardPath: guard.path,
+      gitMetadataPaths: [...metadataPaths, ...(hiddenGitMetadata ? [hiddenGitMetadata.hidden] : [])],
+    }), {
       cwd: input.workingDirectory,
       env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -277,7 +380,11 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     });
   });
   } finally {
-    await guard.cleanup();
+    try {
+      await hiddenGitMetadata?.restore();
+    } finally {
+      await guard.cleanup();
+    }
   }
 }
 

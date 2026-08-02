@@ -43,3 +43,37 @@ test("does not approve a review when GitHub rejects its changed reviewed head", 
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
+
+test("does not merge when the PR base branch or commit changed after AI review", async () => {
+  let mergeRequests = 0;
+  const server = createServer((incoming, outgoing) => {
+    if (incoming.method === "GET") {
+      outgoing.setHeader("content-type", "application/json");
+      outgoing.end(JSON.stringify({ base: { ref: "main", sha: "advanced-base-sha" } }));
+      return;
+    }
+    mergeRequests++;
+    outgoing.setHeader("content-type", "application/json");
+    outgoing.end(JSON.stringify({ merged: true, sha: "merged", message: "merged" }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no TCP port");
+    process.env.GITHUB_API_BASE_URL = `http://127.0.0.1:${address.port}`;
+    process.env.GITHUB_TOKEN = "test-token";
+
+    await expect(approveAndMergePullRequest(
+      { query: async () => ({ rows: [] }) } as any,
+      { id: "pr-id", repository: "acme/widgets", number: 42, base_branch: "main", is_draft: false },
+      undefined,
+      { type: "worker", id: "review-id" },
+      "reviewed-sha",
+      "main",
+      "reviewed-base-sha",
+    )).rejects.toThrow("base changed");
+    expect(mergeRequests).toBe(0);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});

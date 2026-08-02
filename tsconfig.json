@@ -8,5 +8,5 @@
     "esModuleInterop": true,
     "skipLibCheck": true
   },
-  "exclude": ["apps/worker/data", "data", ".lfd", "logs", "dist", ".next", "node_modules"]
+  "exclude": ["apps/worker/data", "data", ".lfd", "logs", "dist", ".next", "node_modules", "skills/vendor"]
 }

@@ -15,8 +15,8 @@ export type ProviderPullRequest = {
   draft: boolean;
   merged?: boolean;
   title: string;
-  head: { ref: string };
-  base: { ref: string };
+  head: { ref: string; sha?: string };
+  base: { ref: string; sha?: string };
   user?: { login?: string };
   review_state?: string | null;
   check_state?: string | null;

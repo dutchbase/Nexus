@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFileSync, readdirSync } from "node:fs";
 import { resolve } from "node:path";
 import { describe, expect, it } from "vitest";
-import { buildAgentContentCatalog } from "./sync-agent-content.ts";
+import { buildAgentContentCatalog, readImportedAgentContentCatalog } from "./sync-agent-content.ts";
 
 const root = resolve(import.meta.dirname, "..");
 const read = (path: string) => readFileSync(resolve(root, path), "utf8");
@@ -47,6 +47,17 @@ describe("curated agent content", () => {
 
     expect(catalog.prompt_sources["code-reviewer"]).toBe(rubric);
     expect(catalog.prompt_hashes["code-reviewer"]).toBe(createHash("sha256").update(rubric).digest("hex"));
+  });
+
+  it("ships a verified pinned vendored catalog that can bootstrap content sync", async () => {
+    const manifest = JSON.parse(read("config/agent-content.json"));
+    const catalog = await readImportedAgentContentCatalog({ root, manifest });
+
+    expect(catalog.source.tag).toBe("v4.1.0");
+    expect(catalog.skills.map((skill) => skill.slug)).toEqual([
+      "brainstorming", "subagent-driven-development", "systematic-debugging",
+      "test-driven-development", "using-superpowers", "verification-before-completion", "writing-plans",
+    ]);
   });
 
   it("keeps PR review read-only and injection-resistant", () => {

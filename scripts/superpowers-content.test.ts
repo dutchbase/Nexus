@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { execFileSync } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, readFile, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -16,10 +16,12 @@ async function fixture() {
   const checkout = join(root, "checkout");
   await mkdir(join(checkout, "skills", "writing-plans"), { recursive: true });
   await mkdir(join(checkout, "skills", "test-driven-development"), { recursive: true });
+  await mkdir(join(checkout, "skills", "requesting-code-review"), { recursive: true });
   await writeFile(join(checkout, "package.json"), JSON.stringify({ version: "4.1.0", license: "MIT" }));
   await writeFile(join(checkout, "LICENSE"), "MIT License\n");
   await writeFile(join(checkout, "skills", "writing-plans", "SKILL.md"), "---\nname: writing-plans\ndescription: Plans work\n---\n# Plans\n");
   await writeFile(join(checkout, "skills", "test-driven-development", "SKILL.md"), "---\nname: test-driven-development\ndescription: Tests first\n---\n# TDD\n");
+  await writeFile(join(checkout, "skills", "requesting-code-review", "code-reviewer.md"), "review rubric v4.1.0\n");
   execFileSync("git", ["init", "--quiet", "--initial-branch=release", checkout]);
   execFileSync("git", ["-C", checkout, "add", "."]);
   execFileSync("git", ["-C", checkout, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "release"]);
@@ -36,6 +38,7 @@ describe("Superpowers content", () => {
       superpowers: {
         repository: "obra/superpowers", tag: "v4.1.0",
         source: { type: "git", license: "MIT" },
+        review_rubric: "skills/requesting-code-review/code-reviewer.md",
         skills: { planning: ["writing-plans"], execution: ["test-driven-development"], repair: [], inspiration_only: [] },
       },
     };
@@ -51,6 +54,12 @@ describe("Superpowers content", () => {
     await expect(readFile(join(destination, "stale", "SKILL.md"))).rejects.toThrow();
     await expect(readFile(join(destination, "writing-plans", "SKILL.md"), "utf8")).resolves.toContain("# Plans");
     expect(JSON.parse(await readFile(join(destination, "catalog.json"), "utf8"))).toEqual(first);
+    await expect(readFile(join(root, "prompts", "global", "code-reviewer.md"), "utf8"))
+      .resolves.toBe("review rubric v4.1.0\n");
+    expect(first.review_rubric).toEqual({
+      path: "skills/requesting-code-review/code-reviewer.md",
+      content_hash: hash("review rubric v4.1.0\n"),
+    });
   });
 
   it("rejects a same-version checkout whose HEAD is not the pinned tag", async () => {
@@ -58,14 +67,27 @@ describe("Superpowers content", () => {
     await writeFile(join(checkout, "README.md"), "not the tagged release\n");
     execFileSync("git", ["-C", checkout, "add", "README.md"]);
     execFileSync("git", ["-C", checkout, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "not release"]);
-    const manifest = { superpowers: { repository: "obra/superpowers", tag: "v4.1.0", source: { type: "git", license: "MIT" }, skills: { planning: ["writing-plans"] } } };
+    const manifest = { superpowers: { repository: "obra/superpowers", tag: "v4.1.0", review_rubric: "skills/requesting-code-review/code-reviewer.md", source: { type: "git", license: "MIT" }, skills: { planning: ["writing-plans"] } } };
 
     await expect(importSuperpowers({ manifest, checkout, destination: join(root, "skills", "vendor", "superpowers"), repositoryRoot: root })).rejects.toThrow("pinned tag");
   });
 
+  it("imports a pinned tagged release without relying on upstream package metadata", async () => {
+    const { root, checkout } = await fixture();
+    await unlink(join(checkout, "package.json"));
+    execFileSync("git", ["-C", checkout, "add", "package.json"]);
+    execFileSync("git", ["-C", checkout, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--amend", "--quiet", "--no-edit"]);
+    execFileSync("git", ["-C", checkout, "tag", "-f", "-a", "v4.1.0", "-m", "release"]);
+    const manifest = { superpowers: { repository: "obra/superpowers", tag: "v4.1.0", review_rubric: "skills/requesting-code-review/code-reviewer.md", source: { type: "git", license: "MIT" }, skills: { planning: ["writing-plans"] } } };
+
+    await expect(importSuperpowers({
+      manifest, checkout, destination: join(root, "skills", "vendor", "superpowers"), repositoryRoot: root,
+    })).resolves.toMatchObject({ source: { tag: "v4.1.0" } });
+  });
+
   it("rejects a destination outside the vendor root before deleting files", async () => {
     const { root, checkout } = await fixture();
-    const manifest = { superpowers: { repository: "obra/superpowers", tag: "v4.1.0", source: { type: "git", license: "MIT" }, skills: { planning: ["writing-plans"] } } };
+    const manifest = { superpowers: { repository: "obra/superpowers", tag: "v4.1.0", review_rubric: "skills/requesting-code-review/code-reviewer.md", source: { type: "git", license: "MIT" }, skills: { planning: ["writing-plans"] } } };
     await writeFile(join(root, "keep.txt"), "keep\n");
 
     await expect(importSuperpowers({ manifest, checkout, destination: root, repositoryRoot: root })).rejects.toThrow("vendor root");
@@ -79,7 +101,7 @@ describe("Superpowers content", () => {
     const manifest = {
       superpowers: {
         repository: "obra/superpowers", tag: "v4.1.0", vendor_path: "skills/vendor/release",
-        source: { type: "git", license: "MIT" }, skills: { planning: ["writing-plans"] },
+        source: { type: "git", license: "MIT" }, review_rubric: "skills/requesting-code-review/code-reviewer.md", skills: { planning: ["writing-plans"] },
       },
     };
     const destination = join(root, "skills", "vendor", "release");
@@ -151,5 +173,46 @@ describe("Superpowers content", () => {
     await syncAgentContent(client, catalog);
 
     expect(calls.find((call) => call.sql.startsWith("UPDATE skills SET enabled=false"))?.values).toEqual([[]]);
+  });
+
+  it("makes freshly synced phase skills eligible for resolution and snapshots", async () => {
+    const { root } = await fixture();
+    await mkdir(join(root, "prompts", "global"), { recursive: true });
+    await writeFile(join(root, "prompts", "global", "base.md"), "source prompt\n");
+    const catalog = await buildAgentContentCatalog({
+      root,
+      manifest: { superpowers: { tag: "v4.1.0", vendor_path: "checkout/skills" } },
+      skills: [{
+        slug: "writing-plans", name: "writing-plans", description: "Plans work",
+        phases: ["planning"], inspiration_only: false, version: "v4.1.0",
+        content_hash: "hash", files: [],
+      }],
+    });
+    let syncedConfiguration: any;
+    const client = {
+      async query(sql: string, values?: unknown[]) {
+        if (sql.includes("FROM agent_content")) return { rows: [{ sync: { prompt_hashes: catalog.prompt_hashes } }] };
+        if (sql.startsWith("INSERT INTO skills")) syncedConfiguration = JSON.parse(values?.[6] as string);
+        return { rows: [] };
+      },
+    };
+
+    await syncAgentContent(client, catalog);
+    expect(syncedConfiguration).toEqual({
+      phases: ["planning"], required_phases: ["planning"], allowed_phases: ["planning"], inspiration_only: false,
+    });
+
+    const { resolveSkills, snapshotSkillSet, skillsForPhase } = await import("../packages/skill-registry/src/index.ts");
+    const resolved = resolveSkills([{
+      skill: {
+        id: "skill-id", slug: "writing-plans", name: "writing-plans", source_type: "vendored",
+        filesystem_path: "checkout/skills/writing-plans/SKILL.md", enabled: true, version: "v4.1.0",
+        configuration_json: syncedConfiguration,
+      },
+      skillId: "skill-id", source: "phase_required",
+    }], "project-id", "planning");
+    const snapshot = await snapshotSkillSet(resolved, ["planning", "execution", "repair"], root);
+    expect(skillsForPhase(snapshot.skills, "planning").map((skill) => skill.slug)).toEqual(["writing-plans"]);
+    expect(skillsForPhase(snapshot.skills, "execution")).toEqual([]);
   });
 });

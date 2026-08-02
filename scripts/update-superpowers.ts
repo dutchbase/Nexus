@@ -9,6 +9,7 @@ export type SuperpowersManifest = {
     repository: string;
     tag: string;
     vendor_path?: string;
+    review_rubric: string;
     source: { type: string; license: string };
     skills: Record<string, string[]>;
   };
@@ -28,6 +29,7 @@ type CatalogSkill = {
 export type SuperpowersCatalog = {
   catalog_hash: string;
   source: { repository: string; tag: string; license: string };
+  review_rubric: { path: string; content_hash: string };
   skills: CatalogSkill[];
 };
 
@@ -70,9 +72,7 @@ async function validate(manifest: SuperpowersManifest, checkout: string) {
   if (manifest?.superpowers?.repository !== "obra/superpowers") fail("repository must be obra/superpowers");
   if (!/^v\d+\.\d+\.\d+$/.test(manifest?.superpowers?.tag ?? "")) fail("tag must be a release tag");
   if (source?.type !== "git" || source.license !== "MIT") fail("source must be the MIT git release");
-  const packageJson = JSON.parse(await readFile(path.join(checkout, "package.json"), "utf8"));
-  if (packageJson.version !== manifest.superpowers.tag.slice(1)) fail("checkout version does not match manifest tag");
-  if (packageJson.license !== "MIT") fail("checkout package license is not MIT");
+  if (typeof manifest.superpowers.review_rubric !== "string" || !manifest.superpowers.review_rubric.trim()) fail("review rubric path is required");
   if (!/^MIT License\b/m.test(await readFile(path.join(checkout, "LICENSE"), "utf8"))) fail("checkout LICENSE is not MIT");
   try {
     const head = execFileSync("git", ["-C", checkout, "rev-parse", "--verify", "HEAD"], { encoding: "utf8" }).trim();
@@ -113,6 +113,11 @@ export async function importSuperpowers({ manifest, checkout, destination, repos
   const vendorRoot = path.resolve(repositoryRoot, "skills", "vendor");
   if (!strictlyWithin(vendorRoot, path.resolve(destination))) fail("destination must be below the vendor root");
   await validate(manifest, checkout);
+  const rubricSource = path.resolve(checkout, manifest.superpowers.review_rubric);
+  const rubricInfo = strictlyWithin(path.resolve(checkout), rubricSource) ? await lstat(rubricSource).catch(() => null) : null;
+  if (!rubricInfo?.isFile() || rubricInfo.isSymbolicLink()) fail("missing configured review rubric");
+  const rubric = await readFile(rubricSource);
+  const review_rubric = { path: manifest.superpowers.review_rubric, content_hash: digest(rubric) };
   const selected = allowedSkills(manifest);
   const staging = `${destination}.next`;
   await rm(staging, { recursive: true, force: true });
@@ -139,8 +144,13 @@ export async function importSuperpowers({ manifest, checkout, destination, repos
     });
   }
   const source = { repository: manifest.superpowers.repository, tag: manifest.superpowers.tag, license: manifest.superpowers.source.license };
-  const catalog: SuperpowersCatalog = { catalog_hash: digest(JSON.stringify({ source, skills })), source, skills };
+  const catalog: SuperpowersCatalog = {
+    catalog_hash: digest(JSON.stringify({ source, review_rubric, skills })), source, review_rubric, skills,
+  };
   await writeFile(path.join(staging, "catalog.json"), `${JSON.stringify(catalog, null, 2)}\n`);
+  const rubricDestination = path.join(repositoryRoot, "prompts", "global", "code-reviewer.md");
+  await mkdir(path.dirname(rubricDestination), { recursive: true });
+  await writeFile(rubricDestination, rubric);
   await mkdir(path.dirname(destination), { recursive: true });
   await rm(destination, { recursive: true, force: true });
   await rename(staging, destination);

@@ -1,5 +1,5 @@
 import type pg from "pg";
-import { markReadyForReview, mergePullRequest, updatePullRequestBase } from "../../github-provider/src/index.ts";
+import { getPullRequest, markReadyForReview, mergePullRequest, updatePullRequestBase } from "../../github-provider/src/index.ts";
 import { syncPullRequest } from "./pull-request-sync.ts";
 
 export type PullRequestRow = {
@@ -22,6 +22,8 @@ export async function approveAndMergePullRequest(
   targetBranch: string | undefined,
   actor: { type: "worker" | "admin"; id: string },
   expectedHeadSha?: string,
+  expectedBaseBranch?: string,
+  expectedBaseSha?: string,
 ): Promise<void> {
   const [owner, repo] = pullRequest.repository.split("/");
   try {
@@ -29,6 +31,12 @@ export async function approveAndMergePullRequest(
       await updatePullRequestBase(owner, repo, pullRequest.number, targetBranch);
     }
     if (pullRequest.is_draft) await markReadyForReview(owner, repo, pullRequest.number);
+    if (expectedBaseBranch) {
+      const current = await getPullRequest(owner, repo, pullRequest.number);
+      if (current.base.ref !== expectedBaseBranch || (expectedBaseSha && current.base.sha !== expectedBaseSha)) {
+        throw new Error("pull request base changed after AI review");
+      }
+    }
     await mergePullRequest(owner, repo, pullRequest.number, "squash", expectedHeadSha);
   } catch (error) {
     throw new PullRequestMergeError(error instanceof Error ? error.message : "merge failed");

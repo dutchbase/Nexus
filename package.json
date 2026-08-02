@@ -3,6 +3,7 @@
   "private": true,
   "scripts": {
     "dev": "tsx scripts/dev.ts",
+    "test:unit": "vitest run --config vitest.config.ts --reporter=verbose",
     "admin:create": "tsx scripts/create-admin.ts",
     "projects:import": "tsx scripts/import-projects.ts"
   },

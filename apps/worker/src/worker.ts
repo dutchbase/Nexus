@@ -10,7 +10,7 @@ import {
 import { inTransaction, pool } from "@dcc/database";
 import {
   approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate,
-  claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, parsePrReviewVerdict, reviewedHeadShaForMerge,
+  claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, parsePrReviewVerdict,
   renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
@@ -20,7 +20,7 @@ import {
   validateExecutionWorktree, WorktreeValidationError, worktreeDiff,
 } from "../../../packages/git-runner/src/index.ts";
 import {
-  createDraftPullRequest, createPullRequestComment, findOpenPullRequestForHead, getPullRequestDiff,
+  createDraftPullRequest, createPullRequestComment, findOpenPullRequestForHead, getPullRequest, updatePullRequestBase,
 } from "@dcc/github-provider";
 import { validateProject } from "@dcc/project-config";
 import {
@@ -28,6 +28,9 @@ import {
   type ResolutionSource, type SkillCandidate, type ResolvedSkill, type SnapshottedSkill,
 } from "@dcc/skill-registry";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
+import {
+  approvedPhaseSkills, assertExecutionPublicationGate, prReviewSnapshotInput, reviewedMergeBinding,
+} from "./worker-boundary.ts";
 
 // Resolved relative to this module's own file, not process.cwd() — `pnpm
 // --filter worker dev/start` runs with cwd=apps/worker, so a cwd-relative
@@ -548,13 +551,10 @@ async function runExecution(job: any) {
   }
   const phase = repairing ? "repair" : "execution";
   const approvedSnapshot = (await pool.query(
-    "SELECT id,skills_json FROM skill_snapshots WHERE id=$1 AND ticket_id=$2",
+    "SELECT id,ticket_id,skills_json FROM skill_snapshots WHERE id=$1 AND ticket_id=$2",
     [ticket.approved_skill_snapshot_id, ticket.id],
   )).rows[0];
-  if (!approvedSnapshot || !Array.isArray(approvedSnapshot.skills_json)) {
-    throw new Error("approved skill snapshot is unavailable");
-  }
-  const phaseSkills = skillsForPhase(approvedSnapshot.skills_json, phase);
+  const phaseSkills = approvedPhaseSkills(approvedSnapshot, ticket.id, phase);
   const attempt = (await pool.query(
     `SELECT ea.*,pv.content_markdown
      FROM execution_attempts ea
@@ -724,7 +724,7 @@ async function runExecution(job: any) {
         );
       },
     });
-    if (!repairing && !usedAgent) throw new Error("execution did not invoke Agent tool");
+    assertExecutionPublicationGate(repairing, usedAgent);
     await pool.query(
       `UPDATE agent_runs
        SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3 WHERE id=$1`,
@@ -1095,11 +1095,29 @@ async function runPrAiReview(job: any) {
     if (!pullRequest) throw new Error("pull request not found");
     const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [pullRequest.project_id])).rows[0];
     if (!project) throw new Error("project not found");
+    if (payload.mode === "review_and_merge" && payload.target_branch && payload.target_branch !== pullRequest.base_branch) {
+      const [owner, repo] = pullRequest.repository.split("/");
+      await updatePullRequestBase(owner, repo, pullRequest.number, payload.target_branch);
+      pullRequest.base_branch = payload.target_branch;
+      await pool.query("UPDATE pull_requests SET base_branch=$2,updated_at=now() WHERE id=$1", [pullRequest.id, pullRequest.base_branch]);
+    }
+    const [owner, repo] = pullRequest.repository.split("/");
+    const providerPullRequest = await getPullRequest(owner, repo, pullRequest.number);
+    if (!providerPullRequest.head.sha || !providerPullRequest.base.sha) {
+      throw new Error("pull request provider did not return immutable review refs");
+    }
+    if (pullRequest.base_branch !== providerPullRequest.base.ref) {
+      pullRequest.base_branch = providerPullRequest.base.ref;
+      await pool.query("UPDATE pull_requests SET base_branch=$2,updated_at=now() WHERE id=$1", [pullRequest.id, pullRequest.base_branch]);
+    }
     reviewWorktree = await createPullRequestReviewWorktree({
       repositoryPath: project.repository_path,
       dataRoot: process.env.DCC_DATA_ROOT ?? REPO_ROOT,
       projectSlug: project.slug,
       pullRequestNumber: pullRequest.number,
+      baseBranch: providerPullRequest.base.ref,
+      expectedBaseSha: providerPullRequest.base.sha,
+      expectedHeadSha: providerPullRequest.head.sha,
     });
 
     const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
@@ -1109,10 +1127,10 @@ async function runPrAiReview(job: any) {
     const [promptRow, reviewRubric] = await Promise.all([
       resolvedPrompt("pr-review", project.id), resolvedGlobalPrompt("code-reviewer"),
     ]);
-    if (!reviewRubric.active_version_id) throw new Error("pinned PR-review rubric is not synchronized");
+    if (!promptRow.active_version_id || !reviewRubric.active_version_id) throw new Error("pinned PR-review prompts are not synchronized");
 
-    const [owner, repo] = pullRequest.repository.split("/");
-    const diff = await getPullRequestDiff(owner, repo, pullRequest.number);
+    if (!reviewWorktree.diff || !reviewWorktree.baseCommit) throw new Error("immutable pull request review diff is unavailable");
+    const diff = reviewWorktree.diff;
 
     const prompt = renderPrReviewPrompt(promptRow.content ?? "", {
       superpowersCodeReviewer: reviewRubric.content,
@@ -1144,6 +1162,21 @@ async function runPrAiReview(job: any) {
     );
     runId = newRunId;
     await pool.query("UPDATE pr_ai_reviews SET agent_run_id=$1 WHERE id=$2", [runId, payload.pr_ai_review_id]);
+    const promptSnapshot = await snapshotPrompt(prReviewSnapshotInput({
+      projectId: project.id,
+      content: prompt,
+      model,
+      reasoningLevel,
+      promptVersionIds: {
+        "global.pr-review": promptRow.active_version_id,
+        "global.code-reviewer": reviewRubric.active_version_id,
+      },
+      pullRequestId: pullRequest.id,
+      reviewedHeadSha: reviewWorktree.headCommit,
+      reviewedBaseBranch: pullRequest.base_branch,
+      reviewedBaseSha: reviewWorktree.baseCommit,
+    }));
+    await pool.query("UPDATE agent_runs SET prompt_snapshot_id=$2 WHERE id=$1", [runId, promptSnapshot.id]);
 
     const temporary = await mkdtemp(path.join(tmpdir(), "dcc-pr-review-"));
     try {
@@ -1180,10 +1213,14 @@ async function runPrAiReview(job: any) {
         [payload.pr_ai_review_id, verdict.verdict === "approved" ? "approved" : "rejected", verdict.summary, comment.html_url],
       );
 
-      const reviewedHeadSha = reviewedHeadShaForMerge(payload.mode, verdict.verdict, reviewWorktree.headCommit);
-      if (reviewedHeadSha) {
+      const mergeBinding = reviewedMergeBinding(
+        payload.mode, verdict.verdict, reviewWorktree.headCommit, pullRequest.base_branch, reviewWorktree.baseCommit,
+      );
+      if (mergeBinding) {
         await approveAndMergePullRequest(
-          pool, pullRequest, payload.target_branch, { type: "worker", id: payload.pr_ai_review_id }, reviewedHeadSha,
+          pool, pullRequest, undefined, { type: "worker", id: payload.pr_ai_review_id },
+          mergeBinding.expectedHeadSha, mergeBinding.expectedBaseBranch,
+          mergeBinding.expectedBaseSha,
         );
       }
     } finally {

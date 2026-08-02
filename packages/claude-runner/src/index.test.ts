@@ -1,8 +1,9 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { homedir } from "node:os";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
-import { buildExecutionArguments, buildPlanningArguments, invokeExecutionClaude, invokePlanningClaude, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
+import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, invokeExecutionClaude, invokePlanningClaude, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -31,16 +32,25 @@ describe("buildPlanningArguments", () => {
 });
 
 describe("buildExecutionArguments", () => {
+  test("requires a Claude version that enforces strict sandbox allowlists", () => {
+    expect(() => assertExecutionSandboxVersion("2.1.218 (Claude Code)")).toThrow("2.1.219");
+    expect(() => assertExecutionSandboxVersion("2.1.219 (Claude Code)")).not.toThrow();
+    expect(() => assertExecutionSandboxVersion("2.2.0 (Claude Code)")).not.toThrow();
+  });
+
   test("enables skills and agents with session-local role definitions", () => {
     const args = buildExecutionArguments({
       ...invocation,
       pluginDirectories: ["/plugin"],
       guardPath: "/immutable/bash-guard.mjs",
+      gitMetadataPaths: ["/repo/.git", "/shared/repo.git"],
+      sensitiveEnvironmentVariables: ["CLAUDE_CODE_OAUTH_TOKEN", "GITHUB_TOKEN"],
       logPath: "/log",
       timeoutMs: 1,
       onEvent: async () => undefined,
     } satisfies ExecutionInvocation);
     expect(args).toContain("Read,Glob,Grep,Skill,Agent");
+    expect(args).toEqual(expect.arrayContaining(["--setting-sources", ""]));
     expect(args).not.toContain("Read,Glob,Grep,Edit,Write,Bash,Skill,Agent");
     expect(args).toEqual(expect.arrayContaining(["--add-dir", "/skills", "--plugin-dir", "/plugin", "--agents"]));
     const agents = JSON.parse(args[args.indexOf("--agents") + 1]);
@@ -65,6 +75,37 @@ describe("buildExecutionArguments", () => {
       expect.objectContaining({ matcher: "Agent" }),
     ]));
     expect(JSON.stringify(settings)).toContain("/immutable/bash-guard.mjs");
+    expect(settings).toMatchObject({
+      permissions: {
+        deny: expect.arrayContaining([
+          "Read(//repo/.git/**)", "Edit(//repo/.git/**)",
+          "Read(//shared/repo.git/**)", "Edit(//shared/repo.git/**)",
+        ]),
+      },
+      sandbox: {
+        enabled: true,
+        failIfUnavailable: true,
+        allowUnsandboxedCommands: false,
+        credentials: {
+          files: expect.arrayContaining([
+            { path: "~/.git-credentials", mode: "deny" },
+            { path: "~/.netrc", mode: "deny" },
+            { path: "~/.npmrc", mode: "deny" },
+          ]),
+          envVars: [
+            { name: "CLAUDE_CODE_OAUTH_TOKEN", mode: "deny" },
+            { name: "GITHUB_TOKEN", mode: "deny" },
+          ],
+        },
+        filesystem: {
+          denyRead: expect.arrayContaining([homedir(), "/repo/.git", "/shared/repo.git"]),
+          allowRead: expect.arrayContaining(["/work", "/skills", "/plugin", "/prompt", "/immutable/bash-guard.mjs"]),
+        },
+        network: {
+          allowedDomains: [], deniedDomains: ["*"], strictAllowlist: true, allowAllUnixSockets: false,
+        },
+      },
+    });
 
   });
 });
@@ -105,29 +146,47 @@ test("invokes execution with a materialized guard outside the worktree", async (
   const root = await mkdtemp(path.join(tmpdir(), "claude-execution-"));
   directories.push(root);
   const bin = path.join(root, "bin");
-  const capture = path.join(root, "settings.json");
+  const capture = path.join(root, "capture.json");
   await mkdir(bin);
   const executable = path.join(bin, "claude");
+  await mkdir(path.join(root, ".git"));
   await writeFile(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '%s\n' '2.1.220 (Claude Code)'; exit 0; fi
+test ! -e ${JSON.stringify(path.join(root, ".git"))} || exit 3
 for arg in "$@"; do
   if [ "$previous" = "--settings" ]; then settings="$arg"; fi
   previous="$arg"
 done
-printf '%s' "$settings" > ${JSON.stringify(capture)}
+node -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify({ settings: JSON.parse(process.argv[2]), scrub: process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, publicationCredential: process.env.GITHUB_TOKEN }))' ${JSON.stringify(capture)} "$settings"
 `);
   await chmod(executable, 0o755);
-  await expect(invokeExecutionClaude({
-    ...invocation,
-    claudeExecutable: executable,
-    workingDirectory: root,
-    logPath: path.join(root, "run.log"),
-    timeoutMs: 1_000,
-    onEvent: async () => undefined,
-  })).resolves.toMatchObject({ exitCode: 0 });
-  const settings = JSON.parse(await (await import("node:fs/promises")).readFile(capture, "utf8"));
+  const previousGithubToken = process.env.GITHUB_TOKEN;
+  process.env.GITHUB_TOKEN = "publication-token";
+  try {
+    await expect(invokeExecutionClaude({
+      ...invocation,
+      claudeExecutable: executable,
+      workingDirectory: root,
+      gitMetadataPaths: [path.join(root, ".git")],
+      logPath: path.join(root, "run.log"),
+      timeoutMs: 1_000,
+      onEvent: async () => undefined,
+    })).resolves.toMatchObject({ exitCode: 0 });
+  } finally {
+    if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previousGithubToken;
+  }
+  const captured = JSON.parse(await (await import("node:fs/promises")).readFile(capture, "utf8"));
+  const settings = captured.settings;
   const command = settings.hooks.PreToolUse[0].hooks[0].command;
   expect(command).toContain("/tmp/dcc-claude-guard-");
   expect(command).not.toContain(root);
+  expect(captured.scrub).toBe("1");
+  expect(captured.publicationCredential).toBeUndefined();
+  await expect((await import("node:fs/promises")).access(path.join(root, ".git"))).resolves.toBeUndefined();
+  expect(settings.sandbox).toMatchObject({
+    enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false,
+  });
 });
 
 test("summarizes a Bash denial from Claude's max-turn payload", () => {

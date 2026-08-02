@@ -150,17 +150,17 @@ export function promptContentHash(content: string) {
 }
 
 export type PromptSnapshotInput = {
-  ticketId: string;
+  ticketId: string | null;
   projectId: string;
-  phase: "planning" | "execution" | "repair" | "validation" | "pull-request";
+  phase: "planning" | "execution" | "repair" | "validation" | "pull-request" | "pr-review";
   content: string;
   model: string;
   reasoningLevel: string;
   skillSnapshotId?: string | null;
   metadata: {
     promptVersionIds: Record<string, string>;
-    projectConfigVersion: number | string;
-    ticketVersion: number | string;
+    projectConfigVersion?: number | string;
+    ticketVersion?: number | string;
     planVersionId?: string | null;
     [key: string]: unknown;
   };

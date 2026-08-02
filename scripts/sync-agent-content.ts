@@ -20,13 +20,18 @@ export async function buildAgentContentCatalog({ root: contentRoot = root, manif
     prompt_hashes[promptType] = digest(prompt_sources[promptType]);
   }
   const source = { repository: manifest.superpowers?.repository ?? "obra/superpowers", tag: manifest.superpowers?.tag, license: manifest.superpowers?.source?.license ?? "MIT" };
-  return { catalog_hash: digest(JSON.stringify({ source, skills, prompt_hashes })), source, skills, vendor_path: manifest.superpowers?.vendor_path ?? "skills/vendor/superpowers", prompt_hashes, prompt_sources };
+  const review_rubric = {
+    path: manifest.superpowers?.review_rubric ?? "skills/requesting-code-review/code-reviewer.md",
+    content_hash: prompt_hashes["code-reviewer"] ?? "",
+  };
+  return { catalog_hash: digest(JSON.stringify({ source, skills, prompt_hashes })), source, review_rubric, skills, vendor_path: manifest.superpowers?.vendor_path ?? "skills/vendor/superpowers", prompt_hashes, prompt_sources };
 }
 
 export function verifyImportedCatalog(manifest: SuperpowersManifest, catalog: SuperpowersCatalog) {
   const source = { repository: manifest.superpowers.repository, tag: manifest.superpowers.tag, license: manifest.superpowers.source.license };
   if (JSON.stringify(catalog.source) !== JSON.stringify(source)) throw new Error("invalid agent content catalog source");
-  if (catalog.catalog_hash !== digest(JSON.stringify({ source: catalog.source, skills: catalog.skills }))) throw new Error("invalid agent content catalog hash");
+  if (catalog.catalog_hash !== digest(JSON.stringify({ source: catalog.source, review_rubric: catalog.review_rubric, skills: catalog.skills }))) throw new Error("invalid agent content catalog hash");
+  if (catalog.review_rubric?.path !== manifest.superpowers.review_rubric) throw new Error("invalid agent content review rubric");
   const expected = allowedSkills(manifest).map((skill) => ({ ...skill, version: manifest.superpowers.tag }));
   const actual = catalog.skills.map((skill) => ({ slug: skill.slug, phases: skill.phases, inspiration_only: skill.inspiration_only, version: skill.version }));
   if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("invalid agent content catalog skills");
@@ -36,6 +41,8 @@ export async function readImportedAgentContentCatalog({ root: contentRoot = root
   const { destination } = vendorDestination(manifest, contentRoot);
   const imported = JSON.parse(await readFile(path.join(destination, "catalog.json"), "utf8")) as SuperpowersCatalog;
   verifyImportedCatalog(manifest, imported);
+  const rubric = await readFile(path.join(contentRoot, "prompts", "global", "code-reviewer.md"), "utf8");
+  if (digest(rubric) !== imported.review_rubric.content_hash) throw new Error("invalid agent content review rubric hash");
   return buildAgentContentCatalog({ root: contentRoot, manifest, skills: imported.skills });
 }
 
@@ -49,7 +56,8 @@ export async function syncAgentContent(client: QueryClient, catalog: AgentConten
       `INSERT INTO skills (slug,name,description,category,source_type,filesystem_path,enabled,version,content_hash,configuration_json)
        VALUES ($1,$2,$3,'superpowers','vendored',$4,true,$5,$6,$7::jsonb)
        ON CONFLICT (slug) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,category=EXCLUDED.category,source_type=EXCLUDED.source_type,filesystem_path=EXCLUDED.filesystem_path,enabled=true,version=EXCLUDED.version,content_hash=EXCLUDED.content_hash,configuration_json=EXCLUDED.configuration_json,updated_at=now()`,
-      [skill.slug, skill.name, skill.description, `${catalog.vendor_path}/${skill.slug}/SKILL.md`, skill.version, skill.content_hash, JSON.stringify({ phases: skill.phases, inspiration_only: skill.inspiration_only })],
+      [skill.slug, skill.name, skill.description, `${catalog.vendor_path}/${skill.slug}/SKILL.md`, skill.version, skill.content_hash,
+        JSON.stringify({ phases: skill.phases, required_phases: skill.phases, allowed_phases: skill.phases, inspiration_only: skill.inspiration_only })],
     );
   }
   await client.query(

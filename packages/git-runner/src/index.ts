@@ -175,6 +175,9 @@ export async function createPullRequestReviewWorktree(input: {
   dataRoot: string;
   projectSlug: string;
   pullRequestNumber: number;
+  baseBranch?: string;
+  expectedBaseSha?: string;
+  expectedHeadSha?: string;
 }) {
   const repository = await realpath(input.repositoryPath);
   const root = path.resolve(input.dataRoot, "data", "worktrees");
@@ -187,10 +190,22 @@ export async function createPullRequestReviewWorktree(input: {
   const ref = `refs/pull/${input.pullRequestNumber}/head`;
   await mkdir(parent, { recursive: true });
   let headCommit: string;
+  let baseCommit: string | null = null;
+  let diff: string | null = null;
   try {
-    await exec("git", ["-C", repository, "fetch", "origin", `+${ref}:${ref}`]);
+    if (input.baseBranch) await exec("git", ["check-ref-format", `refs/heads/${input.baseBranch}`]);
+    await exec("git", [
+      "-C", repository, "fetch", "origin", `+${ref}:${ref}`,
+      ...(input.baseBranch ? [`+refs/heads/${input.baseBranch}:refs/remotes/origin/${input.baseBranch}`] : []),
+    ]);
     await exec("git", ["-C", repository, "worktree", "add", "--detach", worktreePath, ref]);
     headCommit = (await exec("git", ["-C", worktreePath, "rev-parse", "HEAD"])).stdout.trim();
+    if (input.expectedHeadSha && headCommit !== input.expectedHeadSha) throw new Error("pull request head changed before AI review");
+    if (input.baseBranch) {
+      baseCommit = (await exec("git", ["-C", worktreePath, "rev-parse", `origin/${input.baseBranch}`])).stdout.trim();
+      if (input.expectedBaseSha && baseCommit !== input.expectedBaseSha) throw new Error("pull request base changed before AI review");
+      diff = (await git(worktreePath, ["diff", "--no-ext-diff", "--binary", `${baseCommit}...${headCommit}`])).stdout;
+    }
   } catch (error) {
     await rm(worktreePath, { recursive: true, force: true });
     await exec("git", ["-C", repository, "worktree", "prune"]).catch(() => {});
@@ -199,6 +214,8 @@ export async function createPullRequestReviewWorktree(input: {
   return {
     worktreePath,
     headCommit,
+    baseCommit,
+    diff,
     cleanup: async () => {
       try {
         await exec("git", ["-C", repository, "worktree", "remove", "--force", worktreePath]);

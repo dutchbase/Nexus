@@ -57,7 +57,7 @@ describe("Task 8 automation", () => {
     expect(result.marker).toBe("78");
   });
 
-  it("schedules a tagged-release PR update and makes CI fail with Vitest", async () => {
+  it("stages all imported artifacts before detecting updates and runs the scoped fail-closed suite", async () => {
     const workflow = await readFile(join(root, ".github/workflows/superpowers-update.yml"), "utf8");
     const ci = await readFile(join(root, ".github/workflows/ci.yml"), "utf8");
 
@@ -66,7 +66,11 @@ describe("Task 8 automation", () => {
     expect(workflow).toContain("gh release view");
     expect(workflow).toContain("automation/superpowers-${TAG}");
     expect(workflow).toContain("pnpm exec tsx scripts/update-superpowers.ts --checkout");
+    expect(workflow).toContain("pnpm test:unit");
+    expect(workflow.indexOf("git add config/agent-content.json prompts/global/code-reviewer.md skills/vendor/superpowers"))
+      .toBeLessThan(workflow.indexOf("git diff --cached --quiet"));
     expect(workflow).toContain("gh pr create");
+    expect(ci).toContain("pnpm test:unit");
     expect(ci).not.toContain("|| echo");
   });
 });
