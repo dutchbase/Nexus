@@ -15,4 +15,10 @@ describe("publishExecutionAttempt persistence", () => {
     expect(transaction).toContain("UPDATE tickets SET status='PR Ready for Review'");
     expect(transaction).toContain("UPDATE execution_attempts SET validation_status='completed'");
   });
+
+  it("persists the provider base ref for a discovered non-default target branch", async () => {
+    const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
+    expect(worker).toContain("providerPr.draft, providerPr.head.ref, providerPr.base.ref, commit,");
+    expect(worker).not.toContain("providerPr.draft, providerPr.head.ref, input.project.default_branch, commit,");
+  });
 });
