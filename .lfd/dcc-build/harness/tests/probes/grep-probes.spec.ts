@@ -79,10 +79,12 @@ describe("grep probes over built production source", () => {
       return;
     }
 
-    // api.anthropic.com must never appear in production source — all real
-    // Claude Code invocations go through the CLI adapter (PRD §18.3/§20.4),
-    // never a direct HTTP call to the Anthropic API.
-    const anthropicHost = grepSrc("api\\.anthropic\\.com", dirs);
+    // The native sandbox permits egress only to Claude's service endpoint.
+    // All other occurrences would be a direct Anthropic API call rather than
+    // a Claude Code CLI invocation (PRD §18.3/§20.4).
+    const anthropicHost = grepSrc("api\\.anthropic\\.com", dirs).filter(
+      (line) => !/packages\/claude-runner\/src\/index\.ts:.*allowedDomains: \["api\.anthropic\.com"\], strictAllowlist: true/.test(line),
+    );
     expect(anthropicHost, `literal api.anthropic.com found:\n${anthropicHost.join("\n")}`).toHaveLength(0);
 
     // Design-handoff prototype leftovers (design-handoff/*.dc.html,
@@ -124,7 +126,7 @@ describe("grep probes over built production source", () => {
     expect(hexOffenders, `hardcoded hex color outside token file:\n${hexOffenders.join("\n")}`).toHaveLength(0);
   });
 
-  it("no Claude-reachable git-publish or merge capability", () => {
+  it("no Claude-reachable publication or merge capability under strict execution containment", () => {
     const dirs = existingSourceDirs();
     if (dirs.length === 0) {
       console.warn("grep-probes: no production source exists yet — nothing to scan, trivial pass.");
@@ -142,7 +144,10 @@ describe("grep probes over built production source", () => {
     expect(mergeCallSites, `possible merge-endpoint call in GitHub provider code:\n${mergeCallSites.join("\n")}`).toHaveLength(0);
 
     // Heuristic check (documented limitation): git push / git commit / gh /
-    // merge granted as an ALLOWED capability to a Claude invocation.
+    // merge granted as an ALLOWED capability to a Claude invocation. The
+    // runner's private clone and native strict sandbox are covered by its
+    // focused tests; this production-source probe guards the complementary
+    // rule that publication remains worker-only.
     // PRD §11.3's example config legitimately lists these same strings in a
     // denied_bash denylist — a naive substring grep would false-positive on
     // that legitimate declaration. So: a match only counts as an "obvious

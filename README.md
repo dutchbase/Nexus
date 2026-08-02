@@ -17,8 +17,44 @@ directly via `tsx`.
 - **Claude Code CLI** (`claude`) installed and on `$PATH` — the worker
   shells out to it (`spawn("claude", ...)`) to run executions. Install and
   authenticate it under the same user the worker runs as.
+- **Claude Code 2.1.219+**, `bubblewrap`, and `socat` for execution. The
+  worker uses Claude Code's native strict Linux sandbox; it fails closed when
+  that sandbox is unavailable. Docker is not required.
 - A **GitHub token/App** with push + PR access to the repos you'll manage,
   if you want the worker to open pull requests automatically
+
+### Ubuntu 24.04+ execution sandbox
+
+Install the native sandbox dependencies:
+
+```bash
+sudo apt-get install bubblewrap socat
+```
+
+Ubuntu 24.04+ AppArmor blocks Bubblewrap from creating the user namespaces
+needed for isolation. Install the exact Claude Code-recommended profile and
+reload AppArmor:
+
+```bash
+sudo tee /etc/apparmor.d/bwrap > /dev/null <<'EOF'
+abi <abi/4.0>,
+include <tunables/global>
+
+profile bwrap /usr/bin/bwrap flags=(unconfined) {
+  userns,
+  include if exists <local/bwrap>
+}
+EOF
+sudo systemctl reload apparmor
+```
+
+The profile applies to `bwrap`, not commands inside its sandbox. Do not start
+execution until Claude Code confirms its sandbox support is available: the
+worker refuses unsandboxed execution rather than falling back. Claude runs in
+a temporary private clone with egress restricted to Claude service domains;
+it cannot reach GitHub or receive worker credentials. The worker alone imports
+the result, scans and validates it, creates the squashed final commit, pushes,
+and opens the draft PR.
 
 ## 1. Clone and install
 
