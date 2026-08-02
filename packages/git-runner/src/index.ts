@@ -471,13 +471,12 @@ export async function commitExecutionChanges(input: {
   baseCommit?: string;
   protectedPaths?: string[];
 }) {
-  const effective = input.baseCommit
-    ? await validateEffectiveWorktree({
+  if (input.baseCommit) {
+    await validateEffectiveWorktree({
       worktreePath: input.worktreePath, baseCommit: input.baseCommit, protectedPaths: input.protectedPaths,
-    })
-    : null;
-  const dirty = input.baseCommit && (await git(input.worktreePath, ["status", "--porcelain", "-z"])).stdout;
-  if (input.baseCommit && dirty) await git(input.worktreePath, ["reset", "--soft", input.baseCommit]);
+    });
+    await git(input.worktreePath, ["reset", "--soft", input.baseCommit]);
+  }
   await git(input.worktreePath, ["add", "--all"]);
   // Re-scan the final index, including agent commits back to the recorded base,
   // so the secret/protected-path gates cover exactly what will be published.
@@ -509,9 +508,6 @@ export async function commitExecutionChanges(input: {
     );
   }
   if (!stagedForCommit.length) {
-    if (effective) {
-      return (await git(input.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
-    }
     throw new WorktreeValidationError(
       "commit verification",
       "no changes were staged for commit — Claude execution produced no file modifications",

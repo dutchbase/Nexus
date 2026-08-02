@@ -408,22 +408,24 @@ describe("execution effective diff", () => {
     }
   });
 
-  it("accepts a legitimate agent commit without requiring a second empty commit", async () => {
+  it("squashes two clean agent commits into one worker-owned commit from the recorded base", async () => {
     const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-committed-task-"));
     try {
       const repo = path.join(tmp, "repo");
       await initRepo(repo);
       await writeAndCommit(repo, "base.txt", "base\n", "initial commit");
       const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
-      await writeAndCommit(repo, "task.txt", "finished\n", "agent commit");
-      const expectedCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeAndCommit(repo, "first.txt", "first\n", "agent first commit");
+      await writeAndCommit(repo, "second.txt", "second\n", "agent second commit");
 
-      await expect(commitExecutionChanges({
+      await commitExecutionChanges({
         worktreePath: repo,
         baseCommit,
         message: "worker commit",
-      })).resolves.toBe(expectedCommit);
+      });
+
       expect((await git(repo, ["rev-list", "--count", `${baseCommit}..HEAD`])).stdout.trim()).toBe("1");
+      expect((await git(repo, ["log", "-1", "--pretty=%s"])).stdout.trim()).toBe("worker commit");
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
