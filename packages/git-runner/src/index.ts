@@ -32,7 +32,7 @@ export async function createExecutionWorktree(input: {
   attemptNumber: number;
 }) {
   const repository = await realpath(input.repositoryPath);
-  const root = path.resolve(input.dataRoot, "data", "worktrees");
+  const root = path.resolve(input.dataRoot, "worktrees");
   const worktreePath = path.resolve(
     root,
     safeSegment(input.projectSlug, "project"),
@@ -174,7 +174,7 @@ export async function createConflictResolutionWorktree(input: {
   pullRequestNumber: number;
 }) {
   const repository = await realpath(input.repositoryPath);
-  const root = path.resolve(input.dataRoot, "data", "worktrees");
+  const root = path.resolve(input.dataRoot, "worktrees");
   const worktreePath = path.resolve(
     root, safeSegment(input.projectSlug, "project"), `pr-${input.pullRequestNumber}-conflict-resolution`,
   );
