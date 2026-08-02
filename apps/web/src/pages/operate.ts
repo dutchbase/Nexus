@@ -1,10 +1,13 @@
 import { statfsSync } from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { artifactDataRoot } from "../../../../packages/database/src/artifacts.ts";
 import { escapeHtml, pool, shortRef } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { forbiddenClaudeAuthVariables } from "../../../../packages/claude-runner/src/auth-guard.ts";
 import { aiModels, reasoningLevels } from "@dcc/domain";
 
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
 // Coarse relative-duration label — same rule as queue.ts (minutes below an
 // hour, hours above); duplicated because these are the only two callers.
 function since(date: string | Date) {
@@ -134,7 +137,7 @@ async function systemBody(): Promise<string> {
 
   let diskCard: string;
   try {
-    const stats = statfsSync(artifactDataRoot(process.cwd()));
+    const stats = statfsSync(artifactDataRoot(REPO_ROOT));
     const total = Number(stats.blocks) * Number(stats.bsize);
     const free = Number(stats.bfree) * Number(stats.bsize);
     const usedPct = total > 0 ? Math.round(((total - free) / total) * 100) : 0;

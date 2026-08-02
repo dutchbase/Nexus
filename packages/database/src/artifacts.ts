@@ -25,11 +25,12 @@ function isWithin(root: string, target: string) {
 }
 
 export function artifactDataRoot(defaultRoot: string, environment: Partial<Pick<NodeJS.ProcessEnv, "DCC_DATA_DIR" | "DCC_DATA_ROOT">> = process.env) {
-  return path.resolve(environment.DCC_DATA_DIR ?? path.join(environment.DCC_DATA_ROOT ?? defaultRoot, "data"));
+  if (environment.DCC_DATA_DIR !== undefined) return path.resolve(defaultRoot, environment.DCC_DATA_DIR);
+  return path.resolve(defaultRoot, environment.DCC_DATA_ROOT ?? ".", "data");
 }
 
 export function legacyArtifactDataRoot(defaultRoot: string, environment: Partial<Pick<NodeJS.ProcessEnv, "DCC_DATA_ROOT">> = process.env) {
-  return path.resolve(environment.DCC_DATA_ROOT ?? defaultRoot, "data");
+  return path.resolve(defaultRoot, environment.DCC_DATA_ROOT ?? ".", "data");
 }
 
 export function artifactPath(root: string, relativePath: string) {

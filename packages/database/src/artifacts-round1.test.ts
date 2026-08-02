@@ -19,7 +19,9 @@ async function root() {
 describe("artifact lifecycle corrections", () => {
   it("uses one data-root precedence rule for web, worker, and reconciliation", () => {
     expect(artifactDataRoot("/repo", { DCC_DATA_DIR: "/shared-data", DCC_DATA_ROOT: "/ignored" })).toBe("/shared-data");
+    expect(artifactDataRoot("/repo", { DCC_DATA_DIR: "./data" })).toBe("/repo/data");
     expect(artifactDataRoot("/repo", { DCC_DATA_ROOT: "/state" })).toBe("/state/data");
+    expect(artifactDataRoot("/repo", { DCC_DATA_ROOT: "." })).toBe("/repo/data");
     expect(artifactDataRoot("/repo", {})).toBe("/repo/data");
   });
 

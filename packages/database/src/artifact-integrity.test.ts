@@ -164,4 +164,50 @@ integration("artifact integrity migration", () => {
     }
   });
 
+  it("transfers a retained worktree to a repair run before reconciliation or retry publication", async () => {
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const projectId = (await client.query(
+        "INSERT INTO projects (slug,name,repository_path) VALUES ($q$repair-artifact-project$q$,$q$Project$q$,$q$/tmp/project$q$) RETURNING id",
+      )).rows[0].id;
+      const ticketId = (await client.query(
+        "INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$A-2$q$,$1,$q$Repair artifact ticket$q$,$q$Executing$q$) RETURNING id",
+        [projectId],
+      )).rows[0].id;
+      const planId = (await client.query("INSERT INTO plans (ticket_id) VALUES ($1) RETURNING id", [ticketId])).rows[0].id;
+      const planVersionId = (await client.query(
+        "INSERT INTO plan_versions (plan_id,version,content_markdown,content_hash) VALUES ($1,1,$q$x$q$,encode(digest($q$x$q$,$q$sha256$q$),$q$hex$q$)) RETURNING id",
+        [planId],
+      )).rows[0].id;
+      const originalRunId = (await client.query("INSERT INTO agent_runs (status) VALUES ($q$completed$q$) RETURNING id")).rows[0].id;
+      const repairRunId = (await client.query("INSERT INTO agent_runs (status) VALUES ($q$running$q$) RETURNING id")).rows[0].id;
+      const attemptId = (await client.query(
+        "INSERT INTO execution_attempts (ticket_id,plan_version_id,agent_run_id,attempt_number,validation_status) VALUES ($1,$2,$3,1,$q$failed$q$) RETURNING id",
+        [ticketId, planVersionId, originalRunId],
+      )).rows[0].id;
+      const artifactId = (await client.query(
+        `INSERT INTO artifacts (id,storage_path,artifact_type,status,sha256,finalized_at,agent_run_id,execution_attempt_id)
+         VALUES (gen_random_uuid(),$q$worktrees/repair-artifact-project/A-2/1$q$,$q$worktree$q$,$q$finalized$q$,repeat($q$a$q$,64),now(),$1,$2) RETURNING id`,
+        [originalRunId, attemptId],
+      )).rows[0].id;
+
+      await client.query("UPDATE execution_attempts SET agent_run_id=$1 WHERE id=$2", [repairRunId, attemptId]);
+
+      expect((await client.query("SELECT agent_run_id FROM artifacts WHERE id=$1", [artifactId])).rows[0].agent_run_id).toBe(repairRunId);
+      await expect(client.query(
+        `INSERT INTO artifacts (id,storage_path,artifact_type,status,sha256,finalized_at,agent_run_id,execution_attempt_id)
+         VALUES (gen_random_uuid(),$q$worktrees/repair-artifact-project/A-2/1$q$,$q$worktree$q$,$q$finalized$q$,repeat($q$b$q$,64),now(),$1,$2)
+         ON CONFLICT (storage_path) DO NOTHING`,
+        [repairRunId, attemptId],
+      )).resolves.toMatchObject({ rowCount: 0 });
+      await expect(client.query(
+        "UPDATE artifacts SET status=$q$abandoned$q$,abandoned_at=now() WHERE id=$1",
+        [artifactId],
+      )).resolves.toMatchObject({ rowCount: 1 });
+    } finally {
+      await client.end();
+    }
+  });
+
 });
