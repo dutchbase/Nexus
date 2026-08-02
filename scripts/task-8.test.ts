@@ -15,14 +15,14 @@ async function deploy({ failSync = false } = {}) {
   const marker = join(directory, "marker");
   await mkdir(bin);
   await Promise.all(["git", "pnpm", "pm2"].map(async (command) => {
-    const script = `#!/bin/sh\necho '${command}' \"$*\" >> \"$DCC_LOG\"\n${command === "pnpm" ? "if [ \"$DCC_FAIL_SYNC\" = 1 ] && [ \"$*\" = 'exec tsx scripts/sync-agent-content.ts' ]; then exit 78; fi\n" : ""}`;
+    const script = `#!/bin/sh\necho '${command}' \"$*\" >> \"$DCC_LOG\"\n${command === "pnpm" ? "if [ \"$DCC_FAIL_SYNC\" = 1 ] && [ \"$*\" = 'exec tsx scripts/sync-agent-content.ts' ]; then exit 78; fi\n" : ""}${command === "pm2" ? "if [ \"$*\" = 'restart dcc-webhook' ] && [ ! -f \"$DCC_MARKER\" ]; then exit 79; fi\n" : ""}`;
     const file = join(bin, command);
     await writeFile(file, script);
     await chmod(file, 0o755);
   }));
   const result = spawnSync(join(root, "deploy.sh"), ["deadbeef", marker], {
     encoding: "utf8",
-    env: { ...process.env, DCC_ROOT: directory, DCC_LOG: log, DCC_FAIL_SYNC: failSync ? "1" : "0", PATH: `${bin}:${process.env.PATH}` },
+    env: { ...process.env, DCC_ROOT: directory, DCC_LOG: log, DCC_MARKER: marker, DCC_FAIL_SYNC: failSync ? "1" : "0", PATH: `${bin}:${process.env.PATH}` },
   });
   return { commands: await readFile(log, "utf8"), marker: await readFile(marker, "utf8"), status: result.status };
 }
@@ -30,7 +30,7 @@ async function deploy({ failSync = false } = {}) {
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
 describe("Task 8 automation", () => {
-  it("migrates and syncs before restarting deployment processes", async () => {
+  it("writes the success marker before restarting the webhook", async () => {
     expect(await readFile(join(root, "deploy.sh"), "utf8")).toContain("DCC_ROOT");
     const result = await deploy();
 
