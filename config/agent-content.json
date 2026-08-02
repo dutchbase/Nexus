@@ -7,6 +7,7 @@
       "url": "https://github.com/obra/superpowers.git",
       "license": "MIT"
     },
+    "vendor_path": "skills/vendor/superpowers",
     "skills": {
       "planning": ["writing-plans"],
       "execution": ["subagent-driven-development", "test-driven-development", "verification-before-completion"],
