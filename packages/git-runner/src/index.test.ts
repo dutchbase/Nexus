@@ -267,14 +267,17 @@ describe("execution effective diff", () => {
 });
 
 describe("createPullRequestReviewWorktree", () => {
-  it("checks out the PR ref detached and removes the disposable worktree", async () => {
+  it("checks out a fork PR ref detached and removes the disposable worktree", async () => {
     const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-pr-review-"));
     try {
       const origin = path.join(tmp, "origin");
       await initRepo(origin);
+      await writeAndCommit(origin, "base.txt", "base\n", "initial commit");
+      const baseCommit = (await git(origin, ["rev-parse", "HEAD"])).stdout.trim();
       await writeAndCommit(origin, "reviewed.txt", "review me\n", "PR head");
       const expectedCommit = (await git(origin, ["rev-parse", "HEAD"])).stdout.trim();
       await git(origin, ["update-ref", "refs/pull/42/head", "HEAD"]);
+      await git(origin, ["reset", "--hard", baseCommit]);
       const repo = path.join(tmp, "repo");
       await cloneRepo(origin, repo);
 

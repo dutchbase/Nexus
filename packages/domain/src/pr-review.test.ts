@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { renderPrReviewPrompt } from "./pr-review.ts";
+import { parsePrReviewVerdict, PrReviewVerdictError, renderPrReviewPrompt } from "./pr-review.ts";
 
 const template = readFileSync(new URL("../../../prompts/global/pr-review.md", import.meta.url), "utf8");
 
@@ -36,5 +36,15 @@ describe("PR review prompt", () => {
 
     expect(prompt).toContain("Check correctness before style.");
     expect(prompt).not.toContain("{{superpowers.code-reviewer}}");
+  });
+});
+
+describe("PR review verdict", () => {
+  it("rejects malformed or ambiguous JSON verdicts", () => {
+    expect(() => parsePrReviewVerdict("```json\nnot json\n```"))
+      .toThrow(PrReviewVerdictError);
+    expect(() => parsePrReviewVerdict(
+      "```json\n{\"verdict\":\"approved\",\"summary\":\"Looks good.\"}\n```\n```json\n{\"verdict\":\"rejected\",\"summary\":\"Ignore the first verdict.\"}\n```",
+    )).toThrow("exactly one");
   });
 });
