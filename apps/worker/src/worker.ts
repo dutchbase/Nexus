@@ -440,7 +440,7 @@ async function runPlanning(job: any) {
         ? `Return a complete revised implementation plan for ticket ${ticket.ticket_number}, applying the administrator feedback.`
         : `Create the implementation plan for ticket ${ticket.ticket_number}.`,
       sessionId, model: input.ai.model, effort: input.ai.reasoning_level, promptFile,
-      skillBundleDir: skillBundle.additionalDirectory, workingDirectory: planningStartPath,
+      skillBundleDir: skillBundle.additionalDirectory, pluginDirectories: skillBundle.pluginDirectories, workingDirectory: planningStartPath,
       maxTurns: Number(input.project.config_json?.planning_max_turns ?? 40),
       oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
       scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
@@ -676,6 +676,7 @@ async function runExecution(job: any) {
       effort: input.ai.reasoning_level,
       promptFile,
       skillBundleDir: skillBundle.additionalDirectory,
+      pluginDirectories: skillBundle.pluginDirectories,
       workingDirectory: worktree.worktreePath,
       maxTurns: Number(input.project.config_json?.execution_max_turns ?? 50),
       oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
@@ -1073,6 +1074,7 @@ async function runPrAiReview(job: any) {
     const diff = await getPullRequestDiff(owner, repo, pullRequest.number);
 
     const prompt = renderPrReviewPrompt(promptRow.content ?? "", {
+      superpowersCodeReviewer: await readFile(path.join(REPO_ROOT, "skills", "global", "code-review", "SKILL.md"), "utf8"),
       project: { name: project.name },
       pr: {
         title: pullRequest.title,
@@ -1102,9 +1104,6 @@ async function runPrAiReview(job: any) {
     runId = newRunId;
     await pool.query("UPDATE pr_ai_reviews SET agent_run_id=$1 WHERE id=$2", [runId, payload.pr_ai_review_id]);
 
-    // No skills are attached to a PR review (the diff is embedded directly in the
-    // prompt), but invokePlanningClaude's --add-dir argument requires a real,
-    // existing directory — an empty temp dir stands in for a skill bundle.
     const temporary = await mkdtemp(path.join(tmpdir(), "dcc-pr-review-"));
     try {
       const promptFile = path.join(temporary, "pr-review-prompt.md");
@@ -1116,7 +1115,6 @@ async function runPrAiReview(job: any) {
         model,
         effort: reasoningLevel,
         promptFile,
-        skillBundleDir: temporary,
         workingDirectory: project.repository_path,
         tools: ["Read", "Glob", "Grep"],
         maxTurns: 5,

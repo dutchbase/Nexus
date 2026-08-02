@@ -60,8 +60,40 @@ export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = pro
 
 export type PlanningInvocation = {
   task: string; sessionId: string; model: string; effort: string; promptFile: string;
-  skillBundleDir: string; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string; tools?: string[];
+  skillBundleDir?: string; pluginDirectories?: readonly string[]; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string; tools?: string[];
 };
+
+function skillDirectoryArguments(input: PlanningInvocation) {
+  return [
+    ...(input.skillBundleDir ? ["--add-dir", input.skillBundleDir] : []),
+    ...(input.pluginDirectories ?? []).flatMap((directory) => ["--plugin-dir", directory]),
+  ];
+}
+
+function sessionAgents(input: PlanningInvocation) {
+  return JSON.stringify({
+    "dcc-mechanical": {
+      description: "Handles small mechanical implementation tasks.",
+      prompt: "Complete only the assigned mechanical task. Do not commit, push, merge, or create a pull request.",
+      model: "haiku", effort: "low", tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
+    },
+    "dcc-implementer": {
+      description: "Implements an independently scoped plan task.",
+      prompt: "Implement only the assigned task and report validation. Do not commit, push, merge, or create a pull request.",
+      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
+    },
+    "dcc-repair": {
+      description: "Traces and repairs a focused failure.",
+      prompt: "Reproduce and repair only the assigned root cause. Do not commit, push, merge, or create a pull request.",
+      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
+    },
+    "dcc-reviewer": {
+      description: "Reviews assigned code without modifying it.",
+      prompt: "Review the assigned change read-only. Do not edit files, run Bash, commit, push, merge, or create a pull request.",
+      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep"],
+    },
+  });
+}
 
 export function buildPlanningArguments(input: PlanningInvocation) {
   return [
@@ -73,8 +105,8 @@ export function buildPlanningArguments(input: PlanningInvocation) {
     // approver), so planning burned its turns on denied read-only commands.
     // "dontAsk" auto-allows read-only Bash and denies everything else —
     // read-only planning whose tools actually work.
-    "--permission-mode", "dontAsk", "--tools", input.tools?.join(",") ?? "Read,Glob,Grep,Bash",
-    "--append-system-prompt-file", input.promptFile, "--add-dir", input.skillBundleDir,
+    "--permission-mode", "dontAsk", "--tools", input.tools?.join(",") ?? "Read,Glob,Grep,Bash,Skill",
+    "--append-system-prompt-file", input.promptFile, ...skillDirectoryArguments(input),
     "--output-format", "json", "--max-turns", String(input.maxTurns),
   ];
 }
@@ -124,8 +156,8 @@ export type ExecutionInvocation = PlanningInvocation & {
 export function buildExecutionArguments(input: ExecutionInvocation) {
   return [
     "-p", input.task, "--session-id", input.sessionId, "--model", input.model, "--effort", input.effort,
-    "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep,Edit,Write,Bash",
-    "--append-system-prompt-file", input.promptFile, "--add-dir", input.skillBundleDir,
+    "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep,Edit,Write,Bash,Skill,Agent",
+    "--append-system-prompt-file", input.promptFile, ...skillDirectoryArguments(input), "--agents", sessionAgents(input),
     "--output-format", "stream-json", "--verbose", "--max-turns", String(input.maxTurns),
   ];
 }

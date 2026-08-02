@@ -1,5 +1,5 @@
 import { describe, expect, test } from "vitest";
-import { buildPlanningArguments, summarizeClaudeFailure, type PlanningInvocation } from "./index.ts";
+import { buildExecutionArguments, buildPlanningArguments, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
 
 const invocation: PlanningInvocation = {
   task: "Review this", sessionId: "session", model: "model", effort: "low", promptFile: "/prompt",
@@ -12,7 +12,35 @@ describe("buildPlanningArguments", () => {
   });
 
   test("keeps Bash in the default tool list", () => {
-    expect(buildPlanningArguments(invocation)).toContain("Read,Glob,Grep,Bash");
+    expect(buildPlanningArguments(invocation)).toContain("Read,Glob,Grep,Bash,Skill");
+  });
+
+  test("loads local skills and plugins without enabling Agent", () => {
+    const args = buildPlanningArguments({ ...invocation, pluginDirectories: ["/plugin-a", "/plugin-b"] });
+    expect(args).toContain("Read,Glob,Grep,Bash,Skill");
+    expect(args).not.toContain("Agent");
+    expect(args).toEqual(expect.arrayContaining(["--add-dir", "/skills", "--plugin-dir", "/plugin-a", "--plugin-dir", "/plugin-b"]));
+  });
+});
+
+describe("buildExecutionArguments", () => {
+  test("enables skills and agents with session-local role definitions", () => {
+    const args = buildExecutionArguments({
+      ...invocation,
+      pluginDirectories: ["/plugin"],
+      logPath: "/log",
+      timeoutMs: 1,
+      onEvent: async () => undefined,
+    } satisfies ExecutionInvocation);
+    expect(args).toContain("Read,Glob,Grep,Edit,Write,Bash,Skill,Agent");
+    expect(args).toEqual(expect.arrayContaining(["--add-dir", "/skills", "--plugin-dir", "/plugin", "--agents"]));
+    const agents = JSON.parse(args[args.indexOf("--agents") + 1]);
+    expect(agents).toMatchObject({
+      "dcc-mechanical": { model: "haiku" },
+      "dcc-implementer": { model: "model" },
+      "dcc-repair": { model: "model" },
+      "dcc-reviewer": { model: "model", tools: ["Read", "Glob", "Grep"] },
+    });
   });
 });
 

@@ -1,4 +1,5 @@
 export type PrReviewPromptVars = {
+  superpowersCodeReviewer: string;
   project: { name: string };
   pr: {
     title: string;
@@ -12,6 +13,7 @@ export type PrReviewPromptVars = {
 
 function flatten(vars: PrReviewPromptVars): Record<string, string> {
   return {
+    "superpowers.code-reviewer": vars.superpowersCodeReviewer,
     "project.name": JSON.stringify(vars.project.name),
     "pr.title": JSON.stringify(vars.pr.title),
     "pr.author": JSON.stringify(vars.pr.author),
