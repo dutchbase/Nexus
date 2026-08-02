@@ -5,13 +5,19 @@ if [ "$#" -ne 1 ] || [ ! -d "$1" ]; then
   echo "usage: $0 BACKUP_DIRECTORY" >&2
   exit 1
 fi
-for variable in DATABASE_URL DCC_RESTORE_DATABASE_URL DCC_RESTORE_HEALTH_URL; do
+for variable in DATABASE_URL DCC_RESTORE_DATABASE_URL DCC_RESTORE_HEALTH_URL DCC_RESTORE_ROOT; do
   if [ -z "${!variable:-}" ]; then
     echo "$variable is required" >&2
     exit 1
   fi
 done
+
 backup_directory="$(cd "$1" && pwd -P)"
+recovery_root="$DCC_RESTORE_ROOT"
+mkdir -p "$recovery_root"
+recovery_root="$(cd "$recovery_root" && pwd -P)"
+case "$recovery_root" in /|"$backup_directory"|"$backup_directory"/*) echo "DCC_RESTORE_ROOT must be separate from the backup" >&2; exit 1 ;; esac
+
 manifest="$backup_directory/manifest-v1.sha256"
 manifest_sha256=""
 step="preflight"
@@ -58,6 +64,19 @@ step="manifest"
 [ -f "$manifest" ]
 manifest_sha256="$(sha256sum "$manifest" | awk '{print $1}')"
 (cd "$backup_directory" && sha256sum --check --status "manifest-v1.sha256")
+step="payload"
+for payload in data config; do
+  [ -d "$backup_directory/$payload" ] || { echo "backup payload is missing: $payload" >&2; exit 1; }
+  mkdir -p "$recovery_root/$payload"
+  (cd "$backup_directory/$payload" && tar -cf - .) | tar -C "$recovery_root/$payload" -xf -
+  find "$recovery_root/$payload" -type f -print -quit | grep -q . || { echo "restored payload is empty: $payload" >&2; exit 1; }
+done
+if [ -d "$backup_directory/legacy-data" ]; then
+  mkdir -p "$recovery_root/legacy-data"
+  (cd "$backup_directory/legacy-data" && tar -cf - .) | tar -C "$recovery_root/legacy-data" -xf -
+  find "$recovery_root/legacy-data" -type f -print -quit | grep -q . || { echo "restored payload is empty: legacy-data" >&2; exit 1; }
+fi
+
 step="restore"
 pg_restore --clean --if-exists --no-owner --dbname="$DCC_RESTORE_DATABASE_URL" "$backup_directory/database.dump"
 step="verify"

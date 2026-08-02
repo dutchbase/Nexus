@@ -264,6 +264,7 @@ DCC_CONFIG_DIR=/opt/dev-control/config
 
 # Required only for restore drills — this must be a separate, disposable database.
 DCC_RESTORE_DATABASE_URL=postgresql://dcc:change-me@127.0.0.1:5432/dcc_restore
+DCC_RESTORE_ROOT=/var/lib/dcc/recovery-drill
 DCC_RESTORE_HEALTH_URL=http://127.0.0.1:3100/api/health
 ```
 
@@ -287,9 +288,9 @@ The drill verifies the manifest before it calls pg_restore, restores only to the
 
 Start a separate health process against the restore target before the drill (in another terminal):
 
-```bash
-DATABASE_URL="$DCC_RESTORE_DATABASE_URL" HOST=127.0.0.1 PORT=3100 pnpm exec tsx apps/web/src/server.ts
-export DCC_RESTORE_HEALTH_URL=http://127.0.0.1:3100/api/health
+~~~bash
+DATABASE_URL="$DCC_RESTORE_DATABASE_URL" DCC_DATA_DIR="$DCC_RESTORE_ROOT/data" DCC_DATA_ROOT="$DCC_RESTORE_ROOT" DCC_CONFIG_DIR="$DCC_RESTORE_ROOT/config" HOST=127.0.0.1 PORT=3100 pnpm exec tsx apps/web/src/server.ts
+export DCC_RESTORE_HEALTH_URL=http://127.0.0.1:3100/api/health;239c~~~
 ```
 
 ## Recovery integration test

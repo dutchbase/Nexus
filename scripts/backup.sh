@@ -21,6 +21,14 @@ if ! [[ "$retention_days" =~ ^[1-9][0-9]*$ ]]; then
   exit 1
 fi
 
+for required_root in "$data_directory" "$config_directory"; do
+  if [ ! -d "$required_root" ]; then echo "required backup root is missing: $required_root" >&2; exit 1; fi
+done
+if [ "$legacy_data_directory" != "$data_directory" ] && [ ! -d "$legacy_data_directory" ]; then
+  echo "required backup root is missing: $legacy_data_directory" >&2
+  exit 1
+fi
+
 mkdir -p "$backup_directory"
 backup_directory="$(cd "$backup_directory" && pwd -P)"
 stage="$(mktemp -d "$backup_directory/.dcc-backup.XXXXXX")"

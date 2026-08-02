@@ -21,6 +21,7 @@ async function fixture() {
   const legacyData = join(root, "legacy", "data");
   const config = join(root, "config");
   const backups = join(root, "backups");
+  const recoveryRoot = join(root, "recovery");
   const restoreComplete = join(root, "restore-complete");
   const commandLog = join(root, "commands.log");
   await Promise.all([
@@ -90,6 +91,7 @@ fi
       DCC_RESTORE_HEALTH_URL: "http://127.0.0.1:39153/api/health",
       DCC_BACKUP_DIRECTORY: backups,
       DCC_BACKUP_RETENTION_DAYS: "2",
+      DCC_RESTORE_ROOT: recoveryRoot,
       DCC_TEST_RESTORE_COMPLETE: restoreComplete,
       DCC_TEST_HEALTH_UNREACHABLE: "false",
       DCC_DATA_DIR: data,
@@ -149,6 +151,7 @@ describe("backup and recovery drill", () => {
     const test = await fixture();
     const dataRoot = join(test.root, "shared-state");
     const sharedData = join(dataRoot, "data");
+
     await mkdir(sharedData, { recursive: true });
     await writeFile(join(sharedData, "artifact-from-data-root.txt"), "shared artifact");
     const env = { ...test.env, DCC_DATA_DIR: undefined, DCC_DATA_ROOT: dataRoot };
@@ -158,6 +161,17 @@ describe("backup and recovery drill", () => {
     const backup = await newestBackup(test.backups);
     await expect(readFile(join(backup, "data", "artifact-from-data-root.txt"), "utf8")).resolves.toBe("shared artifact");
   });
+  it("fails before publication or retention when a required root is missing", async () => {
+    const test = await fixture();
+    const prior = join(test.backups, "dcc-prior");
+    await mkdir(prior);
+    const result = run("scripts/backup.sh", [], { ...test.env, DCC_CONFIG_DIR: join(test.root, "missing-config") });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("required backup root");
+    expect(await readdir(test.backups)).toContain("dcc-prior");
+    await expect(readFile(test.commandLog, "utf8")).rejects.toThrow();
+  });
+
 
   it("uses only explicit restore targets and records a successful recovery verification", async () => {
     const test = await fixture();
@@ -167,6 +181,9 @@ describe("backup and recovery drill", () => {
     const result = run("scripts/restore-drill.sh", [backup], test.env);
 
     expect(result.status).toBe(0);
+    await expect(readFile(join(test.root, "recovery", "data", "artifact.txt"), "utf8")).resolves.toBe("artifact");
+    await expect(readFile(join(test.root, "recovery", "legacy-data", "legacy-artifact.txt"), "utf8")).resolves.toBe("legacy artifact");
+    await expect(readFile(join(test.root, "recovery", "config", "projects.yaml"), "utf8")).resolves.toBe("projects: []\n");
     const log = await readFile(test.commandLog, "utf8");
     expect(log).toContain("pg_restore --clean --if-exists --no-owner --dbname=postgresql://restore:restore@127.0.0.1:5433/dcc_restore_test");
     expect(log).toContain("curl --fail --silent --show-error http://127.0.0.1:39153/api/health");
