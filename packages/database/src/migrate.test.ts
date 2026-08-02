@@ -27,6 +27,10 @@ describe("validateMigrations", () => {
   it("permits the known follow-up migration after legacy project start path", () => {
     expect(() => validateMigrations(["015_follow_up_ticket_prompt.sql"], ["015_project_agent_start_path.sql"])).not.toThrow();
   });
+
+  it("rejects other pending 015 migrations after legacy project start path", () => {
+    expect(() => validateMigrations(["015_unrelated.sql"], ["015_project_agent_start_path.sql"])).toThrow("pending migration prefix 015 is not greater than applied maximum 15");
+  });
 });
 
 const testDatabaseUrl = process.env.DCC_TEST_DATABASE_URL;
