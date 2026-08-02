@@ -15,5 +15,8 @@ describe("pull request list actions", () => {
     expect(page).toContain('class="card prs-card"');
     expect(page).not.toContain('return `<a class="ticket-row prs-row"');
     expect(script).toContain("async function listPrAction");
+    const css = await readFile(new URL("../design-tokens.css", import.meta.url), "utf8");
+    expect(css).toContain(".prs-row:has(.menu[open]) { z-index:2 }");
+    expect(css).toContain("background-color:var(--raised)");
   });
 });

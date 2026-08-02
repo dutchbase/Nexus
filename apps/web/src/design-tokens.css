@@ -77,7 +77,7 @@ textarea { resize:vertical }
 .menu { position:relative;display:inline-flex }
 .menu > summary { list-style:none;cursor:pointer }
 .menu > summary::-webkit-details-marker { display:none }
-.menu-panel { position:absolute;top:calc(100% + 4px);right:0;z-index:30;min-width:210px;display:flex;flex-direction:column;gap:4px;padding:8px;background:var(--raised);border:1px solid var(--border);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.18) }
+.menu-panel { position:absolute;top:calc(100% + 4px);right:0;z-index:30;min-width:210px;display:flex;flex-direction:column;gap:4px;padding:8px;background:var(--raised);background-color:var(--raised);border:1px solid var(--border);border-radius:6px;box-shadow:0 8px 24px rgba(0,0,0,.18) }
 .menu-panel .button { justify-content:flex-start;width:100% }
 .menu-panel .field { padding:4px 2px }
 .list-head,.ticket-row { display:grid;grid-template-columns:110px minmax(220px,3fr) 1.2fr 1fr 1.3fr .8fr;gap:12px;padding:13px 18px;align-items:center }
@@ -88,6 +88,7 @@ textarea { resize:vertical }
 .prs-head,.prs-row { grid-template-columns:70px minmax(200px,3fr) 1.1fr .9fr 1.1fr 1fr .8fr 52px }
 .prs-card { overflow:visible }
 .prs-row { position:relative }
+.prs-row:has(.menu[open]) { z-index:2 }
 .pr-row-link { position:absolute;inset:0;z-index:0 }
 .prs-row > :not(.pr-row-link) { position:relative;z-index:1;pointer-events:none }
 .pr-actions { display:flex;justify-content:flex-end }
