@@ -440,7 +440,7 @@ async function runPlanning(job: any) {
         ? `Return a complete revised implementation plan for ticket ${ticket.ticket_number}, applying the administrator feedback.`
         : `Create the implementation plan for ticket ${ticket.ticket_number}.`,
       sessionId, model: input.ai.model, effort: input.ai.reasoning_level, promptFile,
-      skillBundleDir: skillBundle, workingDirectory: planningStartPath,
+      skillBundleDir: skillBundle.additionalDirectory, workingDirectory: planningStartPath,
       maxTurns: Number(input.project.config_json?.planning_max_turns ?? 40),
       oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
       scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
@@ -675,7 +675,7 @@ async function runExecution(job: any) {
       model: input.ai.model,
       effort: input.ai.reasoning_level,
       promptFile,
-      skillBundleDir: skillBundle,
+      skillBundleDir: skillBundle.additionalDirectory,
       workingDirectory: worktree.worktreePath,
       maxTurns: Number(input.project.config_json?.execution_max_turns ?? 50),
       oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",

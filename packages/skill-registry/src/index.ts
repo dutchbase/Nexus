@@ -16,6 +16,7 @@ export type RegisteredSkill = {
   id: string;
   slug: string;
   name: string;
+  source_type?: string | null;
   filesystem_path: string | null;
   enabled: boolean;
   version: string | null;
@@ -45,7 +46,12 @@ export type SnapshottedSkill = {
   version: string | null;
   filesystem_path: string;
   resolution_sources: ResolutionSource[];
+  // `phase` is retained for snapshots created before phase sets existed.
   phase: SkillPhase;
+  phases?: SkillPhase[];
+  plugin_name?: string | null;
+  invocation_name?: string | null;
+  configuration_json?: Record<string, unknown> | null;
   files: SnapshottedFile[];
   content_hash: string;
 };
@@ -115,14 +121,39 @@ async function filesUnderSkill(skillPath: string, skillsRoot: string) {
   return files;
 }
 
-export async function snapshotSkills(
+const allPhases: SkillPhase[] = ["planning", "execution", "repair"];
+
+function configuredPhases(configuration: Record<string, unknown> | null | undefined) {
+  if (!Array.isArray(configuration?.phases)) return allPhases;
+  return configuration.phases.filter((phase): phase is SkillPhase => allPhases.includes(phase as SkillPhase));
+}
+
+function snapshotMetadata(skill: ResolvedSkill) {
+  const configuration_json = skill.configuration_json ?? {};
+  const plugin_name = typeof configuration_json.plugin_name === "string"
+    ? configuration_json.plugin_name
+    : skill.source_type === "vendored" ? "superpowers" : null;
+  const invocation_name = typeof configuration_json.invocation_name === "string"
+    ? configuration_json.invocation_name
+    : plugin_name ? `${plugin_name}:${skill.slug}` : skill.slug;
+  return { phases: configuredPhases(configuration_json), plugin_name, invocation_name, configuration_json };
+}
+
+export function skillsForPhase(skills: SnapshottedSkill[], phase: SkillPhase) {
+  return skills.filter((skill) => !Array.isArray(skill.phases) || skill.phases.includes(phase));
+}
+
+export async function snapshotSkillSet(
   skills: ResolvedSkill[],
-  phase: SkillPhase,
+  phases: SkillPhase[],
   skillsRoot = process.env.DCC_SKILLS_ROOT ?? REPO_ROOT,
 ) {
+  const requestedPhases = new Set(phases);
   const snapshots: SnapshottedSkill[] = [];
   for (const skill of skills) {
     if (!skill.filesystem_path) throw new SkillResolutionError(skill.slug, "missing");
+    const metadata = snapshotMetadata(skill);
+    if (!metadata.phases.some((phase) => requestedPhases.has(phase))) continue;
     const files = await filesUnderSkill(skill.filesystem_path, skillsRoot);
     snapshots.push({
       skill_id: skill.id,
@@ -130,7 +161,8 @@ export async function snapshotSkills(
       version: skill.version,
       filesystem_path: skill.filesystem_path,
       resolution_sources: skill.resolution_sources,
-      phase,
+      phase: phases[0] ?? "planning",
+      ...metadata,
       files,
       content_hash: createHash("sha256").update(JSON.stringify(files)).digest("hex"),
     });
@@ -139,22 +171,43 @@ export async function snapshotSkills(
   return { skills: snapshots, contentHash };
 }
 
+export async function snapshotSkills(
+  skills: ResolvedSkill[],
+  phase: SkillPhase,
+  skillsRoot = process.env.DCC_SKILLS_ROOT ?? REPO_ROOT,
+) {
+  return snapshotSkillSet(skills, [phase], skillsRoot);
+}
+
 export async function materializeSkillBundle(
   runId: string,
   skills: SnapshottedSkill[],
   dataRoot = process.env.DCC_DATA_ROOT ?? REPO_ROOT,
 ) {
   if (!/^[0-9a-f-]{36}$/i.test(runId)) throw new Error("invalid run id");
-  const bundle = path.resolve(dataRoot, "data", "skill-bundles", runId, ".claude", "skills");
+  const bundle = path.resolve(dataRoot, "data", "skill-bundles", runId);
+  const pluginDirectories = new Map<string, string>();
   for (const skill of skills) {
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.slug)) throw new Error(`invalid skill slug: ${skill.slug}`);
+    const pluginName = skill.plugin_name;
+    if (pluginName !== null && pluginName !== undefined && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(pluginName)) {
+      throw new Error(`invalid plugin name: ${pluginName}`);
+    }
+    const skillRoot = pluginName
+      ? path.resolve(bundle, "plugins", pluginName, "skills", skill.slug)
+      : path.resolve(bundle, ".claude", "skills", skill.slug);
+    if (pluginName && !pluginDirectories.has(pluginName)) {
+      const pluginDirectory = path.resolve(bundle, "plugins", pluginName);
+      await mkdir(path.join(pluginDirectory, ".claude-plugin"), { recursive: true });
+      await writeFile(path.join(pluginDirectory, ".claude-plugin", "plugin.json"), `${JSON.stringify({ name: pluginName }, null, 2)}\n`, { flag: "wx" });
+      pluginDirectories.set(pluginName, pluginDirectory);
+    }
     for (const file of skill.files) {
-      const destination = path.resolve(bundle, skill.slug, file.path);
-      const skillRoot = path.resolve(bundle, skill.slug);
+      const destination = path.resolve(skillRoot, file.path);
       if (!withinRoot(skillRoot, destination)) throw new Error(`invalid snapshot path: ${file.path}`);
       await mkdir(path.dirname(destination), { recursive: true });
       await writeFile(destination, Buffer.from(file.content_base64, "base64"), { flag: "wx" });
     }
   }
-  return bundle;
+  return { additionalDirectory: bundle, pluginDirectories: [...pluginDirectories.values()] };
 }
