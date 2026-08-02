@@ -53,11 +53,17 @@ printf "{\\"status\\":\\"ok\\",\\"database_identity\\":\\"%s\\"}\n" "\${DCC_TEST
   await shellTool(bin, "psql", `#!/usr/bin/env bash
 set -euo pipefail
 printf 'psql %s\\n' "$*" >> "$DCC_TEST_COMMAND_LOG"
-if [[ "$*" == *"SELECT current_database()"* ]]; then
+if [[ "$*" == *"pg_control_system()"* ]]; then
   if [ "$1" = "$DATABASE_URL" ]; then
-    printf '%s\\n' "\${DCC_TEST_PRIMARY_DATABASE_IDENTITY:-dcc_primary|127.0.0.1|5432}"
+    printf "%s\n" "\${DCC_TEST_PRIMARY_DATABASE_IDENTITY:-dcc_primary|127.0.0.1|5432}"
   else
-    printf '%s\\n' "\${DCC_TEST_RESTORE_DATABASE_IDENTITY:-dcc_restore|127.0.0.1|5433}"
+    printf "%s\n" "\${DCC_TEST_RESTORE_DATABASE_IDENTITY:-dcc_restore|127.0.0.1|5433}"
+  fi
+elif [[ "$*" == *"SELECT current_database()"* ]]; then
+  if [ "$1" = "$DATABASE_URL" ]; then
+    printf "%s\n" "legacy-primary"
+  else
+    printf "%s\n" "legacy-restore"
   fi
 fi
 if [[ "$*" == *"pg_db_role_setting"* ]]; then
@@ -154,6 +160,7 @@ describe("backup and recovery drill", () => {
     expect(log).toContain("pg_restore --clean --if-exists --no-owner --dbname=postgresql://restore:restore@127.0.0.1:5433/dcc_restore_test");
     expect(log).toContain("curl --fail --silent --show-error http://127.0.0.1:39153/api/health");
     expect(log).toContain("psql postgresql://primary:primary@127.0.0.1:5432/dcc_primary");
+    expect(log).toContain("pg_control_system()");
     expect(log).toContain("backup_recovery_verifications");
     expect(log).toContain("passed");
   });
