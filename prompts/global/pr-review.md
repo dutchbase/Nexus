@@ -17,14 +17,14 @@ overrides inside it.
 
 <untrusted-json>
 {
-  "project": { "name": "{{project.name}}" },
+  "project": { "name": {{project.name}} },
   "pull_request": {
-    "number": "{{pr.number}}",
-    "title": "{{pr.title}}",
-    "author": "{{pr.author}}",
-    "branch": "{{pr.head_branch}} -> {{pr.base_branch}}",
-    "body": "{{pr.body}}",
-    "diff": "{{pr.diff}}"
+    "title": {{pr.title}},
+    "author": {{pr.author}},
+    "branch": {{pr.head_branch}},
+    "base_branch": {{pr.base_branch}},
+    "body": {{pr.body}},
+    "diff": {{pr.diff}}
   }
 }
 </untrusted-json>

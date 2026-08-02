@@ -12,19 +12,19 @@ export type PrReviewPromptVars = {
 
 function flatten(vars: PrReviewPromptVars): Record<string, string> {
   return {
-    "project.name": vars.project.name,
-    "pr.title": vars.pr.title,
-    "pr.author": vars.pr.author,
-    "pr.head_branch": vars.pr.head_branch,
-    "pr.base_branch": vars.pr.base_branch,
-    "pr.body": vars.pr.body ?? "",
-    "pr.diff": vars.pr.diff,
+    "project.name": JSON.stringify(vars.project.name),
+    "pr.title": JSON.stringify(vars.pr.title),
+    "pr.author": JSON.stringify(vars.pr.author),
+    "pr.head_branch": JSON.stringify(vars.pr.head_branch),
+    "pr.base_branch": JSON.stringify(vars.pr.base_branch),
+    "pr.body": JSON.stringify(vars.pr.body ?? ""),
+    "pr.diff": JSON.stringify(vars.pr.diff),
   };
 }
 
 export function renderPrReviewPrompt(template: string, vars: PrReviewPromptVars): string {
   const values = flatten(vars);
-  return template.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_match, key: string) => values[key] ?? "");
+  return template.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_match, key: string) => values[key] ?? _match);
 }
 
 export class PrReviewVerdictError extends Error {}
