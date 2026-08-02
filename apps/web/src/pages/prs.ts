@@ -140,7 +140,8 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     else if (tab === "closed") conditions.push("pr.state='closed' AND pr.merged_at IS NULL");
     const [pullRequests, repositories, lastSynced] = await Promise.all([
       pool.query(
-        `SELECT pr.*,p.name project_name,p.slug project_slug,t.ticket_number,t.status ticket_status
+        `SELECT pr.*,p.name project_name,p.slug project_slug,t.ticket_number,t.status ticket_status,
+                (SELECT status FROM pr_ai_reviews WHERE pull_request_id=pr.id ORDER BY created_at DESC LIMIT 1) AS latest_ai_review_status
          FROM pull_requests pr JOIN projects p ON p.id=pr.project_id
          LEFT JOIN tickets t ON t.id=pr.ticket_id
          ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
@@ -151,9 +152,22 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       pool.query("SELECT MAX(last_synced_at) synced FROM pull_requests"),
     ]);
     const rows = pullRequests.rows.map((item) => {
-      const changes = (item.additions != null || item.deletions != null || item.changed_files != null)
-        ? `+${item.additions ?? 0} −${item.deletions ?? 0} · ${item.changed_files ?? 0} files` : "Unknown";
-      return `<a class="ticket-row prs-row" href="/admin/pull-requests/${escapeHtml(item.project_slug)}/${item.number}"><span class="mono">#${item.number}</span><strong>${escapeHtml(item.title)}</strong><span>${item.ticket_number ? escapeHtml(item.ticket_number) : `<span style="color:var(--text3)">Not linked</span>`}</span><span>${escapeHtml(item.check_state ?? "Unknown")}</span><span class="status">${escapeHtml(item.review_state ?? item.state)}</span><span class="mono">${escapeHtml(changes)}</span><span>${escapeHtml(item.project_name)}</span><span>${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}</span><span>${item.created_at_provider ? new Date(item.created_at_provider).toLocaleString() : "—"}</span></a>`;
+      const stateBadge = item.is_draft
+        ? { cls: "muted", label: "Draft" }
+        : item.merged_at
+        ? { cls: "ok", label: "Merged" }
+        : item.state === "closed"
+        ? { cls: "danger", label: "Closed" }
+        : { cls: "info", label: "Open" };
+      const aiBadge = ({
+        running: { cls: "run", label: "Running…" },
+        approved: { cls: "ok", label: "Approved" },
+        rejected: { cls: "danger", label: "Rejected" },
+        error: { cls: "danger", label: "Error" },
+      } as Record<string, { cls: string; label: string }>)[item.latest_ai_review_status ?? ""]
+        ?? { cls: "muted", label: item.latest_ai_review_status ? escapeHtml(item.latest_ai_review_status) : "No review yet" };
+      const href = `/admin/pull-requests/${escapeHtml(item.project_slug)}/${escapeHtml(item.number)}`;
+      return `<div class="ticket-row prs-row" data-pr-id="${item.id}"><a class="pr-row-link" href="${href}" aria-label="Open pull request #${escapeHtml(item.number)}"></a><span class="mono">#${escapeHtml(item.number)}</span><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.project_name)}</span><span class="status ${stateBadge.cls}">${escapeHtml(stateBadge.label)}</span><span class="status ${aiBadge.cls}">${escapeHtml(aiBadge.label)}</span><span>${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}</span><time>${item.created_at_provider ? escapeHtml(new Date(item.created_at_provider).toLocaleDateString("nl-NL")) : "—"}</time><div class="pr-actions"><details class="menu"><summary class="button" aria-label="Pull request actions">•••</summary><div class="menu-panel"><button class="button" type="button" data-pr-list-approve>Approve &amp; Merge</button><button class="button" type="button" data-pr-list-ai-review-merge>AI Review &amp; Approve</button><a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a></div></details></div></div>`;
     }).join("");
     const tabs = [["all", "All"], ["open", "Open"], ["draft", "Draft"], ["merged", "Merged"], ["closed", "Closed"]] as const;
     const withTab = (value: string) => {
@@ -179,7 +193,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
           <button class="button" type="submit">Filter</button><a class="button" href="/admin/pull-requests">Reset</a><span aria-live="polite">${pullRequests.rows.length} shown</span>
         </form>
       </div>
-      <section class="card"><div class="list-head prs-head"><span>PR</span><span>Title</span><span>Ticket</span><span>Checks</span><span>Review</span><span>Changes</span><span>Project</span><span>Conflicts</span><span>Created</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No pull requests match these filters.</div>`}</section>`;
+      <section class="card prs-card"><div class="list-head prs-head"><span>PR</span><span>Title</span><span>Project</span><span>Merge Status</span><span>AI Status</span><span>Conflicts</span><span>Created</span><span>Actions</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No pull requests match these filters.</div>`}</section>`;
     return { status: 200, title: "Pull requests", body };
   }
   const pullRequestSlugMatch = url.pathname.match(/^\/admin\/pull-requests\/([^/]+)\/(\d+)$/);
