@@ -9,6 +9,9 @@ const advisoryLock = 827618744171;
 const legacyAppliedNames: Record<string, string> = {
   "017_project_agent_start_path.sql": "015_project_agent_start_path.sql",
 };
+const legacyPendingNames: Record<string, string> = {
+  "015_follow_up_ticket_prompt.sql": "015_project_agent_start_path.sql",
+};
 
 export function validateMigrations(names: string[], appliedNames: string[]) {
   const prefixes = new Set<string>();
@@ -24,7 +27,7 @@ export function validateMigrations(names: string[], appliedNames: string[]) {
     if (!match) throw new Error("invalid migration filename " + name);
     if (prefixes.has(match[1])) throw new Error("duplicate migration prefix " + match[1]);
     prefixes.add(match[1]);
-    if (!applied.has(name) && !applied.has(legacyAppliedNames[name]) && Number(match[1]) <= appliedMaximum) {
+    if (!applied.has(name) && !applied.has(legacyAppliedNames[name]) && !applied.has(legacyPendingNames[name]) && Number(match[1]) <= appliedMaximum) {
       throw new Error("pending migration prefix " + match[1] + " is not greater than applied maximum " + appliedMaximum);
     }
   }

@@ -23,6 +23,10 @@ describe("validateMigrations", () => {
   it("recognizes the renamed migration through its legacy applied name", () => {
     expect(() => validateMigrations(["017_project_agent_start_path.sql"], ["015_project_agent_start_path.sql"])).not.toThrow();
   });
+
+  it("permits the known follow-up migration after legacy project start path", () => {
+    expect(() => validateMigrations(["015_follow_up_ticket_prompt.sql"], ["015_project_agent_start_path.sql"])).not.toThrow();
+  });
 });
 
 const testDatabaseUrl = process.env.DCC_TEST_DATABASE_URL;
@@ -113,6 +117,30 @@ integration("migrate", () => {
     await verify.connect();
     try {
       expect((await verify.query("SELECT to_regclass($q$should_not_exist$q$) AS table_name")).rows[0].table_name).toBeNull();
+    } finally {
+      await verify.end();
+    }
+  });
+
+  it("applies follow-up 015 after legacy project start path", async () => {
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      await client.query("CREATE TABLE schema_migrations (name text PRIMARY KEY)");
+      await client.query("INSERT INTO schema_migrations (name) VALUES ($q$015_project_agent_start_path.sql$q$)");
+    } finally {
+      await client.end();
+    }
+    await writeFile(join(migrationDirectory, "015_follow_up_ticket_prompt.sql"), "CREATE TABLE legacy_follow_up_applied (id integer);");
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const verify = new pg.Client({ connectionString: testDatabaseUrl });
+    await verify.connect();
+    try {
+      expect((await verify.query("SELECT to_regclass($q$legacy_follow_up_applied$q$) AS table_name")).rows[0].table_name).toBe("legacy_follow_up_applied");
+      expect((await verify.query("SELECT name FROM schema_migrations ORDER BY name")).rows).toEqual([
+        { name: "015_follow_up_ticket_prompt.sql" },
+        { name: "015_project_agent_start_path.sql" },
+      ]);
     } finally {
       await verify.end();
     }
