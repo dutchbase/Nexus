@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { execFile } from "node:child_process";
 import { mkdir, readFile, realpath, rm } from "node:fs/promises";
 import path from "node:path";
@@ -49,8 +50,19 @@ export async function createExecutionWorktree(input: {
   return { worktreePath, branchName, baseCommit };
 }
 
-export async function worktreeDiff(worktreePath: string) {
-  return (await exec("git", ["-C", worktreePath, "diff", "--no-ext-diff", "--binary"])).stdout;
+export async function worktreeDiff(worktreePath: string, baseCommit?: string | null) {
+  const tracked = await git(worktreePath, ["diff", "--no-ext-diff", "--binary", ...(baseCommit ? [baseCommit] : [])]);
+  if (!baseCommit) return tracked.stdout;
+  const untracked = (await git(worktreePath, ["ls-files", "-z", "--others", "--exclude-standard"])).stdout
+    .split("\0").filter(Boolean);
+  const additions = await Promise.all(untracked.map(async (file) => {
+    try {
+      return (await git(worktreePath, ["diff", "--no-index", "--binary", "--", "/dev/null", file])).stdout;
+    } catch (error: any) {
+      return error?.stdout ?? "";
+    }
+  }));
+  return [tracked.stdout, ...additions].filter(Boolean).join("\n");
 }
 
 export const DEFAULT_PROTECTED_PATHS = [".env", ".env.*", "secrets/**", "production-data/**", ".git/**"];
@@ -158,6 +170,43 @@ export async function createConflictResolutionWorktree(input: {
   return { worktreePath, branchName: input.headBranch, headCommit };
 }
 
+export async function createPullRequestReviewWorktree(input: {
+  repositoryPath: string;
+  dataRoot: string;
+  projectSlug: string;
+  pullRequestNumber: number;
+}) {
+  const repository = await realpath(input.repositoryPath);
+  const root = path.resolve(input.dataRoot, "data", "worktrees");
+  const parent = path.resolve(root, safeSegment(input.projectSlug, "project"));
+  const worktreePath = path.resolve(parent, `pr-${input.pullRequestNumber}-review-${randomUUID()}`);
+  const relative = path.relative(root, worktreePath);
+  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
+    throw new Error("invalid worktree path");
+  }
+  const ref = `refs/pull/${input.pullRequestNumber}/head`;
+  await mkdir(parent, { recursive: true });
+  try {
+    await exec("git", ["-C", repository, "fetch", "origin", `+${ref}:${ref}`]);
+    await exec("git", ["-C", repository, "worktree", "add", "--detach", worktreePath, ref]);
+  } catch (error) {
+    await rm(worktreePath, { recursive: true, force: true });
+    await exec("git", ["-C", repository, "worktree", "prune"]).catch(() => {});
+    throw error;
+  }
+  return {
+    worktreePath,
+    cleanup: async () => {
+      try {
+        await exec("git", ["-C", repository, "worktree", "remove", "--force", worktreePath]);
+      } finally {
+        await rm(worktreePath, { recursive: true, force: true });
+        await exec("git", ["-C", repository, "worktree", "prune"]).catch(() => {});
+      }
+    },
+  };
+}
+
 export async function mergeBaseIntoWorktree(worktreePath: string, baseBranch: string) {
   try {
     await git(worktreePath, ["merge", `origin/${baseBranch}`, "--no-edit"]);
@@ -177,11 +226,70 @@ export async function abortMerge(worktreePath: string) {
 }
 
 export async function changedWorktreeFiles(worktreePath: string, baseCommit: string) {
-  const [baseDiff, working] = await Promise.all([
+  const [baseDiff, untracked] = await Promise.all([
     git(worktreePath, ["diff", "--name-only", "-z", baseCommit]),
-    git(worktreePath, ["ls-files", "-z", "--modified", "--others", "--exclude-standard", "--deleted"]),
+    git(worktreePath, ["ls-files", "-z", "--others", "--exclude-standard"]),
   ]);
-  return [...new Set(`${baseDiff.stdout}${working.stdout}`.split("\0").filter(Boolean))].sort();
+  return [...new Set(`${baseDiff.stdout}${untracked.stdout}`.split("\0").filter(Boolean))].sort();
+}
+
+export async function validateEffectiveWorktree(input: {
+  worktreePath: string;
+  baseCommit: string;
+  protectedPaths?: string[];
+}) {
+  const results: ValidationResult[] = [];
+  try {
+    await git(input.worktreePath, ["merge-base", "--is-ancestor", input.baseCommit, "HEAD"]);
+    const merges = (await git(input.worktreePath, ["rev-list", "--merges", `${input.baseCommit}..HEAD`])).stdout.trim();
+    if (merges) throw new Error("merge commit found");
+  } catch {
+    throw new WorktreeValidationError(
+      "history inspection",
+      "execution history must be a linear descendant of the recorded base commit",
+      results,
+    );
+  }
+  results.push({ check: "history inspection", status: "passed" });
+
+  const files = await changedWorktreeFiles(input.worktreePath, input.baseCommit);
+  if (!files.length) {
+    throw new WorktreeValidationError(
+      "changed-file inspection",
+      "no effective changes were made from the recorded base commit",
+      results,
+    );
+  }
+  results.push({ check: "changed-file inspection", status: "passed", detail: `${files.length} changed file(s)` });
+
+  const protectedMatches = files.filter((file) =>
+    matchesProtectedPath(file, input.protectedPaths?.length ? input.protectedPaths : DEFAULT_PROTECTED_PATHS));
+  if (protectedMatches.length) {
+    throw new WorktreeValidationError(
+      "protected-path inspection",
+      `protected-path inspection found ${protectedMatches.length} disallowed changed path(s)`,
+      results,
+    );
+  }
+  results.push({ check: "protected-path inspection", status: "passed" });
+
+  let secretCount = 0;
+  for (const file of files) {
+    try {
+      secretCount += countCredentialShapes(await readFile(path.join(input.worktreePath, file), "utf8"));
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") {
+        throw new WorktreeValidationError("secret scan", "secret scan could not inspect a changed file", results);
+      }
+    }
+  }
+  if (secretCount) {
+    throw new WorktreeValidationError(
+      "secret scan", `secret scan found ${secretCount} credential-shaped pattern(s)`, results,
+    );
+  }
+  results.push({ check: "secret scan", status: "passed" });
+  return { files, results };
 }
 
 async function runCommand(worktreePath: string, command: string) {
@@ -215,45 +323,8 @@ export async function validateExecutionWorktree(input: {
   projectValidationCommands?: string[];
   skillValidationCommands?: string[];
 }) {
-  const results: ValidationResult[] = [];
-  const files = await changedWorktreeFiles(input.worktreePath, input.baseCommit);
-  if (!files.length) {
-    throw new WorktreeValidationError(
-      "changed-file inspection",
-      "no files were modified by the Claude agent execution",
-      results,
-    );
-  }
-  results.push({ check: "changed-file inspection", status: "passed", detail: `${files.length} changed file(s)` });
-
-  const protectedMatches = files.filter((file) =>
-    matchesProtectedPath(file, input.protectedPaths?.length ? input.protectedPaths : DEFAULT_PROTECTED_PATHS));
-  if (protectedMatches.length) {
-    throw new WorktreeValidationError(
-      "protected-path inspection",
-      `protected-path inspection found ${protectedMatches.length} disallowed changed path(s)`,
-      results,
-    );
-  }
-  results.push({ check: "protected-path inspection", status: "passed" });
-
-  let secretCount = 0;
-  for (const file of files) {
-    try {
-      const content = await readFile(path.join(input.worktreePath, file), "utf8");
-      secretCount += countCredentialShapes(content);
-    } catch (error: any) {
-      if (error?.code !== "ENOENT") {
-        throw new WorktreeValidationError("secret scan", "secret scan could not inspect a changed file", results);
-      }
-    }
-  }
-  if (secretCount) {
-    throw new WorktreeValidationError(
-      "secret scan", `secret scan found ${secretCount} credential-shaped pattern(s)`, results,
-    );
-  }
-  results.push({ check: "secret scan", status: "passed" });
+  const effective = await validateEffectiveWorktree(input);
+  const { files, results } = effective;
 
   const scripts = await packageScripts(input.worktreePath);
   results.push({
@@ -313,8 +384,14 @@ export async function validateExecutionWorktree(input: {
 export async function commitExecutionChanges(input: {
   worktreePath: string;
   message: string;
+  baseCommit?: string;
   protectedPaths?: string[];
 }) {
+  const effective = input.baseCommit
+    ? await validateEffectiveWorktree({
+      worktreePath: input.worktreePath, baseCommit: input.baseCommit, protectedPaths: input.protectedPaths,
+    })
+    : null;
   await git(input.worktreePath, ["add", "--all"]);
   // validateExecutionWorktree() scanned the working tree at validation time,
   // but anything landing between then and here would otherwise be committed
@@ -323,30 +400,33 @@ export async function commitExecutionChanges(input: {
   const staged = (await git(input.worktreePath, ["diff", "--cached", "--name-only", "-z"]))
     .stdout.split("\0").filter(Boolean);
   if (!staged.length) {
+    if (effective) return (await git(input.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
     throw new WorktreeValidationError(
       "commit verification",
       "no changes were staged for commit — Claude execution produced no file modifications",
       [],
     );
   }
-  const protectedMatches = staged.filter((file) =>
-    matchesProtectedPath(file, input.protectedPaths?.length ? input.protectedPaths : DEFAULT_PROTECTED_PATHS));
-  if (protectedMatches.length) {
-    throw new WorktreeValidationError(
-      "protected-path inspection",
-      `protected-path inspection found ${protectedMatches.length} disallowed staged path(s)`,
-      [],
-    );
-  }
-  let secretCount = 0;
-  for (const file of staged) {
-    const content = (await git(input.worktreePath, ["show", `:${file}`])).stdout;
-    secretCount += countCredentialShapes(content);
-  }
-  if (secretCount) {
-    throw new WorktreeValidationError(
-      "secret scan", `secret scan found ${secretCount} credential-shaped pattern(s) in the staged commit`, [],
-    );
+  if (!effective) {
+    const protectedMatches = staged.filter((file) =>
+      matchesProtectedPath(file, input.protectedPaths?.length ? input.protectedPaths : DEFAULT_PROTECTED_PATHS));
+    if (protectedMatches.length) {
+      throw new WorktreeValidationError(
+        "protected-path inspection",
+        `protected-path inspection found ${protectedMatches.length} disallowed staged path(s)`,
+        [],
+      );
+    }
+    let secretCount = 0;
+    for (const file of staged) {
+      const content = (await git(input.worktreePath, ["show", `:${file}`])).stdout;
+      secretCount += countCredentialShapes(content);
+    }
+    if (secretCount) {
+      throw new WorktreeValidationError(
+        "secret scan", `secret scan found ${secretCount} credential-shaped pattern(s) in the staged commit`, [],
+      );
+    }
   }
   await git(input.worktreePath, ["commit", "-m", input.message]);
   return (await git(input.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();

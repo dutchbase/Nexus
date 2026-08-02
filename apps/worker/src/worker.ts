@@ -15,8 +15,9 @@ import {
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
-  abortMerge, commitDiffIsEmpty, commitExecutionChanges, conflictedFiles, createConflictResolutionWorktree, createExecutionWorktree,
-  mergeBaseIntoWorktree, pushExecutionBranch, validateExecutionWorktree, WorktreeValidationError, worktreeDiff,
+  abortMerge, commitExecutionChanges, conflictedFiles, createConflictResolutionWorktree, createExecutionWorktree,
+  createPullRequestReviewWorktree, mergeBaseIntoWorktree, pushExecutionBranch, validateEffectiveWorktree,
+  validateExecutionWorktree, WorktreeValidationError, worktreeDiff,
 } from "../../../packages/git-runner/src/index.ts";
 import {
   createDraftPullRequest, createPullRequestComment, findOpenPullRequestForHead, getPullRequestDiff,
@@ -627,7 +628,7 @@ async function runExecution(job: any) {
   const logPath = path.join(logDirectory, `${runId}.log`);
   const details = {
     ...worktree,
-    currentDiff: repairing ? await worktreeDiff(worktree.worktreePath) : undefined,
+    currentDiff: repairing ? await worktreeDiff(worktree.worktreePath, worktree.baseCommit ?? attempt.base_commit) : undefined,
     validationOutput: repairing ? job.payload_json.validation_output : undefined,
     administratorFeedback: repairing ? job.payload_json.feedback : undefined,
   };
@@ -855,6 +856,7 @@ async function publishExecutionAttempt(input: {
     if (!commit) {
       commit = await commitExecutionChanges({
         worktreePath: input.attempt.worktree_path,
+        baseCommit: input.attempt.base_commit,
         message: `${input.ticket.ticket_number}: ${input.ticket.title}`,
         protectedPaths: input.project.config_json?.protected_paths,
       });
@@ -866,14 +868,12 @@ async function publishExecutionAttempt(input: {
          VALUES ('worker','execution.commit','execution_attempt',$1,$2)`,
         [input.attempt.id, { commit }],
       );
-      if (await commitDiffIsEmpty(input.attempt.worktree_path, input.attempt.base_commit)) {
-        throw new WorktreeValidationError(
-          "diff verification",
-          "committed changes produce an empty diff against the base branch",
-          [],
-        );
-      }
     }
+    await validateEffectiveWorktree({
+      worktreePath: input.attempt.worktree_path,
+      baseCommit: input.attempt.base_commit,
+      protectedPaths: input.project.config_json?.protected_paths,
+    });
     await pushExecutionBranch(input.attempt.worktree_path, input.attempt.branch_name);
     await pool.query(
       `INSERT INTO audit_events (actor_type,action,entity_type,entity_id,after_json)
@@ -1085,6 +1085,7 @@ async function runPrAiReview(job: any) {
   // catch block's agent_runs UPDATE must tolerate failures that happen
   // before that INSERT runs.
   let runId: string | null = null;
+  let reviewWorktree: Awaited<ReturnType<typeof createPullRequestReviewWorktree>> | null = null;
   try {
     await preflightClaudeAuthentication();
 
@@ -1094,6 +1095,12 @@ async function runPrAiReview(job: any) {
     if (!pullRequest) throw new Error("pull request not found");
     const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [pullRequest.project_id])).rows[0];
     if (!project) throw new Error("project not found");
+    reviewWorktree = await createPullRequestReviewWorktree({
+      repositoryPath: project.repository_path,
+      dataRoot: process.env.DCC_DATA_ROOT ?? REPO_ROOT,
+      projectSlug: project.slug,
+      pullRequestNumber: pullRequest.number,
+    });
 
     const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
     const model = payload.model ?? settings.default_model;
@@ -1132,7 +1139,7 @@ async function runPrAiReview(job: any) {
       `INSERT INTO agent_runs
        (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
        VALUES ($1,$2,'pr_ai_review','running',NULL,$3,$4,$5,now(),$6)`,
-      [newRunId, project.id, model, reasoningLevel, project.repository_path,
+      [newRunId, project.id, model, reasoningLevel, reviewWorktree.worktreePath,
         { job_id: job.id, pr_ai_review_id: payload.pr_ai_review_id }],
     );
     runId = newRunId;
@@ -1149,7 +1156,7 @@ async function runPrAiReview(job: any) {
         model,
         effort: reasoningLevel,
         promptFile,
-        workingDirectory: project.repository_path,
+        workingDirectory: reviewWorktree.worktreePath,
         tools: ["Read", "Glob", "Grep"],
         maxTurns: 5,
         oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
@@ -1198,6 +1205,8 @@ async function runPrAiReview(job: any) {
     // job through the normal jobs-table lifecycle instead of silently
     // completing a job whose review actually errored out.
     throw error;
+  } finally {
+    if (reviewWorktree) await reviewWorktree.cleanup();
   }
 }
 
