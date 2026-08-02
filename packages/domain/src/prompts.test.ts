@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { buildExecutionPrompt, buildPlanningPrompt, promptContentHash, snapshotPrompt } from "./prompts.ts";
+import { buildExecutionPrompt, buildPlanningPrompt, materializeExecutionPlan, promptContentHash, snapshotPrompt } from "./prompts.ts";
 
 const planning = {
   globalBaseInstructions: "Inspect first.",
@@ -19,6 +19,18 @@ const planning = {
 } as const;
 
 describe("prompt compiler", () => {
+  it("preserves an approved plan with task headings", () => {
+    const heading = String.fromCharCode(35).repeat(3);
+    const plan = [heading + " Task 2:", "", "Make the change.", "", heading + " Task 3:", "", "Test it."].join(String.fromCharCode(10));
+    expect(materializeExecutionPlan(plan)).toBe(plan);
+  });
+
+  it("wraps an unstructured approved plan in its first task section", () => {
+    const plan = ["Approved plan", "", "Make the change."].join(String.fromCharCode(10));
+    const heading = String.fromCharCode(35).repeat(3);
+    expect(materializeExecutionPlan(plan)).toBe([heading + " Task 1:", "", plan].join(String.fromCharCode(10)));
+  });
+
   it("builds byte-identical planning prompts with sections in the required order", () => {
     const first = buildPlanningPrompt(planning);
     const second = buildPlanningPrompt(planning);

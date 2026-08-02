@@ -9,7 +9,7 @@ import {
 } from "@dcc/claude-runner";
 import { inTransaction, pool } from "@dcc/database";
 import {
-  approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate,
+  approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
   claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, parsePrReviewVerdict,
   renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
@@ -25,6 +25,7 @@ import { validateProject } from "@dcc/project-config";
 import {
   materializeSkillBundle, resolveSkills, snapshotSkills, type ResolutionSource, type SkillCandidate,
 } from "@dcc/skill-registry";
+import { resultCommitAfterSuccessfulExecution, runPrivateExecution } from "./execution-handoff.ts";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 
 // Resolved relative to this module's own file, not process.cwd() — `pnpm
@@ -195,7 +196,7 @@ async function planningInputs(ticket: any) {
       "## 7. Proposed Changes", "## 8. Implementation Steps", "## 9. Database or Migration Changes",
       "## 10. Testing Strategy", "## 11. Security Considerations", "## 12. Performance Considerations",
       "## 13. Risks and Edge Cases", "## 14. Rollback Strategy", "## 15. Acceptance Criteria Mapping",
-      "## 16. Out of Scope", "## 17. Open Questions",
+      "## 16. Out of Scope", "## 17. Open Questions", "Each execution task must use a ### Task N: heading.",
     ].join("\n\n"),
     outputConstraints: "Planning is read-only. Do not edit or write repository files, commit, push, create branches, or open pull requests.",
   });
@@ -254,7 +255,7 @@ async function executionInputs(ticket: any, phase: "execution" | "repair", appro
     },
     validationCommands: project.config_json?.validation_commands ?? [],
     definitionOfDone: project.config_json?.definition_of_done ?? "Implement the approved plan in the assigned worktree.",
-    outputConstraints: "Work only inside the assigned worktree. Leave all changes uncommitted for independent worker validation.",
+    outputConstraints: "Work only inside the assigned worktree. Local task commits are allowed; no push, merge, branch switch, PR, history rewrite, or publication; leave the final worktree ready for worker validation.",
   });
   if (phase === "repair") {
     content += [
@@ -583,7 +584,7 @@ async function runExecution(job: any) {
   const logPath = path.join(logDirectory, `${runId}.log`);
   const details = {
     ...worktree,
-    currentDiff: repairing ? await worktreeDiff(worktree.worktreePath) : undefined,
+    currentDiff: repairing ? await worktreeDiff(worktree.worktreePath, attempt.base_commit) : undefined,
     validationOutput: repairing ? job.payload_json.validation_output : undefined,
     administratorFeedback: repairing ? job.payload_json.feedback : undefined,
   };
@@ -666,32 +667,48 @@ async function runExecution(job: any) {
     const promptFile = path.join(temporary, "execution-prompt.md");
     await writeFile(promptFile, input.content, { flag: "wx" });
     const skillBundle = await materializeSkillBundle(runId, copied.skills, process.env.DCC_DATA_ROOT ?? REPO_ROOT);
+    const executionPlanPath = path.join(skillBundle, "execution-plan.md");
+    await writeFile(executionPlanPath, materializeExecutionPlan(attempt.content_markdown), { flag: "wx" });
     const scenarioKey = ["mock", "scenario", "path"].join("_");
-    const result = await invokeExecutionClaude({
-      task: repairing
-        ? `Repair the existing implementation for ticket ${ticket.ticket_number}.`
-        : `Implement the approved plan for ticket ${ticket.ticket_number}.`,
-      sessionId,
-      model: input.ai.model,
-      effort: input.ai.reasoning_level,
+    const executionBaseCommit = worktree.baseCommit ?? attempt.base_commit;
+    if (!executionBaseCommit) throw new Error("execution attempt base commit is unavailable");
+    const result = await runPrivateExecution({
+      worktreePath: worktree.worktreePath,
+      baseCommit: executionBaseCommit,
       promptFile,
       skillBundleDir: skillBundle,
-      workingDirectory: worktree.worktreePath,
-      maxTurns: Number(input.project.config_json?.execution_max_turns ?? 50),
-      oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
-      scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
-      logPath,
-      timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 30 * 60 * 1000),
-      signal: cancellation.signal,
-      onEvent: async ({ eventType, event }) => {
-        sequence += 1;
-        await pool.query(
-          `INSERT INTO agent_run_events (agent_run_id,sequence,event_type,event_json)
-           VALUES ($1,$2,$3,$4)`,
-          [runId, sequence, eventType, event],
-        );
+      invocation: {
+        task: [
+          repairing ? "Repair the existing implementation for ticket " + ticket.ticket_number + "." : "Implement the approved plan for ticket " + ticket.ticket_number + ".",
+          "Invoke ponytail:ponytail and superpowers:subagent-driven-development.",
+          "Use PLAN_FILE=.git/dcc-support/skills/execution-plan.md as the approved execution plan.",
+          "Choose explicit least-capable subagents and stop after local final review.",
+        ].join(" "),
+        sessionId,
+        model: input.ai.model,
+        effort: input.ai.reasoning_level,
+        maxTurns: Number(input.project.config_json?.execution_max_turns ?? 50),
+        oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
+        scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
+        logPath,
+        timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 30 * 60 * 1000),
+        signal: cancellation.signal,
+        onEvent: async ({ eventType, event }: { eventType: string; event: unknown }) => {
+          sequence += 1;
+          await pool.query(
+            `INSERT INTO agent_run_events (agent_run_id,sequence,event_type,event_json)
+             VALUES ($1,$2,$3,$4)`,
+            [runId, sequence, eventType, event],
+          );
+        },
       },
+      invoke: invokeExecutionClaude,
     });
+    const resultCommit = resultCommitAfterSuccessfulExecution(repairing, attempt.result_commit);
+    if (resultCommit !== attempt.result_commit) {
+      await pool.query("UPDATE execution_attempts SET result_commit=$2 WHERE id=$1", [attempt.id, resultCommit]);
+      attempt.result_commit = resultCommit;
+    }
     await pool.query(
       `UPDATE agent_runs
        SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3 WHERE id=$1`,
@@ -769,7 +786,13 @@ async function runExecution(job: any) {
       [runId, JSON.stringify({ results: validation.results, changed_files: validation.files })],
     );
     await publishExecutionAttempt({
-      attempt: { ...attempt, ...worktree, worktree_path: worktree.worktreePath, branch_name: worktree.branchName },
+      attempt: {
+        ...attempt,
+        ...worktree,
+        worktree_path: worktree.worktreePath,
+        branch_name: worktree.branchName,
+        base_commit: worktree.baseCommit ?? attempt.base_commit,
+      },
       ticket, project: input.project, runId, jobId: job.id,
       planMarkdown: attempt.content_markdown, skills: copied.skills.map((skill: any) => skill.slug),
       validationResults: validation.results, changedFiles: validation.files,
@@ -825,6 +848,7 @@ async function publishExecutionAttempt(input: {
         worktreePath: input.attempt.worktree_path,
         message: `${input.ticket.ticket_number}: ${input.ticket.title}`,
         protectedPaths: input.project.config_json?.protected_paths,
+        baseCommit: input.attempt.base_commit,
       });
       await pool.query("UPDATE execution_attempts SET result_commit=$2,validation_status='validated' WHERE id=$1", [
         input.attempt.id, commit,
