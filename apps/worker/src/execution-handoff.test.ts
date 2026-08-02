@@ -28,23 +28,41 @@ async function createWorkerWorktree(root: string) {
   return { baseCommit, worktreePath };
 }
 
+async function createSupportFiles(root: string) {
+  const promptFile = path.join(root, "execution-prompt.md");
+  const skillBundleDir = path.join(root, "host-skills");
+  await writeFile(promptFile, "host prompt\n");
+  await mkdir(path.join(skillBundleDir, "ponytail"), { recursive: true });
+  await writeFile(path.join(skillBundleDir, "execution-plan.md"), "host plan\n");
+  await writeFile(path.join(skillBundleDir, "ponytail", "SKILL.md"), "host skill\n");
+  return { promptFile, skillBundleDir };
+}
+
 it("runs Claude in a private clone and imports its final tree from the saved attempt base", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "worker-execution-handoff-"));
   try {
     const { baseCommit, worktreePath } = await createWorkerWorktree(root);
+    const support = await createSupportFiles(root);
     await writeFile(path.join(worktreePath, "result.txt"), "repair seed\n");
     let privateDirectory = "";
 
     const result = await runPrivateExecution({
       worktreePath,
       baseCommit,
-      readOnlyPaths: ["/prompt.md", "/skills"],
-      invocation: { task: "execute" },
+      ...support,
+      invocation: { task: "execute with PLAN_FILE=.git/dcc-support/skills/execution-plan.md" },
       invoke: async (input) => {
         privateDirectory = input.workingDirectory;
         expect(privateDirectory).not.toBe(worktreePath);
         expect(input.executionDirectory).toBe(privateDirectory);
-        expect(input.readOnlyPaths).toEqual(["/prompt.md", "/skills"]);
+        expect(input.promptFile).toBe(".git/dcc-support/execution-prompt.md");
+        expect(input.skillBundleDir).toBe(".git/dcc-support/skills");
+        expect(JSON.stringify(input)).not.toContain(root);
+        expect(await readFile(path.join(privateDirectory, input.promptFile), "utf8")).toBe("host prompt\n");
+        expect(await readFile(path.join(privateDirectory, input.skillBundleDir, "execution-plan.md"), "utf8")).toBe("host plan\n");
+        expect(await readFile(path.join(privateDirectory, input.skillBundleDir, "ponytail", "SKILL.md"), "utf8")).toBe("host skill\n");
+        expect((await git(privateDirectory, ["remote"])).stdout.trim()).toBe("");
+        await writeFile(path.join(privateDirectory, input.skillBundleDir, "ponytail", "SKILL.md"), "clone edit\n");
         expect(await readFile(path.join(privateDirectory, "result.txt"), "utf8")).toBe("repair seed\n");
         await writeFile(path.join(privateDirectory, "result.txt"), "final output\n");
         expect(await readFile(path.join(worktreePath, "result.txt"), "utf8")).toBe("repair seed\n");
@@ -54,6 +72,7 @@ it("runs Claude in a private clone and imports its final tree from the saved att
 
     expect(result).toEqual({ exitCode: 0 });
     expect(await readFile(path.join(worktreePath, "result.txt"), "utf8")).toBe("final output\n");
+    expect(await readFile(path.join(support.skillBundleDir, "ponytail", "SKILL.md"), "utf8")).toBe("host skill\n");
     await expect(access(privateDirectory)).rejects.toThrow();
   } finally {
     await rm(root, { recursive: true, force: true });
@@ -64,12 +83,13 @@ it("leaves the worker worktree unchanged and removes the private clone when Clau
   const root = await mkdtemp(path.join(tmpdir(), "worker-execution-handoff-failure-"));
   try {
     const { baseCommit, worktreePath } = await createWorkerWorktree(root);
+    const support = await createSupportFiles(root);
     let privateDirectory = "";
 
     await expect(runPrivateExecution({
       worktreePath,
       baseCommit,
-      readOnlyPaths: [],
+      ...support,
       invocation: { task: "execute" },
       invoke: async (input) => {
         privateDirectory = input.workingDirectory;
@@ -89,6 +109,7 @@ it("replaces a prior repair commit with the imported result squashed from the sa
   const root = await mkdtemp(path.join(tmpdir(), "worker-repair-publication-"));
   try {
     const { baseCommit, worktreePath } = await createWorkerWorktree(root);
+    const support = await createSupportFiles(root);
     await writeFile(path.join(worktreePath, "result.txt"), "prior result\n");
     await git(worktreePath, ["add", "."]);
     await git(worktreePath, ["commit", "-m", "prior result"]);
@@ -97,7 +118,7 @@ it("replaces a prior repair commit with the imported result squashed from the sa
     await runPrivateExecution({
       worktreePath,
       baseCommit,
-      readOnlyPaths: [],
+      ...support,
       invocation: { task: "repair" },
       invoke: async (input) => {
         expect(await readFile(path.join(input.workingDirectory, "result.txt"), "utf8")).toBe("prior result\n");

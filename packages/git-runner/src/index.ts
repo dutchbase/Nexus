@@ -1,5 +1,5 @@
 import { execFile, spawn } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -125,14 +125,25 @@ export function sanitizeValidationOutput(output: string) {
     );
 }
 
-async function git(worktreePath: string, args: string[], input?: string) {
-  if (input === undefined) return exec("git", ["-C", worktreePath, ...args], { maxBuffer: 16 * 1024 * 1024 });
+const SAFE_GIT_ARGS = [
+  "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "diff.external=",
+  "-c", "core.attributesFile=/dev/null",
+];
+
+async function git(worktreePath: string, args: string[], input?: string, safe = false) {
+  const commandArgs = [...(safe ? SAFE_GIT_ARGS : []), "-C", worktreePath, ...args];
+  const env = safe ? {
+    PATH: process.env.PATH, LANG: process.env.LANG, LC_ALL: process.env.LC_ALL,
+    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+  } : undefined;
+  if (input === undefined) return exec("git", commandArgs, { maxBuffer: 16 * 1024 * 1024, env });
   return new Promise<{ stdout: string; stderr: string }>((resolve, reject) => {
-    const process = spawn("git", ["-C", worktreePath, ...args]);
+    const process = spawn("git", commandArgs, { env });
     let stdout = "";
     let stderr = "";
     process.stdout.on("data", (chunk) => { stdout += chunk; });
     process.stderr.on("data", (chunk) => { stderr += chunk; });
+    process.stdin.on("error", (error: NodeJS.ErrnoException) => { if (error.code !== "EPIPE") reject(error); });
     process.once("error", reject);
     process.once("close", (code) => {
       if (code === 0) resolve({ stdout, stderr });
@@ -200,15 +211,22 @@ export async function changedWorktreeFiles(worktreePath: string, baseCommit: str
 }
 
 async function runCommand(worktreePath: string, command: string) {
+  const sandbox = process.env.DCC_VALIDATION_BWRAP_PATH ?? "bwrap";
+  const nodeRoot = path.dirname(path.dirname(await realpath(process.execPath)));
+  const args = [
+    "--die-with-parent", "--new-session", "--unshare-net", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+    "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
+    "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
+    "--dir", "/opt", "--dir", "/opt/node", "--ro-bind", nodeRoot, "/opt/node", "--tmpfs", "/tmp",
+    "--dir", "/workspace", "--bind", worktreePath, "/workspace", "--proc", "/proc", "--dev", "/dev", "--chdir", "/workspace", "--clearenv",
+    "--setenv", "PATH", "/opt/node/bin:/usr/bin:/bin", "--setenv", "HOME", "/tmp",
+    "--setenv", "LANG", process.env.LANG ?? "C.UTF-8", "sh", "-lc", command,
+  ];
   try {
-    const result = await exec("sh", ["-lc", command], {
-      cwd: worktreePath,
-      maxBuffer: 16 * 1024 * 1024,
-      env: { ...process.env },
-    });
-    return `${result.stdout}${result.stderr}`.trim();
+    const result = await exec(sandbox, args, { maxBuffer: 16 * 1024 * 1024 });
+    return (result.stdout + result.stderr).trim();
   } catch (error: any) {
-    const output = sanitizeValidationOutput(`${error?.stdout ?? ""}${error?.stderr ?? ""}`.trim());
+    const output = sanitizeValidationOutput(((error?.stdout ?? "") + (error?.stderr ?? "")).trim());
     throw Object.assign(new Error("command failed"), { output });
   }
 }
@@ -222,6 +240,26 @@ async function packageScripts(worktreePath: string) {
   }
 }
 
+async function scanExecutionFiles(
+  worktreePath: string, baseCommit: string, protectedPaths: string[] | undefined,
+  results: ValidationResult[], check = "secret scan",
+) {
+  const files = await changedWorktreeFiles(worktreePath, baseCommit);
+  const protectedMatches = files.filter((file) =>
+    matchesProtectedPath(file, protectedPaths?.length ? protectedPaths : DEFAULT_PROTECTED_PATHS));
+  let secretCount = 0;
+  for (const file of files) {
+    try {
+      secretCount += countCredentialShapes(await readFile(path.join(worktreePath, file), "utf8"));
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") {
+        throw new WorktreeValidationError(check, check + " could not inspect a changed file", results);
+      }
+    }
+  }
+  return { files, protectedMatches, secretCount };
+}
+
 export async function validateExecutionWorktree(input: {
   worktreePath: string;
   baseCommit: string;
@@ -231,41 +269,28 @@ export async function validateExecutionWorktree(input: {
   skillValidationCommands?: string[];
 }) {
   const results: ValidationResult[] = [];
-  const files = await changedWorktreeFiles(input.worktreePath, input.baseCommit);
-  if (!files.length) {
+  let scan = await scanExecutionFiles(input.worktreePath, input.baseCommit, input.protectedPaths, results);
+  if (!scan.files.length) {
     throw new WorktreeValidationError(
       "changed-file inspection",
       "no files were modified by the Claude agent execution",
       results,
     );
   }
-  results.push({ check: "changed-file inspection", status: "passed", detail: `${files.length} changed file(s)` });
+  results.push({ check: "changed-file inspection", status: "passed", detail: scan.files.length + " changed file(s)" });
 
-  const protectedMatches = files.filter((file) =>
-    matchesProtectedPath(file, input.protectedPaths?.length ? input.protectedPaths : DEFAULT_PROTECTED_PATHS));
-  if (protectedMatches.length) {
+  if (scan.protectedMatches.length) {
     throw new WorktreeValidationError(
       "protected-path inspection",
-      `protected-path inspection found ${protectedMatches.length} disallowed changed path(s)`,
+      "protected-path inspection found " + scan.protectedMatches.length + " disallowed changed path(s)",
       results,
     );
   }
   results.push({ check: "protected-path inspection", status: "passed" });
 
-  let secretCount = 0;
-  for (const file of files) {
-    try {
-      const content = await readFile(path.join(input.worktreePath, file), "utf8");
-      secretCount += countCredentialShapes(content);
-    } catch (error: any) {
-      if (error?.code !== "ENOENT") {
-        throw new WorktreeValidationError("secret scan", "secret scan could not inspect a changed file", results);
-      }
-    }
-  }
-  if (secretCount) {
+  if (scan.secretCount) {
     throw new WorktreeValidationError(
-      "secret scan", `secret scan found ${secretCount} credential-shaped pattern(s)`, results,
+      "secret scan", "secret scan found " + scan.secretCount + " credential-shaped pattern(s)", results,
     );
   }
   results.push({ check: "secret scan", status: "passed" });
@@ -322,7 +347,18 @@ export async function validateExecutionWorktree(input: {
     }
     results.push({ check, status: "passed", detail: `${commands.length} command(s)` });
   }
-  return { files, results };
+  scan = await scanExecutionFiles(input.worktreePath, input.baseCommit, input.protectedPaths, results, "final tree scan");
+  if (scan.protectedMatches.length || scan.secretCount) {
+    throw new WorktreeValidationError(
+      "final tree scan",
+      scan.protectedMatches.length
+        ? "final tree scan found " + scan.protectedMatches.length + " disallowed changed path(s)"
+        : "final tree scan found " + scan.secretCount + " credential-shaped pattern(s)",
+      results,
+    );
+  }
+  results.push({ check: "final tree scan", status: "passed", detail: scan.files.length + " changed file(s)" });
+  return { files: scan.files, results };
 }
 
 export async function commitExecutionChanges(input: {
@@ -398,6 +434,7 @@ export async function createPrivateExecutionClone(input: { worktreePath: string 
     await exec("git", ["clone", "--no-local", sourceRoot, clonePath]);
     const sourceHead = (await git(sourceRoot, ["rev-parse", "HEAD"])).stdout.trim();
     await git(clonePath, ["checkout", "--detach", sourceHead]);
+    await git(clonePath, ["remote", "remove", "origin"]);
     const dirtyPatch = (await git(sourceRoot, ["diff", "--binary", "HEAD"])).stdout;
     if (dirtyPatch) {
       const patchPath = path.join(privateRoot, "source.patch");
@@ -428,6 +465,21 @@ export async function createPrivateExecutionClone(input: { worktreePath: string 
   }
 }
 
+async function replaceWorkingTree(source: string, destination: string, excludeNestedGit = false) {
+  await mkdir(destination, { recursive: true });
+  for (const entry of await readdir(destination)) {
+    if (entry !== ".git") await rm(path.join(destination, entry), { recursive: true, force: true });
+  }
+  for (const entry of await readdir(source)) {
+    if (entry === ".git") continue;
+    const sourceEntry = path.join(source, entry);
+    await cp(sourceEntry, path.join(destination, entry), {
+      recursive: true, dereference: false,
+      filter: excludeNestedGit ? (candidate) => !path.relative(source, candidate).split(path.sep).includes(".git") : undefined,
+    });
+  }
+}
+
 export async function importPrivateExecutionClone(input: {
   clonePath: string;
   worktreePath: string;
@@ -440,11 +492,36 @@ export async function importPrivateExecutionClone(input: {
   if (originWorktreePath !== worktreePath || privateCloneOrigins.get(clonePath) !== worktreePath) {
     throw new Error("clone did not originate from this worktree");
   }
-  if (await requireGitRoot(clonePath) !== clonePath) throw new Error("clone path must be its Git root");
   if (await requireGitRoot(worktreePath) !== worktreePath) throw new Error("worktree path must be its Git root");
-  await git(clonePath, ["add", "--intent-to-add", "--all"]);
-  const patch = (await git(clonePath, ["diff", "--binary", input.baseCommit])).stdout;
-  await git(worktreePath, ["reset", "--hard", input.baseCommit]);
-  await git(worktreePath, ["clean", "-fd"]);
-  await git(worktreePath, ["apply", "--binary"], patch);
+
+  const importRoot = await mkdtemp(path.join(tmpdir(), "dcc-execution-import-"));
+  const stagingPath = path.join(importRoot, "staging");
+  const backupPath = path.join(importRoot, "backup");
+  try {
+    await exec("git", ["clone", "--no-local", worktreePath, stagingPath]);
+    await git(stagingPath, ["remote", "remove", "origin"], undefined, true);
+    await git(stagingPath, ["checkout", "--detach", input.baseCommit], undefined, true);
+    await replaceWorkingTree(clonePath, stagingPath, true);
+    await git(stagingPath, ["add", "--intent-to-add", "--all"], undefined, true);
+    const patch = (await git(stagingPath, ["diff", "--binary", "--no-ext-diff", "--no-textconv", input.baseCommit], undefined, true)).stdout;
+
+    await git(stagingPath, ["reset", "--hard", input.baseCommit], undefined, true);
+    await git(stagingPath, ["clean", "-fdx"], undefined, true);
+    if (patch) await git(stagingPath, ["apply", "--check", "--binary"], patch, true);
+
+    const priorHead = (await git(worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+    await replaceWorkingTree(worktreePath, backupPath);
+    try {
+      await git(worktreePath, ["reset", "--hard", input.baseCommit]);
+      await git(worktreePath, ["clean", "-fdx"]);
+      if (patch) await git(worktreePath, ["apply", "--binary"], patch);
+    } catch (error) {
+      await git(worktreePath, ["reset", "--hard", priorHead]);
+      await git(worktreePath, ["clean", "-fdx"]);
+      await replaceWorkingTree(backupPath, worktreePath);
+      throw error;
+    }
+  } finally {
+    await rm(importRoot, { recursive: true, force: true });
+  }
 }

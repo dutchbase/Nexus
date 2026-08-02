@@ -116,7 +116,6 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
 
 export type ExecutionInvocation = PlanningInvocation & {
   executionDirectory: string;
-  readOnlyPaths: string[];
   logPath: string;
   timeoutMs: number;
   signal?: AbortSignal;
@@ -126,7 +125,6 @@ export type ExecutionInvocation = PlanningInvocation & {
 export async function createExecutionSandboxSettings(input: ExecutionInvocation, directory: string) {
   const settingsFile = path.join(directory, "settings.json");
   const executionDirectory = input.executionDirectory;
-  const readOnlyPaths = input.readOnlyPaths;
   await writeFile(settingsFile, JSON.stringify({
     disableAllHooks: true,
     sandbox: {
@@ -135,8 +133,8 @@ export async function createExecutionSandboxSettings(input: ExecutionInvocation,
       allowUnsandboxedCommands: false,
       filesystem: {
         allowWrite: [executionDirectory],
-        denyRead: ["~/"],
-        allowRead: [executionDirectory, ...readOnlyPaths],
+        denyRead: ["/"],
+        allowRead: [executionDirectory],
       },
       credentials: {
         envVars: [
@@ -155,8 +153,8 @@ export async function createExecutionSandboxSettings(input: ExecutionInvocation,
 export function buildExecutionArguments(input: ExecutionInvocation, settingsFile: string) {
   return [
     "-p", input.task, "--session-id", input.sessionId, "--model", input.model, "--effort", input.effort,
-    "--permission-mode", "auto", "--tools", "Read,Glob,Grep,Edit,Write,Bash,Agent,Skill",
-    "--disallowedTools", "Bash(git push *),Bash(git merge *),Bash(git reset *),Bash(git commit --amend *),Bash(git rebase *),Bash(git checkout *),Bash(git switch *),Bash(gh *),Bash(sudo *),Bash(rm -rf /),Bash(rm -rf ~)",
+    "--permission-mode", "auto", "--tools", "Bash,Agent,Skill",
+    "--disallowedTools", "Read,Glob,Grep,Edit,Write,Bash(git push *),Bash(git merge *),Bash(git reset *),Bash(git commit --amend *),Bash(git rebase *),Bash(git checkout *),Bash(git switch *),Bash(gh *),Bash(sudo *),Bash(rm -rf /),Bash(rm -rf ~)",
     "--setting-sources", "", "--strict-mcp-config",
     "--append-system-prompt-file", input.promptFile, "--add-dir", input.skillBundleDir,
     "--settings", settingsFile,

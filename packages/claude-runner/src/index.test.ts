@@ -27,8 +27,8 @@ const invocation: PlanningInvocation = {
 
 const executionInvocation: ExecutionInvocation = {
   ...invocation,
+  promptFile: ".git/dcc-support/execution-prompt.md", skillBundleDir: ".git/dcc-support/skills",
   executionDirectory: "/execution",
-  readOnlyPaths: ["/prompt", "/skills"],
   logPath: "/log",
   timeoutMs: 1000,
   onEvent: async () => undefined,
@@ -46,8 +46,8 @@ test("writes fail-closed workspace-only sandbox settings for execution", async (
       allowUnsandboxedCommands: false,
       filesystem: {
         allowWrite: ["/execution"],
-        denyRead: ["~/"],
-        allowRead: ["/execution", "/prompt", "/skills"],
+        denyRead: ["/"],
+        allowRead: ["/execution"],
       },
       credentials: {
         envVars: [
@@ -140,12 +140,17 @@ test("enables local execution while denying publication and destructive shell co
   const args = buildExecutionArguments(executionInvocation, "/settings");
 
   expect(args).toContain("auto");
-  expect(args).toContain("Read,Glob,Grep,Edit,Write,Bash,Agent,Skill");
+  expect(args).toContain("Bash,Agent,Skill");
   expect(args[args.indexOf("--disallowedTools") + 1]?.split(",")).toEqual([
+    "Read", "Glob", "Grep", "Edit", "Write",
     "Bash(git push *)", "Bash(git merge *)", "Bash(git reset *)", "Bash(git commit --amend *)",
     "Bash(git rebase *)", "Bash(git checkout *)", "Bash(git switch *)",
     "Bash(gh *)", "Bash(sudo *)", "Bash(rm -rf /)", "Bash(rm -rf ~)",
   ]);
+  expect(args).toContain(".git/dcc-support/execution-prompt.md");
+  expect(args).toContain(".git/dcc-support/skills");
+  expect(args).not.toContain("/prompt");
+  expect(args).not.toContain("/skills");
 });
 
 test("summarizes a Bash denial from Claude's max-turn payload", () => {

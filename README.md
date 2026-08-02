@@ -52,9 +52,12 @@ The profile applies to `bwrap`, not commands inside its sandbox. Do not start
 execution until Claude Code confirms its sandbox support is available: the
 worker refuses unsandboxed execution rather than falling back. Claude runs in
 a temporary private clone with egress restricted to Claude service domains;
-it cannot reach GitHub or receive worker credentials. The worker alone imports
-the result, scans and validates it, creates the squashed final commit, pushes,
-and opens the draft PR.
+it cannot reach GitHub or receive worker credentials.
+The worker verifies the result in worker-owned staging before touching its
+publishable worktree. Validation commands receive a scrubbed environment and
+no network namespace; the worker re-enumerates and secret-scans their final
+output before creating the squashed final commit, pushing, and opening the
+draft PR.
 
 ## 1. Clone and install
 

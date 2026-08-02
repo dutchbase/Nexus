@@ -1,3 +1,5 @@
+import { cp, mkdir } from "node:fs/promises";
+import path from "node:path";
 import {
   createPrivateExecutionClone, importPrivateExecutionClone,
 } from "../../../packages/git-runner/src/index.ts";
@@ -9,21 +11,30 @@ export function resultCommitAfterSuccessfulExecution(repairing: boolean, resultC
 export async function runPrivateExecution<T extends Record<string, unknown>, R>(input: {
   worktreePath: string;
   baseCommit: string;
-  readOnlyPaths: string[];
+  promptFile: string;
+  skillBundleDir: string;
   invocation: T;
   invoke: (input: T & {
     workingDirectory: string;
     executionDirectory: string;
-    readOnlyPaths: string[];
+    promptFile: string;
+    skillBundleDir: string;
   }) => Promise<R>;
 }) {
   const clone = await createPrivateExecutionClone({ worktreePath: input.worktreePath });
   try {
+    const supportRoot = path.join(clone.clonePath, ".git", "dcc-support");
+    const promptFile = path.join(supportRoot, "execution-prompt.md");
+    const skillBundleDir = path.join(supportRoot, "skills");
+    await mkdir(supportRoot, { recursive: true });
+    await cp(input.promptFile, promptFile);
+    await cp(input.skillBundleDir, skillBundleDir, { recursive: true, dereference: false });
     const result = await input.invoke({
       ...input.invocation,
       workingDirectory: clone.clonePath,
       executionDirectory: clone.clonePath,
-      readOnlyPaths: input.readOnlyPaths,
+      promptFile: path.relative(clone.clonePath, promptFile),
+      skillBundleDir: path.relative(clone.clonePath, skillBundleDir),
     });
     await importPrivateExecutionClone({
       clonePath: clone.clonePath,

@@ -4,12 +4,12 @@
 
 Use Claude Code's native Linux Bash sandbox, not a custom container runtime. It is already part of the installed CLI and uses Bubblewrap plus Socat for OS-enforced filesystem and network isolation. The worker will fail closed if sandboxing is unavailable or an agent requests an unsandboxed retry.
 
-Each execution runs in a temporary private Git clone rather than the worker's real worktree. The clone lets SDD create local commits without access to the real repository's shared `.git` metadata. After Claude exits, the worker imports the clone's full diff from the saved execution base into its own worktree, then runs the existing validation, protected-path scan, secret scan, squash, push, and PR workflow.
+Each execution runs in a temporary private Git clone rather than the worker's real worktree. The clone lets SDD create local commits without access to the real repository's shared `.git` metadata. After Claude exits, the worker derives and verifies the clone's full diff in worker-owned staging before touching its worktree, then runs validation without worker environment variables or network egress, re-scans the final tree, and continues the squash, push, and PR workflow.
 
 ## Security boundary
 
 - Bash may write only the private clone and session temporary directory.
-- Bash may read the private clone, execution prompt, and materialized skill bundle; home is denied except for those explicit paths.
+- The execution prompt, plan, and complete materialized skill bundle are copied into the disposable clone. Bash can read only that clone; built-in file tools are disabled.
 - The sandbox has strict egress only to Claude service domains; GitHub is unavailable.
 - Unsandboxed fallback is disabled and unavailability is fatal.
 - GitHub/database secrets are removed from sandboxed Bash. The outer Claude process retains only the Claude OAuth token it needs.

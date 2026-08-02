@@ -1699,7 +1699,7 @@ feedback/DCC-142-fix-mobile-navigation
 
 Immediately before execution, it creates a temporary private clone seeded from that worktree. Claude receives only the private clone as its writable working directory; the worker worktree, Git refs, GitHub credentials, and database credentials are not exposed to sandboxed Bash. The private clone is removed after the run.
 
-Execution uses Claude Code's native strict Linux sandbox, backed by Bubblewrap and Socat. The filesystem permits writes only to the private clone and reads only from that clone, the execution prompt, and the materialized skill bundle; home is denied. Network egress uses a strict allowlist for Claude service domains only, so GitHub is unavailable. Sandbox support is a required host precondition: execution fails closed when it is unavailable; there is no unsandboxed fallback and no Docker runtime requirement.
+Execution uses Claude Code's native strict Linux sandbox, backed by Bubblewrap and Socat. The execution prompt, approved plan, and complete materialized skill bundle are copied into the disposable clone before launch. Bash can read and write only that clone; built-in Read, Glob, Grep, Edit, and Write tools are hard-disabled so they cannot bypass the Bash sandbox. Network egress uses a strict allowlist for Claude service domains only, so GitHub is unavailable. Sandbox support is a required host precondition: execution fails closed when it is unavailable; there is no unsandboxed fallback and no Docker runtime requirement.
 
 ## 20.3 Execution permissions
 
@@ -1729,7 +1729,7 @@ Claude may not:
 * recursively delete `/` or `~`;
 * access unrelated projects.
 
-After Claude exits successfully, the worker alone imports the private clone's final tree from the saved execution base into its own worktree. The worker alone scans and validates that imported result, squashes it into one final commit, then pushes the branch and creates the pull request. Only the worker worktree is publishable.
+After Claude exits successfully, the worker alone derives and verifies the private clone's final tree in worker-owned staging before touching its publishable worktree. Validation commands run with a scrubbed environment and no network namespace. The worker re-enumerates and secret-scans their final output, squashes it into one final commit, then pushes the branch and creates the pull request. Only the worker worktree is publishable.
 
 ## 20.4 Conceptual execution command
 
@@ -1739,8 +1739,8 @@ claude -p \
   --model "$MODEL" \
   --effort "$REASONING_LEVEL" \
   --permission-mode auto \
-  --tools "Read,Glob,Grep,Edit,Write,Bash,Agent,Skill" \
-  --disallowedTools "Bash(git push *),Bash(git merge *),Bash(git reset *),Bash(git commit --amend *),Bash(git rebase *),Bash(git checkout *),Bash(git switch *),Bash(gh *),Bash(sudo *),Bash(rm -rf /),Bash(rm -rf ~)" \
+  --tools "Bash,Agent,Skill" \
+  --disallowedTools "Read,Glob,Grep,Edit,Write,Bash(git push *),Bash(git merge *),Bash(git reset *),Bash(git commit --amend *),Bash(git rebase *),Bash(git checkout *),Bash(git switch *),Bash(gh *),Bash(sudo *),Bash(rm -rf /),Bash(rm -rf ~)" \
   --setting-sources "" \
   --strict-mcp-config \
   --append-system-prompt-file "$PROMPT_FILE" \

@@ -675,19 +675,18 @@ async function runExecution(job: any) {
     const result = await runPrivateExecution({
       worktreePath: worktree.worktreePath,
       baseCommit: executionBaseCommit,
-      readOnlyPaths: [promptFile, skillBundle],
+      promptFile,
+      skillBundleDir: skillBundle,
       invocation: {
         task: [
           repairing ? "Repair the existing implementation for ticket " + ticket.ticket_number + "." : "Implement the approved plan for ticket " + ticket.ticket_number + ".",
           "Invoke ponytail:ponytail and superpowers:subagent-driven-development.",
-          "Use PLAN_FILE=" + executionPlanPath + " as the approved execution plan.",
+          "Use PLAN_FILE=.git/dcc-support/skills/execution-plan.md as the approved execution plan.",
           "Choose explicit least-capable subagents and stop after local final review.",
         ].join(" "),
         sessionId,
         model: input.ai.model,
         effort: input.ai.reasoning_level,
-        promptFile,
-        skillBundleDir: skillBundle,
         maxTurns: Number(input.project.config_json?.execution_max_turns ?? 50),
         oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
         scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
