@@ -40,7 +40,7 @@ export function reviewedHeadShaForMerge(
   verdict: "approved" | "rejected",
   reviewedHeadSha: string,
 ) {
-  return mode === "review_and_merge" && verdict === "approved" ? reviewedHeadSha : null;
+  return null;
 }
 
 export function parsePrReviewVerdict(markdown: string): { verdict: "approved" | "rejected"; summary: string } {

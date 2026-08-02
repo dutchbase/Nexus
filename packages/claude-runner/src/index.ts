@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { appendFile, chmod, copyFile, mkdtemp, open, readFile, rename, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -100,6 +101,11 @@ function hookCommand(guardPath: string) {
   return `node ${JSON.stringify(guardPath)}`;
 }
 
+function fileHookCommand(guardPath: string, readRoots: string[], writeRoot: string) {
+  const policy = Buffer.from(JSON.stringify({ readRoots, writeRoot })).toString("base64url");
+  return `${hookCommand(guardPath)} ${policy}`;
+}
+
 function sessionAgents(input: PlanningInvocation, guardPath = input.guardPath ?? trustedBashGuard) {
   const bashHooks = {
     PreToolUse: [{
@@ -179,13 +185,31 @@ function executionSettings(input: PlanningInvocation, guardPath: string) {
   const deniedCredentialReads = sensitiveHomePaths.flatMap((target) => [
     `Read(${target})`, `Read(${target}/**)`,
   ]);
+  const hostHome = permissionPath(homedir());
+  const deniedHostHome = [
+    `Read(${hostHome})`, `Read(${hostHome}/**)`, `Edit(${hostHome})`, `Edit(${hostHome}/**)`,
+  ];
   const nodeInstallRoot = path.dirname(path.dirname(process.execPath));
   const allowRead = [
     input.workingDirectory, input.skillBundleDir, ...(input.pluginDirectories ?? []), input.promptFile,
     guardPath, nodeInstallRoot, process.env.COREPACK_HOME, path.join(homedir(), ".cache", "node", "corepack"),
   ].filter((target): target is string => Boolean(target)).map((target) => path.resolve(target));
+  let worktree: string;
+  try { worktree = realpathSync(input.workingDirectory); } catch { worktree = path.resolve(input.workingDirectory); }
+  const homeRelative = path.relative(homedir(), worktree);
+  if (homeRelative === "" || (!homeRelative.startsWith(`..${path.sep}`) && homeRelative !== ".." && !path.isAbsolute(homeRelative))) {
+    throw new Error("execution worktree must be outside the host home so deny rules cannot override its edit allowlist");
+  }
+  const allowedPermissions = [...new Set(allowRead)].flatMap((target) => {
+    const rulePath = permissionPath(target);
+    return [`Read(${rulePath})`, `Read(${rulePath}/**)`];
+  });
+  const worktreeRule = permissionPath(worktree);
   return JSON.stringify({
-    permissions: { deny: [...deniedGitPaths, ...deniedCredentialReads, "WebFetch"] },
+    permissions: {
+      allow: [...allowedPermissions, `Edit(${worktreeRule})`, `Edit(${worktreeRule}/**)`],
+      deny: [...deniedHostHome, ...deniedGitPaths, ...deniedCredentialReads, "WebFetch"],
+    },
     sandbox: {
       enabled: true,
       failIfUnavailable: true,
@@ -205,10 +229,16 @@ function executionSettings(input: PlanningInvocation, guardPath: string) {
       },
     },
     hooks: {
-      PreToolUse: [{
-        matcher: "Agent",
-        hooks: [{ type: "command", command: hookCommand(guardPath) }],
-      }],
+      PreToolUse: [
+        {
+          matcher: "Read|Glob|Grep|Edit|Write",
+          hooks: [{ type: "command", command: fileHookCommand(guardPath, [...new Set(allowRead)], worktree) }],
+        },
+        {
+          matcher: "Agent",
+          hooks: [{ type: "command", command: hookCommand(guardPath) }],
+        },
+      ],
     },
   });
 }

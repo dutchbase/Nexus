@@ -1,5 +1,16 @@
 import { reviewedHeadShaForMerge } from "@dcc/domain";
 import { skillsForPhase, type SkillPhase, type SnapshottedSkill } from "@dcc/skill-registry";
+import { homedir, tmpdir } from "node:os";
+import path from "node:path";
+
+export function executionRoot(configured = path.join(tmpdir(), "dcc-execution")) {
+  const root = path.resolve(configured);
+  const relative = path.relative(homedir(), root);
+  if (relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative))) {
+    throw new Error("execution root must be outside the host home");
+  }
+  return root;
+}
 
 export function approvedPhaseSkills(
   snapshot: { ticket_id?: string; skills_json?: SnapshottedSkill[] } | null,

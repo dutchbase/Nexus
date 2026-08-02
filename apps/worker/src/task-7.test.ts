@@ -6,7 +6,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { createPullRequestReviewWorktree } from "../../../packages/git-runner/src/index.ts";
 import type { SnapshottedSkill } from "@dcc/skill-registry";
 import {
-  approvedPhaseSkills, assertExecutionPublicationGate, prReviewSnapshotInput, reviewedMergeBinding,
+  approvedPhaseSkills, assertExecutionPublicationGate, executionRoot, prReviewSnapshotInput, reviewedMergeBinding,
 } from "./worker-boundary.ts";
 
 const directories: string[] = [];
@@ -22,6 +22,12 @@ function skill(slug: string, phases: SnapshottedSkill["phases"]): SnapshottedSki
 }
 
 describe("worker orchestration boundary", () => {
+  test("places execution worktrees and bundles outside the denied host home", () => {
+    expect(executionRoot()).toBe(path.join(tmpdir(), "dcc-execution"));
+    expect(executionRoot("/var/lib/dcc-execution")).toBe("/var/lib/dcc-execution");
+    expect(() => executionRoot(path.join(process.env.HOME!, "dcc-execution"))).toThrow("outside the host home");
+  });
+
   test("selects only the approved phase snapshot and gates publication on Agent use", () => {
     const snapshot = {
       id: "snapshot-1",
@@ -40,10 +46,8 @@ describe("worker orchestration boundary", () => {
     expect(() => assertExecutionPublicationGate(true, false)).not.toThrow();
   });
 
-  test("binds an approved merge to the exact reviewed head and base", () => {
-    expect(reviewedMergeBinding("review_and_merge", "approved", "head-sha", "main", "base-sha")).toEqual({
-      expectedHeadSha: "head-sha", expectedBaseBranch: "main", expectedBaseSha: "base-sha",
-    });
+  test("never schedules an unsafe automated merge", () => {
+    expect(reviewedMergeBinding("review_and_merge", "approved", "head-sha", "main", "base-sha")).toBeNull();
     expect(reviewedMergeBinding("review_only", "approved", "head-sha", "main", "base-sha")).toBeNull();
     expect(reviewedMergeBinding("review_and_merge", "rejected", "head-sha", "main", "base-sha")).toBeNull();
 

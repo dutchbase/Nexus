@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vitest";
-import { allowsAgent, allowsBashCommand } from "./bash-guard.mjs";
+import { allowsAgent, allowsBashCommand, allowsFileTool } from "./bash-guard.mjs";
 import { materializeBashGuard } from "./index.ts";
 
 const guard = fileURLToPath(new URL("./bash-guard.mjs", import.meta.url));
@@ -55,6 +55,35 @@ describe("execution Bash guard", () => {
       expect(result.code).toBe(2);
       expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
     }
+  });
+
+  test("confines built-in reads and writes to their explicit roots", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "claude-file-guard-"));
+    directories.push(root);
+    const worktree = path.join(root, "worktree");
+    const bundle = path.join(root, "bundle");
+    const outside = path.join(root, "private-notes");
+    await Promise.all([mkdir(worktree), mkdir(bundle)]);
+    await writeFile(outside, "host secret\n");
+    await symlink(outside, path.join(worktree, "escaped-link"));
+    const policy = { readRoots: [worktree, bundle], writeRoot: worktree };
+
+    for (const input of [
+      { tool_name: "Read", tool_input: { file_path: path.join(worktree, "README.md") }, cwd: worktree },
+      { tool_name: "Glob", tool_input: { pattern: "**/*.ts" }, cwd: worktree },
+      { tool_name: "Grep", tool_input: { pattern: "TODO", path: bundle }, cwd: worktree },
+      { tool_name: "Edit", tool_input: { file_path: path.join(worktree, "src.ts") }, cwd: worktree },
+      { tool_name: "Write", tool_input: { file_path: path.join(worktree, "new.ts") }, cwd: worktree },
+    ]) expect(allowsFileTool(input, policy)).toBe(true);
+
+    for (const input of [
+      { tool_name: "Read", tool_input: { file_path: outside }, cwd: worktree },
+      { tool_name: "Read", tool_input: { file_path: path.join(worktree, "escaped-link") }, cwd: worktree },
+      { tool_name: "Glob", tool_input: { pattern: "*", path: homedir() }, cwd: worktree },
+      { tool_name: "Grep", tool_input: { pattern: "secret", path: root }, cwd: worktree },
+      { tool_name: "Edit", tool_input: { file_path: path.join(bundle, "SKILL.md") }, cwd: worktree },
+      { tool_name: "Write", tool_input: { file_path: outside }, cwd: worktree },
+    ]) expect(allowsFileTool(input, policy)).toBe(false);
   });
 
   test("uses a read-only materialized guard after the checkout copy changes", async () => {

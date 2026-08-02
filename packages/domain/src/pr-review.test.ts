@@ -72,8 +72,8 @@ describe("PR review verdict", () => {
     )).toThrow("exactly one");
   });
 
-  it("merges only an approved review with its detached head SHA", () => {
-    expect(reviewedHeadShaForMerge("review_and_merge", "approved", "reviewed-sha")).toBe("reviewed-sha");
+  it("requires a human merge even after an approved automated review", () => {
+    expect(reviewedHeadShaForMerge("review_and_merge", "approved", "reviewed-sha")).toBeNull();
     expect(reviewedHeadShaForMerge("review_and_merge", "rejected", "reviewed-sha")).toBeNull();
   });
 });

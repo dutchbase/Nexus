@@ -29,7 +29,7 @@ import {
 } from "@dcc/skill-registry";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 import {
-  approvedPhaseSkills, assertExecutionPublicationGate, prReviewSnapshotInput, reviewedMergeBinding,
+  approvedPhaseSkills, assertExecutionPublicationGate, executionRoot, prReviewSnapshotInput, reviewedMergeBinding,
 } from "./worker-boundary.ts";
 
 // Resolved relative to this module's own file, not process.cwd() — `pnpm
@@ -37,6 +37,7 @@ import {
 // default would write plans/skill bundles under apps/worker/data instead
 // of the repo root's data/ (PRD §18.5).
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const EXECUTION_ROOT = executionRoot(process.env.DCC_EXECUTION_ROOT);
 
 const workerId = `worker-${randomUUID()}`;
 const planningJobTypes = ["planning.generate", "planning.revise"];
@@ -587,7 +588,7 @@ async function runExecution(job: any) {
       worktree = await createExecutionWorktree({
         repositoryPath: project.repository_path,
         defaultBranch: project.default_branch,
-        dataRoot: process.env.DCC_DATA_ROOT ?? REPO_ROOT,
+        dataRoot: EXECUTION_ROOT,
         projectSlug: project.slug,
         ticketNumber: ticket.ticket_number,
         title: ticket.title,
@@ -695,7 +696,7 @@ async function runExecution(job: any) {
   try {
     const promptFile = path.join(temporary, "execution-prompt.md");
     await writeFile(promptFile, input.content, { flag: "wx" });
-    const skillBundle = await materializeSkillBundle(runId, phaseSkills, process.env.DCC_DATA_ROOT ?? REPO_ROOT);
+    const skillBundle = await materializeSkillBundle(runId, phaseSkills, EXECUTION_ROOT);
     const scenarioKey = ["mock", "scenario", "path"].join("_");
     const result = await invokeExecutionClaude({
       task: repairing

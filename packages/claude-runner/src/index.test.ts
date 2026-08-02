@@ -1,6 +1,8 @@
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
 import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, invokeExecutionClaude, invokePlanningClaude, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
@@ -12,6 +14,18 @@ const invocation: PlanningInvocation = {
   task: "Review this", sessionId: "session", model: "model", effort: "low", promptFile: "/prompt",
   skillBundleDir: "/skills", workingDirectory: "/work", maxTurns: 5, oauthToken: "token",
 };
+const guardPath = fileURLToPath(new URL("./bash-guard.mjs", import.meta.url));
+
+function runConfiguredHook(command: string, toolName: string, toolInput: Record<string, unknown>, cwd = "/work") {
+  return new Promise<{ code: number | null; stdout: string }>((resolve, reject) => {
+    const child = spawn("/bin/sh", ["-c", command]);
+    let stdout = "";
+    child.stdout.on("data", (chunk) => { stdout += chunk; });
+    child.on("error", reject);
+    child.on("close", (code) => resolve({ code, stdout }));
+    child.stdin.end(JSON.stringify({ tool_name: toolName, tool_input: toolInput, cwd }));
+  });
+}
 
 describe("buildPlanningArguments", () => {
   test("uses the supplied restricted tool list", () => {
@@ -38,11 +52,19 @@ describe("buildExecutionArguments", () => {
     expect(() => assertExecutionSandboxVersion("2.2.0 (Claude Code)")).not.toThrow();
   });
 
-  test("enables skills and agents with session-local role definitions", () => {
+  test("rejects an execution worktree inside the denied host home", () => {
+    expect(() => buildExecutionArguments({
+      ...invocation,
+      workingDirectory: path.join(homedir(), "data", "worktree"),
+      logPath: "/log", timeoutMs: 1, onEvent: async () => undefined,
+    })).toThrow("outside the host home");
+  });
+
+  test("enables skills and agents with session-local role definitions", async () => {
     const args = buildExecutionArguments({
       ...invocation,
       pluginDirectories: ["/plugin"],
-      guardPath: "/immutable/bash-guard.mjs",
+      guardPath,
       gitMetadataPaths: ["/repo/.git", "/shared/repo.git"],
       sensitiveEnvironmentVariables: ["CLAUDE_CODE_OAUTH_TOKEN", "GITHUB_TOKEN"],
       logPath: "/log",
@@ -74,10 +96,13 @@ describe("buildExecutionArguments", () => {
     expect(settings.hooks.PreToolUse).toEqual(expect.arrayContaining([
       expect.objectContaining({ matcher: "Agent" }),
     ]));
-    expect(JSON.stringify(settings)).toContain("/immutable/bash-guard.mjs");
+    expect(JSON.stringify(settings)).toContain(guardPath);
     expect(settings).toMatchObject({
       permissions: {
+        allow: expect.arrayContaining(["Edit(//work)", "Edit(//work/**)"]),
         deny: expect.arrayContaining([
+          `Read(//${homedir().slice(1)})`, `Read(//${homedir().slice(1)}/**)`,
+          `Edit(//${homedir().slice(1)})`, `Edit(//${homedir().slice(1)}/**)`,
           "Read(//repo/.git/**)", "Edit(//repo/.git/**)",
           "Read(//shared/repo.git/**)", "Edit(//shared/repo.git/**)",
         ]),
@@ -99,13 +124,22 @@ describe("buildExecutionArguments", () => {
         },
         filesystem: {
           denyRead: expect.arrayContaining([homedir(), "/repo/.git", "/shared/repo.git"]),
-          allowRead: expect.arrayContaining(["/work", "/skills", "/plugin", "/prompt", "/immutable/bash-guard.mjs"]),
+          allowRead: expect.arrayContaining(["/work", "/skills", "/plugin", "/prompt", guardPath]),
         },
         network: {
           allowedDomains: [], deniedDomains: ["*"], strictAllowlist: true, allowAllUnixSockets: false,
         },
       },
     });
+
+    const fileHook = settings.hooks.PreToolUse.find((hook: { matcher: string }) => hook.matcher === "Read|Glob|Grep|Edit|Write");
+    expect(fileHook).toBeDefined();
+    const command = fileHook.hooks[0].command as string;
+    await expect(runConfiguredHook(command, "Read", { file_path: "/work/package.json" }))
+      .resolves.toMatchObject({ code: 0, stdout: "" });
+    const denied = await runConfiguredHook(command, "Read", { file_path: path.join(homedir(), "private-notes") });
+    expect(denied.code).toBe(2);
+    expect(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
 
   });
 });
