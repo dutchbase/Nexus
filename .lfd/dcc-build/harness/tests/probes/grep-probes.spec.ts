@@ -68,7 +68,15 @@ function grepSrc(pattern: string, dirs: string[]): string[] {
   return out.split("\n").filter(Boolean);
 }
 
+const strictSandboxEndpointLine = /\/packages\/claude-runner\/src\/index\.ts:\d+:\s*network: \{ allowedDomains: \["api\.anthropic\.com"\], strictAllowlist: true \},\s*$/;
+
+
 describe("grep probes over built production source", () => {
+  it("allows only the exact strict sandbox endpoint line", () => {
+    expect(strictSandboxEndpointLine.test("/tmp/repo/packages/claude-runner/src/index.ts:147:      network: { allowedDomains: [\"api.anthropic.com\"], strictAllowlist: true },")).toBe(true);
+    expect(strictSandboxEndpointLine.test("/tmp/repo/packages/claude-runner/src/index.ts:147:      network: { allowedDomains: [\"api.anthropic.com\"], strictAllowlist: true }, fetch(\"https://api.anthropic.com\")")).toBe(false);
+  });
+
   it("forbidden literals and imports are absent from production code", () => {
     const dirs = existingSourceDirs();
     if (dirs.length === 0) {
@@ -83,7 +91,7 @@ describe("grep probes over built production source", () => {
     // All other occurrences would be a direct Anthropic API call rather than
     // a Claude Code CLI invocation (PRD §18.3/§20.4).
     const anthropicHost = grepSrc("api\\.anthropic\\.com", dirs).filter(
-      (line) => !/packages\/claude-runner\/src\/index\.ts:.*allowedDomains: \["api\.anthropic\.com"\], strictAllowlist: true/.test(line),
+      (line) => !strictSandboxEndpointLine.test(line),
     );
     expect(anthropicHost, `literal api.anthropic.com found:\n${anthropicHost.join("\n")}`).toHaveLength(0);
 

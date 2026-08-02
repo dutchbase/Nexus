@@ -44,7 +44,7 @@ grep_src() {
 
 # --- hard-fail #1 / #8: forbidden literals -----------------------------
 m=$(grep_src 'api\.anthropic\.com' \
-  | grep -vE '/packages/claude-runner/src/index\.ts:.*allowedDomains: \["api\.anthropic\.com"\], strictAllowlist: true' || true)
+  | grep -vE "/packages/claude-runner/src/index\.ts:[0-9]+:[[:space:]]*network: \{ allowedDomains: \[\"api\.anthropic\.com\"\], strictAllowlist: true \},[[:space:]]*$" || true)
 [ -n "$m" ] && record "forbidden literal api.anthropic.com found: $m"
 
 m=$(grep_src '\.dc\.html|support\.js')
