@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { cp, mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import pg from "pg";
+import { randomUUID } from "node:crypto";
+import { readArtifact } from "./artifacts.ts";
 
 process.env.DATABASE_URL ??= "postgres://unused:unused@127.0.0.1:1/unused";
 const { migrate } = await import("./migrate.js");
@@ -92,4 +94,41 @@ integration("artifact integrity migration", () => {
       await client.end();
     }
   });
+
+  it("backfills and serves a pre-022 controlled legacy execution log", async () => {
+    await resetDatabase();
+    const migrationName = "022_historic_execution_log_artifacts.sql";
+    await rm(join(migrationDirectory, migrationName));
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const root = await mkdtemp(join(tmpdir(), "dcc-legacy-log-"));
+    const runId = randomUUID();
+    const storagePath = `logs/${runId}.log`;
+    const legacyPath = `/legacy/data/${storagePath}`;
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      await client.query(
+        "INSERT INTO agent_runs (id,status,metadata_json) VALUES ($1,$q$completed$q$,jsonb_build_object($q$log_path$q$,$2))",
+        [runId, legacyPath],
+      );
+      await mkdir(join(root, "logs"), { recursive: true });
+      await writeFile(join(root, storagePath), "legacy execution output");
+
+      await cp(new URL("../migrations/022_historic_execution_log_artifacts.sql", import.meta.url), join(migrationDirectory, migrationName));
+      await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+
+      const row = (await client.query(
+        `SELECT ar.id,a.storage_path,a.status FROM agent_runs ar
+         JOIN artifacts a ON a.agent_run_id=ar.id AND a.artifact_type=$q$execution_log$q$ AND a.status IN ($q$staged$q$,$q$finalized$q$)
+         WHERE ar.id=$1`,
+        [runId],
+      )).rows[0];
+      expect(row).toMatchObject({ id: runId, storage_path: storagePath, status: "staged" });
+      await expect(readArtifact(root, row.storage_path).then((content) => content.toString("utf8"))).resolves.toBe("legacy execution output");
+    } finally {
+      await client.end();
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
 });
