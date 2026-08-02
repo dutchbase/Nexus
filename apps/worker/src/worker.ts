@@ -25,6 +25,7 @@ import { validateProject } from "@dcc/project-config";
 import {
   materializeSkillBundle, resolveSkills, snapshotSkills, type ResolutionSource, type SkillCandidate,
 } from "@dcc/skill-registry";
+import { runPrivateExecution } from "./execution-handoff.ts";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 
 // Resolved relative to this module's own file, not process.cwd() — `pnpm
@@ -669,33 +670,40 @@ async function runExecution(job: any) {
     const executionPlanPath = path.join(skillBundle, "execution-plan.md");
     await writeFile(executionPlanPath, materializeExecutionPlan(attempt.content_markdown), { flag: "wx" });
     const scenarioKey = ["mock", "scenario", "path"].join("_");
-    const result = await invokeExecutionClaude({
-      task: [
-        repairing ? "Repair the existing implementation for ticket " + ticket.ticket_number + "." : "Implement the approved plan for ticket " + ticket.ticket_number + ".",
-        "Invoke ponytail:ponytail and superpowers:subagent-driven-development.",
-        "Use PLAN_FILE=" + executionPlanPath + " as the approved execution plan.",
-        "Choose explicit least-capable subagents and stop after local final review.",
-      ].join(" "),
-      sessionId,
-      model: input.ai.model,
-      effort: input.ai.reasoning_level,
-      promptFile,
-      skillBundleDir: skillBundle,
-      workingDirectory: worktree.worktreePath,
-      maxTurns: Number(input.project.config_json?.execution_max_turns ?? 50),
-      oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
-      scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
-      logPath,
-      timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 30 * 60 * 1000),
-      signal: cancellation.signal,
-      onEvent: async ({ eventType, event }) => {
-        sequence += 1;
-        await pool.query(
-          `INSERT INTO agent_run_events (agent_run_id,sequence,event_type,event_json)
-           VALUES ($1,$2,$3,$4)`,
-          [runId, sequence, eventType, event],
-        );
+    const executionBaseCommit = worktree.baseCommit ?? attempt.base_commit;
+    if (!executionBaseCommit) throw new Error("execution attempt base commit is unavailable");
+    const result = await runPrivateExecution({
+      worktreePath: worktree.worktreePath,
+      baseCommit: executionBaseCommit,
+      readOnlyPaths: [promptFile, skillBundle],
+      invocation: {
+        task: [
+          repairing ? "Repair the existing implementation for ticket " + ticket.ticket_number + "." : "Implement the approved plan for ticket " + ticket.ticket_number + ".",
+          "Invoke ponytail:ponytail and superpowers:subagent-driven-development.",
+          "Use PLAN_FILE=" + executionPlanPath + " as the approved execution plan.",
+          "Choose explicit least-capable subagents and stop after local final review.",
+        ].join(" "),
+        sessionId,
+        model: input.ai.model,
+        effort: input.ai.reasoning_level,
+        promptFile,
+        skillBundleDir: skillBundle,
+        maxTurns: Number(input.project.config_json?.execution_max_turns ?? 50),
+        oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
+        scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
+        logPath,
+        timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 30 * 60 * 1000),
+        signal: cancellation.signal,
+        onEvent: async ({ eventType, event }: { eventType: string; event: unknown }) => {
+          sequence += 1;
+          await pool.query(
+            `INSERT INTO agent_run_events (agent_run_id,sequence,event_type,event_json)
+             VALUES ($1,$2,$3,$4)`,
+            [runId, sequence, eventType, event],
+          );
+        },
       },
+      invoke: invokeExecutionClaude,
     });
     await pool.query(
       `UPDATE agent_runs
