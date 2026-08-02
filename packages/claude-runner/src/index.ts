@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFile, mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { appendFile, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { assertSubscriptionOnlyEnvironment, ClaudeAuthError } from "./auth-guard.ts";
@@ -115,29 +115,63 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
 }
 
 export type ExecutionInvocation = PlanningInvocation & {
+  executionDirectory?: string;
+  readOnlyPaths?: string[];
   logPath: string;
   timeoutMs: number;
   signal?: AbortSignal;
   onEvent: (event: { eventType: string; event: unknown; raw: string }) => Promise<void>;
 };
 
-export function buildExecutionArguments(input: ExecutionInvocation) {
+export async function createExecutionSandboxSettings(input: ExecutionInvocation, directory: string) {
+  const settingsFile = path.join(directory, "settings.json");
+  const executionDirectory = input.executionDirectory ?? input.workingDirectory;
+  const readOnlyPaths = input.readOnlyPaths ?? [input.promptFile, input.skillBundleDir];
+  await writeFile(settingsFile, JSON.stringify({
+    sandbox: {
+      enabled: true,
+      failIfUnavailable: true,
+      allowUnsandboxedCommands: false,
+      filesystem: {
+        allowWrite: [executionDirectory],
+        denyRead: ["~/"],
+        allowRead: [executionDirectory, ...readOnlyPaths],
+      },
+      credentials: {
+        envVars: [
+          { name: "GITHUB_TOKEN", mode: "deny" },
+          { name: "GH_TOKEN", mode: "deny" },
+          { name: "DATABASE_URL", mode: "deny" },
+        ],
+      },
+      network: { allowedDomains: ["api.anthropic.com"], strictAllowlist: true },
+    },
+  }), { encoding: "utf8", flag: "wx" });
+  return { settingsFile };
+}
+
+export function buildExecutionArguments(input: ExecutionInvocation, settingsFile: string) {
   return [
     "-p", input.task, "--session-id", input.sessionId, "--model", input.model, "--effort", input.effort,
     "--permission-mode", "auto", "--tools", "Read,Glob,Grep,Edit,Write,Bash,Agent,Skill",
     "--disallowedTools", "Bash(git push *),Bash(git merge *),Bash(git reset *),Bash(git commit --amend *),Bash(git rebase *),Bash(git checkout *),Bash(git switch *),Bash(gh *),Bash(sudo *),Bash(rm -rf /),Bash(rm -rf ~)",
     "--append-system-prompt-file", input.promptFile, "--add-dir", input.skillBundleDir,
+    "--settings", settingsFile,
     "--output-format", "stream-json", "--verbose", "--max-turns", String(input.maxTurns),
   ];
 }
 
 export async function invokeExecutionClaude(input: ExecutionInvocation) {
   assertSubscriptionOnlyEnvironment();
-  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken, AGENT_CONTROL_DISABLE: "1" };
+  const { GITHUB_TOKEN: _githubToken, GH_TOKEN: _ghToken, DATABASE_URL: _databaseUrl, ...parentEnv } = process.env;
+  const env: NodeJS.ProcessEnv = { ...parentEnv, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken, AGENT_CONTROL_DISABLE: "1" };
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
-  await appendFile(input.logPath, "");
-  return new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
-    const child = spawn("claude", buildExecutionArguments(input), {
+  const settingsDirectory = await mkdtemp(path.join(tmpdir(), "dcc-claude-settings-"));
+  try {
+    const { settingsFile } = await createExecutionSandboxSettings(input, settingsDirectory);
+    await appendFile(input.logPath, "");
+    return await new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
+    const child = spawn("claude", buildExecutionArguments(input, settingsFile), {
       cwd: input.workingDirectory,
       env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -198,6 +232,9 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
       }, reject);
     });
   });
+  } finally {
+    await rm(settingsDirectory, { recursive: true, force: true });
+  }
 }
 
 const requiredPlanHeadings = [

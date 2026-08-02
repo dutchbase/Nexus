@@ -1,7 +1,11 @@
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { describe, expect, test } from "vitest";
 import {
   buildExecutionArguments,
   buildPlanningArguments,
+  createExecutionSandboxSettings,
   summarizeClaudeFailure,
   type ExecutionInvocation,
   type PlanningInvocation,
@@ -14,10 +18,42 @@ const invocation: PlanningInvocation = {
 
 const executionInvocation: ExecutionInvocation = {
   ...invocation,
+  executionDirectory: "/execution",
+  readOnlyPaths: ["/prompt", "/skills"],
   logPath: "/log",
   timeoutMs: 1000,
   onEvent: async () => undefined,
 };
+
+test("writes fail-closed workspace-only sandbox settings for execution", async () => {
+  const settingsDirectory = await mkdtemp(path.join(tmpdir(), "claude-runner-test-"));
+  const { settingsFile } = await createExecutionSandboxSettings(executionInvocation, settingsDirectory);
+  try {
+    const settings = JSON.parse(await readFile(settingsFile, "utf8"));
+
+    expect(settings.sandbox).toMatchObject({
+      enabled: true,
+      failIfUnavailable: true,
+      allowUnsandboxedCommands: false,
+      filesystem: {
+        allowWrite: ["/execution"],
+        denyRead: ["~/"],
+        allowRead: ["/execution", "/prompt", "/skills"],
+      },
+      credentials: {
+        envVars: [
+          { name: "GITHUB_TOKEN", mode: "deny" },
+          { name: "GH_TOKEN", mode: "deny" },
+          { name: "DATABASE_URL", mode: "deny" },
+        ],
+      },
+      network: { allowedDomains: ["api.anthropic.com"], strictAllowlist: true },
+    });
+    expect(buildExecutionArguments(executionInvocation, settingsFile)).toContain(settingsFile);
+  } finally {
+    await rm(settingsDirectory, { recursive: true, force: true });
+  }
+});
 
 describe("buildPlanningArguments", () => {
   test("uses the supplied restricted tool list", () => {
@@ -30,7 +66,7 @@ describe("buildPlanningArguments", () => {
 });
 
 test("enables local execution while denying publication and destructive shell commands", () => {
-  const args = buildExecutionArguments(executionInvocation);
+  const args = buildExecutionArguments(executionInvocation, "/settings");
 
   expect(args).toContain("auto");
   expect(args).toContain("Read,Glob,Grep,Edit,Write,Bash,Agent,Skill");
