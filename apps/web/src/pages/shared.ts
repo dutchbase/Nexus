@@ -16,6 +16,7 @@ export const allowedTemplateVariables = new Set([
   "project.slug", "project.name", "project.description", "project.repository_path", "project.agent_start_path", "project.default_branch",
   "ticket.title", "ticket.description", "ticket.category", "ticket.priority",
   "pr.number", "pr.title", "pr.url", "pr.author", "pr.head_branch", "pr.base_branch", "pr.body", "pr.diff", "feedback",
+  "superpowers.code-reviewer",
 ]);
 
 export function lineDiff(before: string, after: string) {

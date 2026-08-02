@@ -1,6 +1,7 @@
 #!/bin/bash
-set -uo pipefail
-cd /home/deploy/projects/dev-control || exit 1
+set -euo pipefail
+ROOT="${DCC_ROOT:-/home/deploy/projects/dev-control}"
+cd "$ROOT"
 SHA="${1:-}"
 MARKER="${2:-}"
 if [ -z "$SHA" ]; then
@@ -8,20 +9,28 @@ if [ -z "$SHA" ]; then
   exit 1
 fi
 
-EC=0
-git fetch origin master || EC=$?
-git checkout master || EC=$?
-git reset --hard "$SHA" || EC=$?
-pnpm install || EC=$?
-pm2 restart dcc-web dcc-worker || EC=$?
+write_marker() {
+  if [ -n "$MARKER" ]; then printf '%s' "$1" > "$MARKER.tmp" && mv "$MARKER.tmp" "$MARKER"; fi
+}
 
-# Write the completion marker BEFORE restarting the webhook. Restarting the
-# webhook kills this deploy child process (it is spawned by the webhook), so
-# the marker must already exist for the restarted webhook to finalize it.
-if [ -n "$MARKER" ]; then
-  printf '%s' "$EC" > "$MARKER.tmp" && mv "$MARKER.tmp" "$MARKER"
-fi
+# Restarting the webhook kills this deploy child process, so its successful
+# completion marker must exist before that restart. Earlier failures still
+# reach the EXIT trap and receive their failure marker.
+finish() {
+  local status=$?
+  trap - EXIT
+  if [ "$status" -ne 0 ]; then write_marker "$status"; fi
+  if [ "$status" -eq 0 ]; then echo "deploy.sh: deployed $SHA"; else echo "deploy.sh: failed before restart" >&2; fi
+  exit "$status"
+}
+trap finish EXIT
 
+git fetch origin master
+git checkout master
+git reset --hard "$SHA"
+pnpm install --frozen-lockfile
+pnpm --filter database migrate
+pnpm exec tsx scripts/sync-agent-content.ts
+pm2 restart dcc-web dcc-worker
+write_marker 0
 pm2 restart dcc-webhook
-echo "deploy.sh: deployed $SHA"
-exit "$EC"

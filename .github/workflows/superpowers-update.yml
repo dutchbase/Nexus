@@ -1,0 +1,71 @@
+name: Superpowers Update
+
+on:
+  schedule:
+    - cron: "17 4 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Tagged obra/superpowers release to import (latest when empty)
+        required: false
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  update:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: latest
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+
+      - run: pnpm install --frozen-lockfile
+
+      - id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          TAG="$REQUESTED_TAG"
+          if [ -z "$TAG" ]; then TAG="$(gh release view --repo obra/superpowers --json tagName --jq .tagName)"; fi
+          case "$TAG" in v[0-9]*.[0-9]*.[0-9]*) ;; *) echo "not a release tag: $TAG" >&2; exit 1 ;; esac
+          git ls-remote --exit-code --tags https://github.com/obra/superpowers.git "refs/tags/$TAG" >/dev/null
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Import tagged release
+        env:
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          CHECKOUT="$RUNNER_TEMP/superpowers"
+          git clone --depth 1 --branch "$TAG" https://github.com/obra/superpowers.git "$CHECKOUT"
+          node --input-type=module -e 'import { readFile, writeFile } from "node:fs/promises"; const file = "config/agent-content.json"; const config = JSON.parse(await readFile(file, "utf8")); config.superpowers.tag = process.env.TAG; await writeFile(file, `${JSON.stringify(config, null, 2)}\n`);'
+          pnpm exec tsx scripts/update-superpowers.ts --checkout "$CHECKOUT"
+          pnpm test:unit
+
+      - name: Open update pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          git add config/agent-content.json prompts/global/code-reviewer.md skills/vendor/superpowers
+          if git diff --cached --quiet; then exit 0; fi
+          BRANCH="automation/superpowers-${TAG}"
+          git switch -c "$BRANCH"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git commit -m "chore: update superpowers to $TAG"
+          git push --set-upstream origin "$BRANCH"
+          gh pr create --base master --head "$BRANCH" --title "chore: update Superpowers to $TAG" --body "Automated import of the tagged obra/superpowers release. Review the vendored skill diff before merging."

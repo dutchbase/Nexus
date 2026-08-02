@@ -15,8 +15,8 @@ export type ProviderPullRequest = {
   draft: boolean;
   merged?: boolean;
   title: string;
-  head: { ref: string };
-  base: { ref: string };
+  head: { ref: string; sha?: string };
+  base: { ref: string; sha?: string };
   user?: { login?: string };
   review_state?: string | null;
   check_state?: string | null;
@@ -126,10 +126,11 @@ export async function mergePullRequest(
   repository: string,
   number: number,
   mergeMethod: "merge" | "squash" | "rebase" = "squash",
+  expectedHeadSha?: string,
 ) {
   return request<MergeResult>(`${pullsPath(owner, repository)}/${number}/merge`, {
     method: "PUT",
-    body: JSON.stringify({ merge_method: mergeMethod }),
+    body: JSON.stringify({ merge_method: mergeMethod, ...(expectedHeadSha ? { sha: expectedHeadSha } : {}) }),
   });
 }
 

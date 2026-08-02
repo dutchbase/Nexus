@@ -1,0 +1,19 @@
+{
+  "superpowers": {
+    "repository": "obra/superpowers",
+    "tag": "v4.1.0",
+    "source": {
+      "type": "git",
+      "url": "https://github.com/obra/superpowers.git",
+      "license": "MIT"
+    },
+    "vendor_path": "skills/vendor/superpowers",
+    "review_rubric": "skills/requesting-code-review/code-reviewer.md",
+    "skills": {
+      "planning": ["writing-plans"],
+      "execution": ["subagent-driven-development", "test-driven-development", "verification-before-completion"],
+      "repair": ["systematic-debugging", "test-driven-development", "verification-before-completion"],
+      "inspiration_only": ["using-superpowers", "brainstorming"]
+    }
+  }
+}

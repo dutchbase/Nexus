@@ -223,13 +223,30 @@ used to build links in outgoing notifications.
 
 ## Updating
 
+The deployment webhook runs `deploy.sh <merged-sha>`. It installs locked
+dependencies, migrates the database, syncs agent content, then restarts the
+application only if every prior step succeeds.
+
 ```bash
 cd /opt/dev-control
 git pull
-pnpm install
+pnpm install --frozen-lockfile
 pnpm --filter database migrate
+pnpm exec tsx scripts/sync-agent-content.ts
 sudo systemctl restart dcc-web dcc-worker
 ```
+
+To roll back code, redeploy the previous known-good SHA with `deploy.sh`.
+Migrations are forward-only: restore the database backup or ship a forward
+fix for a schema problem; do not reset a production database to roll back.
+
+### Superpowers updates
+
+The **Superpowers Update** workflow runs daily at 04:17 UTC. It imports the
+latest tagged `obra/superpowers` release into an
+`automation/superpowers-<tag>` PR; review and merge that PR to activate it.
+Use **Run workflow** with an exact `vX.Y.Z` tag to override the resolved
+latest release. Leaving the tag empty uses the latest release again.
 
 ## Data layout
 

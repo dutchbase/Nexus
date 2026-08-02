@@ -11,6 +11,7 @@ import {
   conflictedFiles,
   countCredentialShapes,
   createConflictResolutionWorktree,
+  createPullRequestReviewWorktree,
   createPrivateExecutionClone,
   executionBranchName,
   importPrivateExecutionClone,
@@ -380,6 +381,130 @@ describe("execution commit containment", () => {
         .toEqual(["base.txt", "executor.txt"]);
       expect((await git(tmp, ["show", "HEAD:base.txt"])).stdout).toBe("uncommitted final output\n");
       expect((await git(tmp, ["show", "HEAD:executor.txt"])).stdout).toBe("committed task output\n");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("execution effective diff", () => {
+  it("keeps committed and working task changes relative to the recorded base", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-effective-diff-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await writeAndCommit(repo, "base.txt", "base\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeAndCommit(repo, "committed.txt", "committed\n", "agent commit");
+      await writeFile(path.join(repo, "working.txt"), "working\n");
+
+      const validation = await validateExecutionWorktree({ worktreePath: repo, baseCommit });
+
+      expect(validation.files).toEqual(["committed.txt", "working.txt"]);
+      expect(await worktreeDiff(repo, baseCommit)).toContain("committed.txt");
+      expect(await worktreeDiff(repo, baseCommit)).toContain("working.txt");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("squashes two clean agent commits into one worker-owned commit from the recorded base", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-committed-task-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await writeAndCommit(repo, "base.txt", "base\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeAndCommit(repo, "first.txt", "first\n", "agent first commit");
+      await writeAndCommit(repo, "second.txt", "second\n", "agent second commit");
+
+      await commitExecutionChanges({
+        worktreePath: repo,
+        baseCommit,
+        message: "worker commit",
+      });
+
+      expect((await git(repo, ["rev-list", "--count", `${baseCommit}..HEAD`])).stdout.trim()).toBe("1");
+      expect((await git(repo, ["log", "-1", "--pretty=%s"])).stdout.trim()).toBe("worker commit");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("rescans base-aware committed blobs after staging worker changes", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-scan-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await writeAndCommit(repo, "base.txt", "base\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeFile(path.join(repo, ".gitattributes"), "task.txt filter=inject\n");
+      await git(repo, ["config", "filter.inject.clean", "sed 's/safe/AKIAIOSFODNN7EXAMPLE/'"]);
+      await writeFile(path.join(repo, "task.txt"), "safe\n");
+      await git(repo, ["add", "--all"]);
+      await git(repo, ["commit", "-m", "agent commit"]);
+      await writeFile(path.join(repo, "working.txt"), "working\n");
+
+      await expect(commitExecutionChanges({
+        worktreePath: repo,
+        baseCommit,
+        message: "worker commit",
+      })).rejects.toMatchObject({ check: "secret scan" });
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a merge commit in an agent execution history", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-nonlinear-history-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await writeAndCommit(repo, "base.txt", "base\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await git(repo, ["checkout", "-b", "side"]);
+      await writeAndCommit(repo, "side.txt", "side\n", "side commit");
+      await git(repo, ["checkout", "-b", "agent", baseCommit]);
+      await writeAndCommit(repo, "agent.txt", "agent\n", "agent commit");
+      await git(repo, ["merge", "--no-ff", "side", "-m", "merge side"]);
+
+      await expect(validateExecutionWorktree({ worktreePath: repo, baseCommit }))
+        .rejects.toMatchObject({ check: "history inspection" });
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("createPullRequestReviewWorktree", () => {
+  it("checks out a fork PR ref detached and removes the disposable worktree", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-pr-review-"));
+    try {
+      const origin = path.join(tmp, "origin");
+      await initRepo(origin);
+      await writeAndCommit(origin, "base.txt", "base\n", "initial commit");
+      const baseCommit = (await git(origin, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeAndCommit(origin, "reviewed.txt", "review me\n", "PR head");
+      const expectedCommit = (await git(origin, ["rev-parse", "HEAD"])).stdout.trim();
+      await git(origin, ["update-ref", "refs/pull/42/head", "HEAD"]);
+      await git(origin, ["reset", "--hard", baseCommit]);
+      const repo = path.join(tmp, "repo");
+      await cloneRepo(origin, repo);
+
+      const worktree = await createPullRequestReviewWorktree({
+        repositoryPath: repo,
+        dataRoot: path.join(tmp, "data-root"),
+        projectSlug: "acme",
+        pullRequestNumber: 42,
+      });
+      try {
+        expect((await git(worktree.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(expectedCommit);
+        expect(worktree.headCommit).toBe(expectedCommit);
+        await expect(git(worktree.worktreePath, ["symbolic-ref", "--quiet", "HEAD"])).rejects.toMatchObject({ code: 1 });
+      } finally {
+        await worktree.cleanup();
+      }
+      await expect(readFile(path.join(worktree.worktreePath, "reviewed.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }

@@ -1,11 +1,14 @@
+import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { appendFile, mkdtemp, open, readFile, rm, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { realpathSync } from "node:fs";
+import { appendFile, chmod, copyFile, mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { assertSubscriptionOnlyEnvironment, ClaudeAuthError } from "./auth-guard.ts";
 export { assertSubscriptionOnlyEnvironment, ClaudeAuthError, forbiddenClaudeAuthVariables } from "./auth-guard.ts";
 
-async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) {
+async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; executable?: string } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "dcc-claude-output-"));
   const stdoutPath = path.join(directory, "stdout");
   const stderrPath = path.join(directory, "stderr");
@@ -13,7 +16,7 @@ async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.P
   const stderrFile = await open(stderrPath, "wx");
   try {
     const exitCode = await new Promise<number | null>((resolve, reject) => {
-      const child = spawn("claude", args, {
+      const child = spawn(options.executable ?? "claude", args, {
         cwd: options.cwd, env: options.env, stdio: ["ignore", stdoutFile.fd, stderrFile.fd],
       });
       child.on("error", reject);
@@ -60,8 +63,185 @@ export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = pro
 
 export type PlanningInvocation = {
   task: string; sessionId: string; model: string; effort: string; promptFile: string;
-  skillBundleDir: string; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string; tools?: string[];
+  skillBundleDir?: string; pluginDirectories?: readonly string[]; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string; tools?: string[]; claudeExecutable?: string; guardPath?: string;
+  gitMetadataPaths?: string[]; sensitiveEnvironmentVariables?: string[];
 };
+
+const trustedBashGuard = fileURLToPath(new URL("./bash-guard.mjs", import.meta.url));
+
+export async function materializeBashGuard(sourcePath = trustedBashGuard) {
+  const directory = await mkdtemp(path.join(tmpdir(), "dcc-claude-guard-"));
+  const guardPath = path.join(directory, "bash-guard.mjs");
+  try {
+    await copyFile(sourcePath, guardPath);
+    await chmod(guardPath, 0o400);
+    await chmod(directory, 0o500);
+    return {
+      directory,
+      path: guardPath,
+      cleanup: async () => {
+        await chmod(directory, 0o700).catch(() => undefined);
+        await rm(directory, { recursive: true, force: true });
+      },
+    };
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
+
+function skillDirectoryArguments(input: PlanningInvocation) {
+  return [
+    ...(input.skillBundleDir ? ["--add-dir", input.skillBundleDir] : []),
+    ...(input.pluginDirectories ?? []).flatMap((directory) => ["--plugin-dir", directory]),
+  ];
+}
+
+function hookCommand(guardPath: string) {
+  return `node ${JSON.stringify(guardPath)}`;
+}
+
+function fileHookCommand(guardPath: string, readRoots: string[], writeRoot: string) {
+  const policy = Buffer.from(JSON.stringify({ readRoots, writeRoot })).toString("base64url");
+  return `${hookCommand(guardPath)} ${policy}`;
+}
+
+function sessionAgents(input: PlanningInvocation, guardPath = input.guardPath ?? trustedBashGuard) {
+  const bashHooks = {
+    PreToolUse: [{
+      matcher: "Bash",
+      hooks: [{ type: "command", command: hookCommand(guardPath) }],
+    }],
+  };
+  return JSON.stringify({
+    "dcc-mechanical": {
+      description: "Handles small mechanical implementation tasks.",
+      prompt: "Complete only the assigned mechanical task. Do not commit, push, merge, or create a pull request.",
+      model: "haiku", effort: "low", tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], hooks: bashHooks,
+    },
+    "dcc-implementer": {
+      description: "Implements an independently scoped plan task.",
+      prompt: "Implement only the assigned task and report validation. Do not commit, push, merge, or create a pull request.",
+      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], hooks: bashHooks,
+    },
+    "dcc-repair": {
+      description: "Traces and repairs a focused failure.",
+      prompt: "Reproduce and repair only the assigned root cause. Do not commit, push, merge, or create a pull request.",
+      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], hooks: bashHooks,
+    },
+    "dcc-reviewer": {
+      description: "Reviews assigned code without modifying it.",
+      prompt: "Review the assigned change read-only. Do not edit files, run Bash, commit, push, merge, or create a pull request.",
+      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep"],
+    },
+  });
+}
+
+const defaultSensitiveEnvironmentVariables = [
+  "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
+  "GITHUB_TOKEN", "GH_TOKEN", "DATABASE_URL", "PGPASSWORD", "NPM_TOKEN",
+  "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+];
+const sensitiveHomePaths = [
+  "~/.ssh", "~/.aws", "~/.config", "~/.docker", "~/.kube", "~/.gnupg", "~/.password-store",
+  "~/.git-credentials", "~/.netrc", "~/.npmrc",
+];
+
+function permissionPath(target: string) {
+  return `//${path.resolve(target).slice(1)}`;
+}
+
+async function gitMetadataPaths(workingDirectory: string) {
+  const dotGit = path.join(workingDirectory, ".git");
+  let gitDirectory = dotGit;
+  const pointer = await readFile(dotGit, "utf8").catch(() => "");
+  const match = pointer.match(/^gitdir:\s*(.+)\s*$/m);
+  if (match) gitDirectory = path.resolve(workingDirectory, match[1]);
+  const common = await readFile(path.join(gitDirectory, "commondir"), "utf8").catch(() => "");
+  return [...new Set([dotGit, gitDirectory, ...(common.trim() ? [path.resolve(gitDirectory, common.trim())] : [])])];
+}
+
+async function hideWorktreeGitMetadata(workingDirectory: string) {
+  const dotGit = path.join(workingDirectory, ".git");
+  const hidden = path.join(path.dirname(workingDirectory), `.dcc-git-metadata-${randomUUID()}`);
+  try {
+    await rename(dotGit, hidden);
+  } catch (error: any) {
+    if (error?.code === "ENOENT") return null;
+    throw error;
+  }
+  return {
+    hidden,
+    restore: async () => { await rename(hidden, dotGit); },
+  };
+}
+
+function executionSettings(input: PlanningInvocation, guardPath: string) {
+  const gitMetadataPaths = [...new Set(input.gitMetadataPaths ?? [path.join(input.workingDirectory, ".git")])];
+  const deniedGitPaths = gitMetadataPaths.flatMap((target) => {
+    const rulePath = permissionPath(target);
+    return [`Read(${rulePath})`, `Read(${rulePath}/**)`, `Edit(${rulePath})`, `Edit(${rulePath}/**)`];
+  });
+  const deniedCredentialReads = sensitiveHomePaths.flatMap((target) => [
+    `Read(${target})`, `Read(${target}/**)`,
+  ]);
+  const hostHome = permissionPath(homedir());
+  const deniedHostHome = [
+    `Read(${hostHome})`, `Read(${hostHome}/**)`, `Edit(${hostHome})`, `Edit(${hostHome}/**)`,
+  ];
+  const nodeInstallRoot = path.dirname(path.dirname(process.execPath));
+  const allowRead = [
+    input.workingDirectory, input.skillBundleDir, ...(input.pluginDirectories ?? []), input.promptFile,
+    guardPath, nodeInstallRoot, process.env.COREPACK_HOME, path.join(homedir(), ".cache", "node", "corepack"),
+  ].filter((target): target is string => Boolean(target)).map((target) => path.resolve(input.workingDirectory, target));
+  let worktree: string;
+  try { worktree = realpathSync(input.workingDirectory); } catch { worktree = path.resolve(input.workingDirectory); }
+  const homeRelative = path.relative(homedir(), worktree);
+  if (homeRelative === "" || (!homeRelative.startsWith(`..${path.sep}`) && homeRelative !== ".." && !path.isAbsolute(homeRelative))) {
+    throw new Error("execution worktree must be outside the host home so deny rules cannot override its edit allowlist");
+  }
+  const allowedPermissions = [...new Set(allowRead)].flatMap((target) => {
+    const rulePath = permissionPath(target);
+    return [`Read(${rulePath})`, `Read(${rulePath}/**)`];
+  });
+  const worktreeRule = permissionPath(worktree);
+  return JSON.stringify({
+    permissions: {
+      allow: [...allowedPermissions, `Edit(${worktreeRule})`, `Edit(${worktreeRule}/**)`],
+      deny: [...deniedHostHome, ...deniedGitPaths, ...deniedCredentialReads, "WebFetch"],
+    },
+    sandbox: {
+      enabled: true,
+      failIfUnavailable: true,
+      allowUnsandboxedCommands: false,
+      filesystem: {
+        denyRead: [...new Set([homedir(), ...gitMetadataPaths])],
+        allowRead: [...new Set(allowRead)],
+        denyWrite: gitMetadataPaths,
+      },
+      credentials: {
+        files: sensitiveHomePaths.map((file) => ({ path: file, mode: "deny" })),
+        envVars: [...new Set(input.sensitiveEnvironmentVariables ?? defaultSensitiveEnvironmentVariables)]
+          .sort().map((name) => ({ name, mode: "deny" })),
+      },
+      network: {
+        allowedDomains: [], deniedDomains: ["*"], strictAllowlist: true, allowAllUnixSockets: false,
+      },
+    },
+    hooks: {
+      PreToolUse: [
+        {
+          matcher: "Read|Glob|Grep|Edit|Write",
+          hooks: [{ type: "command", command: fileHookCommand(guardPath, [...new Set(allowRead)], worktree) }],
+        },
+        {
+          matcher: "Agent",
+          hooks: [{ type: "command", command: hookCommand(guardPath) }],
+        },
+      ],
+    },
+  });
+}
 
 export function buildPlanningArguments(input: PlanningInvocation) {
   return [
@@ -73,8 +253,8 @@ export function buildPlanningArguments(input: PlanningInvocation) {
     // approver), so planning burned its turns on denied read-only commands.
     // "dontAsk" auto-allows read-only Bash and denies everything else —
     // read-only planning whose tools actually work.
-    "--permission-mode", "dontAsk", "--tools", input.tools?.join(",") ?? "Read,Glob,Grep,Bash",
-    "--append-system-prompt-file", input.promptFile, "--add-dir", input.skillBundleDir,
+    "--permission-mode", "dontAsk", "--tools", input.tools?.join(",") ?? "Read,Glob,Grep,Bash,Skill",
+    "--append-system-prompt-file", input.promptFile, ...skillDirectoryArguments(input),
     "--output-format", "json", "--max-turns", String(input.maxTurns),
   ];
 }
@@ -97,7 +277,7 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   assertSubscriptionOnlyEnvironment();
   const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken, AGENT_CONTROL_DISABLE: "1" };
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
-  const result = await runClaude(buildPlanningArguments(input), { cwd: input.workingDirectory, env });
+  const result = await runClaude(buildPlanningArguments(input), { cwd: input.workingDirectory, env, executable: input.claudeExecutable });
   if (result.exitCode !== 0) {
     throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), { exitCode: result.exitCode });
   }
@@ -122,42 +302,25 @@ export type ExecutionInvocation = PlanningInvocation & {
   onEvent: (event: { eventType: string; event: unknown; raw: string }) => Promise<void>;
 };
 
+export function assertExecutionSandboxVersion(value: string) {
+  if (!isClaudeSandboxVersionSupported(value)) {
+    throw new Error("execution requires Claude Code 2.1.219 or newer for fail-closed strict sandboxing");
+  }
+}
+
 export async function createExecutionSandboxSettings(input: ExecutionInvocation, directory: string) {
   const settingsFile = path.join(directory, "settings.json");
-  const executionDirectory = input.executionDirectory;
-  await writeFile(settingsFile, JSON.stringify({
-    disableAllHooks: true,
-    sandbox: {
-      enabled: true,
-      failIfUnavailable: true,
-      allowUnsandboxedCommands: false,
-      filesystem: {
-        allowWrite: [executionDirectory],
-        denyRead: ["/"],
-        allowRead: [executionDirectory],
-      },
-      credentials: {
-        envVars: [
-          { name: "GITHUB_TOKEN", mode: "deny" },
-          { name: "GH_TOKEN", mode: "deny" },
-          { name: "DATABASE_URL", mode: "deny" },
-          { name: "CLAUDE_CODE_OAUTH_TOKEN", mode: "deny" },
-        ],
-      },
-      network: { allowedDomains: ["api.anthropic.com"], strictAllowlist: true },
-    },
-  }), { encoding: "utf8", flag: "wx" });
+  await writeFile(settingsFile, executionSettings(input, input.guardPath ?? trustedBashGuard), { encoding: "utf8", flag: "wx" });
   return { settingsFile };
 }
 
 export function buildExecutionArguments(input: ExecutionInvocation, settingsFile: string) {
   return [
     "-p", input.task, "--session-id", input.sessionId, "--model", input.model, "--effort", input.effort,
-    "--permission-mode", "auto", "--tools", "Bash,Agent,Skill",
-    "--disallowedTools", "Read,Glob,Grep,Edit,Write,Bash(git push *),Bash(git merge *),Bash(git reset *),Bash(git commit --amend *),Bash(git rebase *),Bash(git checkout *),Bash(git switch *),Bash(gh *),Bash(sudo *),Bash(rm -rf /),Bash(rm -rf ~)",
-    "--setting-sources", "", "--strict-mcp-config",
-    "--append-system-prompt-file", input.promptFile, "--add-dir", input.skillBundleDir,
-    "--settings", settingsFile,
+    "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep,Skill,Agent",
+    "--append-system-prompt-file", input.promptFile, ...skillDirectoryArguments(input),
+    "--setting-sources", "", "--strict-mcp-config", "--settings", settingsFile,
+    "--agents", sessionAgents(input),
     "--output-format", "stream-json", "--verbose", "--max-turns", String(input.maxTurns),
   ];
 }
@@ -169,11 +332,10 @@ export function isClaudeSandboxVersionSupported(output: string) {
   return major > 2 || (major === 2 && (minor > 1 || (minor === 1 && patch >= 219)));
 }
 
-async function requireClaudeSandboxVersion(env: NodeJS.ProcessEnv, cwd: string) {
-  const result = await runClaude(["--version", "--setting-sources", ""], { cwd, env });
-  if (result.exitCode !== 0 || !isClaudeSandboxVersionSupported(result.stdout)) {
-    throw new Error("Claude Code 2.1.219 or newer is required for strict sandbox execution");
-  }
+async function requireClaudeSandboxVersion(env: NodeJS.ProcessEnv, cwd: string, executable?: string) {
+  const result = await runClaude(["--version", "--setting-sources", ""], { cwd, env, executable });
+  if (result.exitCode !== 0) throw new Error("could not verify Claude Code sandbox support");
+  assertExecutionSandboxVersion(result.stdout);
 }
 
 export async function invokeExecutionClaude(input: ExecutionInvocation) {
@@ -188,17 +350,27 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     LC_ALL: process.env.LC_ALL,
     CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken,
     CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
+    CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
     CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
     CLAUDE_CONFIG_DIR: settingsDirectory,
     AGENT_CONTROL_DISABLE: "1",
   };
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
+  const guard = await materializeBashGuard();
+  let hiddenGitMetadata: Awaited<ReturnType<typeof hideWorktreeGitMetadata>> = null;
   try {
-    await requireClaudeSandboxVersion(env, input.workingDirectory);
-    const { settingsFile } = await createExecutionSandboxSettings(input, settingsDirectory);
+    await requireClaudeSandboxVersion(env, input.workingDirectory, input.claudeExecutable);
     await appendFile(input.logPath, "");
+    const metadataPaths = input.gitMetadataPaths ?? await gitMetadataPaths(input.workingDirectory);
+    hiddenGitMetadata = await hideWorktreeGitMetadata(input.workingDirectory);
+    const configuredInput = {
+      ...input,
+      guardPath: guard.path,
+      gitMetadataPaths: [...metadataPaths, ...(hiddenGitMetadata ? [hiddenGitMetadata.hidden] : [])],
+    };
+    const { settingsFile } = await createExecutionSandboxSettings(configuredInput, settingsDirectory);
     return await new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
-    const child = spawn("claude", buildExecutionArguments(input, settingsFile), {
+    const child = spawn(input.claudeExecutable ?? "claude", buildExecutionArguments(configuredInput, settingsFile), {
       cwd: input.workingDirectory,
       env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -260,7 +432,15 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     });
   });
   } finally {
-    await rm(settingsDirectory, { recursive: true, force: true });
+    try {
+      await hiddenGitMetadata?.restore();
+    } finally {
+      try {
+        await guard.cleanup();
+      } finally {
+        await rm(settingsDirectory, { recursive: true, force: true });
+      }
+    }
   }
 }
 

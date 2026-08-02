@@ -1,0 +1,187 @@
+{
+  "catalog_hash": "27eb6025ed24341594b6f633e626da2ad7fc22b50ad25d7e08dad6e6453cf301",
+  "source": {
+    "repository": "obra/superpowers",
+    "tag": "v4.1.0",
+    "license": "MIT"
+  },
+  "review_rubric": {
+    "path": "skills/requesting-code-review/code-reviewer.md",
+    "content_hash": "7f5328dca12cb200005ae9d4386f63a9b0acb735ece57f82db206b4a3189ccae"
+  },
+  "skills": [
+    {
+      "slug": "brainstorming",
+      "name": "brainstorming",
+      "description": "You MUST use this before any creative work - creating features, building components, adding functionality, or modifying behavior. Explores user intent, requirements and design before implementation.",
+      "phases": [],
+      "inspiration_only": true,
+      "version": "v4.1.0",
+      "content_hash": "021f83409eadcba2266b90a90676d3565b319059d5d782141ea0b118d9761857",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "content_hash": "206c63e80d38c57e6afc657296332b1d0ff75572435d75c079e7407b26762ecd"
+        }
+      ]
+    },
+    {
+      "slug": "subagent-driven-development",
+      "name": "subagent-driven-development",
+      "description": "Use when executing implementation plans with independent tasks in the current session",
+      "phases": [
+        "execution"
+      ],
+      "inspiration_only": false,
+      "version": "v4.1.0",
+      "content_hash": "9b93f6c529ec76af806e2215edc3be6af0ee3f80a365e3142aa696209567b0ef",
+      "files": [
+        {
+          "path": "code-quality-reviewer-prompt.md",
+          "content_hash": "11de35dba7990f9def49b90039f1f2d8e7f546ae42ca8e1105d308f09456803e"
+        },
+        {
+          "path": "implementer-prompt.md",
+          "content_hash": "9740dc8e425f9e1d6dc34599e0ba82e93aad7fedbcbb27b0bd67a4fa0e15a85e"
+        },
+        {
+          "path": "SKILL.md",
+          "content_hash": "724ff7f5edf539a7b5697daa120a5d0befa012660376724adaf9dd04ca6c305a"
+        },
+        {
+          "path": "spec-reviewer-prompt.md",
+          "content_hash": "631980e472eec5394de8b89b69d432e54fd3f7f523ecf9afa7eb4cda0c9b2baf"
+        }
+      ]
+    },
+    {
+      "slug": "systematic-debugging",
+      "name": "systematic-debugging",
+      "description": "Use when encountering any bug, test failure, or unexpected behavior, before proposing fixes",
+      "phases": [
+        "repair"
+      ],
+      "inspiration_only": false,
+      "version": "v4.1.0",
+      "content_hash": "8fee365935310b241ad475491206a5387d5ef2078115b3e7b895fc01488b5bc5",
+      "files": [
+        {
+          "path": "condition-based-waiting-example.ts",
+          "content_hash": "40ae5ebe497fdf310200e43fe986552546d0a22837c0d39e855db1cfd33eb88e"
+        },
+        {
+          "path": "condition-based-waiting.md",
+          "content_hash": "e89fec8400d6cd50f43407cec9fab50976ba4d55d0ec2eb51c0bd68036b54c26"
+        },
+        {
+          "path": "CREATION-LOG.md",
+          "content_hash": "b482ef9a918fbfc6c369729e8160633ddfa2332466dd362ee73f1527c239ef8b"
+        },
+        {
+          "path": "defense-in-depth.md",
+          "content_hash": "1e175fb86fc357e58c6aebf5441e481e1b7868b4380c0456b63a17eefbd18ba7"
+        },
+        {
+          "path": "find-polluter.sh",
+          "content_hash": "6462747eae9b175ac145b78bcfaeab755654a75e32637f08eb633f065a9e1d7c"
+        },
+        {
+          "path": "root-cause-tracing.md",
+          "content_hash": "a81bee9448794d261b4aca8487c595d11ff4bd4e10a5f96bca1117dd32527050"
+        },
+        {
+          "path": "SKILL.md",
+          "content_hash": "4999cb851360485eca5074e727bbdd62ef20549c5d5b01216fcbf5831badb473"
+        },
+        {
+          "path": "test-academic.md",
+          "content_hash": "fe2ba480d78ac0d686dc025f41c2a32a43d642bf533f91b0c6053a04d35d6486"
+        },
+        {
+          "path": "test-pressure-1.md",
+          "content_hash": "0b6a915db0054577819834c79be9eb614e97bddba10d73768e1fbe91cfed048a"
+        },
+        {
+          "path": "test-pressure-2.md",
+          "content_hash": "b2030aeffba07050e8ad573ddf87486457c4a016a786bb326235bebd856f2016"
+        },
+        {
+          "path": "test-pressure-3.md",
+          "content_hash": "96b50a52e2c7989c9cf20fb752c47c1e9a3a70dc362f8f7989f8f5b64dac7708"
+        }
+      ]
+    },
+    {
+      "slug": "test-driven-development",
+      "name": "test-driven-development",
+      "description": "Use when implementing any feature or bugfix, before writing implementation code",
+      "phases": [
+        "execution",
+        "repair"
+      ],
+      "inspiration_only": false,
+      "version": "v4.1.0",
+      "content_hash": "f33bba155b95ed1e07d8d554b22cf986afbd7f26bcdfb7505f6529b6de863598",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "content_hash": "7dee67b4af6bdccc7a914ca34533184d64592d0f5b23aeae631538168db14994"
+        },
+        {
+          "path": "testing-anti-patterns.md",
+          "content_hash": "bde453bc258f06543987477c837939afaa774ea2acbd9f308d702fc452bc4283"
+        }
+      ]
+    },
+    {
+      "slug": "using-superpowers",
+      "name": "using-superpowers",
+      "description": "Use when starting any conversation - establishes how to find and use skills, requiring Skill tool invocation before ANY response including clarifying questions",
+      "phases": [],
+      "inspiration_only": true,
+      "version": "v4.1.0",
+      "content_hash": "3b232e3351d55b2ca61e665645d0200099554bbbf28b4533c0a1d44967733437",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "content_hash": "81d921b16502091f44e8669bbcfae74b87bbf4295d03fff70a98e81d73af60a6"
+        }
+      ]
+    },
+    {
+      "slug": "verification-before-completion",
+      "name": "verification-before-completion",
+      "description": "Use when about to claim work is complete, fixed, or passing, before committing or creating PRs - requires running verification commands and confirming output before making any success claims; evidence before assertions always",
+      "phases": [
+        "execution",
+        "repair"
+      ],
+      "inspiration_only": false,
+      "version": "v4.1.0",
+      "content_hash": "72ac5a6e50145b7bef8a76fe62e53e5ab9169db5a002cba23a062d2affe2f675",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "content_hash": "ea52d15aabaf72bc6b558efe2c126f161b53961090ddcd712000273bfe8c7b6c"
+        }
+      ]
+    },
+    {
+      "slug": "writing-plans",
+      "name": "writing-plans",
+      "description": "Use when you have a spec or requirements for a multi-step task, before touching code",
+      "phases": [
+        "planning"
+      ],
+      "inspiration_only": false,
+      "version": "v4.1.0",
+      "content_hash": "0f93d9a4579aea4d9aad0fdb17c8172d33c9fbaf93df37d6041b0f0649b999c2",
+      "files": [
+        {
+          "path": "SKILL.md",
+          "content_hash": "2046e5b955aa16c288f9c7290c58f237628dfb6ba6d4817fad3da0fa830b46c2"
+        }
+      ]
+    }
+  ]
+}

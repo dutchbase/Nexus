@@ -1,19 +1,63 @@
-import { access, mkdtemp, rm } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
-import { materializeSkillBundle } from "./index.ts";
+import { afterEach, describe, expect, test } from "vitest";
+import { materializeSkillBundle, skillsForPhase, snapshotSkillSet, type ResolvedSkill } from "./index.ts";
 
-let root = "";
+const directories: string[] = [];
 
-afterEach(async () => {
-  if (root) await rm(root, { recursive: true, force: true });
+async function fixture() {
+  const root = await mkdtemp(path.join(tmpdir(), "skill-registry-"));
+  directories.push(root);
+  await mkdir(path.join(root, "local"), { recursive: true });
+  await mkdir(path.join(root, "vendor", "upstream"), { recursive: true });
+  await writeFile(path.join(root, "local", "SKILL.md"), "# Local\n");
+  await writeFile(path.join(root, "vendor", "upstream", "SKILL.md"), "# Upstream\n");
+  return root;
+}
+
+afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
+
+test("snapshots phase metadata, keeps legacy skills in every phase, and materializes local and vendored skills", async () => {
+  const root = await fixture();
+  const skills: ResolvedSkill[] = [
+    {
+      id: "local", slug: "local", name: "Local", filesystem_path: "local/SKILL.md", enabled: true, version: null,
+      resolution_sources: ["global_mandatory"], configuration_json: {}, source_type: "workspace_global",
+    },
+    {
+      id: "upstream", slug: "upstream", name: "Upstream", filesystem_path: "vendor/upstream/SKILL.md", enabled: true, version: "v1",
+      resolution_sources: ["phase_required"], configuration_json: { phases: ["planning"] }, source_type: "vendored",
+    },
+  ];
+
+  const snapshot = await snapshotSkillSet(skills, ["planning", "execution"], root);
+
+  expect(snapshot.skills.map((skill) => ({ slug: skill.slug, phases: skill.phases, plugin: skill.plugin_name, invocation: skill.invocation_name }))).toEqual([
+    { slug: "local", phases: ["planning", "execution", "repair"], plugin: null, invocation: "local" },
+    { slug: "upstream", phases: ["planning"], plugin: "superpowers", invocation: "superpowers:upstream" },
+  ]);
+  expect(skillsForPhase(snapshot.skills, "execution").map((skill) => skill.slug)).toEqual(["local"]);
+
+  const bundle = await materializeSkillBundle("00000000-0000-0000-0000-000000000001", skillsForPhase(snapshot.skills, "planning"), root);
+
+  expect(bundle.additionalDirectory).toBe(path.join(root, "data", "skill-bundles", "00000000-0000-0000-0000-000000000001"));
+  expect(bundle.pluginDirectories).toEqual([
+    path.join(bundle.additionalDirectory, "plugins", "dcc-local"),
+    path.join(bundle.additionalDirectory, "plugins", "superpowers"),
+  ]);
+  await expect(readFile(path.join(bundle.pluginDirectories[0], ".claude-plugin", "plugin.json"), "utf8")).resolves.toContain('"name": "dcc-local"');
+  await expect(readFile(path.join(bundle.pluginDirectories[0], "skills", "local", "SKILL.md"), "utf8")).resolves.toBe("# Local\n");
+  await expect(readFile(path.join(bundle.additionalDirectory, ".claude", "skills", "local", "SKILL.md"), "utf8")).resolves.toBe("# Local\n");
+  await expect(readFile(path.join(bundle.pluginDirectories[1], ".claude-plugin", "plugin.json"), "utf8")).resolves.toContain('"name": "superpowers"');
+  await expect(readFile(path.join(bundle.pluginDirectories[1], "skills", "upstream", "SKILL.md"), "utf8")).resolves.toBe("# Upstream\n");
 });
 
 describe("skill bundles", () => {
-  it("creates an empty bundle root", async () => {
-    root = await mkdtemp(path.join(tmpdir(), "dcc-skill-bundle-"));
+  test("creates an empty bundle root", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "dcc-skill-bundle-"));
+    directories.push(root);
     const bundle = await materializeSkillBundle("00000000-0000-0000-0000-000000000000", [], root);
-    await expect(access(bundle)).resolves.toBeUndefined();
+    await expect(access(bundle.additionalDirectory)).resolves.toBeUndefined();
   });
 });
