@@ -141,7 +141,7 @@ describe("createConflictResolutionWorktree / mergeBaseIntoWorktree", () => {
       await cloneRepo(originDir, repoDir);
 
       const dataRoot = path.join(tmp, "data-root");
-      const { worktreePath } = await createConflictResolutionWorktree({
+      const { worktreePath, headCommit } = await createConflictResolutionWorktree({
         repositoryPath: repoDir,
         headBranch: "feature",
         baseBranch: "main",
@@ -152,6 +152,8 @@ describe("createConflictResolutionWorktree / mergeBaseIntoWorktree", () => {
 
       const merge = await mergeBaseIntoWorktree(worktreePath, "main");
       expect(merge.conflicted).toBe(false);
+      expect(merge.headCommit).not.toBe(headCommit);
+      expect(merge.headCommit).toBe((await git(worktreePath, ["rev-parse", "HEAD"])).stdout.trim());
       expect(await conflictedFiles(worktreePath)).toEqual([]);
       expect((await git(worktreePath, ["log", "-1", "--pretty=%s"])).stdout.trim()).toBe("main advances");
     } finally {

@@ -303,9 +303,10 @@ export async function createPullRequestReviewWorktree(input: {
 export async function mergeBaseIntoWorktree(worktreePath: string, baseBranch: string) {
   try {
     await git(worktreePath, ["merge", `origin/${baseBranch}`, "--no-edit"]);
-    return { conflicted: false };
+    const headCommit = (await git(worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+    return { conflicted: false as const, headCommit };
   } catch {
-    return { conflicted: true };
+    return { conflicted: true as const };
   }
 }
 
