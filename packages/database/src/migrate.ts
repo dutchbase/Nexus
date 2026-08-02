@@ -43,10 +43,13 @@ export async function migrate(input: { connectionString?: string; directory?: st
     await client.connect();
     await client.query("SELECT pg_advisory_lock($1)", [advisoryLock]);
     locked = true;
+    const schemaMigrations = await client.query<{ name: string | null }>("SELECT to_regclass($q$schema_migrations$q$)::text AS name");
+    const appliedNames = schemaMigrations.rows[0].name
+      ? (await client.query<{ name: string }>("SELECT name FROM schema_migrations")).rows.map((row) => row.name)
+      : [];
+    validateMigrations(names, appliedNames);
     await client.query("CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())");
     await client.query("CREATE TABLE IF NOT EXISTS migration_attempts (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, migration_name text NOT NULL, status text NOT NULL CHECK (status IN ($running$, $applied$, $failed$)), started_at timestamptz NOT NULL DEFAULT now(), finished_at timestamptz, error_text text)");
-    const appliedNames = (await client.query<{ name: string }>("SELECT name FROM schema_migrations")).rows.map((row) => row.name);
-    validateMigrations(names, appliedNames);
 
     for (const name of names) {
       if (appliedNames.includes(name) || appliedNames.includes(legacyAppliedNames[name])) continue;
