@@ -11,12 +11,13 @@ for variable in DATABASE_URL DCC_RESTORE_DATABASE_URL DCC_RESTORE_HEALTH_URL; do
     exit 1
   fi
 done
-
 database_identity() {
-  node -e 'const url = new URL(process.argv[1]); console.log(url.hostname + ":" + (url.port || "5432") + "/" + decodeURIComponent(url.pathname))' "$1"
+  psql "$1" --quiet --tuples-only --no-align --command "SELECT current_database() || '|' || COALESCE(inet_server_addr()::text,'local') || '|' || COALESCE(inet_server_port()::text,'local');"
 }
 
-if [ "$(database_identity "$DATABASE_URL")" = "$(database_identity "$DCC_RESTORE_DATABASE_URL")" ]; then
+primary_database_identity="$(database_identity "$DATABASE_URL")"
+restore_database_identity="$(database_identity "$DCC_RESTORE_DATABASE_URL")"
+if [ "$primary_database_identity" = "$restore_database_identity" ]; then
   echo "DCC_RESTORE_DATABASE_URL must identify a different disposable database" >&2
   exit 1
 fi
@@ -42,6 +43,11 @@ manifest_sha256="$(sha256sum "$manifest" | awk '{print $1}')"
 (cd "$backup_directory" && sha256sum --check --status "manifest-v1.sha256")
 step="restore"
 pg_restore --clean --if-exists --no-owner --dbname="$DCC_RESTORE_DATABASE_URL" "$backup_directory/database.dump"
+step="verify"
+if [ "$(database_identity "$DCC_RESTORE_DATABASE_URL")" != "$restore_database_identity" ]; then
+  echo "DCC_RESTORE_DATABASE_URL changed target during restore" >&2
+  exit 1
+fi
 step="health"
 curl --fail --silent --show-error "$DCC_RESTORE_HEALTH_URL"
 step=""

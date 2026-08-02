@@ -1,5 +1,5 @@
 import { statfsSync } from "node:fs";
-import { resolve } from "node:path";
+import { artifactDataRoot } from "../../../../packages/database/src/artifacts.ts";
 import { escapeHtml, pool, shortRef } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { forbiddenClaudeAuthVariables } from "../../../../packages/claude-runner/src/auth-guard.ts";
@@ -133,7 +133,7 @@ async function systemBody(): Promise<string> {
 
   let diskCard: string;
   try {
-    const stats = statfsSync(resolve(process.env.DCC_DATA_DIR ?? "data"));
+    const stats = statfsSync(artifactDataRoot(process.cwd()));
     const total = Number(stats.blocks) * Number(stats.bsize);
     const free = Number(stats.bfree) * Number(stats.bsize);
     const usedPct = total > 0 ? Math.round(((total - free) / total) * 100) : 0;

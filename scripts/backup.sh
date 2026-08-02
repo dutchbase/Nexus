@@ -8,7 +8,7 @@ fi
 
 backup_directory="${DCC_BACKUP_DIRECTORY:-data/backups}"
 retention_days="${DCC_BACKUP_RETENTION_DAYS:-30}"
-data_directory="${DCC_DATA_DIR:-data}"
+data_directory="${DCC_DATA_DIR:-${DCC_DATA_ROOT:-.}/data}"
 config_directory="${DCC_CONFIG_DIR:-config}"
 
 if ! [[ "$retention_days" =~ ^[1-9][0-9]*$ ]]; then

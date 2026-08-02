@@ -51,6 +51,13 @@ printf 'curl %s\\n' "$*" >> "$DCC_TEST_COMMAND_LOG"
   await shellTool(bin, "psql", `#!/usr/bin/env bash
 set -euo pipefail
 printf 'psql %s\\n' "$*" >> "$DCC_TEST_COMMAND_LOG"
+if [[ "$*" == *"SELECT current_database()"* ]]; then
+  if [ "$1" = "$DATABASE_URL" ]; then
+    printf '%s\\n' "\${DCC_TEST_PRIMARY_DATABASE_IDENTITY:-dcc_primary|127.0.0.1|5432}"
+  else
+    printf '%s\\n' "\${DCC_TEST_RESTORE_DATABASE_IDENTITY:-dcc_restore|127.0.0.1|5433}"
+  fi
+fi
 `);
   return {
     root, backups, commandLog,
@@ -113,6 +120,20 @@ describe("backup and recovery drill", () => {
     await expect(readFile(test.commandLog, "utf8")).resolves.toContain("pg_dump postgresql://primary:primary@127.0.0.1:5432/dcc_primary --format=custom");
   });
 
+  it("backs up the shared data directory from DCC_DATA_ROOT when DCC_DATA_DIR is unset", async () => {
+    const test = await fixture();
+    const dataRoot = join(test.root, "shared-state");
+    const sharedData = join(dataRoot, "data");
+    await mkdir(sharedData, { recursive: true });
+    await writeFile(join(sharedData, "artifact-from-data-root.txt"), "shared artifact");
+    const env = { ...test.env, DCC_DATA_DIR: undefined, DCC_DATA_ROOT: dataRoot };
+
+    expect(run("scripts/backup.sh", [], env).status).toBe(0);
+
+    const backup = await newestBackup(test.backups);
+    await expect(readFile(join(backup, "data", "artifact-from-data-root.txt"), "utf8")).resolves.toBe("shared artifact");
+  });
+
   it("uses only explicit restore targets and records a successful recovery verification", async () => {
     const test = await fixture();
     expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
@@ -127,6 +148,25 @@ describe("backup and recovery drill", () => {
     expect(log).toContain("psql postgresql://primary:primary@127.0.0.1:5432/dcc_primary");
     expect(log).toContain("backup_recovery_verifications");
     expect(log).toContain("passed");
+  });
+
+  it("refuses a restore target that resolves to the primary database despite different URLs", async () => {
+    const test = await fixture();
+    expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
+    const backup = await newestBackup(test.backups);
+    const env = {
+      ...test.env,
+      DATABASE_URL: "postgresql://primary@primary-alias:5432/primary",
+      DCC_RESTORE_DATABASE_URL: "postgresql://restore@restore-alias:5432/restore",
+      DCC_TEST_PRIMARY_DATABASE_IDENTITY: "primary|10.0.0.8|5432",
+      DCC_TEST_RESTORE_DATABASE_IDENTITY: "primary|10.0.0.8|5432",
+    };
+
+    const result = run("scripts/restore-drill.sh", [backup], env);
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("different disposable database");
+    expect(await readFile(test.commandLog, "utf8")).not.toContain("pg_restore");
   });
 
   it("does not restore a corrupt backup and records the failed verification", async () => {
