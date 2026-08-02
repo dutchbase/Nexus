@@ -23,7 +23,8 @@ import {
 } from "@dcc/github-provider";
 import { validateProject } from "@dcc/project-config";
 import {
-  materializeSkillBundle, resolveSkills, snapshotSkills, type ResolutionSource, type SkillCandidate,
+  materializeSkillBundle, resolveSkills, skillsForPhase, snapshotSkillSet,
+  type ResolutionSource, type SkillCandidate, type ResolvedSkill, type SnapshottedSkill,
 } from "@dcc/skill-registry";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 
@@ -129,6 +130,32 @@ async function resolvedSkillsFor(ticket: any, phase: "planning" | "execution" | 
   return resolveSkills(candidates, ticket.project_id, phase);
 }
 
+function unionSkills(...sets: ResolvedSkill[][]) {
+  const union = new Map<string, ResolvedSkill>();
+  for (const skill of sets.flat()) {
+    const existing = union.get(skill.id);
+    if (!existing) {
+      union.set(skill.id, { ...skill, resolution_sources: [...skill.resolution_sources] });
+      continue;
+    }
+    for (const source of skill.resolution_sources) {
+      if (!existing.resolution_sources.includes(source)) existing.resolution_sources.push(source);
+    }
+  }
+  return [...union.values()];
+}
+
+function taskBriefPlan(approvedPlan: string) {
+  if (!/^## 1\. Summary\b/m.test(approvedPlan) || !/^## 17\. Open Questions\b/m.test(approvedPlan)) return approvedPlan;
+  return `## Task 1: Implement the approved legacy plan\n\n${approvedPlan}`;
+}
+
+function isAgentToolEvent(eventType: string, event: any) {
+  const toolUses = [event, event?.content_block, ...(Array.isArray(event?.message?.content) ? event.message.content : [])];
+  return (eventType === "tool_use" || toolUses.some((item) => item?.type === "tool_use"))
+    && toolUses.some((item) => item?.name === "Agent");
+}
+
 async function resolvedPrompt(promptType: string, projectId: string) {
   return (await pool.query(
     `SELECT pf.active_version_id,pv.content FROM prompt_files pf
@@ -157,9 +184,9 @@ function renderTemplate(content: string, values: Record<string, unknown>) {
 async function planningInputs(ticket: any) {
   const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
   if (!project?.enabled) throw new Error("project is missing or disabled");
-  const [base, planning, skills] = await Promise.all([
+  const [base, planning, skills, executionSkills, repairSkills] = await Promise.all([
     resolvedPrompt("base", project.id), resolvedPrompt("planning", project.id),
-    resolvedSkillsFor(ticket),
+    resolvedSkillsFor(ticket), resolvedSkillsFor(ticket, "execution"), resolvedSkillsFor(ticket, "repair"),
   ]);
   const ai = resolveAiConfiguration({
     phase: "planning",
@@ -208,7 +235,7 @@ async function planningInputs(ticket: any) {
     ].join("\n\n"),
     outputConstraints: "Planning is read-only. Do not edit or write repository files, commit, push, create branches, or open pull requests.",
   });
-  return { project, ai, skills, promptVersionIds, content };
+  return { project, ai, skills, skillUnion: unionSkills(skills, executionSkills, repairSkills), promptVersionIds, content };
 }
 
 async function executionInputs(ticket: any, phase: "execution" | "repair", approvedPlan: string, details: {
@@ -218,14 +245,13 @@ async function executionInputs(ticket: any, phase: "execution" | "repair", appro
   currentDiff?: string;
   validationOutput?: unknown;
   administratorFeedback?: string;
-}) {
+}, skills: SnapshottedSkill[]) {
   const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
   if (!project?.enabled) throw new Error("project is missing or disabled");
-  const [base, execution, repair, skills] = await Promise.all([
+  const [base, execution, repair] = await Promise.all([
     resolvedPrompt("base", project.id),
     resolvedPrompt("execution", project.id),
     phase === "repair" ? resolvedPrompt("execution-repair", project.id) : Promise.resolve({ active_version_id: null, content: "" }),
-    resolvedSkillsFor(ticket, phase),
   ]);
   const ai = resolveAiConfiguration({
     phase,
@@ -255,9 +281,9 @@ async function executionInputs(ticket: any, phase: "execution" | "repair", appro
     projectTestingInstructions: "",
     resolvedAiConfiguration: ai,
     resolvedSkills: skills.map((skill) => ({
-      id: skill.id, slug: skill.slug, version: skill.version, resolution_sources: skill.resolution_sources,
+      id: skill.skill_id, slug: skill.slug, version: skill.version, resolution_sources: skill.resolution_sources,
     })),
-    exactApprovedPlan: approvedPlan,
+    exactApprovedPlan: taskBriefPlan(approvedPlan),
     worktreeDetails: {
       path: details.worktreePath, branch: details.branchName, base_commit: details.baseCommit,
     },
@@ -416,7 +442,7 @@ async function runPlanning(job: any) {
   );
   await transitionToPlanning(ticket.id, job.id, runId);
 
-  const copied = await snapshotSkills(input.skills, "planning");
+  const copied = await snapshotSkillSet(input.skillUnion, ["planning", "execution", "repair"]);
   const skillSnapshot = (await pool.query(
     `INSERT INTO skill_snapshots (ticket_id,run_id,skills_json,content_hash) VALUES ($1,$2,$3,$4) RETURNING *`,
     [ticket.id, runId, JSON.stringify(copied.skills), copied.contentHash],
@@ -442,7 +468,7 @@ async function runPlanning(job: any) {
   try {
     const promptFile = path.join(temporary, "planning-prompt.md");
     await writeFile(promptFile, completePrompt, { flag: "wx" });
-    const skillBundle = await materializeSkillBundle(runId, copied.skills, process.env.DCC_DATA_ROOT ?? REPO_ROOT);
+    const skillBundle = await materializeSkillBundle(runId, skillsForPhase(copied.skills, "planning"), process.env.DCC_DATA_ROOT ?? REPO_ROOT);
     const scenarioKey = ["mock", "scenario", "path"].join("_");
     const result = await invokePlanningClaude({
       task: revising
@@ -519,6 +545,15 @@ async function runExecution(job: any) {
   if (gate.planVersion.id !== job.payload_json.plan_version_id) {
     throw new Error("execution gate approved a different plan version");
   }
+  const phase = repairing ? "repair" : "execution";
+  const approvedSnapshot = (await pool.query(
+    "SELECT id,skills_json FROM skill_snapshots WHERE id=$1 AND ticket_id=$2",
+    [ticket.approved_skill_snapshot_id, ticket.id],
+  )).rows[0];
+  if (!approvedSnapshot || !Array.isArray(approvedSnapshot.skills_json)) {
+    throw new Error("approved skill snapshot is unavailable");
+  }
+  const phaseSkills = skillsForPhase(approvedSnapshot.skills_json, phase);
   const attempt = (await pool.query(
     `SELECT ea.*,pv.content_markdown
      FROM execution_attempts ea
@@ -596,7 +631,7 @@ async function runExecution(job: any) {
     validationOutput: repairing ? job.payload_json.validation_output : undefined,
     administratorFeedback: repairing ? job.payload_json.feedback : undefined,
   };
-  const input = await executionInputs(ticket, repairing ? "repair" : "execution", attempt.content_markdown, details);
+  const input = await executionInputs(ticket, phase, attempt.content_markdown, details, phaseSkills);
   await pool.query(
     `INSERT INTO agent_runs
      (id,ticket_id,project_id,run_type,status,model,reasoning_level,working_directory,started_at,metadata_json)
@@ -626,22 +661,6 @@ async function runExecution(job: any) {
     await enqueueNotification(client, "execution.started", ticket.id, runId, { runId });
   });
 
-  // Skill content is immutable once the plan is approved (PRD §13.8): reuse
-  // the earliest snapshot captured for this ticket (taken when planning
-  // started, before any approval) rather than re-reading skill files from
-  // disk again here, which could pick up edits made after approval.
-  const priorSnapshot = (await pool.query(
-    "SELECT skills_json,content_hash FROM skill_snapshots WHERE ticket_id=$1 ORDER BY created_at ASC LIMIT 1",
-    [ticket.id],
-  )).rows[0];
-  const copied = priorSnapshot
-    ? { skills: priorSnapshot.skills_json, contentHash: priorSnapshot.content_hash }
-    : await snapshotSkills(input.skills, repairing ? "repair" : "execution");
-  const skillSnapshot = (await pool.query(
-    `INSERT INTO skill_snapshots (ticket_id,run_id,skills_json,content_hash)
-     VALUES ($1,$2,$3,$4) RETURNING *`,
-    [ticket.id, runId, JSON.stringify(copied.skills), copied.contentHash],
-  )).rows[0];
   const promptSnapshot = await snapshotPrompt({
     ticketId: ticket.id,
     projectId: input.project.id,
@@ -649,7 +668,7 @@ async function runExecution(job: any) {
     content: input.content,
     model: input.ai.model,
     reasoningLevel: input.ai.reasoning_level,
-    skillSnapshotId: skillSnapshot.id,
+    skillSnapshotId: approvedSnapshot.id,
     metadata: {
       promptVersionIds: input.promptVersionIds,
       projectConfigVersion: input.project.config_version,
@@ -660,7 +679,7 @@ async function runExecution(job: any) {
   });
   await pool.query(
     "UPDATE agent_runs SET prompt_snapshot_id=$2,skill_snapshot_id=$3 WHERE id=$1",
-    [runId, promptSnapshot.id, skillSnapshot.id],
+    [runId, promptSnapshot.id, approvedSnapshot.id],
   );
 
   const temporary = await mkdtemp(path.join(tmpdir(), "dcc-execution-"));
@@ -671,10 +690,11 @@ async function runExecution(job: any) {
     if (row?.status === "cancellation_requested") cancellation.abort();
   }, 250);
   let sequence = 0;
+  let usedAgent = false;
   try {
     const promptFile = path.join(temporary, "execution-prompt.md");
     await writeFile(promptFile, input.content, { flag: "wx" });
-    const skillBundle = await materializeSkillBundle(runId, copied.skills, process.env.DCC_DATA_ROOT ?? REPO_ROOT);
+    const skillBundle = await materializeSkillBundle(runId, phaseSkills, process.env.DCC_DATA_ROOT ?? REPO_ROOT);
     const scenarioKey = ["mock", "scenario", "path"].join("_");
     const result = await invokeExecutionClaude({
       task: repairing
@@ -694,6 +714,7 @@ async function runExecution(job: any) {
       timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 30 * 60 * 1000),
       signal: cancellation.signal,
       onEvent: async ({ eventType, event }) => {
+        usedAgent ||= isAgentToolEvent(eventType, event);
         sequence += 1;
         await pool.query(
           `INSERT INTO agent_run_events (agent_run_id,sequence,event_type,event_json)
@@ -702,6 +723,7 @@ async function runExecution(job: any) {
         );
       },
     });
+    if (!repairing && !usedAgent) throw new Error("execution did not invoke Agent tool");
     await pool.query(
       `UPDATE agent_runs
        SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3 WHERE id=$1`,
@@ -781,7 +803,7 @@ async function runExecution(job: any) {
     await publishExecutionAttempt({
       attempt: { ...attempt, ...worktree, worktree_path: worktree.worktreePath, branch_name: worktree.branchName },
       ticket, project: input.project, runId, jobId: job.id,
-      planMarkdown: attempt.content_markdown, skills: copied.skills.map((skill: any) => skill.slug),
+      planMarkdown: attempt.content_markdown, skills: phaseSkills.map((skill) => skill.slug),
       validationResults: validation.results, changedFiles: validation.files,
     });
   } catch (error) {
