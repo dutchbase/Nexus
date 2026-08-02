@@ -287,7 +287,7 @@ The drill verifies the manifest before it calls pg_restore, restores only to the
 
 ## Recovery integration test
 
-`scripts/backup.integration.test.ts` is intentionally skipped unless **both** `DCC_TEST_DATABASE_URL` and `DCC_TEST_RESTORE_DATABASE_URL` are set. A CI job that runs it must provide distinct, disposable databases; the restore database must allow `ALTER DATABASE` and is marked `dcc.restore_disposable=true` by the test. These variables never default to `DATABASE_URL` or a production target.
+`scripts/backup.integration.test.ts` is intentionally skipped unless **both** `DCC_TEST_DATABASE_URL` and `DCC_TEST_RESTORE_DATABASE_URL` are set. A CI job that runs it must provide distinct, disposable databases; the restore database must already be marked `dcc.restore_disposable=true`; the test refuses unmarked targets before any reset. These variables never default to `DATABASE_URL` or a production target.
 
 ## Troubleshooting
 

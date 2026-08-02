@@ -28,6 +28,17 @@ if [ "$restore_database_disposable" != "true" ]; then
   exit 1
 fi
 
+restore_database_fingerprint="$(node -e 'const { createHash } = require("node:crypto"); process.stdout.write(createHash("sha256").update(process.argv[1]).digest("hex"));' "$restore_database_identity")"
+step="preflight"
+if ! health_database_identity="$(curl --fail --silent --show-error "$DCC_RESTORE_HEALTH_URL" | node -e 'let body=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => body += chunk); process.stdin.on("end", () => { const identity = JSON.parse(body).database_identity; if (typeof identity !== "string" || !identity) process.exit(1); process.stdout.write(identity); });')"; then
+  echo "health endpoint must expose a database identity" >&2
+  exit 1
+fi
+if [ "$health_database_identity" != "$restore_database_fingerprint" ]; then
+  echo "health endpoint is connected to a different database" >&2
+  exit 1
+fi
+step=""
 backup_directory="$(cd "$1" && pwd -P)"
 manifest="$backup_directory/manifest-v1.sha256"
 manifest_sha256=""
@@ -54,15 +65,7 @@ if [ "$(database_identity "$DCC_RESTORE_DATABASE_URL")" != "$restore_database_id
   echo "DCC_RESTORE_DATABASE_URL changed target during restore" >&2
   exit 1
 fi
-restore_database_fingerprint="$(node -e 'const { createHash } = require("node:crypto"); process.stdout.write(createHash("sha256").update(process.argv[1]).digest("hex"));' "$restore_database_identity")"
 step="health"
-if ! health_database_identity="$(curl --fail --silent --show-error "$DCC_RESTORE_HEALTH_URL" | node -e 'let body=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => body += chunk); process.stdin.on("end", () => { const identity = JSON.parse(body).database_identity; if (typeof identity !== "string" || !identity) process.exit(1); process.stdout.write(identity); });')"; then
-  echo "health endpoint must expose a database identity" >&2
-  exit 1
-fi
-if [ "$health_database_identity" != "$restore_database_fingerprint" ]; then
-  echo "health endpoint is connected to a different database" >&2
-  exit 1
-fi
+curl --fail --silent --show-error "$DCC_RESTORE_HEALTH_URL"
 step=""
 echo "restore drill passed: $backup_directory"

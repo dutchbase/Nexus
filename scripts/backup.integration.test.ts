@@ -14,11 +14,6 @@ const integration = primaryDatabaseUrl && restoreDatabaseUrl ? describe : descri
 const { migrate } = await import("../packages/database/src/migrate.ts");
 const repoRoot = new URL("..", import.meta.url).pathname;
 
-function databaseIdentity(connectionString: string) {
-  const url = new URL(connectionString);
-  return [url.hostname, url.port || "5432", url.pathname].join("|");
-}
-
 async function resetDatabase(connectionString: string) {
   const client = new pg.Client({ connectionString });
   await client.connect();
@@ -29,12 +24,6 @@ async function resetDatabase(connectionString: string) {
   }
 }
 
-function databaseIdentifier(connectionString: string) {
-  const name = decodeURIComponent(new URL(connectionString).pathname.slice(1));
-  if (!name) throw new Error("database name is required");
-  return "\"" + name.replaceAll(String.fromCharCode(34), String.fromCharCode(34).repeat(2)) + "\"";
-}
-
 async function query(connectionString: string, statement: string, values: unknown[] = []) {
   const client = new pg.Client({ connectionString });
   await client.connect();
@@ -43,6 +32,15 @@ async function query(connectionString: string, statement: string, values: unknow
   } finally {
     await client.end();
   }
+}
+
+async function targetIdentity(connectionString: string) {
+  const row = (await query(connectionString, "SELECT current_database() AS name, COALESCE(inet_server_addr()::text, $$local$$) AS address, COALESCE(inet_server_port()::text, $$local$$) AS port")).rows[0];
+  return [row.name, row.address, row.port].join("|");
+}
+
+async function restoreTargetIsDisposable(connectionString: string) {
+  return (await query(connectionString, "SELECT COALESCE(current_setting($$dcc.restore_disposable$$, true), $$false$$) AS value")).rows[0].value === "true";
 }
 
 async function freePort() {
@@ -77,14 +75,17 @@ integration("backup recovery drill integration", () => {
   let healthProcess: ReturnType<typeof spawn> | undefined;
 
   beforeEach(async () => {
-    if (databaseIdentity(primaryDatabaseUrl!) === databaseIdentity(restoreDatabaseUrl!)) {
-      throw new Error("DCC_TEST_RESTORE_DATABASE_URL must identify a distinct disposable database");
-    }
+    const [primaryIdentity, restoreIdentity, restoreDisposable] = await Promise.all([
+      targetIdentity(primaryDatabaseUrl!),
+      targetIdentity(restoreDatabaseUrl!),
+      restoreTargetIsDisposable(restoreDatabaseUrl!),
+    ]);
+    if (primaryIdentity === restoreIdentity) throw new Error("DCC_TEST_RESTORE_DATABASE_URL must identify a distinct disposable database");
+    if (!restoreDisposable) throw new Error("DCC_TEST_RESTORE_DATABASE_URL must be pre-marked dcc.restore_disposable=true");
     await resetDatabase(primaryDatabaseUrl!);
     await resetDatabase(restoreDatabaseUrl!);
     await migrate({ connectionString: primaryDatabaseUrl! });
     await migrate({ connectionString: restoreDatabaseUrl! });
-    await query(restoreDatabaseUrl!, `ALTER DATABASE ${databaseIdentifier(restoreDatabaseUrl!)} SET dcc.restore_disposable = true`);
     root = await mkdtemp(join(tmpdir(), "dcc-backup-integration-"));
     await Promise.all([mkdir(join(root, "data")), mkdir(join(root, "config"))]);
   }, 30_000);

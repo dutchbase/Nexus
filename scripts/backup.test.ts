@@ -47,6 +47,7 @@ printf 'pg_restore %s\\n' "$*" >> "$DCC_TEST_COMMAND_LOG"
   await shellTool(bin, "curl", `#!/usr/bin/env bash
 set -euo pipefail
 printf "curl %s\n" "$*" >> "$DCC_TEST_COMMAND_LOG"
+if [ "\${DCC_TEST_HEALTH_UNREACHABLE:-false}" = "true" ]; then exit 7; fi
 printf "{\\"status\\":\\"ok\\",\\"database_identity\\":\\"%s\\"}\n" "\${DCC_TEST_HEALTH_DATABASE_IDENTITY:-1639b9318a3b6e0d3c7ac28cc33e5cebd5adcf7919669ad672453e235f6f181a}"
 `);
   await shellTool(bin, "psql", `#!/usr/bin/env bash
@@ -166,7 +167,18 @@ describe("backup and recovery drill", () => {
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("health endpoint");
-    expect(await readFile(test.commandLog, "utf8")).toContain("failed");
+    expect(await readFile(test.commandLog, "utf8")).not.toContain("pg_restore");
+  });
+
+  it("does not restore when the required health endpoint is unreachable", async () => {
+    const test = await fixture();
+    expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
+    const backup = await newestBackup(test.backups);
+
+    const result = run("scripts/restore-drill.sh", [backup], { ...test.env, DCC_TEST_HEALTH_UNREACHABLE: "true" });
+
+    expect(result.status).not.toBe(0);
+    expect(await readFile(test.commandLog, "utf8")).not.toContain("pg_restore");
   });
 
   it("refuses an explicit restore target that is not marked disposable", async () => {
