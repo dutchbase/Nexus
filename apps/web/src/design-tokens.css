@@ -86,6 +86,7 @@ textarea { resize:vertical }
 .tickets7.list-head,.tickets7.ticket-row { grid-template-columns:110px minmax(220px,3fr) 1.2fr 1fr 1.1fr 1.3fr .8fr }
 .runs-head,.runs-row { grid-template-columns:90px 1.4fr 1fr .9fr 1fr 110px }
 .prs-head,.prs-row { grid-template-columns:70px minmax(200px,3fr) 1.1fr .9fr 1.1fr 1fr .8fr 52px }
+.prs-card { overflow:visible }
 .prs-row { position:relative }
 .pr-row-link { position:absolute;inset:0;z-index:0 }
 .prs-row > :not(.pr-row-link) { position:relative;z-index:1;pointer-events:none }

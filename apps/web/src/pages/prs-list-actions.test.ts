@@ -11,6 +11,8 @@ describe("pull request list actions", () => {
     expect(page).toContain("data-pr-list-approve");
     expect(page).toContain("data-pr-list-ai-review-merge");
     expect(page).toContain('class="pr-row-link"');
+    expect(page).toContain("<span>Merge Status</span>");
+    expect(page).toContain('class="card prs-card"');
     expect(page).not.toContain('return `<a class="ticket-row prs-row"');
     expect(script).toContain("async function listPrAction");
   });
