@@ -141,7 +141,12 @@ integration("migrate", () => {
     try {
       const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ($q$project$q$,$q$Project$q$,$q$/tmp/project$q$) RETURNING id")).rows[0].id;
       const ticketId = (await client.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$T-1$q$,$1,$q$Ticket$q$,$q$Cancelled$q$) RETURNING id", [projectId])).rows[0].id;
+      await client.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$T-2$q$,$1,$q$Ticket$q$,$q$Needs Information$q$)", [projectId]);
+      await client.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$T-3$q$,$1,$q$Ticket$q$,$q$Archived$q$)", [projectId]);
       await client.query("INSERT INTO jobs (type,status,idempotency_key) VALUES ($q$test$q$,$q$cancelled$q$,$q$cancelled-job$q$)");
+      await client.query("INSERT INTO jobs (type,status,idempotency_key) VALUES ($q$test$q$,$q$blocked_auth$q$,$q$blocked-auth-job$q$)");
+      await client.query("INSERT INTO jobs (type,status,idempotency_key) VALUES ($q$test$q$,$q$blocked_auth_configuration$q$,$q$blocked-auth-configuration-job$q$)");
+      await client.query("INSERT INTO agent_runs (status) VALUES ($q$timed_out$q$)");
       const planId = (await client.query("INSERT INTO plans (ticket_id) VALUES ($1) RETURNING id", [ticketId])).rows[0].id;
       const planVersionId = (await client.query("INSERT INTO plan_versions (plan_id,version,content_markdown,content_hash) VALUES ($1,1,$q$x$q$,encode(digest($q$x$q$,$q$sha256$q$),$q$hex$q$)) RETURNING id", [planId])).rows[0].id;
       await client.query("INSERT INTO execution_attempts (ticket_id,plan_version_id,attempt_number,validation_status) VALUES ($1,$2,1,$q$cancelled$q$)", [ticketId, planVersionId]);
