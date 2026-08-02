@@ -29,3 +29,35 @@ pnpm exec vitest run packages/git-runner/src/index.test.ts apps/worker/src/task-
 
 3 files passed, 16 tests passed.
 ```
+
+## Review fix — final staged safety scan
+
+- After `git add --all`, commit validation now always scans protected paths and
+  existing blobs from the final index. With a recorded base, the scan covers the
+  complete base-to-index snapshot, including agent-owned commits; HEAD-to-index
+  changes still determine whether the worker creates another commit.
+- Deleted paths remain subject to protected-path validation but are omitted from
+  blob content scanning because they have no index blob.
+
+Red:
+
+```text
+pnpm exec vitest run packages/git-runner/src/index.test.ts -t "rescans base-aware committed blobs after staging worker changes"
+
+1 failed: commitExecutionChanges resolved instead of rejecting the injected
+credential in a base-aware committed blob.
+```
+
+Green:
+
+```text
+pnpm exec vitest run packages/git-runner/src/index.test.ts apps/worker/src/task-6.test.ts
+
+2 files passed, 13 tests passed.
+
+pnpm exec tsc --noEmit
+exit 0
+
+git diff --check
+exit 0
+```

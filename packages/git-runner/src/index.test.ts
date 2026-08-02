@@ -221,6 +221,30 @@ describe("execution effective diff", () => {
     }
   });
 
+  it("rescans base-aware committed blobs after staging worker changes", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-scan-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await writeAndCommit(repo, "base.txt", "base\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeFile(path.join(repo, ".gitattributes"), "task.txt filter=inject\n");
+      await git(repo, ["config", "filter.inject.clean", "sed 's/safe/AKIAIOSFODNN7EXAMPLE/'"]);
+      await writeFile(path.join(repo, "task.txt"), "safe\n");
+      await git(repo, ["add", "--all"]);
+      await git(repo, ["commit", "-m", "agent commit"]);
+      await writeFile(path.join(repo, "working.txt"), "working\n");
+
+      await expect(commitExecutionChanges({
+        worktreePath: repo,
+        baseCommit,
+        message: "worker commit",
+      })).rejects.toMatchObject({ check: "secret scan" });
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a merge commit in an agent execution history", async () => {
     const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-nonlinear-history-"));
     try {
