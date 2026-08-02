@@ -42,8 +42,12 @@ test("snapshots phase metadata, keeps legacy skills in every phase, and material
   const bundle = await materializeSkillBundle("00000000-0000-0000-0000-000000000001", skillsForPhase(snapshot.skills, "planning"), root);
 
   expect(bundle.additionalDirectory).toBe(path.join(root, "data", "skill-bundles", "00000000-0000-0000-0000-000000000001"));
-  await expect(readFile(path.join(bundle.additionalDirectory, ".claude", "skills", "local", "SKILL.md"), "utf8")).resolves.toBe("# Local\n");
-  expect(bundle.pluginDirectories).toEqual([path.join(bundle.additionalDirectory, "plugins", "superpowers")]);
-  await expect(readFile(path.join(bundle.pluginDirectories[0], ".claude-plugin", "plugin.json"), "utf8")).resolves.toContain('"name": "superpowers"');
-  await expect(readFile(path.join(bundle.pluginDirectories[0], "skills", "upstream", "SKILL.md"), "utf8")).resolves.toBe("# Upstream\n");
+  expect(bundle.pluginDirectories).toEqual([
+    path.join(bundle.additionalDirectory, "plugins", "dcc-local"),
+    path.join(bundle.additionalDirectory, "plugins", "superpowers"),
+  ]);
+  await expect(readFile(path.join(bundle.pluginDirectories[0], ".claude-plugin", "plugin.json"), "utf8")).resolves.toContain('"name": "dcc-local"');
+  await expect(readFile(path.join(bundle.pluginDirectories[0], "skills", "local", "SKILL.md"), "utf8")).resolves.toBe("# Local\n");
+  await expect(readFile(path.join(bundle.pluginDirectories[1], ".claude-plugin", "plugin.json"), "utf8")).resolves.toContain('"name": "superpowers"');
+  await expect(readFile(path.join(bundle.pluginDirectories[1], "skills", "upstream", "SKILL.md"), "utf8")).resolves.toBe("# Upstream\n");
 });

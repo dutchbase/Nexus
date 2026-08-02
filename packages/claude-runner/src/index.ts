@@ -5,7 +5,7 @@ import path from "node:path";
 import { assertSubscriptionOnlyEnvironment, ClaudeAuthError } from "./auth-guard.ts";
 export { assertSubscriptionOnlyEnvironment, ClaudeAuthError, forbiddenClaudeAuthVariables } from "./auth-guard.ts";
 
-async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv } = {}) {
+async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; executable?: string } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "dcc-claude-output-"));
   const stdoutPath = path.join(directory, "stdout");
   const stderrPath = path.join(directory, "stderr");
@@ -13,7 +13,7 @@ async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.P
   const stderrFile = await open(stderrPath, "wx");
   try {
     const exitCode = await new Promise<number | null>((resolve, reject) => {
-      const child = spawn("claude", args, {
+      const child = spawn(options.executable ?? "claude", args, {
         cwd: options.cwd, env: options.env, stdio: ["ignore", stdoutFile.fd, stderrFile.fd],
       });
       child.on("error", reject);
@@ -60,37 +60,42 @@ export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = pro
 
 export type PlanningInvocation = {
   task: string; sessionId: string; model: string; effort: string; promptFile: string;
-  skillBundleDir?: string; pluginDirectories?: readonly string[]; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string; tools?: string[];
+  skillBundleDir?: string; pluginDirectories?: readonly string[]; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string; tools?: string[]; claudeExecutable?: string;
 };
 
 function skillDirectoryArguments(input: PlanningInvocation) {
   return [
-    ...(input.skillBundleDir ? ["--add-dir", input.skillBundleDir] : []),
     ...(input.pluginDirectories ?? []).flatMap((directory) => ["--plugin-dir", directory]),
   ];
 }
 
 function sessionAgents(input: PlanningInvocation) {
+  const disallowedTools = [
+    "Bash(git commit *)", "Bash(git -C * commit *)",
+    "Bash(git push *)", "Bash(git -C * push *)",
+    "Bash(git merge *)", "Bash(git -C * merge *)",
+    "Bash(gh pr create *)", "Bash(glab mr create *)",
+  ];
   return JSON.stringify({
     "dcc-mechanical": {
       description: "Handles small mechanical implementation tasks.",
       prompt: "Complete only the assigned mechanical task. Do not commit, push, merge, or create a pull request.",
-      model: "haiku", effort: "low", tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
+      model: "haiku", effort: "low", tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], disallowedTools,
     },
     "dcc-implementer": {
       description: "Implements an independently scoped plan task.",
       prompt: "Implement only the assigned task and report validation. Do not commit, push, merge, or create a pull request.",
-      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
+      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], disallowedTools,
     },
     "dcc-repair": {
       description: "Traces and repairs a focused failure.",
       prompt: "Reproduce and repair only the assigned root cause. Do not commit, push, merge, or create a pull request.",
-      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"],
+      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], disallowedTools,
     },
     "dcc-reviewer": {
       description: "Reviews assigned code without modifying it.",
       prompt: "Review the assigned change read-only. Do not edit files, run Bash, commit, push, merge, or create a pull request.",
-      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep"],
+      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep"], disallowedTools,
     },
   });
 }
@@ -129,7 +134,7 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   assertSubscriptionOnlyEnvironment();
   const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken, AGENT_CONTROL_DISABLE: "1" };
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
-  const result = await runClaude(buildPlanningArguments(input), { cwd: input.workingDirectory, env });
+  const result = await runClaude(buildPlanningArguments(input), { cwd: input.workingDirectory, env, executable: input.claudeExecutable });
   if (result.exitCode !== 0) {
     throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), { exitCode: result.exitCode });
   }
@@ -168,7 +173,7 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
   await appendFile(input.logPath, "");
   return new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
-    const child = spawn("claude", buildExecutionArguments(input), {
+    const child = spawn(input.claudeExecutable ?? "claude", buildExecutionArguments(input), {
       cwd: input.workingDirectory,
       env,
       stdio: ["ignore", "pipe", "pipe"],

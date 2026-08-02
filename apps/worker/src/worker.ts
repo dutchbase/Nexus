@@ -141,6 +141,15 @@ async function resolvedPrompt(promptType: string, projectId: string) {
   )).rows[0] ?? { active_version_id: null, content: "" };
 }
 
+async function resolvedGlobalPrompt(promptType: string) {
+  return (await pool.query(
+    `SELECT pf.active_version_id,pv.content FROM prompt_files pf
+     LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id
+     WHERE pf.scope='global' AND pf.project_id IS NULL AND pf.prompt_type=$1 AND pf.active_version_id IS NOT NULL`,
+    [promptType],
+  )).rows[0] ?? { active_version_id: null, content: "" };
+}
+
 function renderTemplate(content: string, values: Record<string, unknown>) {
   return content.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_match, key: string) => String(values[key] ?? ""));
 }
@@ -1068,13 +1077,16 @@ async function runPrAiReview(job: any) {
     const model = payload.model ?? settings.default_model;
     const reasoningLevel = payload.reasoning_level ?? settings.default_reasoning_level;
 
-    const promptRow = await resolvedPrompt("pr-review", project.id);
+    const [promptRow, reviewRubric] = await Promise.all([
+      resolvedPrompt("pr-review", project.id), resolvedGlobalPrompt("code-reviewer"),
+    ]);
+    if (!reviewRubric.active_version_id) throw new Error("pinned PR-review rubric is not synchronized");
 
     const [owner, repo] = pullRequest.repository.split("/");
     const diff = await getPullRequestDiff(owner, repo, pullRequest.number);
 
     const prompt = renderPrReviewPrompt(promptRow.content ?? "", {
-      superpowersCodeReviewer: await readFile(path.join(REPO_ROOT, "skills", "global", "code-review", "SKILL.md"), "utf8"),
+      superpowersCodeReviewer: reviewRubric.content,
       project: { name: project.name },
       pr: {
         title: pullRequest.title,

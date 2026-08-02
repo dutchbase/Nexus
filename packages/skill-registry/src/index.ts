@@ -189,14 +189,12 @@ export async function materializeSkillBundle(
   const pluginDirectories = new Map<string, string>();
   for (const skill of skills) {
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.slug)) throw new Error(`invalid skill slug: ${skill.slug}`);
-    const pluginName = skill.plugin_name;
+    const pluginName = skill.plugin_name ?? "dcc-local";
     if (pluginName !== null && pluginName !== undefined && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(pluginName)) {
       throw new Error(`invalid plugin name: ${pluginName}`);
     }
-    const skillRoot = pluginName
-      ? path.resolve(bundle, "plugins", pluginName, "skills", skill.slug)
-      : path.resolve(bundle, ".claude", "skills", skill.slug);
-    if (pluginName && !pluginDirectories.has(pluginName)) {
+    const skillRoot = path.resolve(bundle, "plugins", pluginName, "skills", skill.slug);
+    if (!pluginDirectories.has(pluginName)) {
       const pluginDirectory = path.resolve(bundle, "plugins", pluginName);
       await mkdir(path.join(pluginDirectory, ".claude-plugin"), { recursive: true });
       await writeFile(path.join(pluginDirectory, ".claude-plugin", "plugin.json"), `${JSON.stringify({ name: pluginName }, null, 2)}\n`, { flag: "wx" });

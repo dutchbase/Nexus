@@ -8,6 +8,7 @@
       "license": "MIT"
     },
     "vendor_path": "skills/vendor/superpowers",
+    "review_rubric": "skills/requesting-code-review/code-reviewer.md",
     "skills": {
       "planning": ["writing-plans"],
       "execution": ["subagent-driven-development", "test-driven-development", "verification-before-completion"],

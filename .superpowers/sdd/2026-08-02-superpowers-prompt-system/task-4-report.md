@@ -43,3 +43,32 @@ Recorded after commit.
 ## Concerns
 
 None. The pre-existing untracked implementation plan remains excluded.
+
+## Fix round 1
+
+- Local snapshots now materialize as a generated `dcc-local` plugin and every selected skill reaches Claude through repeatable `--plugin-dir` flags; `--add-dir` is no longer used for skills.
+- Added an invocation-level runner test that launches a fixture Claude executable and verifies a materialized local plugin manifest and skill are available through the CLI invocation.
+- Added the exact `obra/superpowers` `v4.1.0` `requesting-code-review/code-reviewer.md` source as `prompts/global/code-reviewer.md`, pinned its source path in the manifest, catalog-hashed it, and load its synchronized global prompt version for PR review rendering.
+- Added `disallowedTools` command patterns to every session-local agent for git commit/push/merge and GitHub/GitLab PR creation, while implementer/repair agents retain Edit, Write, and Bash for normal work and tests.
+
+### TDD evidence
+
+```text
+pnpm exec vitest run packages/skill-registry/src/index.test.ts packages/claude-runner/src/index.test.ts scripts/agent-content.test.ts
+
+5 tests failed as expected: the local plugin did not exist, runner still used --add-dir, agent JSON lacked denials, and the pinned rubric manifest/source were absent.
+```
+
+### Verification
+
+```text
+pnpm exec vitest run packages/skill-registry/src/index.test.ts packages/claude-runner/src/index.test.ts scripts/agent-content.test.ts scripts/superpowers-content.test.ts packages/domain/src/pr-review.test.ts apps/web/src/pages/shared.test.ts
+
+6 files passed, 22 tests passed.
+
+pnpm exec tsc --noEmit
+exit 0
+
+git diff --check
+exit 0
+```
