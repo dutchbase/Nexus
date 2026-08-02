@@ -1707,18 +1707,27 @@ Claude may:
 * run approved package-manager commands;
 * run approved tests;
 * inspect Git status and diff.
+* make local task commits required by SDD and complete local final review.
+
+Execution uses Claude's `auto` permission mode. Hard denials prevent Git
+publication or history/branch rewrites while preserving ordinary local
+implementation commands, including `git add` and `git commit`.
 
 Claude may not:
 
-* commit;
 * push;
 * use GitHub CLI;
 * merge;
-* force-reset;
+* create pull requests;
+* force-reset, rebase, checkout, or switch branches;
 * access secrets;
 * use `sudo`;
-* delete directories recursively;
+* recursively delete `/` or `~`;
 * access unrelated projects.
+
+After validation, the worker alone soft-resets the execution worktree to its
+base, squashes local task commits and remaining changes into one final commit,
+then pushes the branch and creates the pull request.
 
 ## 20.4 Conceptual execution command
 
@@ -1727,8 +1736,9 @@ claude -p \
   --session-id "$SESSION_ID" \
   --model "$MODEL" \
   --effort "$REASONING_LEVEL" \
-  --permission-mode dontAsk \
-  --tools "Read,Glob,Grep,Edit,Write,Bash" \
+  --permission-mode auto \
+  --tools "Read,Glob,Grep,Edit,Write,Bash,Agent,Skill" \
+  --disallowedTools "Bash(git push *),Bash(git merge *),Bash(git reset --hard *),Bash(git rebase *),Bash(git checkout *),Bash(git switch *),Bash(gh *),Bash(sudo *),Bash(rm -rf /),Bash(rm -rf ~)" \
   --append-system-prompt-file "$PROMPT_FILE" \
   --add-dir "$SKILL_BUNDLE_DIR" \
   --output-format stream-json \
@@ -1738,6 +1748,9 @@ claude -p \
 ```
 
 Claude Code currently supports `text`, `json` and `stream-json` output. Streaming output can be used to update the dashboard while a run is active.
+
+Planning remains read-only under `dontAsk`; this execution contract does not
+change planning permissions.
 
 ## 20.5 Validation
 
