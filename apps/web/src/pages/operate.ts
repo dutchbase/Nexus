@@ -96,7 +96,7 @@ function statCard(label: string, value: string, detail: string, tone: string) {
 }
 
 export function backupStatusCards(retentionDays: string | undefined, latest: { status: string; verified_at: string | Date } | null) {
-  const configured = Number.isInteger(Number(retentionDays)) && Number(retentionDays) > 0;
+  const configured = /^[1-9][0-9]*$/.test(retentionDays ?? "");
   const schedule = configured
     ? statCard("Backup schedule", "03:15 Europe/Amsterdam", "retention " + retentionDays + " days · external cron required", "ok")
     : statCard("Backup schedule", "not configured", "Set DCC_BACKUP_RETENTION_DAYS and install the documented external cron", "muted");

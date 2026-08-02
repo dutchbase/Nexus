@@ -56,5 +56,5 @@ copy_tree "$config_directory" "$stage/config"
 mv -- "$stage" "$backup"
 stage=""
 
-find "$backup_directory" -mindepth 1 -maxdepth 1 -type d -name 'dcc-*' -mtime "+$retention_days" -exec rm -rf -- {} +
+find "$backup_directory" -mindepth 1 -maxdepth 1 -type d \( -name "dcc-*" -o -name ".dcc-backup.*" \) -mtime "+$retention_days" -exec rm -rf -- {} +
 echo "backup created: $backup"

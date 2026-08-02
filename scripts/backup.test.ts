@@ -90,11 +90,18 @@ describe("backup and recovery drill", () => {
     const expired = join(test.backups, "dcc-expired");
     await mkdir(expired);
     await utimes(expired, new Date("2020-01-01T00:00:00Z"), new Date("2020-01-01T00:00:00Z"));
+    const staleStage = join(test.backups, ".dcc-backup.interrupted");
+    const freshStage = join(test.backups, ".dcc-backup.recent");
+    await Promise.all([mkdir(staleStage), mkdir(freshStage)]);
+    await utimes(staleStage, new Date("2020-01-01T00:00:00Z"), new Date("2020-01-01T00:00:00Z"));
 
     const result = run("scripts/backup.sh", [], test.env);
 
     expect(result.status).toBe(0);
     const backup = await newestBackup(test.backups);
+    const retainedDirectories = await readdir(test.backups);
+    expect(retainedDirectories).not.toContain(".dcc-backup.interrupted");
+    expect(retainedDirectories).toContain(".dcc-backup.recent");
     await expect(readFile(join(backup, "database.dump"), "utf8")).resolves.toBe("custom dump\n");
     await expect(readFile(join(backup, "data", "artifact.txt"), "utf8")).resolves.toBe("artifact");
     await expect(readFile(join(backup, "config", "projects.yaml"), "utf8")).resolves.toBe("projects: []\n");

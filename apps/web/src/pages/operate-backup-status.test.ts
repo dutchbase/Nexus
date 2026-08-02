@@ -16,4 +16,12 @@ describe("backupStatusCards", () => {
     expect(html).toContain("30 days");
     expect(html).toContain("passed");
   });
+
+  it.each(["30.0", "+30", " 30", "30 "])("treats unsupported retention value %j as not configured", (retentionDays) => {
+    const html = backupStatusCards(retentionDays, null);
+
+    expect(html).toContain("Backup schedule");
+    expect(html).toContain("not configured");
+    expect(html).not.toContain("03:15 Europe/Amsterdam");
+  });
 });
