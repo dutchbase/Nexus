@@ -1,9 +1,10 @@
 import { createHash } from "node:crypto";
+import { execFileSync } from "node:child_process";
 import { lstat, mkdir, readFile, readdir, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-type Manifest = {
+export type SuperpowersManifest = {
   superpowers: {
     repository: string;
     tag: string;
@@ -35,7 +36,21 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 function fail(message: string): never { throw new Error(`invalid Superpowers import: ${message}`); }
 
-function allowedSkills(manifest: Manifest) {
+function strictlyWithin(parent: string, target: string) {
+  const relative = path.relative(parent, target);
+  return relative !== "" && relative !== "." && !relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative);
+}
+
+export function vendorDestination(manifest: SuperpowersManifest, repositoryRoot = root) {
+  const vendorPath = manifest.superpowers.vendor_path;
+  if (typeof vendorPath !== "string" || !vendorPath.trim() || vendorPath === ".") fail("vendor path must name a directory below skills/vendor");
+  const vendorRoot = path.resolve(repositoryRoot, "skills", "vendor");
+  const destination = path.resolve(repositoryRoot, vendorPath);
+  if (!strictlyWithin(vendorRoot, destination)) fail("vendor path must be below the vendor root");
+  return { destination, vendorRoot };
+}
+
+export function allowedSkills(manifest: SuperpowersManifest) {
   const skills = new Map<string, { phases: string[]; inspiration_only: boolean }>();
   for (const [phase, names] of Object.entries(manifest.superpowers.skills ?? {})) {
     if (!Array.isArray(names)) fail(`skills.${phase} must be an array`);
@@ -50,7 +65,7 @@ function allowedSkills(manifest: Manifest) {
   return [...skills.entries()].map(([slug, values]) => ({ slug, phases: values.phases.sort(), inspiration_only: values.inspiration_only })).sort((a, b) => a.slug.localeCompare(b.slug));
 }
 
-async function validate(manifest: Manifest, checkout: string) {
+async function validate(manifest: SuperpowersManifest, checkout: string) {
   const source = manifest?.superpowers?.source;
   if (manifest?.superpowers?.repository !== "obra/superpowers") fail("repository must be obra/superpowers");
   if (!/^v\d+\.\d+\.\d+$/.test(manifest?.superpowers?.tag ?? "")) fail("tag must be a release tag");
@@ -59,6 +74,14 @@ async function validate(manifest: Manifest, checkout: string) {
   if (packageJson.version !== manifest.superpowers.tag.slice(1)) fail("checkout version does not match manifest tag");
   if (packageJson.license !== "MIT") fail("checkout package license is not MIT");
   if (!/^MIT License\b/m.test(await readFile(path.join(checkout, "LICENSE"), "utf8"))) fail("checkout LICENSE is not MIT");
+  try {
+    const head = execFileSync("git", ["-C", checkout, "rev-parse", "--verify", "HEAD"], { encoding: "utf8" }).trim();
+    const tag = execFileSync("git", ["-C", checkout, "rev-parse", "--verify", `refs/tags/${manifest.superpowers.tag}^{commit}`], { encoding: "utf8" }).trim();
+    if (head !== tag) fail("checkout HEAD is not the pinned tag");
+  } catch (error) {
+    if (error instanceof Error && error.message.includes("pinned tag")) throw error;
+    fail("checkout HEAD is not the pinned tag");
+  }
 }
 
 function frontMatter(content: string, field: string) {
@@ -86,7 +109,9 @@ async function copyTree(source: string, destination: string) {
   }
 }
 
-export async function importSuperpowers({ manifest, checkout, destination }: { manifest: Manifest; checkout: string; destination: string }): Promise<SuperpowersCatalog> {
+export async function importSuperpowers({ manifest, checkout, destination, repositoryRoot }: { manifest: SuperpowersManifest; checkout: string; destination: string; repositoryRoot: string }): Promise<SuperpowersCatalog> {
+  const vendorRoot = path.resolve(repositoryRoot, "skills", "vendor");
+  if (!strictlyWithin(vendorRoot, path.resolve(destination))) fail("destination must be below the vendor root");
   await validate(manifest, checkout);
   const selected = allowedSkills(manifest);
   const staging = `${destination}.next`;
@@ -131,10 +156,8 @@ async function main() {
   const checkout = argument("--checkout");
   if (!checkout) throw new Error("usage: tsx scripts/update-superpowers.ts --checkout <tagged-checkout>");
   const manifest = JSON.parse(await readFile(path.join(root, "config", "agent-content.json"), "utf8"));
-  const vendorPath = manifest.superpowers.vendor_path ?? "skills/vendor/superpowers";
-  if (path.isAbsolute(vendorPath) || vendorPath.split(/[\\/]/).includes("..")) throw new Error("invalid vendor path");
-  const destination = path.resolve(root, vendorPath);
-  const catalog = await importSuperpowers({ manifest, checkout: path.resolve(checkout), destination });
+  const { destination } = vendorDestination(manifest);
+  const catalog = await importSuperpowers({ manifest, checkout: path.resolve(checkout), destination, repositoryRoot: root });
   console.log(`imported ${catalog.skills.length} Superpowers skills (${catalog.catalog_hash})`);
 }
 

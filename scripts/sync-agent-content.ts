@@ -3,10 +3,10 @@ import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { inTransaction, pool } from "../packages/database/src/index.ts";
-import type { SuperpowersCatalog } from "./update-superpowers.ts";
+import { allowedSkills, vendorDestination, type SuperpowersCatalog, type SuperpowersManifest } from "./update-superpowers.ts";
 
 type QueryClient = { query(sql: string, values?: unknown[]): Promise<{ rows: any[] }> };
-export type AgentContentCatalog = SuperpowersCatalog & { prompt_hashes: Record<string, string>; prompt_sources: Record<string, string> };
+export type AgentContentCatalog = SuperpowersCatalog & { vendor_path: string; prompt_hashes: Record<string, string>; prompt_sources: Record<string, string> };
 const digest = (value: string) => createHash("sha256").update(value).digest("hex");
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -20,7 +20,23 @@ export async function buildAgentContentCatalog({ root: contentRoot = root, manif
     prompt_hashes[promptType] = digest(prompt_sources[promptType]);
   }
   const source = { repository: manifest.superpowers?.repository ?? "obra/superpowers", tag: manifest.superpowers?.tag, license: manifest.superpowers?.source?.license ?? "MIT" };
-  return { catalog_hash: digest(JSON.stringify({ source, skills, prompt_hashes })), source, skills, prompt_hashes, prompt_sources };
+  return { catalog_hash: digest(JSON.stringify({ source, skills, prompt_hashes })), source, skills, vendor_path: manifest.superpowers?.vendor_path ?? "skills/vendor/superpowers", prompt_hashes, prompt_sources };
+}
+
+export function verifyImportedCatalog(manifest: SuperpowersManifest, catalog: SuperpowersCatalog) {
+  const source = { repository: manifest.superpowers.repository, tag: manifest.superpowers.tag, license: manifest.superpowers.source.license };
+  if (JSON.stringify(catalog.source) !== JSON.stringify(source)) throw new Error("invalid agent content catalog source");
+  if (catalog.catalog_hash !== digest(JSON.stringify({ source: catalog.source, skills: catalog.skills }))) throw new Error("invalid agent content catalog hash");
+  const expected = allowedSkills(manifest).map((skill) => ({ ...skill, version: manifest.superpowers.tag }));
+  const actual = catalog.skills.map((skill) => ({ slug: skill.slug, phases: skill.phases, inspiration_only: skill.inspiration_only, version: skill.version }));
+  if (JSON.stringify(actual) !== JSON.stringify(expected)) throw new Error("invalid agent content catalog skills");
+}
+
+export async function readImportedAgentContentCatalog({ root: contentRoot = root, manifest }: { root?: string; manifest: SuperpowersManifest }) {
+  const { destination } = vendorDestination(manifest, contentRoot);
+  const imported = JSON.parse(await readFile(path.join(destination, "catalog.json"), "utf8")) as SuperpowersCatalog;
+  verifyImportedCatalog(manifest, imported);
+  return buildAgentContentCatalog({ root: contentRoot, manifest, skills: imported.skills });
 }
 
 export async function syncAgentContent(client: QueryClient, catalog: AgentContentCatalog) {
@@ -33,9 +49,13 @@ export async function syncAgentContent(client: QueryClient, catalog: AgentConten
       `INSERT INTO skills (slug,name,description,category,source_type,filesystem_path,enabled,version,content_hash,configuration_json)
        VALUES ($1,$2,$3,'superpowers','vendored',$4,true,$5,$6,$7::jsonb)
        ON CONFLICT (slug) DO UPDATE SET name=EXCLUDED.name,description=EXCLUDED.description,category=EXCLUDED.category,source_type=EXCLUDED.source_type,filesystem_path=EXCLUDED.filesystem_path,enabled=true,version=EXCLUDED.version,content_hash=EXCLUDED.content_hash,configuration_json=EXCLUDED.configuration_json,updated_at=now()`,
-      [skill.slug, skill.name, skill.description, `skills/vendor/superpowers/${skill.slug}/SKILL.md`, skill.version, skill.content_hash, JSON.stringify({ phases: skill.phases, inspiration_only: skill.inspiration_only })],
+      [skill.slug, skill.name, skill.description, `${catalog.vendor_path}/${skill.slug}/SKILL.md`, skill.version, skill.content_hash, JSON.stringify({ phases: skill.phases, inspiration_only: skill.inspiration_only })],
     );
   }
+  await client.query(
+    "UPDATE skills SET enabled=false,updated_at=now() WHERE source_type='vendored' AND category='superpowers' AND NOT (slug = ANY($1::text[]))",
+    [catalog.skills.map((skill) => skill.slug)],
+  );
   for (const [promptType, sourceHash] of Object.entries(catalog.prompt_hashes)) {
     if (previous.prompt_hashes?.[promptType] === sourceHash) { promptsPreserved++; continue; }
     const file = (await client.query(
@@ -62,8 +82,7 @@ export async function syncAgentContent(client: QueryClient, catalog: AgentConten
 
 async function main() {
   const manifest = JSON.parse(await readFile(path.join(root, "config", "agent-content.json"), "utf8"));
-  const imported = JSON.parse(await readFile(path.join(root, "skills", "vendor", "superpowers", "catalog.json"), "utf8"));
-  const catalog = await buildAgentContentCatalog({ manifest, skills: imported.skills });
+  const catalog = await readImportedAgentContentCatalog({ manifest });
   const result = await inTransaction((client) => syncAgentContent(client, catalog));
   console.log(`synced ${result.skillsSynced} skills and ${result.promptsUpdated} prompts`);
 }
