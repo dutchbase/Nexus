@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 
 const exec = promisify(execFile);
+const privateCloneOrigins = new Map<string, string>();
 
 function safeSegment(value: string, fallback: string) {
   const segment = value
@@ -398,8 +399,17 @@ export async function createPrivateExecutionClone(input: { worktreePath: string 
       await mkdir(path.dirname(cloneFile), { recursive: true });
       await cp(sourceFile, cloneFile, { recursive: true, dereference: false });
     }
-    return { clonePath, cleanup: () => rm(privateRoot, { recursive: true, force: true }) };
+    privateCloneOrigins.set(clonePath, sourceRoot);
+    return {
+      clonePath,
+      originWorktreePath: sourceRoot,
+      cleanup: async () => {
+        privateCloneOrigins.delete(clonePath);
+        await rm(privateRoot, { recursive: true, force: true });
+      },
+    };
   } catch (error) {
+    privateCloneOrigins.delete(clonePath);
     await rm(privateRoot, { recursive: true, force: true });
     throw error;
   }
@@ -409,19 +419,29 @@ export async function importPrivateExecutionClone(input: {
   clonePath: string;
   worktreePath: string;
   baseCommit: string;
+  originWorktreePath: string;
 }) {
   const clonePath = await realpath(input.clonePath);
   const worktreePath = await realpath(input.worktreePath);
+  const originWorktreePath = await realpath(input.originWorktreePath);
+  if (originWorktreePath !== worktreePath || privateCloneOrigins.get(clonePath) !== worktreePath) {
+    throw new Error("clone did not originate from this worktree");
+  }
   if (await requireGitRoot(clonePath) !== clonePath) throw new Error("clone path must be its Git root");
   if (await requireGitRoot(worktreePath) !== worktreePath) throw new Error("worktree path must be its Git root");
-  const patchPath = requireContainedPath(clonePath, path.join(clonePath, ".git", "execution.patch"), "patch path");
-  await git(clonePath, ["add", "--intent-to-add", "--all"]);
-  await writeFile(patchPath, (await git(clonePath, ["diff", "--binary", input.baseCommit])).stdout);
+  const patchRoot = await mkdtemp(path.join(tmpdir(), "dcc-execution-import-"));
   try {
+    const patchRootInfo = await lstat(patchRoot);
+    if (!patchRootInfo.isDirectory() || patchRootInfo.isSymbolicLink()) throw new Error("invalid import temporary directory");
+    const patchPath = requireContainedPath(patchRoot, path.join(patchRoot, "execution.patch"), "patch path");
+    await git(clonePath, ["add", "--intent-to-add", "--all"]);
+    await writeFile(patchPath, (await git(clonePath, ["diff", "--binary", input.baseCommit])).stdout, { flag: "wx" });
+    const patchInfo = await lstat(patchPath);
+    if (!patchInfo.isFile() || patchInfo.isSymbolicLink()) throw new Error("invalid import patch");
     await git(worktreePath, ["reset", "--hard", input.baseCommit]);
     await git(worktreePath, ["clean", "-fd"]);
     await git(worktreePath, ["apply", "--binary", patchPath]);
   } finally {
-    await rm(patchPath, { force: true });
+    await rm(patchRoot, { recursive: true, force: true });
   }
 }

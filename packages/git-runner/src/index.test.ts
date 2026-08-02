@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -197,7 +197,26 @@ describe("execution commit containment", () => {
       await writeFile(path.join(clone.clonePath, "base.txt"), "clone-only uncommitted\n");
       await writeFile(path.join(clone.clonePath, "untracked.txt"), "clone-only untracked\n");
 
-      await importPrivateExecutionClone({ clonePath: clone.clonePath, worktreePath: worker, baseCommit });
+      expect((await git(worker, ["rev-parse", "HEAD"])).stdout.trim()).toBe(baseCommit);
+      const workerCommonDir = await realpath(path.resolve(worker, (await git(worker, ["rev-parse", "--git-common-dir"])).stdout.trim()));
+      const cloneCommonDir = await realpath(path.resolve(clone.clonePath, (await git(clone.clonePath, ["rev-parse", "--git-common-dir"])).stdout.trim()));
+      const workerObjects = await realpath(path.resolve(worker, (await git(worker, ["rev-parse", "--git-path", "objects"])).stdout.trim()));
+      const cloneObjects = await realpath(path.resolve(clone.clonePath, (await git(clone.clonePath, ["rev-parse", "--git-path", "objects"])).stdout.trim()));
+      expect(cloneCommonDir).not.toBe(workerCommonDir);
+      expect(cloneObjects).not.toBe(workerObjects);
+
+      const otherWorker = path.join(tmp, "other-worker");
+      await git(repository, ["worktree", "add", "-b", "other-worker", otherWorker, baseCommit]);
+      await writeFile(path.join(otherWorker, "must-survive.txt"), "do not reset me\n");
+      await expect(importPrivateExecutionClone({
+        clonePath: clone.clonePath,
+        worktreePath: otherWorker,
+        baseCommit,
+        originWorktreePath: clone.originWorktreePath,
+      })).rejects.toThrow("clone did not originate from this worktree");
+      expect(await readFile(path.join(otherWorker, "must-survive.txt"), "utf8")).toBe("do not reset me\n");
+
+      await importPrivateExecutionClone({ clonePath: clone.clonePath, worktreePath: worker, baseCommit, originWorktreePath: clone.originWorktreePath });
 
       expect(await readFile(path.join(worker, "committed.txt"), "utf8")).toBe("clone-only commit\n");
       expect(await readFile(path.join(worker, "base.txt"), "utf8")).toBe("clone-only uncommitted\n");
