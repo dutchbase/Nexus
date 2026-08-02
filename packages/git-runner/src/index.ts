@@ -40,7 +40,7 @@ async function managedWorktreePath(dataRoot: string, directories: string[], leaf
       if (!isWithin(realRoot, realNext)) throw new Error("managed worktree path escapes controlled root");
     } catch (error: any) {
       if (error?.code !== "ENOENT") throw error;
-      await mkdir(next);
+      await mkdir(next, { recursive: true });
       const realNext = await realpath(next);
       if (!isWithin(realRoot, realNext)) throw new Error("managed worktree path escapes controlled root");
     }
@@ -227,17 +227,17 @@ export async function createConflictResolutionWorktree(input: {
   dataRoot: string;
   projectSlug: string;
   pullRequestNumber: number;
+  conflictResolutionId: string;
 }) {
   const repository = await realpath(input.repositoryPath);
-  const worktreePath = await managedWorktreePath(input.dataRoot, [safeSegment(input.projectSlug, "project")], "pr-" + input.pullRequestNumber + "-conflict-resolution");
-  // ponytail: a prior attempt (validation failure, crash) can leave this same
-  // path registered as a worktree. Force-clear it so retrying doesn't fail on
-  // "branch already checked out" or "path already exists".
-  await removeContainedWorktreePath(input.dataRoot, worktreePath);
-  await exec("git", ["-C", repository, "worktree", "prune"]).catch(() => {});
-  await exec("git", ["-C", repository, "fetch", "origin", input.headBranch, input.baseBranch]);
+  const resolution = safeSegment(input.conflictResolutionId, "resolution");
+  const worktreePath = await managedWorktreePath(input.dataRoot, [
+    safeSegment(input.projectSlug, "project"),
+    "pr-" + input.pullRequestNumber + "-conflict-resolution",
+  ], resolution);
+  await exec("git", ["-C", repository, "fetch", "--no-write-fetch-head", "origin", input.headBranch, input.baseBranch]);
   await exec("git", [
-    "-C", repository, "worktree", "add", "-B", input.headBranch, worktreePath, `origin/${input.headBranch}`,
+    "-C", repository, "worktree", "add", "--detach", worktreePath, `origin/${input.headBranch}`,
   ]);
   const headCommit = (await exec("git", ["-C", worktreePath, "rev-parse", "HEAD"])).stdout.trim();
   return { worktreePath, branchName: input.headBranch, headCommit };
@@ -571,8 +571,8 @@ export async function commitDiffIsEmpty(worktreePath: string, baseCommit: string
   return !result.stdout.trim();
 }
 
-export async function pushExecutionBranch(worktreePath: string, branchName: string) {
-  await git(worktreePath, ["push", "--set-upstream", "origin", branchName]);
+export async function pushExecutionBranch(worktreePath: string, branchName: string, sourceRef = branchName) {
+  await git(worktreePath, ["push", "origin", `${sourceRef}:refs/heads/${branchName}`]);
 }
 function requireGitRoot(worktreePath: string) {
   return git(worktreePath, ["rev-parse", "--show-toplevel"])
