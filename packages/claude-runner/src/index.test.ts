@@ -2,7 +2,7 @@ import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
-import { buildExecutionArguments, buildPlanningArguments, invokePlanningClaude, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
+import { buildExecutionArguments, buildPlanningArguments, invokeExecutionClaude, invokePlanningClaude, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -35,14 +35,17 @@ describe("buildExecutionArguments", () => {
     const args = buildExecutionArguments({
       ...invocation,
       pluginDirectories: ["/plugin"],
+      guardPath: "/immutable/bash-guard.mjs",
       logPath: "/log",
       timeoutMs: 1,
       onEvent: async () => undefined,
     } satisfies ExecutionInvocation);
-    expect(args).toContain("Read,Glob,Grep,Edit,Write,Bash,Skill,Agent");
+    expect(args).toContain("Read,Glob,Grep,Skill,Agent");
+    expect(args).not.toContain("Read,Glob,Grep,Edit,Write,Bash,Skill,Agent");
     expect(args).not.toContain("--add-dir");
     expect(args).toEqual(expect.arrayContaining(["--plugin-dir", "/plugin", "--agents"]));
     const agents = JSON.parse(args[args.indexOf("--agents") + 1]);
+    const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
     expect(agents).toMatchObject({
       "dcc-mechanical": { model: "haiku" },
       "dcc-implementer": { model: "model" },
@@ -59,6 +62,10 @@ describe("buildExecutionArguments", () => {
     }
     const reviewer = agents["dcc-reviewer"] as { tools: string[] };
     expect(reviewer.tools).not.toContain("Bash");
+    expect(settings.hooks.PreToolUse).toEqual(expect.arrayContaining([
+      expect.objectContaining({ matcher: "Agent" }),
+    ]));
+    expect(JSON.stringify(settings)).toContain("/immutable/bash-guard.mjs");
 
   });
 });
@@ -89,6 +96,35 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan","session_
     claudeExecutable: path.join(bin, "claude"),
     workingDirectory: root,
   })).resolves.toMatchObject({ markdown: "# Plan" });
+});
+
+test("invokes execution with a materialized guard outside the worktree", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-execution-"));
+  directories.push(root);
+  const bin = path.join(root, "bin");
+  const capture = path.join(root, "settings.json");
+  await mkdir(bin);
+  const executable = path.join(bin, "claude");
+  await writeFile(executable, `#!/bin/sh
+for arg in "$@"; do
+  if [ "$previous" = "--settings" ]; then settings="$arg"; fi
+  previous="$arg"
+done
+printf '%s' "$settings" > ${JSON.stringify(capture)}
+`);
+  await chmod(executable, 0o755);
+  await expect(invokeExecutionClaude({
+    ...invocation,
+    claudeExecutable: executable,
+    workingDirectory: root,
+    logPath: path.join(root, "run.log"),
+    timeoutMs: 1_000,
+    onEvent: async () => undefined,
+  })).resolves.toMatchObject({ exitCode: 0 });
+  const settings = JSON.parse(await (await import("node:fs/promises")).readFile(capture, "utf8"));
+  const command = settings.hooks.PreToolUse[0].hooks[0].command;
+  expect(command).toContain("/tmp/dcc-claude-guard-");
+  expect(command).not.toContain(root);
 });
 
 test("summarizes a Bash denial from Claude's max-turn payload", () => {

@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { appendFile, mkdtemp, open, readFile, rm } from "node:fs/promises";
+import { appendFile, chmod, copyFile, mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -61,8 +61,31 @@ export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = pro
 
 export type PlanningInvocation = {
   task: string; sessionId: string; model: string; effort: string; promptFile: string;
-  skillBundleDir?: string; pluginDirectories?: readonly string[]; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string; tools?: string[]; claudeExecutable?: string;
+  skillBundleDir?: string; pluginDirectories?: readonly string[]; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string; tools?: string[]; claudeExecutable?: string; guardPath?: string;
 };
+
+const trustedBashGuard = fileURLToPath(new URL("./bash-guard.mjs", import.meta.url));
+
+export async function materializeBashGuard(sourcePath = trustedBashGuard) {
+  const directory = await mkdtemp(path.join(tmpdir(), "dcc-claude-guard-"));
+  const guardPath = path.join(directory, "bash-guard.mjs");
+  try {
+    await copyFile(sourcePath, guardPath);
+    await chmod(guardPath, 0o400);
+    await chmod(directory, 0o500);
+    return {
+      directory,
+      path: guardPath,
+      cleanup: async () => {
+        await chmod(directory, 0o700).catch(() => undefined);
+        await rm(directory, { recursive: true, force: true });
+      },
+    };
+  } catch (error) {
+    await rm(directory, { recursive: true, force: true });
+    throw error;
+  }
+}
 
 function skillDirectoryArguments(input: PlanningInvocation) {
   return [
@@ -70,11 +93,15 @@ function skillDirectoryArguments(input: PlanningInvocation) {
   ];
 }
 
-function sessionAgents(input: PlanningInvocation) {
+function hookCommand(guardPath: string) {
+  return `node ${JSON.stringify(guardPath)}`;
+}
+
+function sessionAgents(input: PlanningInvocation, guardPath = input.guardPath ?? trustedBashGuard) {
   const bashHooks = {
     PreToolUse: [{
       matcher: "Bash",
-      hooks: [{ type: "command", command: `node ${JSON.stringify(fileURLToPath(new URL("./bash-guard.mjs", import.meta.url)))}` }],
+      hooks: [{ type: "command", command: hookCommand(guardPath) }],
     }],
   };
   return JSON.stringify({
@@ -97,6 +124,17 @@ function sessionAgents(input: PlanningInvocation) {
       description: "Reviews assigned code without modifying it.",
       prompt: "Review the assigned change read-only. Do not edit files, run Bash, commit, push, merge, or create a pull request.",
       model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep"],
+    },
+  });
+}
+
+function executionSettings(guardPath: string) {
+  return JSON.stringify({
+    hooks: {
+      PreToolUse: [{
+        matcher: "Agent",
+        hooks: [{ type: "command", command: hookCommand(guardPath) }],
+      }],
     },
   });
 }
@@ -162,8 +200,8 @@ export type ExecutionInvocation = PlanningInvocation & {
 export function buildExecutionArguments(input: ExecutionInvocation) {
   return [
     "-p", input.task, "--session-id", input.sessionId, "--model", input.model, "--effort", input.effort,
-    "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep,Edit,Write,Bash,Skill,Agent",
-    "--append-system-prompt-file", input.promptFile, ...skillDirectoryArguments(input), "--agents", sessionAgents(input),
+    "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep,Skill,Agent",
+    "--append-system-prompt-file", input.promptFile, ...skillDirectoryArguments(input), "--settings", executionSettings(input.guardPath ?? trustedBashGuard), "--agents", sessionAgents(input),
     "--output-format", "stream-json", "--verbose", "--max-turns", String(input.maxTurns),
   ];
 }
@@ -172,9 +210,11 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
   assertSubscriptionOnlyEnvironment();
   const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken, AGENT_CONTROL_DISABLE: "1" };
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
+  const guard = await materializeBashGuard();
+  try {
   await appendFile(input.logPath, "");
-  return new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
-    const child = spawn(input.claudeExecutable ?? "claude", buildExecutionArguments(input), {
+  return await new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
+    const child = spawn(input.claudeExecutable ?? "claude", buildExecutionArguments({ ...input, guardPath: guard.path }), {
       cwd: input.workingDirectory,
       env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -235,6 +275,9 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
       }, reject);
     });
   });
+  } finally {
+    await guard.cleanup();
+  }
 }
 
 const requiredPlanHeadings = [

@@ -124,3 +124,32 @@ exit 0
 git diff --check
 exit 0
 ```
+
+## Fix round 4/5
+
+- Before each execution run, the trusted Bash guard is copied into a dedicated `dcc-claude-guard-*` temporary directory outside the worktree, made read-only, and passed to all custom-agent hooks. Cleanup restores directory permissions only after Claude exits and removes the directory.
+- The parent execution session now has no Bash, Edit, or Write tool. It retains read/skill/delegation capability; the named DCC execution roles retain edit/write/test capability behind the copied Bash guard.
+- Session-level `PreToolUse` configuration validates every parent `Agent` call, allowing only `dcc-mechanical`, `dcc-implementer`, `dcc-repair`, and `dcc-reviewer`.
+- Adversarial coverage verifies a changed worktree guard cannot alter the materialized invocation guard, denies generic/publisher Agent roles, and verifies the actual execution CLI receives an external temporary guard path.
+
+### TDD evidence
+
+```text
+pnpm exec vitest run packages/claude-runner/src/bash-guard.test.mjs packages/claude-runner/src/index.test.ts
+
+FAIL: the runner exposed Bash to the parent session, did not attach an Agent hook, and had no materialized guard or named-agent validator.
+```
+
+### Verification
+
+```text
+pnpm exec vitest run packages/skill-registry/src/index.test.ts packages/claude-runner/src/bash-guard.test.mjs packages/claude-runner/src/index.test.ts scripts/agent-content.test.ts scripts/superpowers-content.test.ts packages/domain/src/pr-review.test.ts apps/web/src/pages/shared.test.ts
+
+7 files passed, 27 tests passed.
+
+pnpm exec tsc --noEmit
+exit 0
+
+git diff --check
+exit 0
+```
