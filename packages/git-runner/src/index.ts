@@ -165,6 +165,12 @@ async function git(worktreePath: string, args: string[], input?: string, safe = 
   });
 }
 
+export async function removeManagedWorktree(repositoryPath: string, worktreePath: string) {
+  const repository = await realpath(repositoryPath);
+  await exec("git", ["-C", repository, "worktree", "remove", "--force", worktreePath]);
+  await exec("git", ["-C", repository, "worktree", "prune"]);
+}
+
 export async function createConflictResolutionWorktree(input: {
   repositoryPath: string;
   headBranch: string;
