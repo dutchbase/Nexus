@@ -1719,7 +1719,7 @@ Claude may not:
 * use GitHub CLI;
 * merge;
 * create pull requests;
-* force-reset, rebase, checkout, or switch branches;
+* reset, rebase, amend commits, checkout, or switch branches;
 * access secrets;
 * use `sudo`;
 * recursively delete `/` or `~`;
@@ -1738,7 +1738,7 @@ claude -p \
   --effort "$REASONING_LEVEL" \
   --permission-mode auto \
   --tools "Read,Glob,Grep,Edit,Write,Bash,Agent,Skill" \
-  --disallowedTools "Bash(git push *),Bash(git merge *),Bash(git reset --hard *),Bash(git rebase *),Bash(git checkout *),Bash(git switch *),Bash(gh *),Bash(sudo *),Bash(rm -rf /),Bash(rm -rf ~)" \
+  --disallowedTools "Bash(git push *),Bash(git merge *),Bash(git reset *),Bash(git commit --amend *),Bash(git rebase *),Bash(git checkout *),Bash(git switch *),Bash(gh *),Bash(sudo *),Bash(rm -rf /),Bash(rm -rf ~)" \
   --append-system-prompt-file "$PROMPT_FILE" \
   --add-dir "$SKILL_BUNDLE_DIR" \
   --output-format stream-json \

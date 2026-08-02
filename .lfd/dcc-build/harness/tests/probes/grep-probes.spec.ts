@@ -157,7 +157,7 @@ describe("grep probes over built production source", () => {
     const obviousViolations: string[] = [];
     const inconclusive: string[] = [];
     for (const line of dangerousCapability) {
-      if (/den(y|ied)|block|forbid/i.test(line)) continue; // legitimate denylist entry
+      if (/den(y|ied)|block|forbid|disallowedTools/i.test(line)) continue; // legitimate denylist entry
       if (/allow/i.test(line)) {
         obviousViolations.push(line);
       } else {

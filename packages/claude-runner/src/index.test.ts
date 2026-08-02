@@ -35,7 +35,7 @@ test("enables local execution while denying publication and destructive shell co
   expect(args).toContain("auto");
   expect(args).toContain("Read,Glob,Grep,Edit,Write,Bash,Agent,Skill");
   expect(args[args.indexOf("--disallowedTools") + 1]?.split(",")).toEqual([
-    "Bash(git push *)", "Bash(git merge *)", "Bash(git reset --hard *)",
+    "Bash(git push *)", "Bash(git merge *)", "Bash(git reset *)", "Bash(git commit --amend *)",
     "Bash(git rebase *)", "Bash(git checkout *)", "Bash(git switch *)",
     "Bash(gh *)", "Bash(sudo *)", "Bash(rm -rf /)", "Bash(rm -rf ~)",
   ]);
