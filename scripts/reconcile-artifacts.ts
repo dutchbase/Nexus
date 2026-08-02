@@ -1,7 +1,8 @@
 import path from "node:path";
-import { pool, reconcileArtifacts } from "../packages/database/src/index.ts";
+import { fileURLToPath } from "node:url";
+import { artifactDataRoot, pool, reconcileArtifacts } from "../packages/database/src/index.ts";
 
-const dataRoot = path.resolve(process.env.DCC_DATA_ROOT ?? ".", "data");
+const dataRoot = artifactDataRoot(path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."));
 const records = (await pool.query(
   "SELECT id,storage_path,status,expires_at FROM artifacts WHERE status IN ('staged','finalized')",
 )).rows as Array<{ id: string; storage_path: string; status: "staged" | "finalized" | "abandoned"; expires_at: Date | string | null }>;

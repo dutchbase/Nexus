@@ -1,10 +1,11 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { readFile, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { artifactPath, finalizeArtifact, inTransaction, pool, stageArtifact } from "@dcc/database";
+import { artifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, stageArtifact } from "@dcc/database";
 import {
   AiConfigurationError, approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
   globalPromptTypes, enqueueNotification, importGithubPullRequests, promptContentHash, PullRequestMergeError,
@@ -34,7 +35,8 @@ import * as operatePage from "./pages/operate.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const production = process.env.NODE_ENV === "production";
-const dataRoot = resolve(process.env.DCC_DATA_DIR ?? (process.env.DCC_DATA_ROOT ? resolve(process.env.DCC_DATA_ROOT, "data") : "data"));
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const dataRoot = artifactDataRoot(REPO_ROOT);
 const lockoutThreshold = 5;
 const lockoutWindowMinutes = 15;
 const sessionHours = 8;
@@ -523,7 +525,11 @@ async function upload(request: IncomingMessage, response: ServerResponse) {
       );
     } catch (error) {
       await Promise.all([
-        pool.query("UPDATE artifacts SET status='abandoned',abandoned_at=now() WHERE id=$1 AND status='staged'", [artifactId]).catch(() => undefined),
+        inTransaction(async (client) => {
+          await client.query("DELETE FROM artifacts WHERE id=$1", [artifactId]);
+          await client.query("DELETE FROM attachments WHERE upload_id=$1 AND ticket_id IS NULL", [row.id]);
+          await client.query("DELETE FROM uploads WHERE id=$1", [row.id]);
+        }).catch(() => undefined),
         rm(staged.stagedPath, { force: true }),
         rm(staged.storagePath, { force: true }),
       ]);
@@ -1804,7 +1810,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     )).rows[0];
     if (!row) return json(response, 404, { error: "execution log not found" });
     try {
-      const content = await readFile(artifactPath(dataRoot, row.storage_path), "utf8");
+      const content = await readArtifact(dataRoot, row.storage_path).then((content) => content.toString("utf8"));
       return json(response, 200, { run_id: row.id, content });
     } catch {
       await pool.query("UPDATE artifacts SET status='abandoned',abandoned_at=now() WHERE id=$1 AND status='finalized'", [row.artifact_id]);

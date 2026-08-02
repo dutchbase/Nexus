@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { lstat, mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export type ArtifactRecord = {
@@ -17,9 +17,15 @@ export type StagedArtifact = {
   storagePath: string;
 };
 
+type ArtifactLocation = "missing" | "present" | "unsafe";
+
 function isWithin(root: string, target: string) {
   const relative = path.relative(root, target);
   return relative && relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+
+export function artifactDataRoot(defaultRoot: string, environment: Partial<Pick<NodeJS.ProcessEnv, "DCC_DATA_DIR" | "DCC_DATA_ROOT">> = process.env) {
+  return path.resolve(environment.DCC_DATA_DIR ?? path.join(environment.DCC_DATA_ROOT ?? defaultRoot, "data"));
 }
 
 export function artifactPath(root: string, relativePath: string) {
@@ -35,6 +41,16 @@ function stagedPath(root: string, id: string) {
   return artifactPath(root, path.join(".staged", id));
 }
 
+async function location(root: string, target: string): Promise<ArtifactLocation> {
+  try {
+    const [realRoot, realTarget] = await Promise.all([realpath(root), realpath(target)]);
+    return isWithin(realRoot, realTarget) ? "present" : "unsafe";
+  } catch (error: any) {
+    if (error?.code === "ENOENT") return "missing";
+    throw error;
+  }
+}
+
 async function safeDirectory(root: string, target: string) {
   const controlledRoot = path.resolve(root);
   await mkdir(controlledRoot, { recursive: true });
@@ -43,14 +59,15 @@ async function safeDirectory(root: string, target: string) {
   if (!isWithin(realRoot, realDirectory) && realRoot !== realDirectory) throw new Error("artifact path escapes controlled root");
 }
 
-async function exists(target: string) {
-  try {
-    await lstat(target);
-    return true;
-  } catch (error: any) {
-    if (error?.code === "ENOENT") return false;
-    throw error;
-  }
+async function removeArtifact(root: string, target: string) {
+  if (await location(root, target) === "present") await rm(target, { force: true });
+}
+
+export async function readArtifact(root: string, relativePath: string) {
+  const target = artifactPath(root, relativePath);
+  const current = await location(root, target);
+  if (current !== "present") throw new Error(current === "unsafe" ? "artifact path escapes controlled root" : "artifact is missing");
+  return readFile(target);
 }
 
 export async function stageArtifact(input: {
@@ -67,8 +84,13 @@ export async function stageArtifact(input: {
 }
 
 export async function finalizeArtifact(staged: StagedArtifact) {
-  if (await exists(staged.storagePath)) throw new Error("artifact destination already exists");
-  const content = await readFile(staged.stagedPath);
+  const destination = await location(staged.root, staged.storagePath);
+  if (destination === "present") throw new Error("artifact destination already exists");
+  if (destination === "unsafe" || await location(staged.root, staged.stagedPath) !== "present") {
+    throw new Error("artifact path escapes controlled root");
+  }
+  await safeDirectory(staged.root, staged.storagePath);
+  const content = await readArtifact(staged.root, path.join(".staged", staged.id));
   const sha256 = createHash("sha256").update(content).digest("hex");
   await rename(staged.stagedPath, staged.storagePath);
   return { id: staged.id, storagePath: staged.storagePath, sha256 };
@@ -94,19 +116,28 @@ export async function reconcileArtifacts(input: {
       await input.abandon(record.id);
       continue;
     }
-    if (expiresAt && expiresAt <= now) {
-      await Promise.all([rm(pendingPath, { force: true }), rm(storagePath, { force: true })]);
+    const stored = await location(input.root, storagePath);
+    if (stored === "unsafe") {
       await input.abandon(record.id);
+      continue;
+    }
+    if (record.status === "staged" && stored === "present") {
+      try {
+        await input.finalize(record.id, createHash("sha256").update(await readArtifact(input.root, record.storage_path)).digest("hex"));
+      } catch {
+        await input.abandon(record.id);
+      }
       continue;
     }
     if (record.status === "finalized") {
-      if (!await exists(storagePath)) await input.abandon(record.id);
+      if (stored !== "present") await input.abandon(record.id);
       continue;
     }
-    if (await exists(storagePath)) {
-      await input.finalize(record.id, createHash("sha256").update(await readFile(storagePath)).digest("hex"));
-    } else if (!await exists(pendingPath)) {
+    if (expiresAt && expiresAt <= now) {
+      await removeArtifact(input.root, pendingPath);
       await input.abandon(record.id);
+      continue;
     }
+    if (await location(input.root, pendingPath) !== "present") await input.abandon(record.id);
   }
 }

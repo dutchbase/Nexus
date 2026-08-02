@@ -99,8 +99,8 @@ GITHUB_API_BASE_URL=https://api.github.com
 
 # Optional overrides (sane defaults if unset)
 DB_POOL_SIZE=10
-DCC_DATA_DIR=./data              # web: file uploads land in $DCC_DATA_DIR/uploads
-DCC_DATA_ROOT=.                  # worker: ticket plans/logs/skill bundles under $DCC_DATA_ROOT/data
+DCC_DATA_DIR=./data              # managed artifact root for web, worker, and reconciliation
+DCC_DATA_ROOT=.                  # compatibility fallback: artifacts live in $DCC_DATA_ROOT/data when DCC_DATA_DIR is unset
 DCC_SKILLS_ROOT=.                # worker: where skill definitions are read from
 PROJECTS_CONFIG_PATH=./config/projects.yaml
 ```
@@ -250,11 +250,7 @@ latest release. Leaving the tag empty uses the latest release again.
 
 ## Data layout
 
-Everything under `$DCC_DATA_ROOT/data/` is worker-managed state:
-uploaded attachments, per-ticket plan snapshots, execution logs, and
-materialized skill bundles. Back this directory up along with the
-database — losing it doesn't corrupt the DB, but you lose execution
-history and in-flight plan artifacts.
+Everything under `$DCC_DATA_DIR` (or `$DCC_DATA_ROOT/data` when `DCC_DATA_DIR` is unset) is managed artifact state: uploaded attachments, execution logs, and worktrees. Plans are immutable database rows; skill bundles are temporary and reconstructed for each run. Back this directory up with the database — losing it does not corrupt the DB, but it loses execution history and in-flight artifacts.
 
 ## Troubleshooting
 
