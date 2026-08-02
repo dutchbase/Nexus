@@ -1,10 +1,10 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { resolve } from "node:path";
 import { promisify } from "node:util";
-import { pool, inTransaction } from "@dcc/database";
+import { artifactPath, finalizeArtifact, inTransaction, pool, stageArtifact } from "@dcc/database";
 import {
   AiConfigurationError, approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
   globalPromptTypes, enqueueNotification, importGithubPullRequests, promptContentHash, PullRequestMergeError,
@@ -34,7 +34,7 @@ import * as operatePage from "./pages/operate.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const production = process.env.NODE_ENV === "production";
-const uploadRoot = resolve(process.env.DCC_DATA_DIR ?? "data", "uploads");
+const dataRoot = resolve(process.env.DCC_DATA_DIR ?? (process.env.DCC_DATA_ROOT ? resolve(process.env.DCC_DATA_ROOT, "data") : "data"));
 const lockoutThreshold = 5;
 const lockoutWindowMinutes = 15;
 const sessionHours = 8;
@@ -495,17 +495,45 @@ async function upload(request: IncomingMessage, response: ServerResponse) {
   if (!bytes.length || bytes.length > maxUploadBytes) return json(response, 413, { error: "upload too large" });
   const sniffed = sniffImage(bytes);
   if (!sniffed) return json(response, 415, { error: "only PNG and JPEG images are accepted" });
-  const filename = `${randomUUID()}${sniffed.extension}`;
-  await mkdir(uploadRoot, { recursive: true });
-  const path = resolve(uploadRoot, filename);
-  await writeFile(path, bytes, { flag: "wx" });
-  const originalName = /filename="([^"]*)"/i.exec(raw.subarray(0, headerEnd).toString("utf8"))?.[1] ?? null;
-  const row = (await pool.query(
-    `INSERT INTO uploads (storage_path,original_name,media_type,size_bytes) VALUES ($1,$2,$3,$4) RETURNING *`,
-    [path, originalName ? originalName.slice(0, 255) : null, sniffed.mediaType, bytes.length],
-  )).rows[0];
-  await pool.query("INSERT INTO attachments (upload_id) VALUES ($1)", [row.id]);
-  json(response, 201, { upload_id: row.id, reference: `/uploads/${row.id}` });
+  const artifactId = randomUUID();
+  const staged = await stageArtifact({
+    root: dataRoot, id: artifactId, storagePath: `uploads/${artifactId}${sniffed.extension}`, content: bytes,
+  });
+  try {
+    const originalName = /filename="([^"]*)"/i.exec(raw.subarray(0, headerEnd).toString("utf8"))?.[1] ?? null;
+    const row = await inTransaction(async (client) => {
+      const upload = (await client.query(
+        `INSERT INTO uploads (storage_path,original_name,media_type,size_bytes) VALUES ($1,$2,$3,$4) RETURNING *`,
+        [staged.storagePath, originalName ? originalName.slice(0, 255) : null, sniffed.mediaType, bytes.length],
+      )).rows[0];
+      await client.query(
+        `INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,upload_id)
+         VALUES ($1,$2,'upload','staged',now() + interval '1 hour',$3)`,
+        [artifactId, staged.relativePath, upload.id],
+      );
+      await client.query("INSERT INTO attachments (upload_id) VALUES ($1)", [upload.id]);
+      return upload;
+    });
+    try {
+      const finalized = await finalizeArtifact(staged);
+      await pool.query(
+        `UPDATE artifacts SET status='finalized',sha256=$2,finalized_at=now(),expires_at=NULL
+         WHERE id=$1 AND status='staged'`,
+        [artifactId, finalized.sha256],
+      );
+    } catch (error) {
+      await Promise.all([
+        pool.query("UPDATE artifacts SET status='abandoned',abandoned_at=now() WHERE id=$1 AND status='staged'", [artifactId]).catch(() => undefined),
+        rm(staged.stagedPath, { force: true }),
+        rm(staged.storagePath, { force: true }),
+      ]);
+      throw error;
+    }
+    json(response, 201, { upload_id: row.id, reference: `/uploads/${row.id}` });
+  } catch (error) {
+    await rm(staged.stagedPath, { force: true });
+    throw error;
+  }
 }
 
 function normalizeFields(fields: any[]) {
@@ -1768,13 +1796,20 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
   const runLogMatch = url.pathname.match(/^\/api\/admin\/runs\/([0-9a-f-]+)\/log$/i);
   if (runLogMatch && request.method === "GET") {
     const row = (await pool.query(
-      `SELECT ar.id,ar.metadata_json->>'log_path' log_path FROM agent_runs ar
-       JOIN execution_attempts ea ON ea.agent_run_id=ar.id WHERE ar.id=$1`,
+      `SELECT ar.id,a.id artifact_id,a.storage_path FROM agent_runs ar
+       JOIN execution_attempts ea ON ea.agent_run_id=ar.id
+       JOIN artifacts a ON a.agent_run_id=ar.id AND a.artifact_type='execution_log' AND a.status='finalized'
+       WHERE ar.id=$1`,
       [runLogMatch[1]],
     )).rows[0];
     if (!row) return json(response, 404, { error: "execution log not found" });
-    const content = row.log_path ? await readFile(row.log_path, "utf8").catch(() => "") : "";
-    return json(response, 200, { run_id: row.id, content });
+    try {
+      const content = await readFile(artifactPath(dataRoot, row.storage_path), "utf8");
+      return json(response, 200, { run_id: row.id, content });
+    } catch {
+      await pool.query("UPDATE artifacts SET status='abandoned',abandoned_at=now() WHERE id=$1 AND status='finalized'", [row.artifact_id]);
+      return json(response, 404, { error: "execution log not found" });
+    }
   }
   const runCancelMatch = url.pathname.match(/^\/api\/admin\/runs\/([0-9a-f-]+)\/cancel$/i);
   const attemptCancelMatch = url.pathname.match(/^\/api\/admin\/execution-attempts\/([0-9a-f-]+)\/cancel$/i);
