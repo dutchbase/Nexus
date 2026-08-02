@@ -124,7 +124,8 @@ export type ExecutionInvocation = PlanningInvocation & {
 export function buildExecutionArguments(input: ExecutionInvocation) {
   return [
     "-p", input.task, "--session-id", input.sessionId, "--model", input.model, "--effort", input.effort,
-    "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep,Edit,Write,Bash",
+    "--permission-mode", "auto", "--tools", "Read,Glob,Grep,Edit,Write,Bash,Agent,Skill",
+    "--disallowedTools", "Bash(git push *),Bash(git merge *),Bash(git reset --hard *),Bash(git rebase *),Bash(git checkout *),Bash(git switch *),Bash(gh *),Bash(sudo *),Bash(rm -rf /),Bash(rm -rf ~)",
     "--append-system-prompt-file", input.promptFile, "--add-dir", input.skillBundleDir,
     "--output-format", "stream-json", "--verbose", "--max-turns", String(input.maxTurns),
   ];
