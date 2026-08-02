@@ -9,7 +9,7 @@ import {
 } from "@dcc/claude-runner";
 import { inTransaction, pool } from "@dcc/database";
 import {
-  approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate,
+  approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
   claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, parsePrReviewVerdict,
   renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
@@ -195,7 +195,7 @@ async function planningInputs(ticket: any) {
       "## 7. Proposed Changes", "## 8. Implementation Steps", "## 9. Database or Migration Changes",
       "## 10. Testing Strategy", "## 11. Security Considerations", "## 12. Performance Considerations",
       "## 13. Risks and Edge Cases", "## 14. Rollback Strategy", "## 15. Acceptance Criteria Mapping",
-      "## 16. Out of Scope", "## 17. Open Questions",
+      "## 16. Out of Scope", "## 17. Open Questions", "Each execution task must use a ### Task N: heading.",
     ].join("\n\n"),
     outputConstraints: "Planning is read-only. Do not edit or write repository files, commit, push, create branches, or open pull requests.",
   });
@@ -254,7 +254,7 @@ async function executionInputs(ticket: any, phase: "execution" | "repair", appro
     },
     validationCommands: project.config_json?.validation_commands ?? [],
     definitionOfDone: project.config_json?.definition_of_done ?? "Implement the approved plan in the assigned worktree.",
-    outputConstraints: "Work only inside the assigned worktree. Leave all changes uncommitted for independent worker validation.",
+    outputConstraints: "Work only inside the assigned worktree. Local task commits are allowed; no push, merge, branch switch, PR, history rewrite, or publication; leave the final worktree ready for worker validation.",
   });
   if (phase === "repair") {
     content += [
@@ -666,11 +666,16 @@ async function runExecution(job: any) {
     const promptFile = path.join(temporary, "execution-prompt.md");
     await writeFile(promptFile, input.content, { flag: "wx" });
     const skillBundle = await materializeSkillBundle(runId, copied.skills, process.env.DCC_DATA_ROOT ?? REPO_ROOT);
+    const executionPlanPath = path.join(skillBundle, "execution-plan.md");
+    await writeFile(executionPlanPath, materializeExecutionPlan(attempt.content_markdown), { flag: "wx" });
     const scenarioKey = ["mock", "scenario", "path"].join("_");
     const result = await invokeExecutionClaude({
-      task: repairing
-        ? `Repair the existing implementation for ticket ${ticket.ticket_number}.`
-        : `Implement the approved plan for ticket ${ticket.ticket_number}.`,
+      task: [
+        repairing ? "Repair the existing implementation for ticket " + ticket.ticket_number + "." : "Implement the approved plan for ticket " + ticket.ticket_number + ".",
+        "Invoke ponytail:ponytail and superpowers:subagent-driven-development.",
+        "Use PLAN_FILE=" + executionPlanPath + " as the approved execution plan.",
+        "Choose explicit least-capable subagents and stop after local final review.",
+      ].join(" "),
       sessionId,
       model: input.ai.model,
       effort: input.ai.reasoning_level,

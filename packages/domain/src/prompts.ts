@@ -128,6 +128,13 @@ export type ExecutionPromptInputs = {
   outputConstraints: string;
 };
 
+export function materializeExecutionPlan(approvedPlan: string) {
+  const taskHeading = String.fromCharCode(35).repeat(3);
+  return new RegExp("^" + taskHeading + " Task [0-9]+:", "m").test(approvedPlan)
+    ? approvedPlan
+    : taskHeading + " Task 1:" + String.fromCharCode(10).repeat(2) + approvedPlan;
+}
+
 export function buildExecutionPrompt(input: ExecutionPromptInputs) {
   return assemble([
     ["Global base instructions", input.globalBaseInstructions],
