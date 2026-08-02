@@ -21,11 +21,11 @@ describe("buildPlanningArguments", () => {
     expect(buildPlanningArguments(invocation)).toContain("Read,Glob,Grep,Bash,Skill");
   });
 
-  test("loads all materialized skills as session plugins without enabling Agent", () => {
+  test("loads the bundle layout and all materialized skills as session plugins without enabling Agent", () => {
     const args = buildPlanningArguments({ ...invocation, pluginDirectories: ["/plugin-a", "/plugin-b"] });
     expect(args).toContain("Read,Glob,Grep,Bash,Skill");
     expect(args).not.toContain("Agent");
-    expect(args).not.toContain("--add-dir");
+    expect(args).toEqual(expect.arrayContaining(["--add-dir", "/skills"]));
     expect(args).toEqual(expect.arrayContaining(["--plugin-dir", "/plugin-a", "--plugin-dir", "/plugin-b"]));
   });
 });
@@ -42,8 +42,7 @@ describe("buildExecutionArguments", () => {
     } satisfies ExecutionInvocation);
     expect(args).toContain("Read,Glob,Grep,Skill,Agent");
     expect(args).not.toContain("Read,Glob,Grep,Edit,Write,Bash,Skill,Agent");
-    expect(args).not.toContain("--add-dir");
-    expect(args).toEqual(expect.arrayContaining(["--plugin-dir", "/plugin", "--agents"]));
+    expect(args).toEqual(expect.arrayContaining(["--add-dir", "/skills", "--plugin-dir", "/plugin", "--agents"]));
     const agents = JSON.parse(args[args.indexOf("--agents") + 1]);
     const settings = JSON.parse(args[args.indexOf("--settings") + 1]);
     expect(agents).toMatchObject({
@@ -70,28 +69,32 @@ describe("buildExecutionArguments", () => {
   });
 });
 
-test("invokes Claude with a materialized local skill plugin", async () => {
+test("invokes Claude with the materialized local layout and plugin", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "claude-runner-"));
   directories.push(root);
-  const plugin = path.join(root, "dcc-local");
+  const bundle = path.join(root, "bundle");
+  const plugin = path.join(bundle, "plugins", "dcc-local");
   const bin = path.join(root, "bin");
   await mkdir(path.join(plugin, ".claude-plugin"), { recursive: true });
   await mkdir(path.join(plugin, "skills", "local"), { recursive: true });
+  await mkdir(path.join(bundle, ".claude", "skills", "local"), { recursive: true });
   await mkdir(bin);
   await writeFile(path.join(plugin, ".claude-plugin", "plugin.json"), '{"name":"dcc-local"}\n');
   await writeFile(path.join(plugin, "skills", "local", "SKILL.md"), "# Local\n");
+  await writeFile(path.join(bundle, ".claude", "skills", "local", "SKILL.md"), "# Local\n");
   await writeFile(path.join(bin, "claude"), `#!/bin/sh
 for arg in "$@"; do
   if [ "$previous" = "--plugin-dir" ]; then plugin="$arg"; fi
+  if [ "$previous" = "--add-dir" ]; then bundle="$arg"; fi
   previous="$arg"
 done
-test -f "$plugin/.claude-plugin/plugin.json" && test -f "$plugin/skills/local/SKILL.md" || exit 2
+test -f "$bundle/.claude/skills/local/SKILL.md" && test -f "$plugin/.claude-plugin/plugin.json" && test -f "$plugin/skills/local/SKILL.md" || exit 2
 printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan","session_id":"session"}'
 `);
   await chmod(path.join(bin, "claude"), 0o755);
   await expect(invokePlanningClaude({
     ...invocation,
-    skillBundleDir: undefined,
+    skillBundleDir: bundle,
     pluginDirectories: [plugin],
     claudeExecutable: path.join(bin, "claude"),
     workingDirectory: root,

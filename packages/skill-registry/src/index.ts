@@ -194,6 +194,7 @@ export async function materializeSkillBundle(
       throw new Error(`invalid plugin name: ${pluginName}`);
     }
     const skillRoot = path.resolve(bundle, "plugins", pluginName, "skills", skill.slug);
+    const localSkillRoot = skill.plugin_name === null ? path.resolve(bundle, ".claude", "skills", skill.slug) : null;
     if (!pluginDirectories.has(pluginName)) {
       const pluginDirectory = path.resolve(bundle, "plugins", pluginName);
       await mkdir(path.join(pluginDirectory, ".claude-plugin"), { recursive: true });
@@ -201,10 +202,12 @@ export async function materializeSkillBundle(
       pluginDirectories.set(pluginName, pluginDirectory);
     }
     for (const file of skill.files) {
-      const destination = path.resolve(skillRoot, file.path);
-      if (!withinRoot(skillRoot, destination)) throw new Error(`invalid snapshot path: ${file.path}`);
-      await mkdir(path.dirname(destination), { recursive: true });
-      await writeFile(destination, Buffer.from(file.content_base64, "base64"), { flag: "wx" });
+      for (const root of [skillRoot, localSkillRoot].filter((root): root is string => root !== null)) {
+        const destination = path.resolve(root, file.path);
+        if (!withinRoot(root, destination)) throw new Error(`invalid snapshot path: ${file.path}`);
+        await mkdir(path.dirname(destination), { recursive: true });
+        await writeFile(destination, Buffer.from(file.content_base64, "base64"), { flag: "wx" });
+      }
     }
   }
   return { additionalDirectory: bundle, pluginDirectories: [...pluginDirectories.values()] };

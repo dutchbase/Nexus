@@ -48,6 +48,7 @@ test("snapshots phase metadata, keeps legacy skills in every phase, and material
   ]);
   await expect(readFile(path.join(bundle.pluginDirectories[0], ".claude-plugin", "plugin.json"), "utf8")).resolves.toContain('"name": "dcc-local"');
   await expect(readFile(path.join(bundle.pluginDirectories[0], "skills", "local", "SKILL.md"), "utf8")).resolves.toBe("# Local\n");
+  await expect(readFile(path.join(bundle.additionalDirectory, ".claude", "skills", "local", "SKILL.md"), "utf8")).resolves.toBe("# Local\n");
   await expect(readFile(path.join(bundle.pluginDirectories[1], ".claude-plugin", "plugin.json"), "utf8")).resolves.toContain('"name": "superpowers"');
   await expect(readFile(path.join(bundle.pluginDirectories[1], "skills", "upstream", "SKILL.md"), "utf8")).resolves.toBe("# Upstream\n");
 });

@@ -89,6 +89,7 @@ export async function materializeBashGuard(sourcePath = trustedBashGuard) {
 
 function skillDirectoryArguments(input: PlanningInvocation) {
   return [
+    ...(input.skillBundleDir ? ["--add-dir", input.skillBundleDir] : []),
     ...(input.pluginDirectories ?? []).flatMap((directory) => ["--plugin-dir", directory]),
   ];
 }
