@@ -4,7 +4,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { expect, it } from "vitest";
-import { runPrivateExecution } from "./execution-handoff.ts";
+import { commitExecutionChanges } from "../../../packages/git-runner/src/index.ts";
+import { resultCommitAfterSuccessfulExecution, runPrivateExecution } from "./execution-handoff.ts";
 
 const exec = promisify(execFile);
 
@@ -79,6 +80,45 @@ it("leaves the worker worktree unchanged and removes the private clone when Clau
 
     expect(await readFile(path.join(worktreePath, "result.txt"), "utf8")).toBe("base\n");
     await expect(access(privateDirectory)).rejects.toThrow();
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("replaces a prior repair commit with the imported result squashed from the saved base", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "worker-repair-publication-"));
+  try {
+    const { baseCommit, worktreePath } = await createWorkerWorktree(root);
+    await writeFile(path.join(worktreePath, "result.txt"), "prior result\n");
+    await git(worktreePath, ["add", "."]);
+    await git(worktreePath, ["commit", "-m", "prior result"]);
+    const priorResultCommit = (await git(worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+
+    await runPrivateExecution({
+      worktreePath,
+      baseCommit,
+      readOnlyPaths: [],
+      invocation: { task: "repair" },
+      invoke: async (input) => {
+        expect(await readFile(path.join(input.workingDirectory, "result.txt"), "utf8")).toBe("prior result\n");
+        await writeFile(path.join(input.workingDirectory, "result.txt"), "repaired result\n");
+        return { exitCode: 0 };
+      },
+    });
+
+    expect(resultCommitAfterSuccessfulExecution(false, priorResultCommit)).toBe(priorResultCommit);
+    let resultCommit = resultCommitAfterSuccessfulExecution(true, priorResultCommit);
+    if (!resultCommit) {
+      resultCommit = await commitExecutionChanges({
+        worktreePath,
+        baseCommit,
+        message: "final repaired result",
+      });
+    }
+
+    expect(resultCommit).not.toBe(priorResultCommit);
+    expect((await git(worktreePath, ["rev-list", "--count", `${baseCommit}..HEAD`])).stdout.trim()).toBe("1");
+    expect((await git(worktreePath, ["show", "HEAD:result.txt"])).stdout).toBe("repaired result\n");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

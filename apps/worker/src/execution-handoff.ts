@@ -2,6 +2,10 @@ import {
   createPrivateExecutionClone, importPrivateExecutionClone,
 } from "../../../packages/git-runner/src/index.ts";
 
+export function resultCommitAfterSuccessfulExecution(repairing: boolean, resultCommit: string | null) {
+  return repairing ? null : resultCommit;
+}
+
 export async function runPrivateExecution<T extends Record<string, unknown>, R>(input: {
   worktreePath: string;
   baseCommit: string;

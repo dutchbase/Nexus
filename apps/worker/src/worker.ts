@@ -25,7 +25,7 @@ import { validateProject } from "@dcc/project-config";
 import {
   materializeSkillBundle, resolveSkills, snapshotSkills, type ResolutionSource, type SkillCandidate,
 } from "@dcc/skill-registry";
-import { runPrivateExecution } from "./execution-handoff.ts";
+import { resultCommitAfterSuccessfulExecution, runPrivateExecution } from "./execution-handoff.ts";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 
 // Resolved relative to this module's own file, not process.cwd() — `pnpm
@@ -705,6 +705,11 @@ async function runExecution(job: any) {
       },
       invoke: invokeExecutionClaude,
     });
+    const resultCommit = resultCommitAfterSuccessfulExecution(repairing, attempt.result_commit);
+    if (resultCommit !== attempt.result_commit) {
+      await pool.query("UPDATE execution_attempts SET result_commit=$2 WHERE id=$1", [attempt.id, resultCommit]);
+      attempt.result_commit = resultCommit;
+    }
     await pool.query(
       `UPDATE agent_runs
        SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3 WHERE id=$1`,
