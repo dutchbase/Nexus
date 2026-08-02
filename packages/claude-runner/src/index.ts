@@ -115,8 +115,8 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
 }
 
 export type ExecutionInvocation = PlanningInvocation & {
-  executionDirectory?: string;
-  readOnlyPaths?: string[];
+  executionDirectory: string;
+  readOnlyPaths: string[];
   logPath: string;
   timeoutMs: number;
   signal?: AbortSignal;
@@ -125,9 +125,10 @@ export type ExecutionInvocation = PlanningInvocation & {
 
 export async function createExecutionSandboxSettings(input: ExecutionInvocation, directory: string) {
   const settingsFile = path.join(directory, "settings.json");
-  const executionDirectory = input.executionDirectory ?? input.workingDirectory;
-  const readOnlyPaths = input.readOnlyPaths ?? [input.promptFile, input.skillBundleDir];
+  const executionDirectory = input.executionDirectory;
+  const readOnlyPaths = input.readOnlyPaths;
   await writeFile(settingsFile, JSON.stringify({
+    disableAllHooks: true,
     sandbox: {
       enabled: true,
       failIfUnavailable: true,
@@ -142,6 +143,7 @@ export async function createExecutionSandboxSettings(input: ExecutionInvocation,
           { name: "GITHUB_TOKEN", mode: "deny" },
           { name: "GH_TOKEN", mode: "deny" },
           { name: "DATABASE_URL", mode: "deny" },
+          { name: "CLAUDE_CODE_OAUTH_TOKEN", mode: "deny" },
         ],
       },
       network: { allowedDomains: ["api.anthropic.com"], strictAllowlist: true },
@@ -155,19 +157,46 @@ export function buildExecutionArguments(input: ExecutionInvocation, settingsFile
     "-p", input.task, "--session-id", input.sessionId, "--model", input.model, "--effort", input.effort,
     "--permission-mode", "auto", "--tools", "Read,Glob,Grep,Edit,Write,Bash,Agent,Skill",
     "--disallowedTools", "Bash(git push *),Bash(git merge *),Bash(git reset *),Bash(git commit --amend *),Bash(git rebase *),Bash(git checkout *),Bash(git switch *),Bash(gh *),Bash(sudo *),Bash(rm -rf /),Bash(rm -rf ~)",
+    "--setting-sources", "", "--strict-mcp-config",
     "--append-system-prompt-file", input.promptFile, "--add-dir", input.skillBundleDir,
     "--settings", settingsFile,
     "--output-format", "stream-json", "--verbose", "--max-turns", String(input.maxTurns),
   ];
 }
 
+export function isClaudeSandboxVersionSupported(output: string) {
+  const match = output.match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return false;
+  const [major, minor, patch] = match.slice(1).map(Number);
+  return major > 2 || (major === 2 && (minor > 1 || (minor === 1 && patch >= 219)));
+}
+
+async function requireClaudeSandboxVersion(env: NodeJS.ProcessEnv, cwd: string) {
+  const result = await runClaude(["--version", "--setting-sources", ""], { cwd, env });
+  if (result.exitCode !== 0 || !isClaudeSandboxVersionSupported(result.stdout)) {
+    throw new Error("Claude Code 2.1.219 or newer is required for strict sandbox execution");
+  }
+}
+
 export async function invokeExecutionClaude(input: ExecutionInvocation) {
   assertSubscriptionOnlyEnvironment();
-  const { GITHUB_TOKEN: _githubToken, GH_TOKEN: _ghToken, DATABASE_URL: _databaseUrl, ...parentEnv } = process.env;
-  const env: NodeJS.ProcessEnv = { ...parentEnv, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken, AGENT_CONTROL_DISABLE: "1" };
-  if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
+  if (input.executionDirectory !== input.workingDirectory) {
+    throw new Error("executionDirectory must match workingDirectory");
+  }
   const settingsDirectory = await mkdtemp(path.join(tmpdir(), "dcc-claude-settings-"));
+  const env: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH,
+    LANG: process.env.LANG,
+    LC_ALL: process.env.LC_ALL,
+    CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken,
+    CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+    CLAUDE_CONFIG_DIR: settingsDirectory,
+    AGENT_CONTROL_DISABLE: "1",
+  };
+  if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
   try {
+    await requireClaudeSandboxVersion(env, input.workingDirectory);
     const { settingsFile } = await createExecutionSandboxSettings(input, settingsDirectory);
     await appendFile(input.logPath, "");
     return await new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
