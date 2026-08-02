@@ -6,10 +6,15 @@ if [ -z "${DATABASE_URL:-}" ]; then
   exit 1
 fi
 
-backup_directory="${DCC_BACKUP_DIRECTORY:-data/backups}"
+repo_root="$(cd "$(dirname "$0")/.." && pwd -P)"
+resolve_path() {
+  if [[ "$1" = /* ]]; then printf "%s\n" "$1"; else printf "%s/%s\n" "$repo_root" "$1"; fi
+}
+backup_directory="$(resolve_path "${DCC_BACKUP_DIRECTORY:-data/backups}")"
 retention_days="${DCC_BACKUP_RETENTION_DAYS:-30}"
-data_directory="${DCC_DATA_DIR:-${DCC_DATA_ROOT:-.}/data}"
-config_directory="${DCC_CONFIG_DIR:-config}"
+legacy_data_directory="$(resolve_path "${DCC_DATA_ROOT:-.}/data")"
+data_directory="$(resolve_path "${DCC_DATA_DIR:-$legacy_data_directory}")"
+config_directory="$(resolve_path "${DCC_CONFIG_DIR:-config}")"
 
 if ! [[ "$retention_days" =~ ^[1-9][0-9]*$ ]]; then
   echo "DCC_BACKUP_RETENTION_DAYS must be a positive integer" >&2
@@ -31,9 +36,9 @@ copy_tree() {
   mkdir -p "$destination"
   [ -d "$source" ] || return
   local -a excludes=(
-    --exclude='./.env' --exclude='./.env.*' --exclude='*/.env' --exclude='*/.env.*'
-    --exclude='./secrets' --exclude='./secrets/*' --exclude='*/secrets' --exclude='*/secrets/*'
-    --exclude='*.key' --exclude='*.pem' --exclude='*.secret'
+    --exclude="./.env" --exclude="./.env.*" --exclude="*/.env" --exclude="*/.env.*"
+    --exclude="./secrets" --exclude="./secrets/*" --exclude="*/secrets" --exclude="*/secrets/*"
+    --exclude="*.key" --exclude="*.pem" --exclude="*.secret"
   )
   if [ -n "$backup_relative" ]; then
     excludes+=(--exclude="./$backup_relative" --exclude="./$backup_relative/*")
@@ -42,15 +47,25 @@ copy_tree() {
 }
 
 data_backup_relative=""
+legacy_data_backup_relative=""
 if [ -d "$data_directory" ]; then
   data_directory="$(cd "$data_directory" && pwd -P)"
   case "$backup_directory/" in
     "$data_directory/"*) data_backup_relative="${backup_directory#"$data_directory/"}" ;;
   esac
 fi
+if [ -d "$legacy_data_directory" ]; then
+  legacy_data_directory="$(cd "$legacy_data_directory" && pwd -P)"
+  case "$backup_directory/" in
+    "$legacy_data_directory/"*) legacy_data_backup_relative="${backup_directory#"$legacy_data_directory/"}" ;;
+  esac
+fi
 
 pg_dump "$DATABASE_URL" --format=custom --file="$stage/database.dump"
 copy_tree "$data_directory" "$stage/data" "$data_backup_relative"
+if [ "$legacy_data_directory" != "$data_directory" ]; then
+  copy_tree "$legacy_data_directory" "$stage/legacy-data" "$legacy_data_backup_relative"
+fi
 copy_tree "$config_directory" "$stage/config"
 (cd "$stage" && find . -type f ! -name 'manifest-v1.sha256' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$stage/manifest-v1.sha256"
 mv -- "$stage" "$backup"

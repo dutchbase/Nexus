@@ -66,6 +66,13 @@ if [ "$(database_identity "$DCC_RESTORE_DATABASE_URL")" != "$restore_database_id
   exit 1
 fi
 step="health"
-curl --fail --silent --show-error "$DCC_RESTORE_HEALTH_URL"
+if ! post_restore_health_database_identity="$(curl --fail --silent --show-error "$DCC_RESTORE_HEALTH_URL" | node -e 'let body=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => body += chunk); process.stdin.on("end", () => { const identity = JSON.parse(body).database_identity; if (typeof identity !== "string" || !identity) process.exit(1); process.stdout.write(identity); });')"; then
+  echo "health endpoint must expose a database identity after restore" >&2
+  exit 1
+fi
+if [ "$post_restore_health_database_identity" != "$restore_database_fingerprint" ]; then
+  echo "health endpoint changed database after restore" >&2
+  exit 1
+fi
 step=""
 echo "restore drill passed: $backup_directory"

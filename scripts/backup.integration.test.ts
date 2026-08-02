@@ -39,7 +39,7 @@ async function targetIdentity(connectionString: string) {
   return [row.name, row.system_identifier].join("|");
 }
 
-async function restoreTargetIsDisposable(connectionString: string) {
+async function targetIsDisposable(connectionString: string) {
   return (await query(connectionString, "SELECT EXISTS (SELECT 1 FROM pg_db_role_setting settings WHERE settings.setdatabase = (SELECT oid FROM pg_database WHERE datname=current_database()) AND settings.setrole=0 AND $$dcc.restore_disposable=true$$ = ANY(settings.setconfig)) AS value")).rows[0].value === true;
 }
 
@@ -75,13 +75,14 @@ integration("backup recovery drill integration", () => {
   let healthProcess: ReturnType<typeof spawn> | undefined;
 
   beforeEach(async () => {
-    const [primaryIdentity, restoreIdentity, restoreDisposable] = await Promise.all([
+    const [primaryIdentity, restoreIdentity, primaryDisposable, restoreDisposable] = await Promise.all([
       targetIdentity(primaryDatabaseUrl!),
       targetIdentity(restoreDatabaseUrl!),
-      restoreTargetIsDisposable(restoreDatabaseUrl!),
+      targetIsDisposable(primaryDatabaseUrl!),
+      targetIsDisposable(restoreDatabaseUrl!),
     ]);
     if (primaryIdentity === restoreIdentity) throw new Error("DCC_TEST_RESTORE_DATABASE_URL must identify a distinct disposable database");
-    if (!restoreDisposable) throw new Error("DCC_TEST_RESTORE_DATABASE_URL must be pre-marked dcc.restore_disposable=true");
+    if (!primaryDisposable || !restoreDisposable) throw new Error("DCC_TEST_DATABASE_URL and DCC_TEST_RESTORE_DATABASE_URL must be pre-marked dcc.restore_disposable=true");
     await resetDatabase(primaryDatabaseUrl!);
     await resetDatabase(restoreDatabaseUrl!);
     await migrate({ connectionString: primaryDatabaseUrl! });

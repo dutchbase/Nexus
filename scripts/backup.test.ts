@@ -18,17 +18,21 @@ async function fixture() {
   temporaryRoots.push(root);
   const bin = join(root, "bin");
   const data = join(root, "data");
+  const legacyData = join(root, "legacy", "data");
   const config = join(root, "config");
   const backups = join(root, "backups");
+  const restoreComplete = join(root, "restore-complete");
   const commandLog = join(root, "commands.log");
   await Promise.all([
     mkdir(join(data, "secrets"), { recursive: true }),
+    mkdir(legacyData, { recursive: true }),
     mkdir(join(config, "secrets"), { recursive: true }),
     mkdir(bin, { recursive: true }),
     mkdir(backups, { recursive: true }),
   ]);
   await Promise.all([
     writeFile(join(data, "artifact.txt"), "artifact"),
+    writeFile(join(legacyData, "legacy-artifact.txt"), "legacy artifact"),
     writeFile(join(data, ".env"), "DATABASE_URL=do-not-back-up"),
     writeFile(join(data, "secrets", "token"), "do-not-back-up"),
     writeFile(join(config, "projects.yaml"), "projects: []\n"),
@@ -42,13 +46,16 @@ for argument in "$@"; do case "$argument" in --file=*) printf 'custom dump\\n' >
 `);
   await shellTool(bin, "pg_restore", `#!/usr/bin/env bash
 set -euo pipefail
+touch "$DCC_TEST_RESTORE_COMPLETE"
 printf 'pg_restore %s\\n' "$*" >> "$DCC_TEST_COMMAND_LOG"
 `);
   await shellTool(bin, "curl", `#!/usr/bin/env bash
 set -euo pipefail
 printf "curl %s\n" "$*" >> "$DCC_TEST_COMMAND_LOG"
-if [ "\${DCC_TEST_HEALTH_UNREACHABLE:-false}" = "true" ]; then exit 7; fi
-printf "{\\"status\\":\\"ok\\",\\"database_identity\\":\\"%s\\"}\n" "\${DCC_TEST_HEALTH_DATABASE_IDENTITY:-1639b9318a3b6e0d3c7ac28cc33e5cebd5adcf7919669ad672453e235f6f181a}"
+if [ "$DCC_TEST_HEALTH_UNREACHABLE" = "true" ]; then exit 7; fi
+identity="\${DCC_TEST_HEALTH_DATABASE_IDENTITY:-1639b9318a3b6e0d3c7ac28cc33e5cebd5adcf7919669ad672453e235f6f181a}"
+if [ -f "\${DCC_TEST_RESTORE_COMPLETE:-}" ]; then identity="\${DCC_TEST_POST_RESTORE_HEALTH_DATABASE_IDENTITY:-\$identity}"; fi
+printf "{\\"status\\":\\"ok\\",\\"database_identity\\":\\"%s\\"}\n" "$identity"
 `);
   await shellTool(bin, "psql", `#!/usr/bin/env bash
 set -euo pipefail
@@ -83,7 +90,10 @@ fi
       DCC_RESTORE_HEALTH_URL: "http://127.0.0.1:39153/api/health",
       DCC_BACKUP_DIRECTORY: backups,
       DCC_BACKUP_RETENTION_DAYS: "2",
+      DCC_TEST_RESTORE_COMPLETE: restoreComplete,
+      DCC_TEST_HEALTH_UNREACHABLE: "false",
       DCC_DATA_DIR: data,
+      DCC_DATA_ROOT: join(root, "legacy"),
       DCC_CONFIG_DIR: config,
       DCC_TEST_COMMAND_LOG: commandLog,
     },
@@ -125,6 +135,7 @@ describe("backup and recovery drill", () => {
     expect(retainedDirectories).toContain(".dcc-backup.recent");
     await expect(readFile(join(backup, "database.dump"), "utf8")).resolves.toBe("custom dump\n");
     await expect(readFile(join(backup, "data", "artifact.txt"), "utf8")).resolves.toBe("artifact");
+    await expect(readFile(join(backup, "legacy-data", "legacy-artifact.txt"), "utf8")).resolves.toBe("legacy artifact");
     await expect(readFile(join(backup, "config", "projects.yaml"), "utf8")).resolves.toBe("projects: []\n");
     await expect(readFile(join(backup, "data", ".env"))).rejects.toThrow();
     await expect(readFile(join(backup, "data", "secrets", "token"))).rejects.toThrow();
@@ -191,6 +202,15 @@ describe("backup and recovery drill", () => {
 
     expect(result.status).not.toBe(0);
     expect(await readFile(test.commandLog, "utf8")).not.toContain("pg_restore");
+  });
+
+  it("fails when the post-restore health endpoint changes database identity", async () => {
+    const test = await fixture();
+    expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
+    const backup = await newestBackup(test.backups);
+    const result = run("scripts/restore-drill.sh", [backup], { ...test.env, DCC_TEST_POST_RESTORE_HEALTH_DATABASE_IDENTITY: "0000000000000000000000000000000000000000000000000000000000000000" });
+    expect(result.status).not.toBe(0);
+    expect(await readFile(test.commandLog, "utf8")).toContain("failed");
   });
 
   it("refuses an explicit restore target that is not marked disposable", async () => {

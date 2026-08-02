@@ -274,7 +274,7 @@ CRON_TZ=Europe/Amsterdam
 15 3 * * * cd /opt/dev-control && set -a && . ./.env && set +a && /usr/bin/env bash scripts/backup.sh >> /var/log/dcc-backup.log 2>&1
 ```
 
-Each backup is atomically published as one directory containing database.dump, managed data/, managed config/, and manifest-v1.sha256. .env files and secrets/, .key, .pem, and .secret paths are excluded; backup directories are also excluded from the managed-data copy. Successful runs apply DCC_BACKUP_RETENTION_DAYS.
+Each backup is atomically published as one directory containing database.dump, managed data/ (and legacy-data/ when DCC_DATA_DIR differs from DCC_DATA_ROOT/data), managed config/, and manifest-v1.sha256. .env files and secrets/, .key, .pem, and .secret paths are excluded; backup directories are also excluded from the managed-data copy. Successful runs apply DCC_BACKUP_RETENTION_DAYS.
 
 Run the recovery drill after a successful backup:
 
@@ -285,9 +285,16 @@ scripts/restore-drill.sh /var/backups/dcc/dcc-YYYYMMDDTHHMMSSZ-PID
 
 The drill verifies the manifest before it calls pg_restore, restores only to the explicit DCC_RESTORE_DATABASE_URL, checks the explicit DCC_RESTORE_HEALTH_URL, and writes a passed or failed result to backup_recovery_verifications through the primary DATABASE_URL. It rejects the primary database and requires a durable database-scoped marker set with PostgreSQL configuration; session and role options do not qualify: `psql -d postgres --command "ALTER DATABASE dcc_restore SET dcc.restore_disposable = true"`. Never set that marker on production. The System health page reports configured retention and recorded verification, but cannot inspect an external host crontab.
 
+Start a separate health process against the restore target before the drill (in another terminal):
+
+```bash
+DATABASE_URL="$DCC_RESTORE_DATABASE_URL" HOST=127.0.0.1 PORT=3100 pnpm exec tsx apps/web/src/server.ts
+export DCC_RESTORE_HEALTH_URL=http://127.0.0.1:3100/api/health
+```
+
 ## Recovery integration test
 
-`scripts/backup.integration.test.ts` is intentionally skipped unless **both** `DCC_TEST_DATABASE_URL` and `DCC_TEST_RESTORE_DATABASE_URL` are set. A CI job that runs it must provide distinct, disposable databases; the restore database must already be marked `dcc.restore_disposable=true`; the test refuses unmarked targets before any reset. These variables never default to `DATABASE_URL` or a production target.
+`scripts/backup.integration.test.ts` is intentionally skipped unless **both** `DCC_TEST_DATABASE_URL` and `DCC_TEST_RESTORE_DATABASE_URL` are set. A CI job that runs it must provide distinct, disposable databases; the primary and restore databases must already be marked `dcc.restore_disposable=true`; the test refuses unmarked targets before any reset. These variables never default to `DATABASE_URL` or a production target.
 
 ## Troubleshooting
 
