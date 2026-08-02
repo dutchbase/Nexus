@@ -22,6 +22,12 @@ if [ "$primary_database_identity" = "$restore_database_identity" ]; then
   exit 1
 fi
 
+restore_database_disposable="$(psql "$DCC_RESTORE_DATABASE_URL" --quiet --tuples-only --no-align --command "SELECT COALESCE(current_setting('dcc.restore_disposable', true), 'false');")"
+if [ "$restore_database_disposable" != "true" ]; then
+  echo "DCC_RESTORE_DATABASE_URL must be marked disposable with dcc.restore_disposable=true" >&2
+  exit 1
+fi
+
 backup_directory="$(cd "$1" && pwd -P)"
 manifest="$backup_directory/manifest-v1.sha256"
 manifest_sha256=""

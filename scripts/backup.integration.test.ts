@@ -29,6 +29,12 @@ async function resetDatabase(connectionString: string) {
   }
 }
 
+function databaseIdentifier(connectionString: string) {
+  const name = decodeURIComponent(new URL(connectionString).pathname.slice(1));
+  if (!name) throw new Error("database name is required");
+  return "\"" + name.replaceAll(String.fromCharCode(34), String.fromCharCode(34).repeat(2)) + "\"";
+}
+
 async function query(connectionString: string, statement: string, values: unknown[] = []) {
   const client = new pg.Client({ connectionString });
   await client.connect();
@@ -78,6 +84,7 @@ integration("backup recovery drill integration", () => {
     await resetDatabase(restoreDatabaseUrl!);
     await migrate({ connectionString: primaryDatabaseUrl! });
     await migrate({ connectionString: restoreDatabaseUrl! });
+    await query(restoreDatabaseUrl!, `ALTER DATABASE ${databaseIdentifier(restoreDatabaseUrl!)} SET dcc.restore_disposable = true`);
     root = await mkdtemp(join(tmpdir(), "dcc-backup-integration-"));
     await Promise.all([mkdir(join(root, "data")), mkdir(join(root, "config"))]);
   }, 30_000);

@@ -59,6 +59,9 @@ if [[ "$*" == *"SELECT current_database()"* ]]; then
     printf '%s\\n' "\${DCC_TEST_RESTORE_DATABASE_IDENTITY:-dcc_restore|127.0.0.1|5433}"
   fi
 fi
+if [[ "$*" == *"current_setting"* ]]; then
+  printf "%s\n" "\${DCC_TEST_RESTORE_DISPOSABLE:-true}"
+fi
 `);
   return {
     root, backups, commandLog,
@@ -164,6 +167,18 @@ describe("backup and recovery drill", () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("health endpoint");
     expect(await readFile(test.commandLog, "utf8")).toContain("failed");
+  });
+
+  it("refuses an explicit restore target that is not marked disposable", async () => {
+    const test = await fixture();
+    expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
+    const backup = await newestBackup(test.backups);
+
+    const result = run("scripts/restore-drill.sh", [backup], { ...test.env, DCC_TEST_RESTORE_DISPOSABLE: "false" });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("marked disposable");
+    expect(await readFile(test.commandLog, "utf8")).not.toContain("pg_restore");
   });
 
   it("refuses a restore target that resolves to the primary database despite different URLs", async () => {

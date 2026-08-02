@@ -9,12 +9,13 @@ describe("backupStatusCards", () => {
     expect(html).toContain("not configured");
   });
 
-  it("reports the configured external schedule, retention, and latest durable verification", () => {
+  it("reports retention without claiming an unobservable external schedule", () => {
     const html = backupStatusCards("30", { status: "passed", verified_at: new Date().toISOString() });
 
-    expect(html).toContain("03:15 Europe/Amsterdam");
+    expect(html).toContain("external cron required");
     expect(html).toContain("30 days");
     expect(html).toContain("passed");
+    expect(html).not.toContain("03:15 Europe/Amsterdam");
   });
 
   it.each(["30.0", "+30", " 30", "30 "])("treats unsupported retention value %j as not configured", (retentionDays) => {

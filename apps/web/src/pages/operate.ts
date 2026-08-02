@@ -60,7 +60,8 @@ function settingsBody(aiReviewSettings: any): string {
     <div style="padding-top:10px">${check("Always open pull requests as draft")}${check("Automatic merge permanently disabled")}</div>
   </section>`;
 
-  const retention = `<section class="card">${field("Worktree cleanup", "7 days after completion")}${field("Run event retention", "90 days")}${field("Audit retention", "forever")}${field("Daily backup window", "03:15 Europe/Amsterdam")}</section>`;
+  const backupRetention = /^[1-9][0-9]*$/.test(process.env.DCC_BACKUP_RETENTION_DAYS ?? "") ? process.env.DCC_BACKUP_RETENTION_DAYS + " days" : "not configured";
+  const retention = `<section class="card">${field("Worktree cleanup", "not configured")}${field("Run event retention", "not configured")}${field("Audit retention", "not configured")}${field("Backup retention", backupRetention)}${field("Backup schedule", "not configured · external cron")}</section>`;
 
   const aiReview = `<section class="card"><div class="card-body">
     <div class="card-head" style="margin:-18px -18px 14px;border-radius:6px 6px 0 0">AI PR Review defaults</div>
@@ -98,7 +99,7 @@ function statCard(label: string, value: string, detail: string, tone: string) {
 export function backupStatusCards(retentionDays: string | undefined, latest: { status: string; verified_at: string | Date } | null) {
   const configured = /^[1-9][0-9]*$/.test(retentionDays ?? "");
   const schedule = configured
-    ? statCard("Backup schedule", "03:15 Europe/Amsterdam", "retention " + retentionDays + " days · external cron required", "ok")
+    ? statCard("Backup schedule", "not configured", "retention " + retentionDays + " days · external cron required", "muted")
     : statCard("Backup schedule", "not configured", "Set DCC_BACKUP_RETENTION_DAYS and install the documented external cron", "muted");
   const verification = latest
     ? statCard("Recovery verification", latest.status, "verified " + since(latest.verified_at) + " ago", latest.status === "passed" ? "ok" : "danger")

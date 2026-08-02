@@ -283,7 +283,11 @@ set -a; source .env; set +a
 scripts/restore-drill.sh /var/backups/dcc/dcc-YYYYMMDDTHHMMSSZ-PID
 ```
 
-The drill verifies the manifest before it calls pg_restore, restores only to the explicit DCC_RESTORE_DATABASE_URL, checks the explicit DCC_RESTORE_HEALTH_URL, and writes a passed or failed result to backup_recovery_verifications through the primary DATABASE_URL. It rejects a restore URL that identifies the same host, port, and database as DATABASE_URL; never point it at production. The System health page shows the configured retention target and latest recorded verification, but cannot inspect an external host crontab.
+The drill verifies the manifest before it calls pg_restore, restores only to the explicit DCC_RESTORE_DATABASE_URL, checks the explicit DCC_RESTORE_HEALTH_URL, and writes a passed or failed result to backup_recovery_verifications through the primary DATABASE_URL. It rejects the primary database and requires the restore database to be explicitly marked disposable with PostgreSQL configuration: `psql -d postgres --command "ALTER DATABASE dcc_restore SET dcc.restore_disposable = true"`. Never set that marker on production. The System health page reports configured retention and recorded verification, but cannot inspect an external host crontab.
+
+## Recovery integration test
+
+`scripts/backup.integration.test.ts` is intentionally skipped unless **both** `DCC_TEST_DATABASE_URL` and `DCC_TEST_RESTORE_DATABASE_URL` are set. A CI job that runs it must provide distinct, disposable databases; the restore database must allow `ALTER DATABASE` and is marked `dcc.restore_disposable=true` by the test. These variables never default to `DATABASE_URL` or a production target.
 
 ## Troubleshooting
 
