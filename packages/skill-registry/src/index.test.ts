@@ -1,7 +1,7 @@
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, expect, test } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 import { materializeSkillBundle, skillsForPhase, snapshotSkillSet, type ResolvedSkill } from "./index.ts";
 
 const directories: string[] = [];
@@ -51,4 +51,13 @@ test("snapshots phase metadata, keeps legacy skills in every phase, and material
   await expect(readFile(path.join(bundle.additionalDirectory, ".claude", "skills", "local", "SKILL.md"), "utf8")).resolves.toBe("# Local\n");
   await expect(readFile(path.join(bundle.pluginDirectories[1], ".claude-plugin", "plugin.json"), "utf8")).resolves.toContain('"name": "superpowers"');
   await expect(readFile(path.join(bundle.pluginDirectories[1], "skills", "upstream", "SKILL.md"), "utf8")).resolves.toBe("# Upstream\n");
+});
+
+describe("skill bundles", () => {
+  test("creates an empty bundle root", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "dcc-skill-bundle-"));
+    directories.push(root);
+    const bundle = await materializeSkillBundle("00000000-0000-0000-0000-000000000000", [], root);
+    await expect(access(bundle.additionalDirectory)).resolves.toBeUndefined();
+  });
 });

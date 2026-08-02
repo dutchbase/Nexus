@@ -187,6 +187,7 @@ export async function materializeSkillBundle(
   if (!/^[0-9a-f-]{36}$/i.test(runId)) throw new Error("invalid run id");
   const bundle = path.resolve(dataRoot, "data", "skill-bundles", runId);
   const pluginDirectories = new Map<string, string>();
+  await mkdir(path.join(bundle, ".claude", "skills"), { recursive: true });
   for (const skill of skills) {
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.slug)) throw new Error(`invalid skill slug: ${skill.slug}`);
     const pluginName = skill.plugin_name ?? "dcc-local";

@@ -67,7 +67,7 @@ The administrator can:
 
 Only after explicit plan approval may the system start an execution session.
 
-Execution takes place in an isolated Git worktree. Claude Code implements the approved plan, after which the worker independently runs the configured validation commands.
+Execution takes place in a temporary private clone seeded from an isolated worker Git worktree. Claude Code implements the approved plan inside its native strict sandbox; the worker imports the result and independently runs the configured validation commands.
 
 If validation succeeds, the system:
 
@@ -1681,11 +1681,11 @@ Execution may start only when:
 * GitHub authentication is valid;
 * no active execution exists.
 
-## 20.2 Isolated worktree
+## 20.2 Private clone and native strict sandbox
 
 Claude must never work directly in the primary project checkout.
 
-The worker creates:
+The worker creates its publishable worktree:
 
 ```text
 data/worktrees/{project}/{ticket-number}/{attempt-number}
@@ -1697,6 +1697,10 @@ Example branch:
 feedback/DCC-142-fix-mobile-navigation
 ```
 
+Immediately before execution, it creates a temporary private clone seeded from that worktree. Claude receives only the private clone as its writable working directory; the worker worktree, Git refs, GitHub credentials, and database credentials are not exposed to sandboxed Bash. The private clone is removed after the run.
+
+Execution uses Claude Code's native strict Linux sandbox, backed by Bubblewrap and Socat. The execution prompt, approved plan, and complete materialized skill bundle are copied into the disposable clone before launch. Bash can read and write only that clone; built-in Read, Glob, Grep, Edit, and Write tools are hard-disabled so they cannot bypass the Bash sandbox. Network egress uses a strict allowlist for Claude service domains only, so GitHub is unavailable. Sandbox support is a required host precondition: execution fails closed when it is unavailable; there is no unsandboxed fallback and no Docker runtime requirement.
+
 ## 20.3 Execution permissions
 
 Claude may:
@@ -1707,18 +1711,25 @@ Claude may:
 * run approved package-manager commands;
 * run approved tests;
 * inspect Git status and diff.
+* make local task commits required by SDD and complete local final review.
+
+Execution uses Claude's `auto` permission mode. Hard denials prevent Git
+publication or history/branch rewrites while preserving ordinary local
+implementation commands, including `git add` and `git commit`.
 
 Claude may not:
 
-* commit;
 * push;
 * use GitHub CLI;
 * merge;
-* force-reset;
+* create pull requests;
+* reset, rebase, amend commits, checkout, or switch branches;
 * access secrets;
 * use `sudo`;
-* delete directories recursively;
+* recursively delete `/` or `~`;
 * access unrelated projects.
+
+After Claude exits successfully, the worker alone derives and verifies the private clone's final tree in worker-owned staging before touching its publishable worktree. Validation commands run with a scrubbed environment and no network namespace. The worker re-enumerates and secret-scans their final output, squashes it into one final commit, then pushes the branch and creates the pull request. Only the worker worktree is publishable.
 
 ## 20.4 Conceptual execution command
 
@@ -1727,8 +1738,11 @@ claude -p \
   --session-id "$SESSION_ID" \
   --model "$MODEL" \
   --effort "$REASONING_LEVEL" \
-  --permission-mode dontAsk \
-  --tools "Read,Glob,Grep,Edit,Write,Bash" \
+  --permission-mode auto \
+  --tools "Bash,Agent,Skill" \
+  --disallowedTools "Read,Glob,Grep,Edit,Write,Bash(git push *),Bash(git merge *),Bash(git reset *),Bash(git commit --amend *),Bash(git rebase *),Bash(git checkout *),Bash(git switch *),Bash(gh *),Bash(sudo *),Bash(rm -rf /),Bash(rm -rf ~)" \
+  --setting-sources "" \
+  --strict-mcp-config \
   --append-system-prompt-file "$PROMPT_FILE" \
   --add-dir "$SKILL_BUNDLE_DIR" \
   --output-format stream-json \
@@ -1738,6 +1752,9 @@ claude -p \
 ```
 
 Claude Code currently supports `text`, `json` and `stream-json` output. Streaming output can be used to update the dashboard while a run is active.
+
+Planning remains read-only under `dontAsk`; this execution contract does not
+change planning permissions.
 
 ## 20.5 Validation
 
@@ -3542,18 +3559,9 @@ After implementation:
 4. findings are shown in the dashboard;
 5. administrator decides whether repair is required.
 
-## Release 3.0: Containerized execution sandbox
+## Release 3.0: Resource-limited execution nodes
 
-Run each execution in a disposable container with:
-
-* CPU limits;
-* memory limits;
-* process limits;
-* temporary filesystem;
-* restricted network;
-* read-only base mounts;
-* explicit writable worktree;
-* automatic destruction.
+The native strict sandbox is the execution isolation boundary. Add CPU, memory, and process limits to execution nodes only when the deployment requires them; Docker is not a runtime requirement.
 
 ## Release 3.1: Public roadmap
 
@@ -3607,9 +3615,9 @@ Jobs are routed only to a node containing the correct local repository.
 11. Prompt generation does not use AI.
 12. Planning is read-only.
 13. Plan approval applies to an immutable plan version.
-14. Execution always uses a worktree.
+14. Execution uses a private clone inside a native strict sandbox; only the worker worktree is publishable.
 15. Claude never pushes or opens PRs directly.
-16. The worker independently validates all changes.
+16. The worker imports, scans, independently validates, squashes, and publishes all changes.
 17. Pull requests are always drafts initially.
 18. Pull requests from all projects are visible centrally.
 19. Ticket statuses update automatically.

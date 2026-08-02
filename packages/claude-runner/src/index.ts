@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
 import { realpathSync } from "node:fs";
-import { appendFile, chmod, copyFile, mkdtemp, open, readFile, rename, rm } from "node:fs/promises";
+import { appendFile, chmod, copyFile, mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -193,7 +193,7 @@ function executionSettings(input: PlanningInvocation, guardPath: string) {
   const allowRead = [
     input.workingDirectory, input.skillBundleDir, ...(input.pluginDirectories ?? []), input.promptFile,
     guardPath, nodeInstallRoot, process.env.COREPACK_HOME, path.join(homedir(), ".cache", "node", "corepack"),
-  ].filter((target): target is string => Boolean(target)).map((target) => path.resolve(target));
+  ].filter((target): target is string => Boolean(target)).map((target) => path.resolve(input.workingDirectory, target));
   let worktree: string;
   try { worktree = realpathSync(input.workingDirectory); } catch { worktree = path.resolve(input.workingDirectory); }
   const homeRelative = path.relative(homedir(), worktree);
@@ -295,6 +295,7 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
 }
 
 export type ExecutionInvocation = PlanningInvocation & {
+  executionDirectory: string;
   logPath: string;
   timeoutMs: number;
   signal?: AbortSignal;
@@ -302,53 +303,74 @@ export type ExecutionInvocation = PlanningInvocation & {
 };
 
 export function assertExecutionSandboxVersion(value: string) {
-  const match = value.match(/\b(\d+)\.(\d+)\.(\d+)\b/);
-  const version = match?.slice(1).map(Number);
-  const tooOld = !version || version[0] < 2 || (version[0] === 2 && (version[1] < 1 || (version[1] === 1 && version[2] < 219)));
-  if (tooOld) {
+  if (!isClaudeSandboxVersionSupported(value)) {
     throw new Error("execution requires Claude Code 2.1.219 or newer for fail-closed strict sandboxing");
   }
 }
 
-export function buildExecutionArguments(input: ExecutionInvocation) {
+export async function createExecutionSandboxSettings(input: ExecutionInvocation, directory: string) {
+  const settingsFile = path.join(directory, "settings.json");
+  await writeFile(settingsFile, executionSettings(input, input.guardPath ?? trustedBashGuard), { encoding: "utf8", flag: "wx" });
+  return { settingsFile };
+}
+
+export function buildExecutionArguments(input: ExecutionInvocation, settingsFile: string) {
   return [
     "-p", input.task, "--session-id", input.sessionId, "--model", input.model, "--effort", input.effort,
     "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep,Skill,Agent",
     "--append-system-prompt-file", input.promptFile, ...skillDirectoryArguments(input),
-    "--setting-sources", "", "--settings", executionSettings(input, input.guardPath ?? trustedBashGuard),
+    "--setting-sources", "", "--strict-mcp-config", "--settings", settingsFile,
     "--agents", sessionAgents(input),
     "--output-format", "stream-json", "--verbose", "--max-turns", String(input.maxTurns),
   ];
 }
 
+export function isClaudeSandboxVersionSupported(output: string) {
+  const match = output.match(/(\d+)\.(\d+)\.(\d+)/);
+  if (!match) return false;
+  const [major, minor, patch] = match.slice(1).map(Number);
+  return major > 2 || (major === 2 && (minor > 1 || (minor === 1 && patch >= 219)));
+}
+
+async function requireClaudeSandboxVersion(env: NodeJS.ProcessEnv, cwd: string, executable?: string) {
+  const result = await runClaude(["--version", "--setting-sources", ""], { cwd, env, executable });
+  if (result.exitCode !== 0) throw new Error("could not verify Claude Code sandbox support");
+  assertExecutionSandboxVersion(result.stdout);
+}
+
 export async function invokeExecutionClaude(input: ExecutionInvocation) {
   assertSubscriptionOnlyEnvironment();
-  const env: NodeJS.ProcessEnv = { ...process.env };
-  for (const name of new Set([...defaultSensitiveEnvironmentVariables, ...(input.sensitiveEnvironmentVariables ?? [])])) {
-    delete env[name];
+  if (input.executionDirectory !== input.workingDirectory) {
+    throw new Error("executionDirectory must match workingDirectory");
   }
-  Object.assign(env, {
+  const settingsDirectory = await mkdtemp(path.join(tmpdir(), "dcc-claude-settings-"));
+  const env: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH,
+    LANG: process.env.LANG,
+    LC_ALL: process.env.LC_ALL,
     CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken,
     CLAUDE_CODE_SUBPROCESS_ENV_SCRUB: "1",
     CLAUDE_CODE_DISABLE_BACKGROUND_TASKS: "1",
+    CLAUDE_CODE_DISABLE_AUTO_MEMORY: "1",
+    CLAUDE_CONFIG_DIR: settingsDirectory,
     AGENT_CONTROL_DISABLE: "1",
-  });
+  };
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
-  const version = await runClaude(["--version"], { env, executable: input.claudeExecutable });
-  if (version.exitCode !== 0) throw new Error("could not verify Claude Code sandbox support");
-  assertExecutionSandboxVersion(version.stdout);
   const guard = await materializeBashGuard();
   let hiddenGitMetadata: Awaited<ReturnType<typeof hideWorktreeGitMetadata>> = null;
   try {
-  await appendFile(input.logPath, "");
-  const metadataPaths = input.gitMetadataPaths ?? await gitMetadataPaths(input.workingDirectory);
-  hiddenGitMetadata = await hideWorktreeGitMetadata(input.workingDirectory);
-  return await new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
-    const child = spawn(input.claudeExecutable ?? "claude", buildExecutionArguments({
+    await requireClaudeSandboxVersion(env, input.workingDirectory, input.claudeExecutable);
+    await appendFile(input.logPath, "");
+    const metadataPaths = input.gitMetadataPaths ?? await gitMetadataPaths(input.workingDirectory);
+    hiddenGitMetadata = await hideWorktreeGitMetadata(input.workingDirectory);
+    const configuredInput = {
       ...input,
       guardPath: guard.path,
       gitMetadataPaths: [...metadataPaths, ...(hiddenGitMetadata ? [hiddenGitMetadata.hidden] : [])],
-    }), {
+    };
+    const { settingsFile } = await createExecutionSandboxSettings(configuredInput, settingsDirectory);
+    return await new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
+    const child = spawn(input.claudeExecutable ?? "claude", buildExecutionArguments(configuredInput, settingsFile), {
       cwd: input.workingDirectory,
       env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -413,7 +435,11 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     try {
       await hiddenGitMetadata?.restore();
     } finally {
-      await guard.cleanup();
+      try {
+        await guard.cleanup();
+      } finally {
+        await rm(settingsDirectory, { recursive: true, force: true });
+      }
     }
   }
 }
