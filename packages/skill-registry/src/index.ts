@@ -146,6 +146,7 @@ export async function materializeSkillBundle(
 ) {
   if (!/^[0-9a-f-]{36}$/i.test(runId)) throw new Error("invalid run id");
   const bundle = path.resolve(dataRoot, "data", "skill-bundles", runId, ".claude", "skills");
+  await mkdir(bundle, { recursive: true });
   for (const skill of skills) {
     if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(skill.slug)) throw new Error(`invalid skill slug: ${skill.slug}`);
     for (const file of skill.files) {
