@@ -46,7 +46,8 @@ printf 'pg_restore %s\\n' "$*" >> "$DCC_TEST_COMMAND_LOG"
 `);
   await shellTool(bin, "curl", `#!/usr/bin/env bash
 set -euo pipefail
-printf 'curl %s\\n' "$*" >> "$DCC_TEST_COMMAND_LOG"
+printf "curl %s\n" "$*" >> "$DCC_TEST_COMMAND_LOG"
+printf "{\\"status\\":\\"ok\\",\\"database_identity\\":\\"%s\\"}\n" "\${DCC_TEST_HEALTH_DATABASE_IDENTITY:-1639b9318a3b6e0d3c7ac28cc33e5cebd5adcf7919669ad672453e235f6f181a}"
 `);
   await shellTool(bin, "psql", `#!/usr/bin/env bash
 set -euo pipefail
@@ -148,6 +149,21 @@ describe("backup and recovery drill", () => {
     expect(log).toContain("psql postgresql://primary:primary@127.0.0.1:5432/dcc_primary");
     expect(log).toContain("backup_recovery_verifications");
     expect(log).toContain("passed");
+  });
+
+  it("rejects a healthy endpoint connected to a different database", async () => {
+    const test = await fixture();
+    expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
+    const backup = await newestBackup(test.backups);
+
+    const result = run("scripts/restore-drill.sh", [backup], {
+      ...test.env,
+      DCC_TEST_HEALTH_DATABASE_IDENTITY: "0000000000000000000000000000000000000000000000000000000000000000",
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("health endpoint");
+    expect(await readFile(test.commandLog, "utf8")).toContain("failed");
   });
 
   it("refuses a restore target that resolves to the primary database despite different URLs", async () => {
