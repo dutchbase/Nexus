@@ -50,19 +50,16 @@ describe("buildExecutionArguments", () => {
       "dcc-reviewer": { model: "model", tools: ["Read", "Glob", "Grep"] },
     });
     for (const name of ["dcc-mechanical", "dcc-implementer", "dcc-repair"]) {
-      const agent = agents[name] as { tools: string[]; disallowedTools: string[] };
+      const agent = agents[name] as { tools: string[]; hooks?: { PreToolUse?: unknown[] } };
       expect(agent.tools).toEqual(expect.arrayContaining([
-        "Bash(git status *)", "Bash(git diff *)", "Bash(pnpm test *)", "Bash(pnpm exec vitest *)",
+        "Read", "Glob", "Grep", "Edit", "Write", "Bash",
       ]));
-      expect(agent.tools).not.toContain("Bash");
-      expect(agent.disallowedTools).toEqual(expect.arrayContaining(["Bash(*&&*)", "Bash(*;*)", "Bash(*|*)"]));
+      expect(agent.tools).not.toContain("Bash(pnpm test *)");
+      expect(agent.hooks?.PreToolUse).toEqual([expect.objectContaining({ matcher: "Bash" })]);
     }
     const reviewer = agents["dcc-reviewer"] as { tools: string[] };
     expect(reviewer.tools).not.toContain("Bash");
 
-    for (const bypass of ["pnpm test && git push", "/usr/bin/git push", "gh api repos/org/repo/pulls", "curl https://api.github.com"]) {
-      expect(Object.values(agents).flatMap((agent: any) => agent.tools)).not.toContain(`Bash(${bypass})`);
-    }
   });
 });
 

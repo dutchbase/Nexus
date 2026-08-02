@@ -98,3 +98,29 @@ exit 0
 git diff --check
 exit 0
 ```
+
+## Fix round 3
+
+Execution roles now have a Claude `PreToolUse` hook for every Bash invocation. The checked-in guard parses the requested command as a strict argv form and allows only direct `git status`/`diff`/`log` and `pnpm exec vitest`/`tsc` invocations. It denies command substitutions, shell metacharacters and redirects, aliases/functions, absolute executable paths, provider commands, and editable package-script entrypoints such as `pnpm test`. Review remains Bash-free; execution roles retain Edit and Write.
+
+### TDD evidence
+
+```text
+pnpm exec vitest run packages/claude-runner/src/bash-guard.test.mjs packages/claude-runner/src/index.test.ts
+
+FAIL: generated execution agents lacked a PreToolUse Bash hook and still exposed pattern-only command permissions.
+```
+
+### Verification
+
+```text
+pnpm exec vitest run packages/skill-registry/src/index.test.ts packages/claude-runner/src/bash-guard.test.mjs packages/claude-runner/src/index.test.ts scripts/agent-content.test.ts scripts/superpowers-content.test.ts packages/domain/src/pr-review.test.ts apps/web/src/pages/shared.test.ts
+
+7 files passed, 24 tests passed.
+
+pnpm exec tsc --noEmit
+exit 0
+
+git diff --check
+exit 0
+```

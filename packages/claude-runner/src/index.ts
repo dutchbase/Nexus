@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { appendFile, mkdtemp, open, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { assertSubscriptionOnlyEnvironment, ClaudeAuthError } from "./auth-guard.ts";
 export { assertSubscriptionOnlyEnvironment, ClaudeAuthError, forbiddenClaudeAuthVariables } from "./auth-guard.ts";
 
@@ -70,34 +71,32 @@ function skillDirectoryArguments(input: PlanningInvocation) {
 }
 
 function sessionAgents(input: PlanningInvocation) {
-  const executionTools = [
-    "Read", "Glob", "Grep", "Edit", "Write",
-    "Bash(git status *)", "Bash(git diff *)", "Bash(git log *)",
-    "Bash(pnpm test *)", "Bash(pnpm exec vitest *)", "Bash(pnpm exec tsc *)",
-  ];
-  const disallowedTools = [
-    "Bash(*&&*)", "Bash(*;*)", "Bash(*|*)",
-  ];
+  const bashHooks = {
+    PreToolUse: [{
+      matcher: "Bash",
+      hooks: [{ type: "command", command: `node ${JSON.stringify(fileURLToPath(new URL("./bash-guard.mjs", import.meta.url)))}` }],
+    }],
+  };
   return JSON.stringify({
     "dcc-mechanical": {
       description: "Handles small mechanical implementation tasks.",
       prompt: "Complete only the assigned mechanical task. Do not commit, push, merge, or create a pull request.",
-      model: "haiku", effort: "low", tools: executionTools, disallowedTools,
+      model: "haiku", effort: "low", tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], hooks: bashHooks,
     },
     "dcc-implementer": {
       description: "Implements an independently scoped plan task.",
       prompt: "Implement only the assigned task and report validation. Do not commit, push, merge, or create a pull request.",
-      model: input.model, effort: input.effort, tools: executionTools, disallowedTools,
+      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], hooks: bashHooks,
     },
     "dcc-repair": {
       description: "Traces and repairs a focused failure.",
       prompt: "Reproduce and repair only the assigned root cause. Do not commit, push, merge, or create a pull request.",
-      model: input.model, effort: input.effort, tools: executionTools, disallowedTools,
+      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], hooks: bashHooks,
     },
     "dcc-reviewer": {
       description: "Reviews assigned code without modifying it.",
       prompt: "Review the assigned change read-only. Do not edit files, run Bash, commit, push, merge, or create a pull request.",
-      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep"], disallowedTools,
+      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep"],
     },
   });
 }
