@@ -10,7 +10,7 @@ import {
 import { inTransaction, pool } from "@dcc/database";
 import {
   approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate,
-  claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, parsePrReviewVerdict,
+  claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, parsePrReviewVerdict, reviewedHeadShaForMerge,
   renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
@@ -1180,8 +1180,11 @@ async function runPrAiReview(job: any) {
         [payload.pr_ai_review_id, verdict.verdict === "approved" ? "approved" : "rejected", verdict.summary, comment.html_url],
       );
 
-      if (payload.mode === "review_and_merge" && verdict.verdict === "approved") {
-        await approveAndMergePullRequest(pool, pullRequest, payload.target_branch, { type: "worker", id: payload.pr_ai_review_id });
+      const reviewedHeadSha = reviewedHeadShaForMerge(payload.mode, verdict.verdict, reviewWorktree.headCommit);
+      if (reviewedHeadSha) {
+        await approveAndMergePullRequest(
+          pool, pullRequest, payload.target_branch, { type: "worker", id: payload.pr_ai_review_id }, reviewedHeadSha,
+        );
       }
     } finally {
       await rm(temporary, { recursive: true, force: true });

@@ -289,6 +289,7 @@ describe("createPullRequestReviewWorktree", () => {
       });
       try {
         expect((await git(worktree.worktreePath, ["rev-parse", "HEAD"])).stdout.trim()).toBe(expectedCommit);
+        expect(worktree.headCommit).toBe(expectedCommit);
         await expect(git(worktree.worktreePath, ["symbolic-ref", "--quiet", "HEAD"])).rejects.toMatchObject({ code: 1 });
       } finally {
         await worktree.cleanup();

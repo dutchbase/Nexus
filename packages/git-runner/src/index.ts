@@ -186,9 +186,11 @@ export async function createPullRequestReviewWorktree(input: {
   }
   const ref = `refs/pull/${input.pullRequestNumber}/head`;
   await mkdir(parent, { recursive: true });
+  let headCommit: string;
   try {
     await exec("git", ["-C", repository, "fetch", "origin", `+${ref}:${ref}`]);
     await exec("git", ["-C", repository, "worktree", "add", "--detach", worktreePath, ref]);
+    headCommit = (await exec("git", ["-C", worktreePath, "rev-parse", "HEAD"])).stdout.trim();
   } catch (error) {
     await rm(worktreePath, { recursive: true, force: true });
     await exec("git", ["-C", repository, "worktree", "prune"]).catch(() => {});
@@ -196,6 +198,7 @@ export async function createPullRequestReviewWorktree(input: {
   }
   return {
     worktreePath,
+    headCommit,
     cleanup: async () => {
       try {
         await exec("git", ["-C", repository, "worktree", "remove", "--force", worktreePath]);

@@ -12,24 +12,36 @@ export type PrReviewPromptVars = {
 };
 
 function flatten(vars: PrReviewPromptVars): Record<string, string> {
+  const json = (value: string) => JSON.stringify(value).replaceAll("<", "\\u003c");
   return {
     "superpowers.code-reviewer": vars.superpowersCodeReviewer,
-    "project.name": JSON.stringify(vars.project.name),
-    "pr.title": JSON.stringify(vars.pr.title),
-    "pr.author": JSON.stringify(vars.pr.author),
-    "pr.head_branch": JSON.stringify(vars.pr.head_branch),
-    "pr.base_branch": JSON.stringify(vars.pr.base_branch),
-    "pr.body": JSON.stringify(vars.pr.body ?? ""),
-    "pr.diff": JSON.stringify(vars.pr.diff),
+    "project.name": json(vars.project.name),
+    "pr.title": json(vars.pr.title),
+    "pr.author": json(vars.pr.author),
+    "pr.head_branch": json(vars.pr.head_branch),
+    "pr.base_branch": json(vars.pr.base_branch),
+    "pr.body": json(vars.pr.body ?? ""),
+    "pr.diff": json(vars.pr.diff),
   };
 }
 
 export function renderPrReviewPrompt(template: string, vars: PrReviewPromptVars): string {
   const values = flatten(vars);
-  return template.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_match, key: string) => values[key] ?? _match);
+  const rendered = template.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_match, key: string) => values[key] ?? _match);
+  return /\{\{\s*superpowers\.code-reviewer\s*\}\}/.test(template)
+    ? rendered
+    : `${rendered}\n\n## Required immutable review rubric\n\n${vars.superpowersCodeReviewer}`;
 }
 
 export class PrReviewVerdictError extends Error {}
+
+export function reviewedHeadShaForMerge(
+  mode: "review_only" | "review_and_merge",
+  verdict: "approved" | "rejected",
+  reviewedHeadSha: string,
+) {
+  return mode === "review_and_merge" && verdict === "approved" ? reviewedHeadSha : null;
+}
 
 export function parsePrReviewVerdict(markdown: string): { verdict: "approved" | "rejected"; summary: string } {
   const matches = [...markdown.matchAll(/```json\s*([\s\S]*?)```/g)];

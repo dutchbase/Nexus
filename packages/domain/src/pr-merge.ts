@@ -21,6 +21,7 @@ export async function approveAndMergePullRequest(
   pullRequest: PullRequestRow,
   targetBranch: string | undefined,
   actor: { type: "worker" | "admin"; id: string },
+  expectedHeadSha?: string,
 ): Promise<void> {
   const [owner, repo] = pullRequest.repository.split("/");
   try {
@@ -28,7 +29,7 @@ export async function approveAndMergePullRequest(
       await updatePullRequestBase(owner, repo, pullRequest.number, targetBranch);
     }
     if (pullRequest.is_draft) await markReadyForReview(owner, repo, pullRequest.number);
-    await mergePullRequest(owner, repo, pullRequest.number);
+    await mergePullRequest(owner, repo, pullRequest.number, "squash", expectedHeadSha);
   } catch (error) {
     throw new PullRequestMergeError(error instanceof Error ? error.message : "merge failed");
   }
