@@ -70,27 +70,29 @@ function skillDirectoryArguments(input: PlanningInvocation) {
 }
 
 function sessionAgents(input: PlanningInvocation) {
+  const executionTools = [
+    "Read", "Glob", "Grep", "Edit", "Write",
+    "Bash(git status *)", "Bash(git diff *)", "Bash(git log *)",
+    "Bash(pnpm test *)", "Bash(pnpm exec vitest *)", "Bash(pnpm exec tsc *)",
+  ];
   const disallowedTools = [
-    "Bash(git commit *)", "Bash(git -C * commit *)",
-    "Bash(git push *)", "Bash(git -C * push *)",
-    "Bash(git merge *)", "Bash(git -C * merge *)",
-    "Bash(gh pr create *)", "Bash(glab mr create *)",
+    "Bash(*&&*)", "Bash(*;*)", "Bash(*|*)",
   ];
   return JSON.stringify({
     "dcc-mechanical": {
       description: "Handles small mechanical implementation tasks.",
       prompt: "Complete only the assigned mechanical task. Do not commit, push, merge, or create a pull request.",
-      model: "haiku", effort: "low", tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], disallowedTools,
+      model: "haiku", effort: "low", tools: executionTools, disallowedTools,
     },
     "dcc-implementer": {
       description: "Implements an independently scoped plan task.",
       prompt: "Implement only the assigned task and report validation. Do not commit, push, merge, or create a pull request.",
-      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], disallowedTools,
+      model: input.model, effort: input.effort, tools: executionTools, disallowedTools,
     },
     "dcc-repair": {
       description: "Traces and repairs a focused failure.",
       prompt: "Reproduce and repair only the assigned root cause. Do not commit, push, merge, or create a pull request.",
-      model: input.model, effort: input.effort, tools: ["Read", "Glob", "Grep", "Edit", "Write", "Bash"], disallowedTools,
+      model: input.model, effort: input.effort, tools: executionTools, disallowedTools,
     },
     "dcc-reviewer": {
       description: "Reviews assigned code without modifying it.",

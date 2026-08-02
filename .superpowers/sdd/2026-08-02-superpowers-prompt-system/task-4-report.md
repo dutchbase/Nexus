@@ -72,3 +72,29 @@ exit 0
 git diff --check
 exit 0
 ```
+
+## Fix round 2
+
+Execution subagents no longer receive unrestricted `Bash`. Mechanical, implementation, and repair roles receive only explicit `git status`/`diff`/`log` and `pnpm` test/typecheck command patterns, plus Edit and Write. Chained shell forms are denied; absolute git and provider API commands are outside the allowlist. The reviewer remains Bash-free.
+
+### TDD evidence
+
+```text
+pnpm exec vitest run packages/claude-runner/src/index.test.ts
+
+FAIL: generated execution agents exposed unrestricted Bash instead of the status/test command allowlist.
+```
+
+### Verification
+
+```text
+pnpm exec vitest run packages/skill-registry/src/index.test.ts packages/claude-runner/src/index.test.ts scripts/agent-content.test.ts scripts/superpowers-content.test.ts packages/domain/src/pr-review.test.ts apps/web/src/pages/shared.test.ts
+
+6 files passed, 22 tests passed.
+
+pnpm exec tsc --noEmit
+exit 0
+
+git diff --check
+exit 0
+```
