@@ -172,4 +172,21 @@ integration("migrate", () => {
       await client.end();
     }
   });
+
+  it("persists backup recovery verification outcomes", async () => {
+    await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      await client.query(
+        "INSERT INTO backup_recovery_verifications (backup_path,manifest_sha256,status) VALUES ($q$/backups/dcc-20260802T031500Z$q$,repeat($q$a$q$,64),$q$passed$q$)",
+      );
+      expect((await client.query("SELECT status, failure_step FROM backup_recovery_verifications")).rows).toEqual([
+        { status: "passed", failure_step: null },
+      ]);
+    } finally {
+      await client.end();
+    }
+  });
 });

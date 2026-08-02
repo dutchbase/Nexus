@@ -252,6 +252,39 @@ latest release. Leaving the tag empty uses the latest release again.
 
 Everything under `$DCC_DATA_DIR` (or `$DCC_DATA_ROOT/data` when `DCC_DATA_DIR` is unset) is managed artifact state: uploaded attachments, execution logs, and worktrees. Plans are immutable database rows; skill bundles are temporary and reconstructed for each run. Back this directory up with the database — losing it does not corrupt the DB, but it loses execution history and in-flight artifacts.
 
+## Backups and recovery drills
+
+Backups are external scheduled work. Configure the process environment with:
+
+```bash
+DCC_BACKUP_DIRECTORY=/var/backups/dcc
+DCC_BACKUP_RETENTION_DAYS=30
+DCC_DATA_DIR=/opt/dev-control/data
+DCC_CONFIG_DIR=/opt/dev-control/config
+
+# Required only for restore drills — this must be a separate, disposable database.
+DCC_RESTORE_DATABASE_URL=postgresql://dcc:change-me@127.0.0.1:5432/dcc_restore
+DCC_RESTORE_HEALTH_URL=http://127.0.0.1:3100/api/health
+```
+
+Install an external cron entry for **03:15 Europe/Amsterdam**. Cron does not inherit your service environment, so source the same environment file explicitly:
+
+```cron
+CRON_TZ=Europe/Amsterdam
+15 3 * * * cd /opt/dev-control && set -a && . ./.env && set +a && /usr/bin/env bash scripts/backup.sh >> /var/log/dcc-backup.log 2>&1
+```
+
+Each backup is atomically published as one directory containing database.dump, managed data/, managed config/, and manifest-v1.sha256. .env files and secrets/, .key, .pem, and .secret paths are excluded; backup directories are also excluded from the managed-data copy. Successful runs apply DCC_BACKUP_RETENTION_DAYS.
+
+Run the recovery drill after a successful backup:
+
+```bash
+set -a; source .env; set +a
+scripts/restore-drill.sh /var/backups/dcc/dcc-YYYYMMDDTHHMMSSZ-PID
+```
+
+The drill verifies the manifest before it calls pg_restore, restores only to the explicit DCC_RESTORE_DATABASE_URL, checks the explicit DCC_RESTORE_HEALTH_URL, and writes a passed or failed result to backup_recovery_verifications through the primary DATABASE_URL. It rejects a restore URL that identifies the same host, port, and database as DATABASE_URL; never point it at production. The System health page shows the configured retention target and latest recorded verification, but cannot inspect an external host crontab.
+
 ## Troubleshooting
 
 - **Worker can't find `claude`:** confirm `which claude` resolves for the
