@@ -22,6 +22,43 @@ export function executionBranchName(ticketNumber: string, title: string, attempt
   return `feedback/${safeSegment(ticketNumber, "ticket")}-${attemptNumber}-${safeSegment(title.toLowerCase(), "change")}`;
 }
 
+function isWithin(root: string, target: string) {
+  const relative = path.relative(root, target);
+  return relative && relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative);
+}
+
+async function managedWorktreePath(dataRoot: string, directories: string[], leaf: string) {
+  const root = path.resolve(dataRoot, "worktrees");
+  await mkdir(root, { recursive: true });
+  const realRoot = await realpath(root);
+  let current = root;
+  for (const directory of directories) {
+    const next = path.resolve(current, directory);
+    if (!isWithin(root, next)) throw new Error("managed worktree path escapes controlled root");
+    try {
+      const realNext = await realpath(next);
+      if (!isWithin(realRoot, realNext)) throw new Error("managed worktree path escapes controlled root");
+    } catch (error: any) {
+      if (error?.code !== "ENOENT") throw error;
+      await mkdir(next);
+      const realNext = await realpath(next);
+      if (!isWithin(realRoot, realNext)) throw new Error("managed worktree path escapes controlled root");
+    }
+    current = next;
+  }
+  const target = path.resolve(current, leaf);
+  if (!isWithin(root, target)) throw new Error("managed worktree path escapes controlled root");
+  return target;
+}
+
+async function assertManagedWorktreePath(dataRoot: string, worktreePath: string) {
+  const root = path.resolve(dataRoot, "worktrees");
+  const target = path.resolve(worktreePath);
+  if (!isWithin(root, target)) throw new Error("managed worktree path escapes controlled root");
+  const [realRoot, realTarget] = await Promise.all([realpath(root), realpath(target)]);
+  if (!isWithin(realRoot, realTarget)) throw new Error("managed worktree path escapes controlled root");
+}
+
 export async function createExecutionWorktree(input: {
   repositoryPath: string;
   defaultBranch: string;
@@ -32,18 +69,9 @@ export async function createExecutionWorktree(input: {
   attemptNumber: number;
 }) {
   const repository = await realpath(input.repositoryPath);
-  const root = path.resolve(input.dataRoot, "worktrees");
-  const worktreePath = path.resolve(
-    root,
-    safeSegment(input.projectSlug, "project"),
-    safeSegment(input.ticketNumber, "ticket"),
-    String(input.attemptNumber),
-  );
-  const relative = path.relative(root, worktreePath);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error("invalid worktree path");
-  }
-  await mkdir(path.dirname(worktreePath), { recursive: true });
+  const worktreePath = await managedWorktreePath(input.dataRoot, [
+    safeSegment(input.projectSlug, "project"), safeSegment(input.ticketNumber, "ticket"),
+  ], String(input.attemptNumber));
   const branchName = executionBranchName(input.ticketNumber, input.title, input.attemptNumber);
   const baseRef = `refs/heads/${input.defaultBranch}`;
   await exec("git", ["-C", repository, "show-ref", "--verify", baseRef]);
@@ -165,7 +193,8 @@ async function git(worktreePath: string, args: string[], input?: string, safe = 
   });
 }
 
-export async function removeManagedWorktree(repositoryPath: string, worktreePath: string) {
+export async function removeManagedWorktree(repositoryPath: string, dataRoot: string, worktreePath: string) {
+  await assertManagedWorktreePath(dataRoot, worktreePath);
   const repository = await realpath(repositoryPath);
   await exec("git", ["-C", repository, "worktree", "remove", "--force", worktreePath]);
   await exec("git", ["-C", repository, "worktree", "prune"]);
@@ -180,15 +209,7 @@ export async function createConflictResolutionWorktree(input: {
   pullRequestNumber: number;
 }) {
   const repository = await realpath(input.repositoryPath);
-  const root = path.resolve(input.dataRoot, "worktrees");
-  const worktreePath = path.resolve(
-    root, safeSegment(input.projectSlug, "project"), `pr-${input.pullRequestNumber}-conflict-resolution`,
-  );
-  const relative = path.relative(root, worktreePath);
-  if (!relative || relative.startsWith("..") || path.isAbsolute(relative)) {
-    throw new Error("invalid worktree path");
-  }
-  await mkdir(path.dirname(worktreePath), { recursive: true });
+  const worktreePath = await managedWorktreePath(input.dataRoot, [safeSegment(input.projectSlug, "project")], "pr-" + input.pullRequestNumber + "-conflict-resolution");
   // ponytail: a prior attempt (validation failure, crash) can leave this same
   // path registered as a worktree. Force-clear it so retrying doesn't fail on
   // "branch already checked out" or "path already exists".

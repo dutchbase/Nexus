@@ -71,14 +71,15 @@ integration("artifact integrity migration", () => {
         [uploadId, runId],
       )).rejects.toThrow("upload artifacts require only an upload owner");
       await expect(client.query(
-        "INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,agent_run_id,execution_attempt_id) VALUES (gen_random_uuid(),$q$logs/invalid.log$q$,$q$execution_log$q$,$q$staged$q$,now() + interval $q$1 hour$q$,$1,$2)",
+        "INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,agent_run_id,execution_attempt_id) VALUES (gen_random_uuid(),$q$worktrees/invalid.tar$q$,$q$worktree$q$,$q$staged$q$,now() + interval $q$1 hour$q$,$1,$2)",
         [otherRunId, attemptId],
-      )).rejects.toThrow("run artifacts require matching run and execution attempt owners");
+      )).rejects.toThrow("worktree artifacts require matching run and execution attempt owners");
 
       const artifactId = (await client.query(
         "INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,agent_run_id,execution_attempt_id) VALUES (gen_random_uuid(),$q$logs/valid.log$q$,$q$execution_log$q$,$q$staged$q$,now() + interval $q$1 hour$q$,$1,$2) RETURNING id",
         [runId, attemptId],
       )).rows[0].id;
+      await client.query("UPDATE execution_attempts SET agent_run_id=$1 WHERE id=$2", [otherRunId, attemptId]);
       await client.query(
         "UPDATE artifacts SET status=$q$finalized$q$,sha256=repeat($q$a$q$,64),expires_at=NULL,finalized_at=now() WHERE id=$1",
         [artifactId],

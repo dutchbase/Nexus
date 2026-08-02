@@ -1803,8 +1803,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
   if (runLogMatch && request.method === "GET") {
     const row = (await pool.query(
       `SELECT ar.id,a.id artifact_id,a.storage_path FROM agent_runs ar
-       JOIN execution_attempts ea ON ea.agent_run_id=ar.id
-       JOIN artifacts a ON a.agent_run_id=ar.id AND a.artifact_type='execution_log' AND a.status='finalized'
+       JOIN artifacts a ON a.agent_run_id=ar.id AND a.artifact_type='execution_log' AND a.status IN ('staged','finalized')
        WHERE ar.id=$1`,
       [runLogMatch[1]],
     )).rows[0];
@@ -1813,7 +1812,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
       const content = await readArtifact(dataRoot, row.storage_path).then((content) => content.toString("utf8"));
       return json(response, 200, { run_id: row.id, content });
     } catch {
-      await pool.query("UPDATE artifacts SET status='abandoned',abandoned_at=now() WHERE id=$1 AND status='finalized'", [row.artifact_id]);
+      await pool.query("UPDATE artifacts SET status='abandoned',abandoned_at=now() WHERE id=$1 AND status IN ('staged','finalized')", [row.artifact_id]);
       return json(response, 404, { error: "execution log not found" });
     }
   }

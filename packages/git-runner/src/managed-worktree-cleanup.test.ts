@@ -25,7 +25,7 @@ it("unregisters and removes a managed worktree", async () => {
       projectSlug: "acme", ticketNumber: "DCC-1", title: "Cleanup", attemptNumber: 1,
     });
 
-    await removeManagedWorktree(repository, worktree.worktreePath);
+    await removeManagedWorktree(repository, path.join(temporary, "data"), worktree.worktreePath);
 
     await expect(access(worktree.worktreePath)).rejects.toThrow();
     await expect(exec("git", ["worktree", "list", "--porcelain"], { cwd: repository })).resolves.not.toMatchObject({ stdout: expect.stringContaining(worktree.worktreePath) });

@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { mkdir, readFile, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export type ArtifactRecord = {
@@ -139,5 +139,18 @@ export async function reconcileArtifacts(input: {
       continue;
     }
     if (await location(input.root, pendingPath) !== "present") await input.abandon(record.id);
+  }
+
+  const registered = new Set(input.records.map((record) => record.id));
+  const stagingRoot = artifactPath(input.root, ".staged");
+  try {
+    for (const entry of await readdir(stagingRoot, { withFileTypes: true })) {
+      if (!entry.isFile() || !/^[0-9a-f-]{36}$/i.test(entry.name) || registered.has(entry.name)) continue;
+      const candidate = stagedPath(input.root, entry.name);
+      const age = now.getTime() - (await stat(candidate)).mtime.getTime();
+      if (age >= 60 * 60 * 1000) await removeArtifact(input.root, candidate);
+    }
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
   }
 }
