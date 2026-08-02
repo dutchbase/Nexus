@@ -1369,6 +1369,7 @@ async function runPrConflictResolution(job: any) {
          WHERE id=$1`,
         [payload.pr_conflict_resolution_id],
       );
+      await rm(worktree.worktreePath, { recursive: true, force: true }).catch((error) => console.error(`conflict worktree cleanup failed: ${error.message}`));
       return;
     }
 
@@ -1465,6 +1466,7 @@ async function runPrConflictResolution(job: any) {
         [payload.pr_conflict_resolution_id,
           `Resolved conflicts in ${conflicts.length} file(s): ${conflicts.join(", ")}`, commit],
       );
+      await rm(worktree.worktreePath, { recursive: true, force: true }).catch((error) => console.error(`conflict worktree cleanup failed: ${error.message}`));
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }
