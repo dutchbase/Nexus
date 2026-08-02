@@ -6,6 +6,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
   abortMerge,
+  commitExecutionChanges,
   conflictedFiles,
   countCredentialShapes,
   createConflictResolutionWorktree,
@@ -13,6 +14,7 @@ import {
   matchesProtectedPath,
   mergeBaseIntoWorktree,
   sanitizeValidationOutput,
+  worktreeDiff,
 } from "./index.ts";
 
 const exec = promisify(execFile);
@@ -172,5 +174,30 @@ describe("worker validation primitives", () => {
     const second = executionBranchName("DCC-1001", "Update the logo to my png image", 2);
     expect(first).not.toBe(second);
     expect(second).toContain("-2-");
+  });
+});
+
+describe("execution commit containment", () => {
+  it("squashes executor commits and uncommitted changes into one commit from the attempt base", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-execution-"));
+    try {
+      await initRepo(tmp);
+      await writeAndCommit(tmp, "base.txt", "base\n", "base commit");
+      const baseCommit = (await git(tmp, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeAndCommit(tmp, "executor.txt", "committed task output\n", "executor task commit");
+      await writeFile(path.join(tmp, "base.txt"), "uncommitted final output\n");
+
+      const diff = await worktreeDiff(tmp, baseCommit);
+      expect(diff).toContain("committed task output");
+      expect(diff).toContain("uncommitted final output");
+
+      await commitExecutionChanges({ worktreePath: tmp, message: "worker final commit", baseCommit });
+
+      expect((await git(tmp, ["rev-list", "--count", `${baseCommit}..HEAD`])).stdout.trim()).toBe("1");
+      expect((await git(tmp, ["show", "--format=", "--name-only", "HEAD"])).stdout.split("\n").filter(Boolean))
+        .toEqual(["base.txt", "executor.txt"]);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 });

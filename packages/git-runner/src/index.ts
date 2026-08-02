@@ -49,8 +49,8 @@ export async function createExecutionWorktree(input: {
   return { worktreePath, branchName, baseCommit };
 }
 
-export async function worktreeDiff(worktreePath: string) {
-  return (await exec("git", ["-C", worktreePath, "diff", "--no-ext-diff", "--binary"])).stdout;
+export async function worktreeDiff(worktreePath: string, baseCommit?: string) {
+  return (await exec("git", ["-C", worktreePath, "diff", "--no-ext-diff", "--binary", ...(baseCommit ? [baseCommit] : [])])).stdout;
 }
 
 export const DEFAULT_PROTECTED_PATHS = [".env", ".env.*", "secrets/**", "production-data/**", ".git/**"];
@@ -314,7 +314,9 @@ export async function commitExecutionChanges(input: {
   worktreePath: string;
   message: string;
   protectedPaths?: string[];
+  baseCommit?: string;
 }) {
+  if (input.baseCommit) await git(input.worktreePath, ["reset", "--soft", input.baseCommit]);
   await git(input.worktreePath, ["add", "--all"]);
   // validateExecutionWorktree() scanned the working tree at validation time,
   // but anything landing between then and here would otherwise be committed

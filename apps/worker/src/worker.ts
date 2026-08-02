@@ -583,7 +583,7 @@ async function runExecution(job: any) {
   const logPath = path.join(logDirectory, `${runId}.log`);
   const details = {
     ...worktree,
-    currentDiff: repairing ? await worktreeDiff(worktree.worktreePath) : undefined,
+    currentDiff: repairing ? await worktreeDiff(worktree.worktreePath, attempt.base_commit) : undefined,
     validationOutput: repairing ? job.payload_json.validation_output : undefined,
     administratorFeedback: repairing ? job.payload_json.feedback : undefined,
   };
@@ -830,6 +830,7 @@ async function publishExecutionAttempt(input: {
         worktreePath: input.attempt.worktree_path,
         message: `${input.ticket.ticket_number}: ${input.ticket.title}`,
         protectedPaths: input.project.config_json?.protected_paths,
+        baseCommit: input.attempt.base_commit,
       });
       await pool.query("UPDATE execution_attempts SET result_commit=$2,validation_status='validated' WHERE id=$1", [
         input.attempt.id, commit,
