@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -216,7 +216,12 @@ describe("execution commit containment", () => {
       })).rejects.toThrow("clone did not originate from this worktree");
       expect(await readFile(path.join(otherWorker, "must-survive.txt"), "utf8")).toBe("do not reset me\n");
 
+      const symlinkTarget = path.join(tmp, "agent-controlled-patch-target");
+      await writeFile(symlinkTarget, "must stay untouched\n");
+      await symlink(symlinkTarget, path.join(clone.clonePath, ".git", "execution.patch"));
+
       await importPrivateExecutionClone({ clonePath: clone.clonePath, worktreePath: worker, baseCommit, originWorktreePath: clone.originWorktreePath });
+      expect(await readFile(symlinkTarget, "utf8")).toBe("must stay untouched\n");
 
       expect(await readFile(path.join(worker, "committed.txt"), "utf8")).toBe("clone-only commit\n");
       expect(await readFile(path.join(worker, "base.txt"), "utf8")).toBe("clone-only uncommitted\n");
