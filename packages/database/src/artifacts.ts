@@ -28,6 +28,10 @@ export function artifactDataRoot(defaultRoot: string, environment: Partial<Pick<
   return path.resolve(environment.DCC_DATA_DIR ?? path.join(environment.DCC_DATA_ROOT ?? defaultRoot, "data"));
 }
 
+export function legacyArtifactDataRoot(defaultRoot: string, environment: Partial<Pick<NodeJS.ProcessEnv, "DCC_DATA_ROOT">> = process.env) {
+  return path.resolve(environment.DCC_DATA_ROOT ?? defaultRoot, "data");
+}
+
 export function artifactPath(root: string, relativePath: string) {
   if (path.isAbsolute(relativePath)) throw new Error("artifact path escapes controlled root");
   const controlledRoot = path.resolve(root);
@@ -61,6 +65,10 @@ async function safeDirectory(root: string, target: string) {
 
 async function removeArtifact(root: string, target: string) {
   if (await location(root, target) === "present") await rm(target, { force: true });
+}
+
+export async function readStagedArtifact(root: string, id: string) {
+  return readArtifact(root, path.join(".staged", id));
 }
 
 export async function readArtifact(root: string, relativePath: string) {
@@ -125,7 +133,7 @@ export async function reconcileArtifacts(input: {
       try {
         await input.finalize(record.id, createHash("sha256").update(await readArtifact(input.root, record.storage_path)).digest("hex"));
       } catch {
-        await input.abandon(record.id);
+        // The bytes are intact at the finalized location; retry database finalization later.
       }
       continue;
     }

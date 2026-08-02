@@ -193,6 +193,26 @@ async function git(worktreePath: string, args: string[], input?: string, safe = 
   });
 }
 
+export async function removeContainedWorktreePath(dataRoot: string, worktreePath: string) {
+  try {
+    await assertManagedWorktreePath(dataRoot, worktreePath);
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+    const root = path.resolve(dataRoot, "worktrees");
+    let parent = path.dirname(path.resolve(worktreePath));
+    if (!isWithin(root, path.resolve(worktreePath))) throw new Error("managed worktree path escapes controlled root");
+    while (parent !== root) {
+      try { await realpath(parent); break; } catch (parentError: any) {
+        if (parentError?.code !== "ENOENT") throw parentError;
+        parent = path.dirname(parent);
+      }
+    }
+    const [realRoot, realParent] = await Promise.all([realpath(root), realpath(parent)]);
+    if (!isWithin(realRoot, realParent)) throw new Error("managed worktree path escapes controlled root");
+  }
+  await rm(worktreePath, { recursive: true, force: true });
+}
+
 export async function removeManagedWorktree(repositoryPath: string, dataRoot: string, worktreePath: string) {
   await assertManagedWorktreePath(dataRoot, worktreePath);
   const repository = await realpath(repositoryPath);
@@ -213,7 +233,7 @@ export async function createConflictResolutionWorktree(input: {
   // ponytail: a prior attempt (validation failure, crash) can leave this same
   // path registered as a worktree. Force-clear it so retrying doesn't fail on
   // "branch already checked out" or "path already exists".
-  await rm(worktreePath, { recursive: true, force: true });
+  await removeContainedWorktreePath(input.dataRoot, worktreePath);
   await exec("git", ["-C", repository, "worktree", "prune"]).catch(() => {});
   await exec("git", ["-C", repository, "fetch", "origin", input.headBranch, input.baseBranch]);
   await exec("git", [

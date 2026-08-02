@@ -5,7 +5,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { artifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, stageArtifact } from "@dcc/database";
+import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
 import {
   AiConfigurationError, approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
   globalPromptTypes, enqueueNotification, importGithubPullRequests, promptContentHash, PullRequestMergeError,
@@ -37,6 +37,7 @@ const port = Number(process.env.PORT ?? 3000);
 const production = process.env.NODE_ENV === "production";
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const dataRoot = artifactDataRoot(REPO_ROOT);
+const legacyDataRoot = legacyArtifactDataRoot(REPO_ROOT);
 const lockoutThreshold = 5;
 const lockoutWindowMinutes = 15;
 const sessionHours = 8;
@@ -1802,14 +1803,16 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
   const runLogMatch = url.pathname.match(/^\/api\/admin\/runs\/([0-9a-f-]+)\/log$/i);
   if (runLogMatch && request.method === "GET") {
     const row = (await pool.query(
-      `SELECT ar.id,a.id artifact_id,a.storage_path FROM agent_runs ar
+      `SELECT ar.id,a.id artifact_id,a.storage_path,a.status,a.storage_root FROM agent_runs ar
        JOIN artifacts a ON a.agent_run_id=ar.id AND a.artifact_type='execution_log' AND a.status IN ('staged','finalized')
        WHERE ar.id=$1`,
       [runLogMatch[1]],
     )).rows[0];
     if (!row) return json(response, 404, { error: "execution log not found" });
     try {
-      const content = await readArtifact(dataRoot, row.storage_path).then((content) => content.toString("utf8"));
+      const content = await (row.status === "staged"
+        ? readStagedArtifact(row.storage_root === "legacy" ? legacyDataRoot : dataRoot, row.artifact_id)
+        : readArtifact(row.storage_root === "legacy" ? legacyDataRoot : dataRoot, row.storage_path)).then((content) => content.toString("utf8"));
       return json(response, 200, { run_id: row.id, content });
     } catch {
       await pool.query("UPDATE artifacts SET status='abandoned',abandoned_at=now() WHERE id=$1 AND status IN ('staged','finalized')", [row.artifact_id]);

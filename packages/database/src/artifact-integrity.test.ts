@@ -131,4 +131,37 @@ integration("artifact integrity migration", () => {
     }
   });
 
+  it("preserves the legacy root when DCC_DATA_DIR differs during upgrade", async () => {
+    await resetDatabase();
+    const migrationNames = ["022_historic_execution_log_artifacts.sql", "023_legacy_artifact_root.sql"];
+    await Promise.all(migrationNames.map((name) => rm(join(migrationDirectory, name))));
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const primaryRoot = await mkdtemp(join(tmpdir(), "dcc-primary-root-"));
+    const legacyRoot = await mkdtemp(join(tmpdir(), "dcc-legacy-root-"));
+    const runId = randomUUID();
+    const storagePath = `logs/${runId}.log`;
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      await client.query(
+        "INSERT INTO agent_runs (id,status,metadata_json) VALUES ($1,$q$completed$q$,jsonb_build_object($q$log_path$q$,$2))",
+        [runId, `/old-data/${storagePath}`],
+      );
+      await mkdir(join(primaryRoot, "logs"), { recursive: true });
+      await mkdir(join(legacyRoot, "logs"), { recursive: true });
+      await writeFile(join(primaryRoot, storagePath), "wrong independent root");
+      await writeFile(join(legacyRoot, storagePath), "preserved legacy root");
+      for (const name of migrationNames) await cp(new URL(`../migrations/${name}`, import.meta.url), join(migrationDirectory, name));
+      await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+
+      const row = (await client.query("SELECT storage_path,storage_root FROM artifacts WHERE agent_run_id=$1", [runId])).rows[0];
+      expect(row).toMatchObject({ storage_path: storagePath, storage_root: "legacy" });
+      await expect(readArtifact(legacyRoot, row.storage_path).then((content) => content.toString("utf8"))).resolves.toBe("preserved legacy root");
+      await expect(readArtifact(primaryRoot, row.storage_path).then((content) => content.toString("utf8"))).resolves.toBe("wrong independent root");
+    } finally {
+      await client.end();
+      await Promise.all([rm(primaryRoot, { recursive: true, force: true }), rm(legacyRoot, { recursive: true, force: true })]);
+    }
+  });
+
 });

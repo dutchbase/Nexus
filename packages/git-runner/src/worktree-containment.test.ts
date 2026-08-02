@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { expect, it } from "vitest";
-import { createExecutionWorktree, removeManagedWorktree } from "./index.ts";
+import { createExecutionWorktree, removeContainedWorktreePath, removeManagedWorktree } from "./index.ts";
 
 const exec = promisify(execFile);
 
@@ -31,6 +31,8 @@ it("rejects symlinked managed-worktree paths and never cleans outside the data r
       ticketNumber: "DCC-1", title: "Containment", attemptNumber: 1,
     })).rejects.toThrow("managed worktree path escapes controlled root");
     await expect(access(path.join(outside, "DCC-1", "1"))).rejects.toThrow();
+    await expect(removeContainedWorktreePath(dataRoot, path.join(dataRoot, "worktrees", "acme", "DCC-1", "1"))).rejects.toThrow("managed worktree path escapes controlled root");
+    await expect(access(outside)).resolves.toBeUndefined();
     await expect(removeManagedWorktree(repository, dataRoot, outside)).rejects.toThrow("managed worktree path escapes controlled root");
     await expect(access(outside)).resolves.toBeUndefined();
   } finally {
