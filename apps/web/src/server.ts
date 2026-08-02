@@ -616,7 +616,7 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
   return html(response, 404, adminPage(url.pathname, "Page not found", "<h1>Page not found</h1><p>Page not found.</p>", metrics, session.username));
 }
 
-async function adminApi(request: IncomingMessage, response: ServerResponse, url: URL, session: any) {
+export async function adminApi(request: IncomingMessage, response: ServerResponse, url: URL, session: any) {
   if (request.method === "GET" && url.pathname === "/api/admin/session") return json(response, 200, { user: { id: session.user_id, username: session.username, role: session.role } });
   if (request.method === "POST" && url.pathname === "/api/admin/logout") {
     await pool.query("UPDATE admin_sessions SET invalidated_at = now() WHERE id = $1", [session.id]);
@@ -1810,9 +1810,10 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     )).rows[0];
     if (!row) return json(response, 404, { error: "execution log not found" });
     try {
+      const root = row.storage_root === "legacy" ? legacyDataRoot : dataRoot;
       const content = await (row.status === "staged"
-        ? readStagedArtifact(row.storage_root === "legacy" ? legacyDataRoot : dataRoot, row.artifact_id)
-        : readArtifact(row.storage_root === "legacy" ? legacyDataRoot : dataRoot, row.storage_path)).then((content) => content.toString("utf8"));
+        ? readStagedArtifact(root, row.artifact_id).catch(() => readArtifact(root, row.storage_path))
+        : readArtifact(root, row.storage_path)).then((content) => content.toString("utf8"));
       return json(response, 200, { run_id: row.id, content });
     } catch {
       await pool.query("UPDATE artifacts SET status='abandoned',abandoned_at=now() WHERE id=$1 AND status IN ('staged','finalized')", [row.artifact_id]);
@@ -2084,4 +2085,4 @@ const server = createServer((request, response) => {
     else response.end();
   });
 });
-server.listen(port, process.env.HOST ?? "0.0.0.0", () => console.log(`web listening on ${port}`));
+if (process.env.NODE_ENV !== "test") server.listen(port, process.env.HOST ?? "0.0.0.0", () => console.log(`web listening on `));
