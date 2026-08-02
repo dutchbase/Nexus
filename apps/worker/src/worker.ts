@@ -774,7 +774,13 @@ async function runExecution(job: any) {
       [runId, JSON.stringify({ results: validation.results, changed_files: validation.files })],
     );
     await publishExecutionAttempt({
-      attempt: { ...attempt, ...worktree, worktree_path: worktree.worktreePath, branch_name: worktree.branchName },
+      attempt: {
+        ...attempt,
+        ...worktree,
+        worktree_path: worktree.worktreePath,
+        branch_name: worktree.branchName,
+        base_commit: worktree.baseCommit ?? attempt.base_commit,
+      },
       ticket, project: input.project, runId, jobId: job.id,
       planMarkdown: attempt.content_markdown, skills: copied.skills.map((skill: any) => skill.slug),
       validationResults: validation.results, changedFiles: validation.files,

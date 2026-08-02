@@ -196,6 +196,8 @@ describe("execution commit containment", () => {
       expect((await git(tmp, ["rev-list", "--count", `${baseCommit}..HEAD`])).stdout.trim()).toBe("1");
       expect((await git(tmp, ["show", "--format=", "--name-only", "HEAD"])).stdout.split("\n").filter(Boolean))
         .toEqual(["base.txt", "executor.txt"]);
+      expect((await git(tmp, ["show", "HEAD:base.txt"])).stdout).toBe("uncommitted final output\n");
+      expect((await git(tmp, ["show", "HEAD:executor.txt"])).stdout).toBe("committed task output\n");
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }

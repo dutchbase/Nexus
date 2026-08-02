@@ -19,6 +19,11 @@ it("casts the JSON key when saving generated output", async () => {
   expect(worker).toContain("jsonb_build_object($2::text,$3::text)");
 });
 
+it("publishes normal execution attempts with the worktree base commit", async () => {
+  const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
+  expect(worker).toContain("base_commit: worktree.baseCommit ?? attempt.base_commit");
+});
+
 it("upserts on project_id+number instead of a plain insert, so it can't collide with the PR sync job", async () => {
   const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
   expect(worker).toContain("ON CONFLICT (project_id,number) DO UPDATE SET");
