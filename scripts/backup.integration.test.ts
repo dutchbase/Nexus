@@ -35,12 +35,12 @@ async function query(connectionString: string, statement: string, values: unknow
 }
 
 async function targetIdentity(connectionString: string) {
-  const row = (await query(connectionString, "SELECT current_database() AS name, COALESCE(inet_server_addr()::text, $$local$$) AS address, COALESCE(inet_server_port()::text, $$local$$) AS port")).rows[0];
-  return [row.name, row.address, row.port].join("|");
+  const row = (await query(connectionString, "SELECT current_database() AS name, (pg_control_system()).system_identifier AS system_identifier")).rows[0];
+  return [row.name, row.system_identifier].join("|");
 }
 
 async function restoreTargetIsDisposable(connectionString: string) {
-  return (await query(connectionString, "SELECT COALESCE(current_setting($$dcc.restore_disposable$$, true), $$false$$) AS value")).rows[0].value === "true";
+  return (await query(connectionString, "SELECT EXISTS (SELECT 1 FROM pg_db_role_setting settings WHERE settings.setdatabase = (SELECT oid FROM pg_database WHERE datname=current_database()) AND settings.setrole=0 AND $$dcc.restore_disposable=true$$ = ANY(settings.setconfig)) AS value")).rows[0].value === true;
 }
 
 async function freePort() {

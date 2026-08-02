@@ -2040,7 +2040,7 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/api/health")) {
     if (url.pathname === "/") { response.writeHead(302, { location: "/login" }); return response.end(); }
-    try { const health = await pool.query("SELECT current_database() AS name, COALESCE(inet_server_addr()::text, 'local') AS address, COALESCE(inet_server_port()::text, 'local') AS port"); const database = health.rows[0]; return json(response, 200, { status: "ok", database: "ok", web: "ok", database_identity: createHash("sha256").update(`${database.name}|${database.address}|${database.port}`).digest("hex") }); }
+    try { const health = await pool.query("SELECT current_database() AS name, (pg_control_system()).system_identifier AS system_identifier"); const database = health.rows[0]; return json(response, 200, { status: "ok", database: "ok", web: "ok", database_identity: createHash("sha256").update(`${database.name}|${database.system_identifier}`).digest("hex") }); }
     catch { return json(response, 503, { status: "degraded", database: "unavailable", web: "ok" }); }
   }
   if (request.method === "GET" && url.pathname === "/login") return html(response, 200, loginPage());

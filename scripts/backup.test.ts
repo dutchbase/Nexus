@@ -60,8 +60,11 @@ if [[ "$*" == *"SELECT current_database()"* ]]; then
     printf '%s\\n' "\${DCC_TEST_RESTORE_DATABASE_IDENTITY:-dcc_restore|127.0.0.1|5433}"
   fi
 fi
+if [[ "$*" == *"pg_db_role_setting"* ]]; then
+  printf "%s\n" "\${DCC_TEST_RESTORE_DATABASE_MARKER:-true}"
+fi
 if [[ "$*" == *"current_setting"* ]]; then
-  printf "%s\n" "\${DCC_TEST_RESTORE_DISPOSABLE:-true}"
+  printf "%s\n" "\${DCC_TEST_SESSION_DISPOSABLE:-false}"
 fi
 `);
   return {
@@ -168,6 +171,8 @@ describe("backup and recovery drill", () => {
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("health endpoint");
     expect(await readFile(test.commandLog, "utf8")).not.toContain("pg_restore");
+    expect(await readFile(test.commandLog, "utf8")).toContain("backup_recovery_verifications");
+    expect(await readFile(test.commandLog, "utf8")).toContain("failed");
   });
 
   it("does not restore when the required health endpoint is unreachable", async () => {
@@ -186,23 +191,40 @@ describe("backup and recovery drill", () => {
     expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
     const backup = await newestBackup(test.backups);
 
-    const result = run("scripts/restore-drill.sh", [backup], { ...test.env, DCC_TEST_RESTORE_DISPOSABLE: "false" });
+    const result = run("scripts/restore-drill.sh", [backup], { ...test.env, DCC_TEST_RESTORE_DATABASE_MARKER: "false" });
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain("marked disposable");
     expect(await readFile(test.commandLog, "utf8")).not.toContain("pg_restore");
   });
 
-  it("refuses a restore target that resolves to the primary database despite different URLs", async () => {
+  it("refuses a session-supplied disposable marker without a database marker", async () => {
+    const test = await fixture();
+    expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
+    const backup = await newestBackup(test.backups);
+
+    const result = run("scripts/restore-drill.sh", [backup], {
+      ...test.env,
+      DCC_RESTORE_DATABASE_URL: "postgresql://restore@127.0.0.1:5433/dcc_restore_test?options=-c%20dcc.restore_disposable%3Dtrue",
+      DCC_TEST_RESTORE_DATABASE_MARKER: "false",
+      DCC_TEST_SESSION_DISPOSABLE: "true",
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("marked disposable");
+    expect(await readFile(test.commandLog, "utf8")).not.toContain("pg_restore");
+  });
+
+  it("refuses a primary database reached through an alternate connection path", async () => {
     const test = await fixture();
     expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
     const backup = await newestBackup(test.backups);
     const env = {
       ...test.env,
-      DATABASE_URL: "postgresql://primary@primary-alias:5432/primary",
+      DATABASE_URL: "postgresql:///primary?host=/var/run/postgresql",
       DCC_RESTORE_DATABASE_URL: "postgresql://restore@restore-alias:5432/restore",
-      DCC_TEST_PRIMARY_DATABASE_IDENTITY: "primary|10.0.0.8|5432",
-      DCC_TEST_RESTORE_DATABASE_IDENTITY: "primary|10.0.0.8|5432",
+      DCC_TEST_PRIMARY_DATABASE_IDENTITY: "primary|cluster-a",
+      DCC_TEST_RESTORE_DATABASE_IDENTITY: "primary|cluster-a",
     };
 
     const result = run("scripts/restore-drill.sh", [backup], env);

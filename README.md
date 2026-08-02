@@ -283,7 +283,7 @@ set -a; source .env; set +a
 scripts/restore-drill.sh /var/backups/dcc/dcc-YYYYMMDDTHHMMSSZ-PID
 ```
 
-The drill verifies the manifest before it calls pg_restore, restores only to the explicit DCC_RESTORE_DATABASE_URL, checks the explicit DCC_RESTORE_HEALTH_URL, and writes a passed or failed result to backup_recovery_verifications through the primary DATABASE_URL. It rejects the primary database and requires the restore database to be explicitly marked disposable with PostgreSQL configuration: `psql -d postgres --command "ALTER DATABASE dcc_restore SET dcc.restore_disposable = true"`. Never set that marker on production. The System health page reports configured retention and recorded verification, but cannot inspect an external host crontab.
+The drill verifies the manifest before it calls pg_restore, restores only to the explicit DCC_RESTORE_DATABASE_URL, checks the explicit DCC_RESTORE_HEALTH_URL, and writes a passed or failed result to backup_recovery_verifications through the primary DATABASE_URL. It rejects the primary database and requires a durable database-scoped marker set with PostgreSQL configuration; session and role options do not qualify: `psql -d postgres --command "ALTER DATABASE dcc_restore SET dcc.restore_disposable = true"`. Never set that marker on production. The System health page reports configured retention and recorded verification, but cannot inspect an external host crontab.
 
 ## Recovery integration test
 

@@ -11,8 +11,24 @@ for variable in DATABASE_URL DCC_RESTORE_DATABASE_URL DCC_RESTORE_HEALTH_URL; do
     exit 1
   fi
 done
+backup_directory="$(cd "$1" && pwd -P)"
+manifest="$backup_directory/manifest-v1.sha256"
+manifest_sha256=""
+step="preflight"
+
+record_result() {
+  local code="$?" status="failed"
+  trap - EXIT
+  [ "$code" -eq 0 ] && status="passed"
+  if ! psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=backup_path="$backup_directory" --set=manifest_sha256="$manifest_sha256" --set=status="$status" --set=failure_step="$step" --command "INSERT INTO backup_recovery_verifications (backup_path,manifest_sha256,status,failure_step) VALUES (:'backup_path',NULLIF(:'manifest_sha256',''),:'status',NULLIF(:'failure_step',''));" ; then
+    [ "$code" -ne 0 ] || code=1
+  fi
+  exit "$code"
+}
+trap record_result EXIT
+
 database_identity() {
-  psql "$1" --quiet --tuples-only --no-align --command "SELECT current_database() || '|' || COALESCE(inet_server_addr()::text,'local') || '|' || COALESCE(inet_server_port()::text,'local');"
+  psql "$1" --quiet --tuples-only --no-align --command "SELECT current_database() || chr(124) || (pg_control_system()).system_identifier;"
 }
 
 primary_database_identity="$(database_identity "$DATABASE_URL")"
@@ -22,7 +38,7 @@ if [ "$primary_database_identity" = "$restore_database_identity" ]; then
   exit 1
 fi
 
-restore_database_disposable="$(psql "$DCC_RESTORE_DATABASE_URL" --quiet --tuples-only --no-align --command "SELECT COALESCE(current_setting('dcc.restore_disposable', true), 'false');")"
+restore_database_disposable="$(psql "$DCC_RESTORE_DATABASE_URL" --quiet --tuples-only --no-align --command "SELECT CASE WHEN EXISTS (SELECT 1 FROM pg_db_role_setting settings WHERE settings.setdatabase = (SELECT oid FROM pg_database WHERE datname=current_database()) AND settings.setrole=0 AND \$\$dcc.restore_disposable=true\$\$ = ANY(settings.setconfig)) THEN \$\$true\$\$ ELSE \$\$false\$\$ END;")"
 if [ "$restore_database_disposable" != "true" ]; then
   echo "DCC_RESTORE_DATABASE_URL must be marked disposable with dcc.restore_disposable=true" >&2
   exit 1
@@ -38,23 +54,7 @@ if [ "$health_database_identity" != "$restore_database_fingerprint" ]; then
   echo "health endpoint is connected to a different database" >&2
   exit 1
 fi
-step=""
-backup_directory="$(cd "$1" && pwd -P)"
-manifest="$backup_directory/manifest-v1.sha256"
-manifest_sha256=""
 step="manifest"
-
-record_result() {
-  local code="$?" status="failed"
-  trap - EXIT
-  [ "$code" -eq 0 ] && status="passed"
-  if ! psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=backup_path="$backup_directory" --set=manifest_sha256="$manifest_sha256" --set=status="$status" --set=failure_step="$step" --command "INSERT INTO backup_recovery_verifications (backup_path,manifest_sha256,status,failure_step) VALUES (:'backup_path',NULLIF(:'manifest_sha256',''),:'status',NULLIF(:'failure_step',''));" ; then
-    [ "$code" -ne 0 ] || code=1
-  fi
-  exit "$code"
-}
-trap record_result EXIT
-
 [ -f "$manifest" ]
 manifest_sha256="$(sha256sum "$manifest" | awk '{print $1}')"
 (cd "$backup_directory" && sha256sum --check --status "manifest-v1.sha256")
