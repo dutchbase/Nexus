@@ -491,6 +491,22 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           }finally{button.disabled=false}
         });
         document.querySelector("select[name=repository]")?.addEventListener("change",function(){this.form.submit()});
+        async function listPrAction(button,action,payload){
+          const prId=button.closest("[data-pr-id]")?.dataset.prId;
+          if(!prId)return;
+          button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/"+prId+"/"+action,{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
+            if(response.ok)return location.reload();
+            const result=await response.json();alert(result.error);
+          }catch(error){alert(error.message)}finally{button.disabled=false}
+        }
+        document.querySelectorAll("[data-pr-list-approve]").forEach(button=>button.addEventListener("click",()=>{
+          if(confirm("Approve and merge this pull request on GitHub? This cannot be undone from here."))listPrAction(button,"approve",{});
+        }));
+        document.querySelectorAll("[data-pr-list-ai-review-merge]").forEach(button=>button.addEventListener("click",()=>{
+          if(confirm("Run AI review and, if approved, merge this pull request on GitHub? This cannot be undone from here."))listPrAction(button,"ai-review",{mode:"review_and_merge"});
+        }));
       `:""}
       ${/^\/admin\/pull-requests\/[^/]+(\/\d+)?$/.test(path)?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";
