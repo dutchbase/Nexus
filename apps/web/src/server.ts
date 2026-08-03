@@ -48,7 +48,7 @@ const maxUploadBytes = 5 * 1024 * 1024;
 const exec = promisify(execFile);
 const defaultRateLimit = 15;
 const dummyHash = await hashPassword(randomBytes(32).toString("hex"));
-const systemOnlyStatuses = new Set(["Planning", "Executing", "Validating", "PR Ready for Review", "Merged"]);
+const systemOnlyStatuses = new Set(["Planning", "Execution Queued", "Executing", "Validating", "PR Ready for Review", "Merged"]);
 const fieldTypes = new Set([
   "short_text", "long_text", "email", "url", "number", "dropdown", "radio", "checkbox", "multi_select",
   "project_selector", "category_selector", "environment_selector", "image_upload", "hidden", "static",

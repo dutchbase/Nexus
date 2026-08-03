@@ -22,3 +22,10 @@ test.each(["Rejected", "Plan Approved"])("generic ticket PATCH rejects raw %s tr
   expect(response.writeHead).toHaveBeenCalledWith(422, expect.any(Object));
   expect(response.end).toHaveBeenCalledWith(JSON.stringify({ error: "status must use its decision endpoint" }));
 });
+
+test("generic ticket PATCH cannot forge the worker-authorized queued status", async () => {
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+  await adminApi(request({ status: "Execution Queued" }), response, new URL("http://test/api/admin/tickets/ticket"), { user_id: "admin" });
+  expect(response.writeHead).toHaveBeenCalledWith(422, expect.any(Object));
+  expect(response.end).toHaveBeenCalledWith(JSON.stringify({ error: "status cannot be set manually" }));
+});
