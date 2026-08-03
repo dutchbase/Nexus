@@ -11,6 +11,7 @@ import { artifactDataRoot, finalizeArtifact, inTransaction, legacyArtifactDataRo
 import {
   approveAndMergePullRequest, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
   claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, parsePrReviewVerdict,
+  claimNotificationDelivery, completeNotificationDelivery, failNotificationDelivery,
   renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
@@ -1450,36 +1451,15 @@ async function runPrConflictResolution(job: any) {
 }
 
 async function deliverDueNotification() {
-  const delivery = await inTransaction(async (client) => {
-    const row = (await client.query(
-      `SELECT nd.*,np.type provider_type,np.configuration_encrypted_json
-       FROM notification_deliveries nd JOIN notification_providers np ON np.id=nd.provider_id
-       WHERE np.enabled=true AND nd.status IN ('queued','failed') AND nd.next_attempt_at<=now()
-       ORDER BY nd.next_attempt_at,nd.created_at FOR UPDATE OF nd SKIP LOCKED LIMIT 1`,
-    )).rows[0];
-    if (!row) return null;
-    await client.query("UPDATE notification_deliveries SET status='sending',updated_at=now() WHERE id=$1", [row.id]);
-    return row;
-  });
+  const delivery = await claimNotificationDelivery(workerId);
   if (!delivery) return;
   try {
     const provider = createNotificationProvider(delivery.provider_type, delivery.configuration_encrypted_json ?? {});
     const result = await provider.send(delivery.payload_json);
-    await pool.query(
-      `UPDATE notification_deliveries
-       SET attempt_count=COALESCE(attempt_count,0)+1,status=$2,response_status=COALESCE($3,response_status),error_message=$4,
-           sent_at=CASE WHEN $2='sent' THEN now() ELSE sent_at END,
-           next_attempt_at=CASE WHEN $2='failed' THEN now() + interval '2 seconds' * power(2,LEAST(COALESCE(attempt_count,0),8)) ELSE next_attempt_at END,
-           updated_at=now() WHERE id=$1`,
-      [delivery.id, result.ok ? "sent" : "failed", result.responseStatus, redactNotificationError(result.errorMessage)],
-    );
+    if (result.ok) await completeNotificationDelivery(delivery.id, workerId, result.responseStatus ?? undefined);
+    else await failNotificationDelivery(delivery.id, workerId, redactNotificationError(result.errorMessage), result.responseStatus ?? undefined);
   } catch (error) {
-    await pool.query(
-      `UPDATE notification_deliveries SET attempt_count=COALESCE(attempt_count,0)+1,status='failed',
-       error_message=$2,next_attempt_at=now() + interval '2 seconds' * power(2,LEAST(COALESCE(attempt_count,0),8)),
-       updated_at=now() WHERE id=$1`,
-      [delivery.id, redactNotificationError(error instanceof Error ? error.message : "Notification delivery failed")],
-    );
+    await failNotificationDelivery(delivery.id, workerId, redactNotificationError(error instanceof Error ? error.message : "Notification delivery failed"));
   }
 }
 
@@ -1557,8 +1537,8 @@ while (!stopping) {
     else console.error(error instanceof Error ? error.message : "job failed");
     if (error instanceof ClaudeExecutionError && error.code === "execution_cancelled") {
       await pool.query(
-        `UPDATE jobs SET status='cancelled',completed_at=now(),updated_at=now()
-         WHERE id=$1 AND claimed_by=$2`,
+        `UPDATE jobs SET status='cancelled',completed_at=now(),claimed_by=NULL,lease_expires_at=NULL,updated_at=now()
+         WHERE id=$1 AND claimed_by=$2 AND lease_expires_at > now()`,
         [job.id, workerId],
       );
     } else {
