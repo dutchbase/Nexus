@@ -11,6 +11,38 @@ CREATE TABLE approved_input_snapshots (
 CREATE INDEX approved_input_snapshots_ticket_created_idx
   ON approved_input_snapshots (ticket_id, created_at DESC);
 
+CREATE FUNCTION canonical_jsonb(value jsonb) RETURNS text
+LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+BEGIN
+  CASE jsonb_typeof(value)
+    WHEN 'object' THEN
+      RETURN '{' || COALESCE((
+        SELECT string_agg(to_jsonb(key)::text || ':' || canonical_jsonb(child), ',' ORDER BY key COLLATE "C")
+        FROM jsonb_each(value) AS item(key, child)
+      ), '') || '}';
+    WHEN 'array' THEN
+      RETURN '[' || COALESCE((
+        SELECT string_agg(canonical_jsonb(item), ',' ORDER BY ordinality)
+        FROM jsonb_array_elements(value) WITH ORDINALITY AS elements(item, ordinality)
+      ), '') || ']';
+    ELSE RETURN value::text;
+  END CASE;
+END;
+$$;
+
+CREATE FUNCTION verify_approved_input_hash() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF NEW.input_hash <> encode(digest(canonical_jsonb(NEW.material_input_json), 'sha256'), 'hex') THEN
+    RAISE EXCEPTION 'approved input hash does not match canonical material input';
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER approved_input_snapshots_verify_hash
+BEFORE INSERT ON approved_input_snapshots
+FOR EACH ROW EXECUTE FUNCTION verify_approved_input_hash();
+
 CREATE TABLE plan_approval_decisions (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   ticket_id uuid NOT NULL REFERENCES tickets(id) ON DELETE RESTRICT,

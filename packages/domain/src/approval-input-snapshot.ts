@@ -23,12 +23,13 @@ function stableJson(value: ApprovalInputValue): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") {
     const object = value as { readonly [key: string]: ApprovalInputValue };
-    return `{${Object.keys(object).sort().map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`).join(",")}}`;
+    return `{${Object.keys(object).sort(utf8Compare).map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`).join(",")}}`;
   }
   return JSON.stringify(value);
 }
 
-const byCanonicalValue = <T extends ApprovalInputValue>(left: T, right: T) => stableJson(left).localeCompare(stableJson(right));
+const utf8Compare = (left: string, right: string) => Buffer.from(left).compare(Buffer.from(right));
+const byCanonicalValue = <T extends ApprovalInputValue>(left: T, right: T) => utf8Compare(stableJson(left), stableJson(right));
 
 export function canonicalApprovedInput(input: ApprovedInputSnapshot) {
   return {
@@ -36,11 +37,11 @@ export function canonicalApprovedInput(input: ApprovedInputSnapshot) {
     ticket: input.ticket,
     project: { configVersion: input.project.configVersion, config: input.project.config },
     models: input.models,
-    prompts: [...input.prompts]
-      .sort((left, right) => left.phase.localeCompare(right.phase))
-      .map((prompt) => ({ ...prompt, provenance: [...prompt.provenance].sort(byCanonicalValue) })),
+    prompts: input.prompts
+      .map((prompt) => ({ ...prompt, provenance: [...prompt.provenance].sort(byCanonicalValue) }))
+      .sort(byCanonicalValue),
     skills: [...input.skills]
-      .map((skill) => ({ ...skill, sources: [...skill.sources].sort() }))
+      .map((skill) => ({ ...skill, sources: [...skill.sources].sort(utf8Compare) }))
       .sort(byCanonicalValue),
     policySources: [...input.policySources].sort(byCanonicalValue),
   } satisfies ApprovalInputValue;

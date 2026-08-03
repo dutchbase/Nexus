@@ -76,6 +76,23 @@ integration("migrate", () => {
     }
   });
 
+  it("rejects approved input snapshots whose hash does not match canonical JSON", async () => {
+    await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ($q$approval-hash$q$,$q$Approval hash$q$,$q$/tmp/project$q$) RETURNING id")).rows[0].id;
+      const ticketId = (await client.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$AH-1$q$,$1,$q$Ticket$q$,$q$Submitted$q$) RETURNING id", [projectId])).rows[0].id;
+      const planId = (await client.query("INSERT INTO plans (ticket_id) VALUES ($1) RETURNING id", [ticketId])).rows[0].id;
+      const planVersionId = (await client.query("INSERT INTO plan_versions (plan_id,version,content_markdown,content_hash) VALUES ($1,1,$q$x$q$,encode(digest($q$x$q$,$q$sha256$q$),$q$hex$q$)) RETURNING id", [planId])).rows[0].id;
+      await client.query("INSERT INTO approved_input_snapshots (ticket_id,plan_version_id,material_input_json,input_hash) VALUES ($1,$2,$q${\"a\":1}$q$,$q$015abd7f5cc57a2dd94b7590f04ad8084273905ee33ec5cebeae62276a97f862$q$)", [ticketId, planVersionId]);
+      await expect(client.query("INSERT INTO approved_input_snapshots (ticket_id,plan_version_id,material_input_json,input_hash) VALUES ($1,$2,$q${\"a\":1}$q$,repeat($q$0$q$,64))", [ticketId, planVersionId])).rejects.toThrow("approved input hash does not match canonical material input");
+    } finally {
+      await client.end();
+    }
+  });
+
   it("rejects invalid filenames before DDL", async () => {
     await writeFile(join(migrationDirectory, "invalid.sql"), "CREATE TABLE should_not_exist (id integer);");
     await expect(migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory })).rejects.toThrow("invalid migration filename");

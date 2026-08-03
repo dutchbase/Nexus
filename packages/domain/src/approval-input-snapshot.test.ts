@@ -45,4 +45,18 @@ describe("approved input hash", () => {
     expect(approvedInputHash({ ...input, project: { ...input.project, lastValidatedAt: "2026-08-03T11:00:00.000Z" } })).toBe(hash);
     expect(approvedInputHash({ ...input, prompts: [{ ...input.prompts[0], provenance: [{ ...input.prompts[0].provenance[0], scope: "project" }, input.prompts[0].provenance[1]] }] })).not.toBe(hash);
   });
+
+  it("orders prompts and their scoped provenance deterministically within a phase", () => {
+    const prompts = [
+      { phase: "execution", content: "Second prompt.", provenance: [{ scope: "project", promptType: "execution", versionId: "project-v2", contentHash: "f".repeat(64) }, { scope: "global", promptType: "base", versionId: "global-v1", contentHash: "g".repeat(64) }] },
+      { phase: "execution", content: "First prompt.", provenance: [{ scope: "project", promptType: "context", versionId: "project-v1", contentHash: "h".repeat(64) }] },
+    ] as const;
+    expect(approvedInputHash({ ...input, prompts })).toBe(approvedInputHash({
+      ...input,
+      prompts: [
+        { ...prompts[1], provenance: [...prompts[1].provenance].reverse() },
+        { ...prompts[0], provenance: [...prompts[0].provenance].reverse() },
+      ],
+    }));
+  });
 });
