@@ -89,6 +89,13 @@ describe("approval skill policy", () => {
     ], "project", "planning")[0]?.resolution_sources).toEqual(["project_automatic", "ticket_selected"]);
   });
 
+  test("does not allow a ticket exclusion to remove a required project skill", () => {
+    expect(resolveSkills([
+      { skill, skillId: skill.id, source: "project_required", allowTicketOverride: true },
+      { skill, skillId: skill.id, source: "ticket_excluded" },
+    ], "project", "planning")[0]?.resolution_sources).toEqual(["project_required"]);
+  });
+
   test.each([
     [null, "missing"],
     [{ ...skill, enabled: false }, "disabled"],

@@ -3,6 +3,7 @@ import { checkPlanApprovalGate } from "./plan-approval.ts";
 
 const approved = {
   id: "ticket",
+  status: "Plan Approved",
   approved_plan_version_id: "version",
   gate_plan_version_id: "version",
   current_version_id: "version",
@@ -27,5 +28,7 @@ describe("plan approval gate", () => {
       .toMatchObject({ valid: false, code: "plan_approval_required" });
     expect(await checkPlanApprovalGate(clientWith({ ...approved, current_version_id: "new-version" }), "ticket"))
       .toMatchObject({ valid: false, code: "plan_approval_stale" });
+    expect(await checkPlanApprovalGate(clientWith({ ...approved, status: "Cancelled" }), "ticket"))
+      .toMatchObject({ valid: false, code: "plan_approval_status_invalid" });
   });
 });
