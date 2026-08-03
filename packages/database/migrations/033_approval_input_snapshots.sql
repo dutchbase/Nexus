@@ -115,24 +115,30 @@ FOR EACH ROW EXECUTE FUNCTION bump_project_material_config_version();
 
 CREATE OR REPLACE FUNCTION stale_plans_for_skill_change() RETURNS trigger
 LANGUAGE plpgsql AS $$
+DECLARE
+  affects_all boolean;
 BEGIN
-  IF (TG_OP = 'INSERT' AND (
-        COALESCE((NEW.configuration_json->>'mandatory')::boolean,false) OR
-        NEW.configuration_json ? 'required_phases'
-      )) OR (TG_OP = 'UPDATE' AND (
-        OLD.enabled IS DISTINCT FROM NEW.enabled OR OLD.version IS DISTINCT FROM NEW.version OR
-        OLD.content_hash IS DISTINCT FROM NEW.content_hash OR OLD.configuration_json IS DISTINCT FROM NEW.configuration_json
-      )) THEN
-    UPDATE plans SET potentially_stale=true,updated_at=now()
-    WHERE ticket_id IN (
-      SELECT DISTINCT t.id FROM tickets t
-      LEFT JOIN ticket_skills ts ON ts.ticket_id=t.id
-      LEFT JOIN project_skills ps ON ps.project_id=t.project_id
-      WHERE t.approved_plan_version_id IS NOT NULL
-        AND (TG_OP = 'INSERT' OR ts.skill_id=NEW.id OR ps.skill_id=NEW.id OR
-             COALESCE((NEW.configuration_json->>'mandatory')::boolean,false))
-    );
+  IF TG_OP = 'INSERT' THEN
+    affects_all := COALESCE((NEW.configuration_json->>'mandatory')::boolean,false)
+      OR NEW.configuration_json ? 'required_phases';
+    IF NOT affects_all THEN RETURN NEW; END IF;
+  ELSE
+    IF NOT (OLD.enabled IS DISTINCT FROM NEW.enabled OR OLD.version IS DISTINCT FROM NEW.version OR
+      OLD.content_hash IS DISTINCT FROM NEW.content_hash OR OLD.configuration_json IS DISTINCT FROM NEW.configuration_json) THEN
+      RETURN NEW;
+    END IF;
+    affects_all := COALESCE((OLD.configuration_json->>'mandatory')::boolean,false)
+      OR OLD.configuration_json ? 'required_phases'
+      OR COALESCE((NEW.configuration_json->>'mandatory')::boolean,false)
+      OR NEW.configuration_json ? 'required_phases';
   END IF;
+
+  UPDATE plans p SET potentially_stale=true,updated_at=now()
+  FROM tickets t
+  WHERE t.id=p.ticket_id AND t.approved_plan_version_id IS NOT NULL
+    AND (affects_all
+      OR EXISTS (SELECT 1 FROM ticket_skills ts WHERE ts.ticket_id=t.id AND ts.skill_id=NEW.id)
+      OR EXISTS (SELECT 1 FROM project_skills ps WHERE ps.project_id=t.project_id AND ps.skill_id=NEW.id));
   RETURN NEW;
 END;
 $$;

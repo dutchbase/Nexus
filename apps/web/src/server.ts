@@ -10,7 +10,7 @@ import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approveAndMergePullRequest, approvePlanDecision, buildApprovedInputSnapshot,
   buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
   globalPromptTypes, enqueueNotification, importGithubPullRequests, promptContentHash, PullRequestMergeError,
-  rejectPlanDecision, requireApprovalPrompt, resolveAiConfiguration, setPullRequestTicketStatus, syncOpenPullRequests,
+  rejectPlanDecision, requestPlanRevisionDecision, requireApprovalPrompt, resolveAiConfiguration, setPullRequestTicketStatus, syncOpenPullRequests,
   syncPullRequest, validateAiSelection, type AiPhase, type ApprovedInputSnapshot,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
@@ -101,7 +101,7 @@ async function skillCandidates(ticket: any, phase: AiPhase, client: any = pool):
        FROM project_skills ps JOIN skills s ON s.id=ps.skill_id
        WHERE ps.project_id=$1 AND (ps.attachment_type IN ('automatic','required') OR ps.required)
        UNION ALL
-       SELECT s.*, 'ticket_selected', 3, ps.allow_ticket_override
+       SELECT s.*, CASE WHEN ts.source='excluded' THEN 'ticket_excluded' ELSE 'ticket_selected' END, 3, ps.allow_ticket_override
        FROM ticket_skills ts LEFT JOIN skills s ON s.id=ts.skill_id
        LEFT JOIN project_skills ps ON ps.project_id=$1 AND ps.skill_id=ts.skill_id
        WHERE ts.ticket_id=$2
@@ -648,16 +648,19 @@ async function replaceFields(client: any, formId: string, fields: any[]) {
 
 async function transitionTicket(ticketRef: string, status: string, reason: string, session: any, request: IncomingMessage, response: ServerResponse) {
   const result = await inTransaction(async (client) => {
-    const before = (await client.query("SELECT * FROM tickets WHERE id::text = $1 OR ticket_number = $1 FOR UPDATE", [ticketRef])).rows[0];
+    const before = (await client.query("SELECT *,updated_at::text ticket_version FROM tickets WHERE id::text = $1 OR ticket_number = $1 FOR UPDATE", [ticketRef])).rows[0];
     if (!before) return null;
     let after;
     if (status === "Rejected") {
+      if (!["Submitted", "Triage", "Needs Information"].includes(before.status)) {
+        throw new ApprovalConflictError(before.approved_input_snapshot_id ?? null);
+      }
       const currentPlan = (await client.query(
         "SELECT current_version_id FROM plans WHERE ticket_id=$1 AND current_version_id IS NOT NULL",
         [before.id],
       )).rows[0];
       after = currentPlan ? (await rejectPlanDecision(client, {
-        ticketId: before.id, planVersionId: currentPlan.current_version_id, expectedStatus: before.status,
+        ticketId: before.id, planVersionId: currentPlan.current_version_id, expectedTicketVersion: before.ticket_version, expectedStatus: before.status,
         expectedSnapshotId: before.approved_input_snapshot_id ?? null, decidedBy: session.user_id, metadata: { reason },
       })).ticket : (await client.query(
         `UPDATE tickets SET status=$2,approved_plan_version_id=NULL,approved_plan_hash=NULL,
@@ -1476,28 +1479,32 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (ticketSkillsMatch && request.method === "PUT") {
     const body = await bodyOf(request);
     const supplied = body.skill_ids ?? body.skills ?? body.skill_slugs ?? [];
-    if (!Array.isArray(supplied) || supplied.some((value: unknown) => typeof value !== "string")) {
-      return json(response, 400, { error: "skill_ids must be an array" });
+    const excluded = body.excluded_skill_ids ?? [];
+    if (!Array.isArray(supplied) || supplied.some((value: unknown) => typeof value !== "string")
+      || !Array.isArray(excluded) || excluded.some((value: unknown) => typeof value !== "string")) {
+      return json(response, 400, { error: "skill_ids and excluded_skill_ids must be arrays" });
     }
+    const requested = [...new Set([...supplied, ...excluded])];
     const ref = decodeURIComponent(ticketSkillsMatch[1]);
     const result = await inTransaction(async (client) => {
       const ticket = (await client.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE", [ref])).rows[0];
       if (!ticket) return null;
-      const skills = supplied.length ? (await client.query(
+      const skills = requested.length ? (await client.query(
         "SELECT * FROM skills WHERE id::text=ANY($1::text[]) OR slug=ANY($1::text[])",
-        [supplied],
+        [requested],
       )).rows : [];
-      for (const selected of supplied) {
+      for (const selected of requested) {
         const skill = skills.find((item: any) => item.id === selected || item.slug === selected);
         if (!skill) throw new SkillResolutionError(selected, "missing");
         if (!skill.enabled) throw new SkillResolutionError(skill.slug, "disabled");
       }
       await client.query("DELETE FROM ticket_skills WHERE ticket_id=$1", [ticket.id]);
       for (const skill of skills) {
+        const isExcluded = excluded.includes(skill.id) || excluded.includes(skill.slug);
         await client.query(
-          `INSERT INTO ticket_skills (ticket_id,skill_id,source,selected_by) VALUES ($1,$2,'manual',$3)
+          `INSERT INTO ticket_skills (ticket_id,skill_id,source,selected_by) VALUES ($1,$2,$3,$4)
            ON CONFLICT (ticket_id,skill_id) DO NOTHING`,
-          [ticket.id, skill.id, session.user_id],
+          [ticket.id, skill.id, isExcluded ? "excluded" : "manual", session.user_id],
         );
       }
       return { ticket, skills: await resolvedSkillsFor(ticket, "planning", client) };
@@ -1662,43 +1669,44 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (typeof body.feedback !== "string" || !body.feedback.trim() || body.feedback.length > 10000) {
       return json(response, 400, { error: "feedback is required" });
     }
-    const result = await inTransaction(async (client) => {
+    const expected = (await pool.query(
+      `SELECT p.ticket_id,p.current_version_id,t.status,t.updated_at::text ticket_version,t.approved_input_snapshot_id
+       FROM plans p JOIN tickets t ON t.id=p.ticket_id WHERE p.id=$1`,
+      [planRevisionMatch[1]],
+    )).rows[0];
+    if (!expected) return json(response, 404, { error: "plan not found" });
+    if (!["Plan Ready for Review", "Plan Approved", "Needs Information", "Planning Failed"].includes(expected.status)) {
+      return json(response, 409, { error: `revision cannot be requested from ${expected.status}` });
+    }
+    let result;
+    try { result = await inTransaction(async (client) => {
       const plan = (await client.query(
-        `SELECT p.*,t.status,t.id ticket_id
+        `SELECT p.*,t.id ticket_id
          FROM plans p JOIN tickets t ON t.id=p.ticket_id
          WHERE p.id=$1 FOR UPDATE OF p,t`,
         [planRevisionMatch[1]],
       )).rows[0];
       if (!plan) return null;
-      // ponytail: revisions are safe up through Plan Approved too — execution
-      // only starts once the ticket hits Execution Queued, and the approval
-      // gate already re-blocks Start execution once a new version supersedes
-      // the approved one (see checkPlanApprovalGate's current_version_id check).
-      if (!["Plan Ready for Review", "Plan Approved", "Needs Information", "Planning Failed"].includes(plan.status)) {
-        throw Object.assign(new Error(`revision cannot be requested from ${plan.status}`), { status: 409 });
-      }
       const current = (await client.query(
         "SELECT * FROM plan_versions WHERE id=$1 AND plan_id=$2",
-        [plan.current_version_id, plan.id],
+        [expected.current_version_id, plan.id],
       )).rows[0];
       if (!current) throw Object.assign(new Error("current plan version not found"), { status: 409 });
+      await requestPlanRevisionDecision(client, {
+        ticketId: expected.ticket_id, planVersionId: expected.current_version_id,
+        expectedTicketVersion: expected.ticket_version, expectedStatus: expected.status,
+        expectedSnapshotId: expected.approved_input_snapshot_id ?? null,
+      });
       const feedback = (await client.query(
         `INSERT INTO plan_review_feedback (plan_id,plan_version_id,feedback,created_by)
          VALUES ($1,$2,$3,$4) RETURNING *`,
         [plan.id, current.id, body.feedback.trim(), session.user_id],
       )).rows[0];
       await client.query(
-        `UPDATE tickets SET status='Plan Revision Requested',approved_plan_version_id=NULL,approved_plan_hash=NULL,
-         approved_ticket_version=NULL,approved_project_config_version=NULL,approved_model_config_json=NULL,
-         approved_skill_snapshot_id=NULL,approved_prompt_versions_json=NULL,approved_input_snapshot_id=NULL,
-         plan_approved_at=NULL,updated_at=now() WHERE id=$1`,
-        [plan.ticket_id],
-      );
-      await client.query(
         `INSERT INTO ticket_status_history
          (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_plan_version_id)
          VALUES ($1,$2,'Plan Revision Requested','Plan revision requested','admin',$3,$4)`,
-        [plan.ticket_id, plan.status, session.user_id, current.id],
+        [plan.ticket_id, expected.status, session.user_id, current.id],
       );
       const job = await enqueueJob({
         type: "planning.revise",
@@ -1723,7 +1731,12 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         [plan.ticket_id, session.user_id, job.id, current.id],
       );
       return { ticket, job, feedback };
-    });
+    }); } catch (error) {
+      if (error instanceof ApprovalConflictError) return json(response, 409, {
+        error: error.code, message: error.message, current_snapshot_id: error.currentSnapshotId,
+      });
+      throw error;
+    }
     return result ? json(response, 202, result) : json(response, 404, { error: "plan not found" });
   }
   const planFeedbackMatch = url.pathname.match(/^\/api\/admin\/plans\/([0-9a-f-]+)\/feedback$/i);
@@ -1752,7 +1765,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     let approved;
     try { approved = await inTransaction(async (client) => {
       const version = (await client.query(
-        `SELECT pv.*,p.ticket_id,p.current_version_id,t.status ticket_status,t.updated_at ticket_version,
+        `SELECT pv.*,p.ticket_id,p.current_version_id,t.status ticket_status,t.updated_at::text ticket_version,
                 t.approved_input_snapshot_id,t.project_id
          FROM plan_versions pv
          JOIN plans p ON p.id=pv.plan_id
@@ -1808,10 +1821,22 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   const planRejectMatch = url.pathname.match(/^\/api\/admin\/plan-versions\/([0-9a-f-]+)\/reject$/i);
   if (planRejectMatch && request.method === "POST") {
     const body = await bodyOf(request);
+    const expected = (await pool.query(
+      `SELECT pv.id,p.ticket_id,p.current_version_id,t.status,t.updated_at::text ticket_version,t.approved_input_snapshot_id
+       FROM plan_versions pv JOIN plans p ON p.id=pv.plan_id JOIN tickets t ON t.id=p.ticket_id WHERE pv.id=$1`,
+      [planRejectMatch[1]],
+    )).rows[0];
+    if (!expected) return json(response, 404, { error: "plan version not found" });
+    if (body.plan_version_id !== undefined && body.plan_version_id !== expected.id) {
+      return json(response, 409, { error: "approval_conflict", message: "the ticket or current plan changed before the approval decision completed", current_snapshot_id: expected.approved_input_snapshot_id ?? null });
+    }
+    if (expected.current_version_id !== expected.id || !["Plan Ready for Review", "Plan Approved"].includes(expected.status)) {
+      return json(response, 409, { error: "approval_conflict", message: "the ticket or current plan changed before the approval decision completed", current_snapshot_id: expected.approved_input_snapshot_id ?? null });
+    }
     let rejected;
     try { rejected = await inTransaction(async (client) => {
       const version = (await client.query(
-        `SELECT pv.*,p.ticket_id,p.current_version_id,t.status,t.approved_input_snapshot_id
+        `SELECT pv.*,p.ticket_id,p.current_version_id,t.status,t.updated_at::text ticket_version,t.approved_input_snapshot_id
          FROM plan_versions pv
          JOIN plans p ON p.id=pv.plan_id
          JOIN tickets t ON t.id=p.ticket_id
@@ -1819,29 +1844,20 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         [planRejectMatch[1]],
       )).rows[0];
       if (!version) return null;
-      if (body.plan_version_id !== undefined && body.plan_version_id !== version.id) {
-        throw new ApprovalConflictError(version.approved_input_snapshot_id ?? null);
-      }
-      if (version.current_version_id !== version.id) {
-        throw new ApprovalConflictError(version.approved_input_snapshot_id ?? null);
-      }
-      if (!["Plan Ready for Review", "Plan Approved"].includes(version.status)) {
-        throw new ApprovalConflictError(version.approved_input_snapshot_id ?? null);
-      }
       const reason = typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : "Plan rejected";
       const transition = await rejectPlanDecision(client, {
-        ticketId: version.ticket_id, planVersionId: version.id, expectedStatus: version.status,
-        expectedSnapshotId: version.approved_input_snapshot_id, decidedBy: session.user_id, metadata: { reason },
+        ticketId: expected.ticket_id, planVersionId: expected.id, expectedTicketVersion: expected.ticket_version, expectedStatus: expected.status,
+        expectedSnapshotId: expected.approved_input_snapshot_id, decidedBy: session.user_id, metadata: { reason },
       });
       await client.query(
         `INSERT INTO ticket_status_history
          (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_plan_version_id)
          VALUES ($1,$2,'Rejected',$3,'admin',$4,$5)`,
-        [version.ticket_id, version.status, reason, session.user_id, version.id],
+        [version.ticket_id, expected.status, reason, session.user_id, version.id],
       );
       await audit({
         actorType: "admin", actorId: session.user_id, action: "plan_version.reject",
-        entityType: "plan_version", entityId: version.id, before: { status: version.status }, after: { status: "Rejected" },
+        entityType: "plan_version", entityId: version.id, before: { status: expected.status }, after: { status: "Rejected" },
         metadata: { ticket_id: version.ticket_id, reason: body.reason ?? null }, ip: ipOf(request),
       }, client);
       return { ticket: transition.ticket, plan_version: version, decision: transition.decision };
@@ -2120,6 +2136,9 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (ticketMatch && request.method === "PATCH") {
     const ref = decodeURIComponent(ticketMatch[1]);
     const body = await bodyOf(request);
+    if (body.status !== undefined && ["Rejected", "Plan Approved"].includes(body.status)) {
+      return json(response, 422, { error: "status must use its decision endpoint" });
+    }
     if (body.status !== undefined && (!validStatuses.has(body.status) || systemOnlyStatuses.has(body.status))) return json(response, 422, { error: "status cannot be set manually" });
     const allowed = [
       "title", "description", "category", "priority", "status", "project_id", "submitter_name", "submitter_email",

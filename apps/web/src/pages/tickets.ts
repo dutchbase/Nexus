@@ -300,9 +300,10 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       pool.query("SELECT n.*,u.username FROM ticket_notes n LEFT JOIN users u ON u.id=n.author_id WHERE ticket_id=$1 ORDER BY n.created_at DESC", [ticket.id]),
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
       pool.query(
-        `SELECT s.*,ps.id IS NOT NULL automatic,ts.id IS NOT NULL selected
+        `SELECT s.*,ps.id IS NOT NULL automatic,COALESCE(ps.allow_ticket_override,false) overridable,
+                ts.id IS NOT NULL AND ts.source<>'excluded' selected,ts.source='excluded' excluded
          FROM skills s
-         LEFT JOIN project_skills ps ON ps.skill_id=s.id AND ps.project_id=$1 AND ps.attachment_type='automatic'
+         LEFT JOIN project_skills ps ON ps.skill_id=s.id AND ps.project_id=$1 AND ps.attachment_type IN ('automatic','required')
          LEFT JOIN ticket_skills ts ON ts.skill_id=s.id AND ts.ticket_id=$2
          ORDER BY s.category,s.name`,
         [ticket.project_id, ticket.id],
@@ -326,10 +327,10 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     const notes = notesResult.rows;
     const history = historyResult.rows;
     const skillRows = skillsResult.rows;
-    const selectedSkills = skillRows.filter((skill) => skill.automatic || skill.selected);
+    const selectedSkills = skillRows.filter((skill) => (skill.automatic && !skill.excluded) || skill.selected);
     const chips = selectedSkills.map((skill) =>
       `<span class="skill-chip" data-skill-chip="${skill.id}" data-slug="${escapeHtml(skill.slug)}" title="${skill.automatic ? "Automatically added by project" : "Selected on this ticket"} · ${escapeHtml(skill.filesystem_path)}">${escapeHtml(skill.name)}
-       ${skill.automatic ? '<small>auto</small>' : `<button type="button" aria-label="Remove ${escapeHtml(skill.name)}" data-remove-skill="${skill.id}">×</button>`}</span>`,
+       ${skill.automatic && !skill.overridable ? '<small>auto</small>' : `<button type="button" aria-label="Remove ${escapeHtml(skill.name)}" data-remove-skill="${skill.id}">×</button>`}</span>`,
     ).join("");
     const referenceLines = selectedSkills.map((skill) => `- ${skill.slug}: ${skill.filesystem_path}`).join("\n") || "No skills resolved for this ticket.";
     const modelOptions = ["fable", "opus", "sonnet", "haiku"].map((model) => `<option value="${model}"${ticket.default_model === model ? " selected" : ""}>${model[0].toUpperCase()}${model.slice(1)}</option>`).join("");
@@ -373,7 +374,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
         <div class="skill-chips" data-skill-chips>${chips}</div>
         <button class="button" type="button" data-add-skill>+ Add skill</button>
         <div class="skill-options" data-skill-picker hidden><label class="field"><span>Search and select skills</span><input data-skill-search placeholder="Search skills or categories"></label>
-        ${skillRows.map((skill) => `<label data-skill-option data-search="${escapeHtml(`${skill.name} ${skill.slug} ${skill.category}`.toLowerCase())}"><input type="checkbox" value="${skill.id}" data-skill-toggle data-slug="${escapeHtml(skill.slug)}" data-name="${escapeHtml(skill.name)}" data-path="${escapeHtml(skill.filesystem_path)}"${skill.automatic ? " data-auto" : ""}${skill.automatic || skill.selected ? " checked" : ""}${skill.automatic || !skill.enabled ? " disabled" : ""}> ${escapeHtml(skill.name)} <small>${escapeHtml(skill.category)}${skill.automatic ? " · Automatically added by project" : ""}${!skill.enabled ? " · disabled" : ""}</small></label>`).join("")}</div>
+        ${skillRows.map((skill) => `<label data-skill-option data-search="${escapeHtml(`${skill.name} ${skill.slug} ${skill.category}`.toLowerCase())}"><input type="checkbox" value="${skill.id}" data-skill-toggle data-slug="${escapeHtml(skill.slug)}" data-name="${escapeHtml(skill.name)}" data-path="${escapeHtml(skill.filesystem_path)}"${skill.automatic ? " data-auto" : ""}${skill.automatic && skill.overridable ? " data-overridable" : ""}${(skill.automatic && !skill.excluded) || skill.selected ? " checked" : ""}${(skill.automatic && !skill.overridable) || !skill.enabled ? " disabled" : ""}> ${escapeHtml(skill.name)} <small>${escapeHtml(skill.category)}${skill.automatic ? " · Automatically added by project" : ""}${!skill.enabled ? " · disabled" : ""}</small></label>`).join("")}</div>
       </div></section>
       <section class="card"><div class="card-head">Resolved references injected into the prompt (<span data-ref-count>${selectedSkills.length}</span>)</div><div class="card-body"><pre class="references" data-skill-references>Use the following skills:
 ${escapeHtml(referenceLines)}</pre></div></section>`;

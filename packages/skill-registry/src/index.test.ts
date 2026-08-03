@@ -68,10 +68,25 @@ describe("approval skill policy", () => {
     enabled: true, version: "1", configuration_json: {},
   };
 
-  test("rejects a disallowed ticket override", () => {
+  test("rejects exclusion of an automatic skill when ticket overrides are disabled", () => {
     expect(() => resolveSkills([
-      { skill, skillId: skill.id, source: "ticket_selected", allowTicketOverride: false },
+      { skill, skillId: skill.id, source: "project_automatic", allowTicketOverride: false },
+      { skill, skillId: skill.id, source: "ticket_excluded" },
     ], "project", "planning")).toThrow(SkillResolutionError);
+  });
+
+  test("excludes an automatic skill when ticket overrides are enabled", () => {
+    expect(resolveSkills([
+      { skill, skillId: skill.id, source: "project_automatic", allowTicketOverride: true },
+      { skill, skillId: skill.id, source: "ticket_excluded" },
+    ], "project", "planning")).toEqual([]);
+  });
+
+  test("does not mistake an explicit selection for an override", () => {
+    expect(resolveSkills([
+      { skill, skillId: skill.id, source: "project_automatic", allowTicketOverride: false },
+      { skill, skillId: skill.id, source: "ticket_selected" },
+    ], "project", "planning")[0]?.resolution_sources).toEqual(["project_automatic", "ticket_selected"]);
   });
 
   test.each([

@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 export type SkillPhase = "planning" | "execution" | "repair";
-export type ResolutionSource = "global_mandatory" | "project_automatic" | "project_required" | "ticket_selected" | "phase_required";
+export type ResolutionSource = "global_mandatory" | "project_automatic" | "project_required" | "ticket_selected" | "ticket_excluded" | "phase_required";
 
 export type RegisteredSkill = {
   id: string;
@@ -74,10 +74,13 @@ function isEligible(skill: RegisteredSkill, projectId: string, phase: SkillPhase
 
 export function resolveSkills(candidates: SkillCandidate[], projectId: string, phase: SkillPhase): ResolvedSkill[] {
   const resolved = new Map<string, ResolvedSkill>();
+  const excluded = new Set(candidates.filter((candidate) => candidate.source === "ticket_excluded").map((candidate) => candidate.skillId));
   for (const candidate of candidates) {
     const label = candidate.slug ?? candidate.skill?.slug ?? candidate.skillId;
-    if (candidate.source === "ticket_selected" && candidate.allowTicketOverride === false) {
-      throw new SkillResolutionError(label, "incompatible");
+    if (candidate.source === "ticket_excluded") continue;
+    if (candidate.source === "project_automatic" && excluded.has(candidate.skillId)) {
+      if (candidate.allowTicketOverride !== true) throw new SkillResolutionError(label, "incompatible");
+      continue;
     }
     if (!candidate.skill) throw new SkillResolutionError(label, "missing");
     if (!candidate.skill.enabled) throw new SkillResolutionError(label, "disabled");

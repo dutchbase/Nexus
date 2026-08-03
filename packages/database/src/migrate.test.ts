@@ -52,6 +52,20 @@ async function resetDatabase() {
   }
 }
 
+async function createDecisionFixture(client: pg.Client, key: string) {
+  const project = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ($1,$2,$q$/tmp/project$q$) RETURNING *", [`race-${key}`, `Race ${key}`])).rows[0];
+  const ticket = (await client.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($1,$2,$q$Ticket$q$,$q$Plan Ready for Review$q$) RETURNING *,updated_at::text ticket_version", [`RACE-${key.toUpperCase()}`, project.id])).rows[0];
+  const planId = (await client.query("INSERT INTO plans (ticket_id) VALUES ($1) RETURNING id", [ticket.id])).rows[0].id;
+  const planVersion = (await client.query("INSERT INTO plan_versions (plan_id,version,content_markdown,content_hash) VALUES ($1,1,$q$x$q$,encode(digest($q$x$q$,$q$sha256$q$),$q$hex$q$)) RETURNING *", [planId])).rows[0];
+  await client.query("UPDATE plans SET current_version_id=$2 WHERE id=$1", [planId, planVersion.id]);
+  const approvedInput = {
+    plan: { versionId: planVersion.id, version: 1, contentHash: planVersion.content_hash },
+    ticket: { title: ticket.title }, project: { configVersion: project.config_version, config: {} },
+    models: {}, prompts: [], skills: [], policySources: [],
+  } as const;
+  return { project, ticket, planId, planVersion, approvedInput };
+}
+
 integration("migrate", () => {
   beforeEach(async () => {
     await resetDatabase();
@@ -119,13 +133,51 @@ integration("migrate", () => {
     }
   });
 
+  it("stales approvals for phase-required skill material changes and policy removal", async () => {
+    await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ($q$skill-stale$q$,$q$Skill stale$q$,$q$/tmp/project$q$) RETURNING id")).rows[0].id;
+      const ticketId = (await client.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$SKILL-1$q$,$1,$q$Ticket$q$,$q$Plan Approved$q$) RETURNING id", [projectId])).rows[0].id;
+      const planId = (await client.query("INSERT INTO plans (ticket_id) VALUES ($1) RETURNING id", [ticketId])).rows[0].id;
+      const planVersionId = (await client.query("INSERT INTO plan_versions (plan_id,version,content_markdown,content_hash) VALUES ($1,1,$q$x$q$,encode(digest($q$x$q$,$q$sha256$q$),$q$hex$q$)) RETURNING id", [planId])).rows[0].id;
+      await client.query("UPDATE plans SET current_version_id=$2 WHERE id=$1", [planId, planVersionId]);
+      const snapshotId = (await client.query("INSERT INTO approved_input_snapshots (ticket_id,plan_version_id,material_input_json,input_hash) VALUES ($1,$2,$q${}$q$,$q$44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a$q$) RETURNING id", [ticketId, planVersionId])).rows[0].id;
+      await client.query("UPDATE tickets SET approved_plan_version_id=$2,approved_input_snapshot_id=$3 WHERE id=$1", [ticketId, planVersionId, snapshotId]);
+      const skillId = (await client.query("INSERT INTO skills (slug,name,version,configuration_json) VALUES ($q$phase-policy$q$,$q$Phase policy$q$,$q$1$q$,$q${\"required_phases\":[\"planning\"]}$q$) RETURNING id")).rows[0].id;
+
+      for (const update of [
+        "version='2'",
+        "content_hash=repeat('a',64)",
+        "enabled=false",
+      ]) {
+        await client.query("UPDATE plans SET potentially_stale=false WHERE id=$1", [planId]);
+        await client.query(`UPDATE skills SET ${update} WHERE id=$1`, [skillId]);
+        expect((await client.query("SELECT potentially_stale FROM plans WHERE id=$1", [planId])).rows[0].potentially_stale).toBe(true);
+      }
+
+      await client.query("UPDATE plans SET potentially_stale=false WHERE id=$1", [planId]);
+      await client.query("UPDATE skills SET configuration_json='{}'::jsonb WHERE id=$1", [skillId]);
+      expect((await client.query("SELECT potentially_stale FROM plans WHERE id=$1", [planId])).rows[0].potentially_stale).toBe(true);
+
+      await client.query("UPDATE skills SET configuration_json='{\"mandatory\":true}'::jsonb WHERE id=$1", [skillId]);
+      await client.query("UPDATE plans SET potentially_stale=false WHERE id=$1", [planId]);
+      await client.query("UPDATE skills SET configuration_json='{}'::jsonb WHERE id=$1", [skillId]);
+      expect((await client.query("SELECT potentially_stale FROM plans WHERE id=$1", [planId])).rows[0].potentially_stale).toBe(true);
+    } finally {
+      await client.end();
+    }
+  });
+
   it("allows exactly one concurrent approval decision and reports the winning snapshot", async () => {
     await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
     await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
     const setup = new pg.Client({ connectionString: testDatabaseUrl });
     await setup.connect();
     const project = (await setup.query("INSERT INTO projects (slug,name,repository_path) VALUES ($q$race$q$,$q$Race$q$,$q$/tmp/project$q$) RETURNING *")).rows[0];
-    const ticket = (await setup.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$RACE-1$q$,$1,$q$Ticket$q$,$q$Plan Ready for Review$q$) RETURNING *", [project.id])).rows[0];
+    const ticket = (await setup.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$RACE-1$q$,$1,$q$Ticket$q$,$q$Plan Ready for Review$q$) RETURNING *,updated_at::text ticket_version", [project.id])).rows[0];
     const planId = (await setup.query("INSERT INTO plans (ticket_id) VALUES ($1) RETURNING id", [ticket.id])).rows[0].id;
     const planVersion = (await setup.query("INSERT INTO plan_versions (plan_id,version,content_markdown,content_hash) VALUES ($1,1,$q$x$q$,encode(digest($q$x$q$,$q$sha256$q$),$q$hex$q$)) RETURNING *", [planId])).rows[0];
     await setup.query("UPDATE plans SET current_version_id=$2 WHERE id=$1", [planId, planVersion.id]);
@@ -142,11 +194,11 @@ integration("migrate", () => {
     await Promise.all([first.query("BEGIN"), second.query("BEGIN")]);
     try {
       const winner = await approvalTransitions.approvePlanDecision(first as any, {
-        ticketId: ticket.id, planVersionId: planVersion.id, expectedTicketVersion: ticket.updated_at,
+        ticketId: ticket.id, planVersionId: planVersion.id, expectedTicketVersion: ticket.ticket_version,
         expectedStatus: "Plan Ready for Review", approvedInput, decidedBy: null, skillSnapshotId: null,
       });
       const loser = approvalTransitions.approvePlanDecision(second as any, {
-        ticketId: ticket.id, planVersionId: planVersion.id, expectedTicketVersion: ticket.updated_at,
+        ticketId: ticket.id, planVersionId: planVersion.id, expectedTicketVersion: ticket.ticket_version,
         expectedStatus: "Plan Ready for Review", approvedInput, decidedBy: null, skillSnapshotId: null,
       });
       await new Promise((resolve) => setImmediate(resolve));
@@ -163,6 +215,106 @@ integration("migrate", () => {
     }
   });
 
+  it("rejects approval when the ticket changed after its inputs were built", async () => {
+    await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const project = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ($q$stale-input$q$,$q$Stale input$q$,$q$/tmp/project$q$) RETURNING *")).rows[0];
+      const ticket = (await client.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$STALE-1$q$,$1,$q$Before$q$,$q$Plan Ready for Review$q$) RETURNING *,updated_at::text ticket_version", [project.id])).rows[0];
+      const planId = (await client.query("INSERT INTO plans (ticket_id) VALUES ($1) RETURNING id", [ticket.id])).rows[0].id;
+      const planVersion = (await client.query("INSERT INTO plan_versions (plan_id,version,content_markdown,content_hash) VALUES ($1,1,$q$x$q$,encode(digest($q$x$q$,$q$sha256$q$),$q$hex$q$)) RETURNING *", [planId])).rows[0];
+      await client.query("UPDATE plans SET current_version_id=$2 WHERE id=$1", [planId, planVersion.id]);
+      const approvedInput = {
+        plan: { versionId: planVersion.id, version: 1, contentHash: planVersion.content_hash },
+        ticket: { title: ticket.title }, project: { configVersion: project.config_version, config: {} },
+        models: {}, prompts: [], skills: [], policySources: [],
+      } as const;
+      await client.query("UPDATE tickets SET title=$2,updated_at=clock_timestamp() WHERE id=$1", [ticket.id, "After"]);
+      await client.query("BEGIN");
+      await expect(approvalTransitions.approvePlanDecision(client as any, {
+        ticketId: ticket.id, planVersionId: planVersion.id, expectedTicketVersion: ticket.ticket_version,
+        expectedStatus: "Plan Ready for Review", approvedInput, decidedBy: null, skillSnapshotId: null,
+      })).rejects.toMatchObject({ code: "approval_conflict" });
+      await client.query("ROLLBACK");
+    } finally {
+      await client.query("ROLLBACK").catch(() => undefined);
+      await client.end();
+    }
+  });
+
+  it("allows only one of concurrent approval and rejection", async () => {
+    await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const setup = new pg.Client({ connectionString: testDatabaseUrl });
+    await setup.connect();
+    const fixture = await createDecisionFixture(setup, "approve-reject");
+    await setup.end();
+    const approval = new pg.Client({ connectionString: testDatabaseUrl });
+    const rejection = new pg.Client({ connectionString: testDatabaseUrl });
+    await Promise.all([approval.connect(), rejection.connect()]);
+    await Promise.all([approval.query("BEGIN"), rejection.query("BEGIN")]);
+    try {
+      const winner = await approvalTransitions.approvePlanDecision(approval as any, {
+        ticketId: fixture.ticket.id, planVersionId: fixture.planVersion.id, expectedTicketVersion: fixture.ticket.ticket_version,
+        expectedStatus: "Plan Ready for Review", approvedInput: fixture.approvedInput, decidedBy: null, skillSnapshotId: null,
+      });
+      const loser = approvalTransitions.rejectPlanDecision(rejection as any, {
+        ticketId: fixture.ticket.id, planVersionId: fixture.planVersion.id, expectedTicketVersion: fixture.ticket.ticket_version,
+        expectedStatus: "Plan Ready for Review", expectedSnapshotId: null, decidedBy: null,
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      await approval.query("COMMIT");
+      await expect(loser).rejects.toMatchObject({ code: "approval_conflict", currentSnapshotId: winner.approvedInputSnapshot.id });
+      await rejection.query("ROLLBACK");
+      const verify = new pg.Client({ connectionString: testDatabaseUrl });
+      await verify.connect();
+      expect((await verify.query("SELECT status,approved_input_snapshot_id FROM tickets WHERE id=$1", [fixture.ticket.id])).rows[0]).toEqual({
+        status: "Plan Approved", approved_input_snapshot_id: winner.approvedInputSnapshot.id,
+      });
+      expect((await verify.query("SELECT count(*)::int count FROM plan_approval_decisions")).rows[0].count).toBe(1);
+      await verify.end();
+    } finally {
+      await Promise.allSettled([approval.end(), rejection.end()]);
+    }
+  });
+
+  it("allows only one of concurrent approval and revision", async () => {
+    await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const setup = new pg.Client({ connectionString: testDatabaseUrl });
+    await setup.connect();
+    const fixture = await createDecisionFixture(setup, "approve-revision");
+    await setup.end();
+    const approval = new pg.Client({ connectionString: testDatabaseUrl });
+    const revision = new pg.Client({ connectionString: testDatabaseUrl });
+    await Promise.all([approval.connect(), revision.connect()]);
+    await Promise.all([approval.query("BEGIN"), revision.query("BEGIN")]);
+    try {
+      const winner = await approvalTransitions.approvePlanDecision(approval as any, {
+        ticketId: fixture.ticket.id, planVersionId: fixture.planVersion.id, expectedTicketVersion: fixture.ticket.ticket_version,
+        expectedStatus: "Plan Ready for Review", approvedInput: fixture.approvedInput, decidedBy: null, skillSnapshotId: null,
+      });
+      const loser = approvalTransitions.requestPlanRevisionDecision(revision as any, {
+        ticketId: fixture.ticket.id, planVersionId: fixture.planVersion.id, expectedTicketVersion: fixture.ticket.ticket_version,
+        expectedStatus: "Plan Ready for Review", expectedSnapshotId: null,
+      });
+      await new Promise((resolve) => setImmediate(resolve));
+      await approval.query("COMMIT");
+      await expect(loser).rejects.toMatchObject({ code: "approval_conflict", currentSnapshotId: winner.approvedInputSnapshot.id });
+      await revision.query("ROLLBACK");
+      const verify = new pg.Client({ connectionString: testDatabaseUrl });
+      await verify.connect();
+      expect((await verify.query("SELECT status,approved_input_snapshot_id FROM tickets WHERE id=$1", [fixture.ticket.id])).rows[0]).toEqual({
+        status: "Plan Approved", approved_input_snapshot_id: winner.approvedInputSnapshot.id,
+      });
+      await verify.end();
+    } finally {
+      await Promise.allSettled([approval.end(), revision.end()]);
+    }
+  });
+
   it("records rejection history and clears every active approval reference", async () => {
     await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
     await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
@@ -170,7 +322,7 @@ integration("migrate", () => {
     await client.connect();
     try {
       const project = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ($q$reject$q$,$q$Reject$q$,$q$/tmp/project$q$) RETURNING *")).rows[0];
-      const ticket = (await client.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$REJ-1$q$,$1,$q$Ticket$q$,$q$Plan Ready for Review$q$) RETURNING *", [project.id])).rows[0];
+      const ticket = (await client.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$REJ-1$q$,$1,$q$Ticket$q$,$q$Plan Ready for Review$q$) RETURNING *,updated_at::text ticket_version", [project.id])).rows[0];
       const planId = (await client.query("INSERT INTO plans (ticket_id) VALUES ($1) RETURNING id", [ticket.id])).rows[0].id;
       const planVersion = (await client.query("INSERT INTO plan_versions (plan_id,version,content_markdown,content_hash) VALUES ($1,1,$q$x$q$,encode(digest($q$x$q$,$q$sha256$q$),$q$hex$q$)) RETURNING *", [planId])).rows[0];
       await client.query("UPDATE plans SET current_version_id=$2 WHERE id=$1", [planId, planVersion.id]);
@@ -182,14 +334,15 @@ integration("migrate", () => {
       } as const;
       await client.query("BEGIN");
       const approved = await approvalTransitions.approvePlanDecision(client as any, {
-        ticketId: ticket.id, planVersionId: planVersion.id, expectedTicketVersion: ticket.updated_at,
+        ticketId: ticket.id, planVersionId: planVersion.id, expectedTicketVersion: ticket.ticket_version,
         expectedStatus: "Plan Ready for Review", approvedInput, decidedBy: null, skillSnapshotId: null,
       });
       await client.query("COMMIT");
 
       await client.query("BEGIN");
+      const approvedTicketVersion = (await client.query("SELECT updated_at::text ticket_version FROM tickets WHERE id=$1", [ticket.id])).rows[0].ticket_version;
       const rejected = await approvalTransitions.rejectPlanDecision(client as any, {
-        ticketId: ticket.id, planVersionId: planVersion.id, expectedStatus: "Plan Approved",
+        ticketId: ticket.id, planVersionId: planVersion.id, expectedTicketVersion: approvedTicketVersion, expectedStatus: "Plan Approved",
         expectedSnapshotId: approved.approvedInputSnapshot.id, decidedBy: null,
       });
       await client.query("COMMIT");

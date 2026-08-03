@@ -110,6 +110,7 @@ export async function approvePlanDecision(client: QueryClient, input: {
        plan_approved_at=now(),status='Plan Approved',updated_at=now()
      WHERE t.id=$1 AND t.status=$10
        AND t.approved_input_snapshot_id IS NOT DISTINCT FROM $11::uuid
+       AND t.updated_at=$4::timestamptz
        AND EXISTS (SELECT 1 FROM plans p WHERE p.ticket_id=t.id AND p.current_version_id=$2)
      RETURNING t.*`,
     [input.ticketId, input.planVersionId, input.approvedInput.plan.contentHash, input.expectedTicketVersion,
@@ -132,6 +133,7 @@ export async function approvePlanDecision(client: QueryClient, input: {
 export async function rejectPlanDecision(client: QueryClient, input: {
   ticketId: string;
   planVersionId: string;
+  expectedTicketVersion: Date | string;
   expectedStatus: string;
   expectedSnapshotId: string | null;
   decidedBy: string | null;
@@ -143,11 +145,12 @@ export async function rejectPlanDecision(client: QueryClient, input: {
        approved_model_config_json=NULL,approved_skill_snapshot_id=NULL,
        approved_prompt_versions_json=NULL,approved_input_snapshot_id=NULL,
        plan_approved_at=NULL,updated_at=now()
-     WHERE t.id=$1 AND t.status=$3
-       AND t.approved_input_snapshot_id IS NOT DISTINCT FROM $4::uuid
+     WHERE t.id=$1 AND t.status=$4
+       AND t.approved_input_snapshot_id IS NOT DISTINCT FROM $5::uuid
+       AND t.updated_at=$3::timestamptz
        AND EXISTS (SELECT 1 FROM plans p WHERE p.ticket_id=t.id AND p.current_version_id=$2)
      RETURNING t.*`,
-    [input.ticketId, input.planVersionId, input.expectedStatus, input.expectedSnapshotId],
+    [input.ticketId, input.planVersionId, input.expectedTicketVersion, input.expectedStatus, input.expectedSnapshotId],
   )).rows[0];
   if (!ticket) {
     const current = (await client.query("SELECT approved_input_snapshot_id FROM tickets WHERE id=$1", [input.ticketId])).rows[0];
@@ -160,4 +163,31 @@ export async function rejectPlanDecision(client: QueryClient, input: {
     [input.ticketId, input.planVersionId, input.decidedBy, input.metadata ?? {}],
   )).rows[0];
   return { ticket, decision };
+}
+
+export async function requestPlanRevisionDecision(client: QueryClient, input: {
+  ticketId: string;
+  planVersionId: string;
+  expectedTicketVersion: Date | string;
+  expectedStatus: string;
+  expectedSnapshotId: string | null;
+}) {
+  const ticket = (await client.query(
+    `UPDATE tickets t SET status='Plan Revision Requested',approved_plan_version_id=NULL,
+       approved_plan_hash=NULL,approved_ticket_version=NULL,approved_project_config_version=NULL,
+       approved_model_config_json=NULL,approved_skill_snapshot_id=NULL,
+       approved_prompt_versions_json=NULL,approved_input_snapshot_id=NULL,
+       plan_approved_at=NULL,updated_at=now()
+     WHERE t.id=$1 AND t.status=$4
+       AND t.approved_input_snapshot_id IS NOT DISTINCT FROM $5::uuid
+       AND t.updated_at=$3::timestamptz
+       AND EXISTS (SELECT 1 FROM plans p WHERE p.ticket_id=t.id AND p.current_version_id=$2)
+     RETURNING t.*`,
+    [input.ticketId, input.planVersionId, input.expectedTicketVersion, input.expectedStatus, input.expectedSnapshotId],
+  )).rows[0];
+  if (!ticket) {
+    const current = (await client.query("SELECT approved_input_snapshot_id FROM tickets WHERE id=$1", [input.ticketId])).rows[0];
+    throw new ApprovalConflictError(current?.approved_input_snapshot_id ?? null);
+  }
+  return ticket;
 }
