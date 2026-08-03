@@ -5,7 +5,6 @@ export type CreatePullRequestInput = {
   body: string;
   head: string;
   base: string;
-  draft: boolean;
 };
 
 export type ProviderPullRequest = {
@@ -89,11 +88,11 @@ export async function getPullRequest(owner: string, repository: string, number: 
   return request<ProviderPullRequest>(`${pullsPath(owner, repository)}/${number}`);
 }
 
-export async function createDraftPullRequest(input: CreatePullRequestInput) {
+export async function createPullRequest(input: CreatePullRequestInput) {
   return request<ProviderPullRequest>(pullsPath(input.owner, input.repository), {
     method: "POST",
     body: JSON.stringify({
-      title: input.title, body: input.body, head: input.head, base: input.base, draft: input.draft,
+      title: input.title, body: input.body, head: input.head, base: input.base, draft: false,
     }),
   });
 }

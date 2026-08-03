@@ -30,10 +30,10 @@ export async function approveAndMergePullRequest(
     if (targetBranch && targetBranch !== pullRequest.base_branch) {
       await updatePullRequestBase(owner, repo, pullRequest.number, targetBranch);
     }
-    if (pullRequest.is_draft) await markReadyForReview(owner, repo, pullRequest.number);
+    const remote = await getPullRequest(owner, repo, pullRequest.number);
+    if (remote.draft) await markReadyForReview(owner, repo, pullRequest.number);
     if (expectedBaseBranch) {
-      const current = await getPullRequest(owner, repo, pullRequest.number);
-      if (current.base.ref !== expectedBaseBranch || (expectedBaseSha && current.base.sha !== expectedBaseSha)) {
+      if (remote.base.ref !== expectedBaseBranch || (expectedBaseSha && remote.base.sha !== expectedBaseSha)) {
         throw new Error("pull request base changed after AI review");
       }
     }

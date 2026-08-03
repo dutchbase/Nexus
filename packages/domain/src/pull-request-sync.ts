@@ -71,7 +71,7 @@ export async function syncPullRequest(pullRequestId: string, actorType: "worker"
        merged_at=$11,closed_at=$12,merge_commit_sha=$13,body=$14,merge_conflicts=$15,last_synced_at=now(),updated_at=now()
      WHERE id=$1`,
     [
-      stored.id, remote.state, remote.review_state ?? null, remote.check_state ?? null, remote.draft,
+      stored.id, remote.state, remote.review_state ?? null, remote.check_state ?? null, false,
       remote.title, remote.user?.login ?? null, remote.head.ref, remote.base.ref, remote.updated_at,
       remote.merged_at ?? null, remote.closed_at ?? null, remote.merge_commit_sha ?? null,
       remote.body ?? null, remote.mergeable_state === "dirty",
@@ -106,7 +106,7 @@ export async function importGithubPullRequests(pool: pg.Pool, project: any) {
          updated_at_provider=EXCLUDED.updated_at_provider,merged_at=EXCLUDED.merged_at,closed_at=EXCLUDED.closed_at,
          merge_commit_sha=EXCLUDED.merge_commit_sha,body=EXCLUDED.body,last_synced_at=now(),updated_at=now()`,
       [project.id, `${project.github_owner}/${project.github_repository}`, pr.number, pr.html_url, pr.title, pr.user?.login ?? null,
-       pr.state, pr.review_state ?? null, pr.check_state ?? null, pr.draft, pr.head.ref, pr.base.ref,
+       pr.state, pr.review_state ?? null, pr.check_state ?? null, false, pr.head.ref, pr.base.ref,
        pr.created_at, pr.updated_at, pr.merged_at ?? null, pr.closed_at ?? null, pr.merge_commit_sha ?? null, pr.body ?? null],
     );
   }

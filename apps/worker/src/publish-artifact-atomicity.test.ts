@@ -17,7 +17,7 @@ describe("publishExecutionAttempt persistence", () => {
 
   it("persists the provider base ref for a discovered non-default target branch", async () => {
     const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
-    expect(worker).toContain("providerPr.draft, providerPr.head.ref, providerPr.base.ref, commit,");
-    expect(worker).not.toContain("providerPr.draft, providerPr.head.ref, input.project.default_branch, commit,");
+    expect(worker).toContain("false, providerPr.head.ref, providerPr.base.ref, commit,");
+    expect(worker).not.toContain("false, providerPr.head.ref, input.project.default_branch, commit,");
   });
 });
