@@ -1,6 +1,7 @@
 import { afterEach, expect, test, vi } from "vitest";
 
 import {
+  LeaseLostError,
   recoverExpiredWorkflowState,
   refuseClaudeJobs,
   withLeaseHeartbeat,
@@ -41,26 +42,27 @@ test("recovers each expired job and delivery once in a bounded locked transactio
     .map(([sql]) => sql as string)
     .filter((sql) => sql.includes("lease_expires_at <= now()"));
   expect(recoverySql).toHaveLength(4);
-  expect(recoverySql.every((sql) => sql.includes("FOR UPDATE SKIP LOCKED") && sql.includes("LIMIT 100"))).toBe(true);
+  expect(recoverySql.every((sql) => sql.includes("FOR UPDATE SKIP LOCKED") && sql.includes("LIMIT"))).toBe(true);
   expect(client.query.mock.calls.filter(([sql]) => (sql as string).includes("INSERT INTO audit_events"))).toHaveLength(2);
   expect(transaction).toHaveBeenCalledTimes(2);
 });
 
 test("shares the 100-row recovery budget across jobs and deliveries", async () => {
-  const jobs = Array.from({ length: 100 }, (_, index) => ({
+  const jobs = Array.from({ length: 37 }, (_, index) => ({
     id: `job-${index}`, type: "project.validate", status: "queued", payload_json: {},
   }));
   const query = vi.fn(async (sql: string): Promise<Result> => {
     if (sql.includes("UPDATE jobs j")) return { rows: jobs, rowCount: jobs.length };
+    if (sql.includes("UPDATE notification_deliveries nd")) return { rows: [{ id: "delivery", status: "failed" }], rowCount: 1 };
     if (sql.includes("UPDATE agent_runs")) return { rows: [], rowCount: 0 };
     return { rows: [], rowCount: 1 };
   });
   const client = { query };
   const inTransaction = (async (callback: (client: any) => unknown) => callback(client)) as Transaction;
 
-  await expect(recoverExpiredWorkflowState(inTransaction)).resolves.toEqual({ jobs: 100, deliveries: 0 });
+  await expect(recoverExpiredWorkflowState(inTransaction)).resolves.toEqual({ jobs: 37, deliveries: 1 });
 
-  expect(query.mock.calls.some(([sql]) => (sql as string).includes("UPDATE notification_deliveries nd"))).toBe(false);
+  expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE notification_deliveries nd"), [63]);
 });
 
 test("fails an exhausted recovered job and reconciles its run, attempt, ticket, and history", async () => {
@@ -132,16 +134,29 @@ test("renews every 20 seconds, reports lost ownership, and always clears its tim
   let finish!: () => void;
   const workDone = new Promise<void>((resolve) => { finish = resolve; });
 
-  const running = withLeaseHeartbeat(renew, async (ownsLease) => {
+  const running = withLeaseHeartbeat(renew, async (lease) => {
     await workDone;
-    return ownsLease();
+    await lease.assertOwned();
   });
   await vi.advanceTimersByTimeAsync(20_000);
   finish();
 
-  await expect(running).resolves.toBe(false);
+  await expect(running).rejects.toBeInstanceOf(LeaseLostError);
   expect(renew).toHaveBeenCalledTimes(1);
   expect(vi.getTimerCount()).toBe(0);
+});
+
+test("fences irreversible actions with a fresh lease check and aborts after ownership loss", async () => {
+  const renew = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+  const action = vi.fn();
+
+  await withLeaseHeartbeat(renew, async (lease) => {
+    await lease.run(action);
+    await expect(lease.run(action)).rejects.toBeInstanceOf(LeaseLostError);
+    expect(lease.signal.aborted).toBe(true);
+  });
+
+  expect(action).toHaveBeenCalledTimes(1);
 });
 
 afterEach(() => vi.useRealTimers());

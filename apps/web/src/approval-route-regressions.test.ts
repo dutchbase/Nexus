@@ -123,6 +123,32 @@ test.each([
 });
 
 test.each([
+  ["ai-review", "old-review", "pr_ai_reviews"],
+  ["resolve-conflicts", "old-resolution", "pr_conflict_resolutions"],
+])("%s prioritizes an older active attempt over newer terminal history", async (action, activeId, table) => {
+  pool.query.mockImplementation(async (sql: string) => {
+    if (sql.includes("FROM pull_requests pr")) return { rows: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }] };
+    if (sql.includes("ai_review_settings")) return { rows: [{ default_model: "sonnet", default_reasoning_level: "high" }] };
+    return { rows: [] };
+  });
+  transactionClient = { query: vi.fn(async (sql: string) => {
+    if (sql.includes("SELECT id FROM pull_requests")) return { rows: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }] };
+    if (sql.includes(`FROM ${table}`)) {
+      if (!sql.includes("CASE WHEN j.status IN ('queued','running') THEN 0 ELSE 1 END")) return { rows: [{ id: "new-terminal", job_id: "terminal-job", job_status: "failed" }] };
+      return { rows: [{ id: activeId, job_id: "active-job", job_status: "running" }] };
+    }
+    throw new Error(`unexpected query: ${sql}`);
+  }) };
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await adminApi(request({}, "POST"), response,
+    new URL(`http://test/api/admin/pull-requests/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/${action}`), { user_id: "admin" });
+
+  expect(response.end).toHaveBeenCalledWith(JSON.stringify({ id: activeId }));
+  expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes(`INSERT INTO ${table}`))).toBe(false);
+});
+
+test.each([
   ["ai-review", "pr_ai_reviews", "pr_ai_review_id", "pr.ai_review"],
   ["resolve-conflicts", "pr_conflict_resolutions", "pr_conflict_resolution_id", "pr.conflict_resolution"],
 ])("%s creates a linked single-attempt rerun after terminal history", async (action, table, payloadKey, jobType) => {

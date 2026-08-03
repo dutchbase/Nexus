@@ -121,7 +121,7 @@ export async function recoverExpiredWorkflowState(inTransaction: Transaction) {
          WHERE status='sending' AND lease_expires_at <= now()
          ORDER BY lease_expires_at
          FOR UPDATE SKIP LOCKED
-         LIMIT 100
+         LIMIT $1
        )
        UPDATE notification_deliveries nd
        SET status='failed',attempt_count=COALESCE(attempt_count,0)+1,next_attempt_at=now(),
@@ -129,6 +129,7 @@ export async function recoverExpiredWorkflowState(inTransaction: Transaction) {
            error_message='Worker lease expired',updated_at=now()
        FROM expired WHERE nd.id=expired.id
        RETURNING nd.id,nd.status`,
+      [100 - jobs.length],
     )).rows;
 
     for (const delivery of deliveries) {
@@ -162,16 +163,50 @@ export async function refuseClaudeJobs(
   });
 }
 
+export class LeaseLostError extends Error {
+  constructor() {
+    super("workflow lease ownership lost");
+  }
+}
+
+export type LeaseGuard = {
+  signal: AbortSignal;
+  assertOwned: () => Promise<void>;
+  run: <T>(action: () => Promise<T> | T) => Promise<T>;
+};
+
 export async function withLeaseHeartbeat<T>(
   renew: () => Promise<boolean>,
-  work: (ownsLease: () => Promise<boolean>) => Promise<T>,
+  work: (lease: LeaseGuard) => Promise<T>,
 ): Promise<T> {
-  let renewal = Promise.resolve(true);
-  const timer = setInterval(() => {
-    renewal = renewal.then(async (owned) => owned && await renew()).catch(() => false);
-  }, 20_000);
+  let owned = true;
+  let renewal = Promise.resolve();
+  const controller = new AbortController();
+  const check = () => {
+    renewal = renewal.then(async () => {
+      if (!owned) return;
+      owned = await renew();
+      if (!owned) controller.abort();
+    }).catch(() => {
+      owned = false;
+      controller.abort();
+    });
+    return renewal.then(() => owned);
+  };
+  const assertOwned = async () => {
+    if (!(await check())) throw new LeaseLostError();
+  };
+  const lease: LeaseGuard = {
+    signal: controller.signal,
+    assertOwned,
+    async run(action) {
+      await assertOwned();
+      return action();
+    },
+  };
+  const timer = setInterval(() => { void check(); }, 20_000);
   try {
-    return await work(() => renewal);
+    return await work(lease);
   } finally {
     clearInterval(timer);
     await renewal;

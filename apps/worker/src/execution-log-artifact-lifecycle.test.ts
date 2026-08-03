@@ -9,7 +9,7 @@ describe("execution log artifact lifecycle", () => {
     expect(execution.indexOf("const stagedLog = await stageArtifact")).toBeLessThan(execution.indexOf("await runPrivateExecution"));
     expect(execution).toContain("'execution_log','staged'");
     expect(execution).toContain("logPath: stagedLog.stagedPath");
-    expect(execution).toContain("await finalizeRegisteredArtifact(stagedLog)");
+    expect(execution).toContain("await lease.run(() => finalizeRegisteredArtifact(stagedLog))");
     expect(execution).not.toContain("const logDirectory =");
   });
 });

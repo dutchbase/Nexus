@@ -1016,7 +1016,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
              ORDER BY created_at DESC LIMIT 1
            ) j ON true
            WHERE r.pull_request_id=$1
-           ORDER BY r.created_at DESC LIMIT 1
+           ORDER BY CASE WHEN j.status IN ('queued','running') THEN 0 ELSE 1 END,r.created_at DESC LIMIT 1
            FOR UPDATE OF r`,
           [pullRequest.id],
         )).rows[0];
@@ -1062,7 +1062,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
              ORDER BY created_at DESC LIMIT 1
            ) j ON true
            WHERE r.pull_request_id=$1
-           ORDER BY r.created_at DESC LIMIT 1
+           ORDER BY CASE WHEN j.status IN ('queued','running') THEN 0 ELSE 1 END,r.created_at DESC LIMIT 1
            FOR UPDATE OF r`,
           [pullRequest.id],
         )).rows[0];
