@@ -92,3 +92,51 @@ UPDATE tickets SET
   approved_prompt_versions_json = NULL,
   plan_approved_at = NULL
 WHERE approved_plan_version_id IS NOT NULL;
+
+-- Every project writer, including config imports, advances the same material
+-- revision. Health and validation timestamps remain operational-only.
+CREATE FUNCTION bump_project_material_config_version() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF (OLD.name,OLD.description,OLD.enabled,OLD.repository_path,OLD.agent_start_path,
+      OLD.github_owner,OLD.github_repository,OLD.default_branch,OLD.config_json)
+     IS DISTINCT FROM
+     (NEW.name,NEW.description,NEW.enabled,NEW.repository_path,NEW.agent_start_path,
+      NEW.github_owner,NEW.github_repository,NEW.default_branch,NEW.config_json)
+     AND NEW.config_version = OLD.config_version THEN
+    NEW.config_version := OLD.config_version + 1;
+  END IF;
+  RETURN NEW;
+END;
+$$;
+CREATE TRIGGER projects_bump_material_config_version
+BEFORE UPDATE ON projects
+FOR EACH ROW EXECUTE FUNCTION bump_project_material_config_version();
+
+CREATE OR REPLACE FUNCTION stale_plans_for_skill_change() RETURNS trigger
+LANGUAGE plpgsql AS $$
+BEGIN
+  IF (TG_OP = 'INSERT' AND (
+        COALESCE((NEW.configuration_json->>'mandatory')::boolean,false) OR
+        NEW.configuration_json ? 'required_phases'
+      )) OR (TG_OP = 'UPDATE' AND (
+        OLD.enabled IS DISTINCT FROM NEW.enabled OR OLD.version IS DISTINCT FROM NEW.version OR
+        OLD.content_hash IS DISTINCT FROM NEW.content_hash OR OLD.configuration_json IS DISTINCT FROM NEW.configuration_json
+      )) THEN
+    UPDATE plans SET potentially_stale=true,updated_at=now()
+    WHERE ticket_id IN (
+      SELECT DISTINCT t.id FROM tickets t
+      LEFT JOIN ticket_skills ts ON ts.ticket_id=t.id
+      LEFT JOIN project_skills ps ON ps.project_id=t.project_id
+      WHERE t.approved_plan_version_id IS NOT NULL
+        AND (TG_OP = 'INSERT' OR ts.skill_id=NEW.id OR ps.skill_id=NEW.id OR
+             COALESCE((NEW.configuration_json->>'mandatory')::boolean,false))
+    );
+  END IF;
+  RETURN NEW;
+END;
+$$;
+DROP TRIGGER skills_stale_approved_plans ON skills;
+CREATE TRIGGER skills_stale_approved_plans
+AFTER INSERT OR UPDATE ON skills FOR EACH ROW
+EXECUTE FUNCTION stale_plans_for_skill_change();

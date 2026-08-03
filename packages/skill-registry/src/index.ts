@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 
 export type SkillPhase = "planning" | "execution" | "repair";
-export type ResolutionSource = "global_mandatory" | "project_automatic" | "ticket_selected" | "phase_required";
+export type ResolutionSource = "global_mandatory" | "project_automatic" | "project_required" | "ticket_selected" | "phase_required";
 
 export type RegisteredSkill = {
   id: string;
@@ -28,6 +28,7 @@ export type SkillCandidate = {
   skillId: string;
   slug?: string;
   source: ResolutionSource;
+  allowTicketOverride?: boolean | null;
 };
 
 export type ResolvedSkill = RegisteredSkill & {
@@ -75,6 +76,9 @@ export function resolveSkills(candidates: SkillCandidate[], projectId: string, p
   const resolved = new Map<string, ResolvedSkill>();
   for (const candidate of candidates) {
     const label = candidate.slug ?? candidate.skill?.slug ?? candidate.skillId;
+    if (candidate.source === "ticket_selected" && candidate.allowTicketOverride === false) {
+      throw new SkillResolutionError(label, "incompatible");
+    }
     if (!candidate.skill) throw new SkillResolutionError(label, "missing");
     if (!candidate.skill.enabled) throw new SkillResolutionError(label, "disabled");
     if (!isEligible(candidate.skill, projectId, phase)) throw new SkillResolutionError(label, "incompatible");

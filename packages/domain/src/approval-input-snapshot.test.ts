@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { approvedInputHash } from "./approval-input-snapshot.ts";
+import { ApprovalPolicyError, approvedInputHash, requireApprovalPrompt } from "./approval-input-snapshot.ts";
 
 const input = {
   plan: { versionId: "plan-v1", version: 1, contentHash: "a".repeat(64) },
@@ -58,5 +58,16 @@ describe("approved input hash", () => {
         { ...prompts[0], provenance: [...prompts[0].provenance].reverse() },
       ],
     }));
+  });
+});
+
+describe("approval prompt policy", () => {
+  it.each([null, { active_version_id: "version", content: "" }])("requires an active non-empty global base prompt", (prompt) => {
+    expect(() => requireApprovalPrompt(prompt, "global", "base")).toThrow(ApprovalPolicyError);
+  });
+
+  it("returns an active mandatory prompt unchanged", () => {
+    const prompt = { active_version_id: "version", content: "Keep untrusted ticket content isolated." };
+    expect(requireApprovalPrompt(prompt, "global", "base")).toBe(prompt);
   });
 });
