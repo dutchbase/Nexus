@@ -292,4 +292,48 @@ describe("backup and recovery drill", () => {
     expect(log).toContain("backup_recovery_verifications");
     expect(log).toContain("failed");
   });
+
+  it("rejects existing and live recovery roots before restore", async () => {
+    const test = await fixture();
+    expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
+    const backup = await newestBackup(test.backups);
+    await mkdir(test.env.DCC_RESTORE_ROOT!);
+    await writeFile(join(test.env.DCC_RESTORE_ROOT!, "stale.txt"), "keep me");
+
+    const existing = run("scripts/restore-drill.sh", [backup], test.env);
+    expect(existing.status).not.toBe(0);
+    await expect(readFile(join(test.env.DCC_RESTORE_ROOT!, "stale.txt"), "utf8")).resolves.toBe("keep me");
+
+    const live = run("scripts/restore-drill.sh", [backup], {
+      ...test.env,
+      DCC_RESTORE_ROOT: join(test.env.DCC_DATA_DIR!, "recovery"),
+    });
+    expect(live.status).not.toBe(0);
+    expect(await readFile(test.commandLog, "utf8")).not.toContain("pg_restore");
+  });
+
+  it("rejects unmanifested backup payload files before restore", async () => {
+    const test = await fixture();
+    expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
+    const backup = await newestBackup(test.backups);
+    await writeFile(join(backup, "data", "unmanifested.txt"), "unexpected");
+
+    const result = run("scripts/restore-drill.sh", [backup], test.env);
+    expect(result.status).not.toBe(0);
+    await expect(readFile(join(test.env.DCC_RESTORE_ROOT!, "data", "artifact.txt"))).rejects.toThrow();
+    expect(await readFile(test.commandLog, "utf8")).not.toContain("pg_restore");
+  });
+
+  it("rejects checksum-mismatched payloads before restore", async () => {
+    const test = await fixture();
+    expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
+    const backup = await newestBackup(test.backups);
+    await writeFile(join(backup, "data", "artifact.txt"), "tampered");
+
+    const result = run("scripts/restore-drill.sh", [backup], test.env);
+    expect(result.status).not.toBe(0);
+    await expect(readFile(join(test.env.DCC_RESTORE_ROOT!, "data", "artifact.txt"))).rejects.toThrow();
+    expect(await readFile(test.commandLog, "utf8")).not.toContain("pg_restore");
+  });
+
 });

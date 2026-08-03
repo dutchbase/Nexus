@@ -125,9 +125,10 @@ integration("backup recovery drill integration", () => {
 
     const port = await freePort();
     const healthUrl = "http://127.0.0.1:" + port + "/api/health";
+    const recoveryRoot = join(root, "recovery");
     healthProcess = spawn("pnpm", ["exec", "tsx", "apps/web/src/server.ts"], {
       cwd: repoRoot,
-      env: { ...process.env, DATABASE_URL: restoreDatabaseUrl!, PORT: String(port), HOST: "127.0.0.1", DCC_DATA_DIR: join(root, "restore-data") },
+      env: { ...process.env, DATABASE_URL: restoreDatabaseUrl!, PORT: String(port), HOST: "127.0.0.1", DCC_DATA_DIR: join(recoveryRoot, "data") },
       stdio: "ignore",
     });
     await waitForHealth(healthUrl);
@@ -136,6 +137,7 @@ integration("backup recovery drill integration", () => {
       ...backupEnvironment,
       DCC_RESTORE_DATABASE_URL: restoreDatabaseUrl!,
       DCC_RESTORE_HEALTH_URL: healthUrl,
+      DCC_RESTORE_ROOT: recoveryRoot,
     });
 
     expect(restoreResult.status, restoreResult.stderr).toBe(0);

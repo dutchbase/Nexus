@@ -284,13 +284,16 @@ set -a; source .env; set +a
 scripts/restore-drill.sh /var/backups/dcc/dcc-YYYYMMDDTHHMMSSZ-PID
 ```
 
-The drill verifies the manifest before it calls pg_restore, restores only to the explicit DCC_RESTORE_DATABASE_URL, checks the explicit DCC_RESTORE_HEALTH_URL, and writes a passed or failed result to backup_recovery_verifications through the primary DATABASE_URL. It rejects the primary database and requires a durable database-scoped marker set with PostgreSQL configuration; session and role options do not qualify: `psql -d postgres --command "ALTER DATABASE dcc_restore SET dcc.restore_disposable = true"`. Never set that marker on production. The System health page reports configured retention and recorded verification, but cannot inspect an external host crontab.
+The drill requires a fresh absolute `DCC_RESTORE_ROOT` whose parent already exists and which is outside the repository, live data/config, and backup trees. It verifies the exact manifest file set, restores only to the explicit `DCC_RESTORE_DATABASE_URL`, and atomically publishes recovered files only after database and health verification. It writes a passed or failed result to `backup_recovery_verifications` through the primary `DATABASE_URL`. It rejects the primary database and requires a durable database-scoped marker set with PostgreSQL configuration; session and role options do not qualify: `psql -d postgres --command "ALTER DATABASE dcc_restore SET dcc.restore_disposable = true"`. Never set that marker on production. The System health page reports configured retention and recorded verification, but cannot inspect an external host crontab.
 
 Start a separate health process against the restore target before the drill (in another terminal):
 
 ~~~bash
-DATABASE_URL="$DCC_RESTORE_DATABASE_URL" DCC_DATA_DIR="$DCC_RESTORE_ROOT/data" DCC_DATA_ROOT="$DCC_RESTORE_ROOT" DCC_CONFIG_DIR="$DCC_RESTORE_ROOT/config" HOST=127.0.0.1 PORT=3100 pnpm exec tsx apps/web/src/server.ts
-export DCC_RESTORE_HEALTH_URL=http://127.0.0.1:3100/api/health;239c~~~
+DATABASE_URL="$DCC_RESTORE_DATABASE_URL" DCC_DATA_DIR="$DCC_RESTORE_ROOT/data" HOST=127.0.0.1 PORT=3100 pnpm exec tsx apps/web/src/server.ts
+~~~
+
+```bash
+export DCC_RESTORE_HEALTH_URL=http://127.0.0.1:3100/api/health
 ```
 
 ## Recovery integration test
