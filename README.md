@@ -138,8 +138,10 @@ commit real webhook URLs/tokens into a public fork).
 ## 6. Create the first admin user
 
 ```bash
-pnpm admin:create -- --username admin --password 'a-strong-password' --non-interactive
+printf %s 'a-strong-password' | pnpm admin:create -- --username admin --password-stdin --non-interactive
 ```
+
+Passwords are UTF-8 input of 1–4096 bytes; NUL, CR, and LF are rejected.
 
 ## 7. Run it
 

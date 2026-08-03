@@ -6,9 +6,16 @@ const binary = join(tmpdir(), `dcc-argon2-helper-${process.pid}`);
 const source = join(dirname(fileURLToPath(import.meta.url)), "..", "native", "argon2-helper.c");
 execFileSync("gcc", [source, "-O2", "-Wl,-l:libargon2.so.1", "-o", binary], { stdio: "ignore" });
 
-function execute(mode: "hash" | "verify", input: string) {
+const passwordError = "Password must be 1-4096 UTF-8 bytes without NUL, CR, or LF";
+
+function validatePassword(password: string) {
+  const bytes = Buffer.byteLength(password, "utf8");
+  if (!bytes || bytes > 4096 || /[\0\r\n]/.test(password)) throw new Error(passwordError);
+}
+
+function execute(mode: "hash" | "verify", input: string, encoded?: string) {
   return new Promise<string>((resolve, reject) => {
-    const child = spawn(binary, [mode], { stdio: ["pipe", "pipe", "ignore"] });
+    const child = spawn(binary, encoded ? [mode, encoded] : [mode], { stdio: ["pipe", "pipe", "ignore"] });
     let output = "";
     child.stdout.setEncoding("utf8");
     child.stdout.on("data", (chunk) => { output += chunk; });
@@ -19,12 +26,14 @@ function execute(mode: "hash" | "verify", input: string) {
 }
 
 export async function hashPassword(password: string) {
-  return (await execute("hash", `${password}\n`)).trim();
+  validatePassword(password);
+  return (await execute("hash", password)).trim();
 }
 
 export async function verifyPassword(encoded: string, password: string) {
   try {
-    await execute("verify", `${password}\n${encoded}\n`);
+    validatePassword(password);
+    await execute("verify", password, encoded);
     return true;
   } catch {
     return false;
