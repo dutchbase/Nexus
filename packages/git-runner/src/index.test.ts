@@ -52,7 +52,7 @@ async function cloneRepo(originDir: string, repoDir: string) {
 }
 
 describe("createConflictResolutionWorktree / mergeBaseIntoWorktree", () => {
-  it("checks out the head branch, detects a real conflict, lists conflicted files, then clears them on abort", async () => {
+  it("creates a detached head worktree, detects a real conflict, lists conflicted files, then clears them on abort", async () => {
     const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-conflict-"));
     try {
       const originDir = path.join(tmp, "origin");
@@ -74,11 +74,12 @@ describe("createConflictResolutionWorktree / mergeBaseIntoWorktree", () => {
         dataRoot,
         projectSlug: "acme corp",
         pullRequestNumber: 42,
+        conflictResolutionId: "11111111-1111-4111-8111-111111111111",
       });
 
       expect(branchName).toBe("feature");
       expect(headCommit).toMatch(/^[0-9a-f]{40}$/);
-      expect((await git(worktreePath, ["branch", "--show-current"])).stdout.trim()).toBe("feature");
+      expect((await git(worktreePath, ["branch", "--show-current"])).stdout.trim()).toBe("");
 
       const merge = await mergeBaseIntoWorktree(worktreePath, "main");
       expect(merge.conflicted).toBe(true);
@@ -93,7 +94,7 @@ describe("createConflictResolutionWorktree / mergeBaseIntoWorktree", () => {
     }
   });
 
-  it("reuses/clears the same worktree path when called twice for the same PR", async () => {
+  it("uses a separate detached worktree for each conflict resolution", async () => {
     const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-reuse-"));
     try {
       const originDir = path.join(tmp, "origin");
@@ -115,13 +116,15 @@ describe("createConflictResolutionWorktree / mergeBaseIntoWorktree", () => {
         dataRoot,
         projectSlug: "acme",
         pullRequestNumber: 7,
+        conflictResolutionId: "22222222-2222-4222-8222-222222222222",
       };
 
       const first = await createConflictResolutionWorktree(input);
-      const second = await createConflictResolutionWorktree(input);
+      const second = await createConflictResolutionWorktree({ ...input, conflictResolutionId: "44444444-4444-4444-8444-444444444444" });
 
-      expect(second.worktreePath).toBe(first.worktreePath);
-      expect((await git(second.worktreePath, ["branch", "--show-current"])).stdout.trim()).toBe("feature");
+      expect(second.worktreePath).not.toBe(first.worktreePath);
+      expect((await git(first.worktreePath, ["branch", "--show-current"])).stdout.trim()).toBe("");
+      expect((await git(second.worktreePath, ["branch", "--show-current"])).stdout.trim()).toBe("");
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
@@ -141,17 +144,20 @@ describe("createConflictResolutionWorktree / mergeBaseIntoWorktree", () => {
       await cloneRepo(originDir, repoDir);
 
       const dataRoot = path.join(tmp, "data-root");
-      const { worktreePath } = await createConflictResolutionWorktree({
+      const { worktreePath, headCommit } = await createConflictResolutionWorktree({
         repositoryPath: repoDir,
         headBranch: "feature",
         baseBranch: "main",
         dataRoot,
         projectSlug: "acme",
         pullRequestNumber: 99,
+        conflictResolutionId: "33333333-3333-4333-8333-333333333333",
       });
 
       const merge = await mergeBaseIntoWorktree(worktreePath, "main");
       expect(merge.conflicted).toBe(false);
+      expect(merge.headCommit).not.toBe(headCommit);
+      expect(merge.headCommit).toBe((await git(worktreePath, ["rev-parse", "HEAD"])).stdout.trim());
       expect(await conflictedFiles(worktreePath)).toEqual([]);
       expect((await git(worktreePath, ["log", "-1", "--pretty=%s"])).stdout.trim()).toBe("main advances");
     } finally {

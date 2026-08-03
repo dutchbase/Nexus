@@ -1,10 +1,13 @@
 import { statfsSync } from "node:fs";
-import { resolve } from "node:path";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
+import { artifactDataRoot } from "../../../../packages/database/src/artifacts.ts";
 import { escapeHtml, pool, shortRef } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { forbiddenClaudeAuthVariables } from "../../../../packages/claude-runner/src/auth-guard.ts";
 import { aiModels, reasoningLevels } from "@dcc/domain";
 
+const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
 // Coarse relative-duration label — same rule as queue.ts (minutes below an
 // hour, hours above); duplicated because these are the only two callers.
 function since(date: string | Date) {
@@ -60,7 +63,8 @@ function settingsBody(aiReviewSettings: any): string {
     <div style="padding-top:10px">${check("Always open pull requests as draft")}${check("Automatic merge permanently disabled")}</div>
   </section>`;
 
-  const retention = `<section class="card">${field("Worktree cleanup", "7 days after completion")}${field("Run event retention", "90 days")}${field("Audit retention", "forever")}${field("Daily backup window", "03:15 Europe/Amsterdam")}</section>`;
+  const backupRetention = /^[1-9][0-9]*$/.test(process.env.DCC_BACKUP_RETENTION_DAYS ?? "") ? process.env.DCC_BACKUP_RETENTION_DAYS + " days" : "not configured";
+  const retention = `<section class="card">${field("Worktree cleanup", "not configured")}${field("Run event retention", "not configured")}${field("Audit retention", "not configured")}${field("Backup retention", backupRetention)}${field("Backup schedule", "not configured · external cron")}</section>`;
 
   const aiReview = `<section class="card"><div class="card-body">
     <div class="card-head" style="margin:-18px -18px 14px;border-radius:6px 6px 0 0">AI PR Review defaults</div>
@@ -95,14 +99,26 @@ function statCard(label: string, value: string, detail: string, tone: string) {
   </div></div>`;
 }
 
+export function backupStatusCards(retentionDays: string | undefined, latest: { status: string; verified_at: string | Date } | null) {
+  const configured = /^[1-9][0-9]*$/.test(retentionDays ?? "");
+  const schedule = configured
+    ? statCard("Backup schedule", "not configured", "retention " + retentionDays + " days · external cron required", "muted")
+    : statCard("Backup schedule", "not configured", "Set DCC_BACKUP_RETENTION_DAYS and install the documented external cron", "muted");
+  const verification = latest
+    ? statCard("Recovery verification", latest.status, "verified " + since(latest.verified_at) + " ago", latest.status === "passed" ? "ok" : "danger")
+    : statCard("Recovery verification", "not configured", "Run the documented restore drill after a backup", "muted");
+  return schedule + verification;
+}
+
 async function systemBody(): Promise<string> {
-  const [heartbeat, depth, projects, failedJobs, failedDeliveries, failedRuns] = await Promise.all([
+  const [heartbeat, depth, projects, failedJobs, failedDeliveries, failedRuns, latestBackupVerification] = await Promise.all([
     pool.query("SELECT MAX(claimed_at) hb, (array_agg(claimed_by ORDER BY claimed_at DESC))[1] worker FROM jobs WHERE claimed_at IS NOT NULL"),
     pool.query("SELECT status, count(*)::int c FROM jobs GROUP BY status"),
     pool.query("SELECT slug, name, repository_path, health_status FROM projects ORDER BY name"),
     pool.query("SELECT id, type, error_json->>'message' message, updated_at FROM jobs WHERE status='failed' ORDER BY updated_at DESC LIMIT 10"),
     pool.query("SELECT id, event_type, error_message, response_status, updated_at FROM notification_deliveries WHERE status='failed' ORDER BY updated_at DESC LIMIT 10"),
     pool.query("SELECT id, run_type, error_code, error_message, finished_at FROM agent_runs WHERE status='failed' ORDER BY finished_at DESC LIMIT 10"),
+    pool.query("SELECT status, verified_at FROM backup_recovery_verifications ORDER BY verified_at DESC LIMIT 1"),
   ]);
 
   const hb = heartbeat.rows[0]?.hb;
@@ -121,7 +137,7 @@ async function systemBody(): Promise<string> {
 
   let diskCard: string;
   try {
-    const stats = statfsSync(resolve(process.env.DCC_DATA_DIR ?? "data"));
+    const stats = statfsSync(artifactDataRoot(REPO_ROOT));
     const total = Number(stats.blocks) * Number(stats.bsize);
     const free = Number(stats.bfree) * Number(stats.bsize);
     const usedPct = total > 0 ? Math.round(((total - free) / total) * 100) : 0;
@@ -159,11 +175,13 @@ async function systemBody(): Promise<string> {
 
   const preflightDisabled = `disabled title="No maintenance jobs registered"`;
 
+  const backupCards = backupStatusCards(process.env.DCC_BACKUP_RETENTION_DAYS, latestBackupVerification.rows[0] ?? null);
+
   return `<div style="display:flex;align-items:flex-end;justify-content:space-between;gap:18px;flex-wrap:wrap">
       <div><div class="eyebrow">Observability</div><h1>System health</h1></div>
       <button type="button" class="button" ${preflightDisabled}>Run all preflight checks</button>
     </div>
-    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(230px,1fr));margin-top:16px">${workerCard}${claudeCard}${queueCard}${diskCard}</div>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(230px,1fr));margin-top:16px">${workerCard}${claudeCard}${queueCard}${diskCard}${backupCards}</div>
     <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr));margin-top:22px;align-items:start">
       <section class="card" style="margin-top:0"><div class="card-head">Project health</div>${projectRows}</section>
       <section class="card" style="margin-top:0"><div class="card-head">Recent system errors</div>${errorList}</section>

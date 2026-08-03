@@ -99,8 +99,8 @@ GITHUB_API_BASE_URL=https://api.github.com
 
 # Optional overrides (sane defaults if unset)
 DB_POOL_SIZE=10
-DCC_DATA_DIR=./data              # web: file uploads land in $DCC_DATA_DIR/uploads
-DCC_DATA_ROOT=.                  # worker: ticket plans/logs/skill bundles under $DCC_DATA_ROOT/data
+DCC_DATA_DIR=./data              # managed artifact root for web, worker, and reconciliation
+DCC_DATA_ROOT=.                  # compatibility fallback: artifacts live in $DCC_DATA_ROOT/data when DCC_DATA_DIR is unset
 DCC_SKILLS_ROOT=.                # worker: where skill definitions are read from
 PROJECTS_CONFIG_PATH=./config/projects.yaml
 ```
@@ -250,11 +250,55 @@ latest release. Leaving the tag empty uses the latest release again.
 
 ## Data layout
 
-Everything under `$DCC_DATA_ROOT/data/` is worker-managed state:
-uploaded attachments, per-ticket plan snapshots, execution logs, and
-materialized skill bundles. Back this directory up along with the
-database — losing it doesn't corrupt the DB, but you lose execution
-history and in-flight plan artifacts.
+Everything under `$DCC_DATA_DIR` (or `$DCC_DATA_ROOT/data` when `DCC_DATA_DIR` is unset) is managed artifact state: uploaded attachments, execution logs, and worktrees. Plans are immutable database rows; skill bundles are temporary and reconstructed for each run. Back this directory up with the database — losing it does not corrupt the DB, but it loses execution history and in-flight artifacts.
+
+## Backups and recovery drills
+
+Backups are external scheduled work. Configure the process environment with:
+
+```bash
+DCC_BACKUP_DIRECTORY=/var/backups/dcc
+DCC_BACKUP_RETENTION_DAYS=30
+DCC_DATA_DIR=/opt/dev-control/data
+DCC_CONFIG_DIR=/opt/dev-control/config
+
+# Required only for restore drills — this must be a separate, disposable database.
+DCC_RESTORE_DATABASE_URL=postgresql://dcc:change-me@127.0.0.1:5432/dcc_restore
+DCC_RESTORE_ROOT=/var/lib/dcc/recovery-drill
+DCC_RESTORE_HEALTH_URL=http://127.0.0.1:3100/api/health
+```
+
+Install an external cron entry for **03:15 Europe/Amsterdam**. Cron does not inherit your service environment, so source the same environment file explicitly:
+
+```cron
+CRON_TZ=Europe/Amsterdam
+15 3 * * * cd /opt/dev-control && set -a && . ./.env && set +a && /usr/bin/env bash scripts/backup.sh >> /var/log/dcc-backup.log 2>&1
+```
+
+Each backup is atomically published as one directory containing database.dump, managed data/ (and legacy-data/ when DCC_DATA_DIR differs from DCC_DATA_ROOT/data), managed config/, and manifest-v1.sha256. .env files and secrets/, .key, .pem, and .secret paths are excluded; backup directories are also excluded from the managed-data copy. Successful runs apply DCC_BACKUP_RETENTION_DAYS.
+
+Run the recovery drill after a successful backup:
+
+```bash
+set -a; source .env; set +a
+scripts/restore-drill.sh /var/backups/dcc/dcc-YYYYMMDDTHHMMSSZ-PID
+```
+
+The drill requires a fresh absolute `DCC_RESTORE_ROOT` whose parent already exists and which is outside the repository, live data/config, and backup trees. It verifies the exact manifest file set, restores only to the explicit `DCC_RESTORE_DATABASE_URL`, and atomically publishes recovered files only after database and health verification. It writes a passed or failed result to `backup_recovery_verifications` through the primary `DATABASE_URL`. It rejects the primary database and requires a durable database-scoped marker set with PostgreSQL configuration; session and role options do not qualify: `psql -d postgres --command "ALTER DATABASE dcc_restore SET dcc.restore_disposable = true"`. Never set that marker on production. The System health page reports configured retention and recorded verification, but cannot inspect an external host crontab.
+
+Start a separate health process against the restore target before the drill (in another terminal):
+
+~~~bash
+DATABASE_URL="$DCC_RESTORE_DATABASE_URL" DCC_DATA_DIR="$DCC_RESTORE_ROOT/data" HOST=127.0.0.1 PORT=3100 pnpm exec tsx apps/web/src/server.ts
+~~~
+
+```bash
+export DCC_RESTORE_HEALTH_URL=http://127.0.0.1:3100/api/health
+```
+
+## Recovery integration test
+
+`scripts/backup.integration.test.ts` is intentionally skipped unless **both** `DCC_TEST_DATABASE_URL` and `DCC_TEST_RESTORE_DATABASE_URL` are set. A CI job that runs it must provide distinct, disposable databases; the primary and restore databases must already be marked `dcc.restore_disposable=true`; the test refuses unmarked targets before any reset. These variables never default to `DATABASE_URL` or a production target.
 
 ## Troubleshooting
 
