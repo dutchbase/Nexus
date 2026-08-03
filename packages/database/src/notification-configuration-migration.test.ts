@@ -22,7 +22,7 @@ migrationTest("migration 020 removes unsafe legacy notification configuration id
         },
       ],
     );
-    const migration = await readFile(new URL("../migrations/020_notification_configuration_secrecy.sql", import.meta.url), "utf8");
+    const migration = await readFile(new URL("../migrations/034_notification_configuration_secrecy.sql", import.meta.url), "utf8");
     await client.query(migration);
     const once = (await client.query("SELECT name,configuration_encrypted_json FROM notification_providers ORDER BY name")).rows;
     expect(once).toEqual([
