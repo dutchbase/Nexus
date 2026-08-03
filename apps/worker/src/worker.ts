@@ -11,7 +11,8 @@ import { artifactDataRoot, finalizeArtifact, inTransaction, legacyArtifactDataRo
 import {
   approveAndMergePullRequest, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
   claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, parsePrReviewVerdict,
-  claimNotificationDelivery, completeNotificationDelivery, failNotificationDelivery,
+  claimNotificationDelivery, completeNotificationDelivery, failNotificationDelivery, renewJobLease,
+  renewNotificationDeliveryLease,
   renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
@@ -36,6 +37,7 @@ import {
 } from "./worker-boundary.ts";
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
+import { recoverExpiredWorkflowState, refuseClaudeJobs, withLeaseHeartbeat } from "./workflow-state.ts";
 
 if (process.env.DCC_PROCESS_ROLE !== "worker") throw new Error("worker requires DCC_PROCESS_ROLE=worker");
 
@@ -60,6 +62,7 @@ let lastPullRequestSync = 0;
 let lastNotificationDelivery = 0;
 let lastGithubImport = 0;
 let lastSessionCleanup = 0;
+let lastWorkflowRecovery = 0;
 
 process.on("SIGTERM", () => { stopping = true; activeExecutionCancellation?.abort(); });
 process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort(); });
@@ -115,10 +118,11 @@ async function reconcileArtifactRegistry() {
 
 async function refuseQueuedClaudeJobs(code: string, message: string) {
   try {
-    await pool.query(
-      `UPDATE jobs SET status=$1,completed_at=now(),error_json=jsonb_build_object('message',$2::text),updated_at=now()
-       WHERE status='queued' AND type=ANY($3::text[])`,
-      [code, message, [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes]],
+    await refuseClaudeJobs(
+      inTransaction,
+      [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes],
+      code,
+      message,
     );
   } catch {
     // Startup refusal must remain visible even when the database is unavailable.
@@ -1453,17 +1457,30 @@ async function runPrConflictResolution(job: any) {
 async function deliverDueNotification() {
   const delivery = await claimNotificationDelivery(workerId);
   if (!delivery) return;
-  try {
-    const provider = createNotificationProvider(delivery.provider_type, delivery.configuration_encrypted_json ?? {});
-    const result = await provider.send(delivery.payload_json);
-    if (result.ok) await completeNotificationDelivery(delivery.id, workerId, result.responseStatus ?? undefined);
-    else await failNotificationDelivery(delivery.id, workerId, redactNotificationError(result.errorMessage), result.responseStatus ?? undefined);
-  } catch (error) {
-    await failNotificationDelivery(delivery.id, workerId, redactNotificationError(error instanceof Error ? error.message : "Notification delivery failed"));
-  }
+  await withLeaseHeartbeat(
+    () => renewNotificationDeliveryLease(delivery.id, workerId),
+    async (ownsLease) => {
+      try {
+        const provider = createNotificationProvider(delivery.provider_type, delivery.configuration_encrypted_json ?? {});
+        const result = await provider.send(delivery.payload_json);
+        if (!(await ownsLease())) return;
+        if (result.ok) await completeNotificationDelivery(delivery.id, workerId, result.responseStatus ?? undefined);
+        else await failNotificationDelivery(delivery.id, workerId, redactNotificationError(result.errorMessage), result.responseStatus ?? undefined);
+      } catch (error) {
+        if (await ownsLease()) {
+          await failNotificationDelivery(delivery.id, workerId, redactNotificationError(error instanceof Error ? error.message : "Notification delivery failed"));
+        }
+      }
+    },
+  );
 }
 
 while (!stopping) {
+  if (Date.now() - lastWorkflowRecovery >= 20_000) {
+    lastWorkflowRecovery = Date.now();
+    try { await recoverExpiredWorkflowState(inTransaction); }
+    catch (error) { console.error(`Workflow recovery failed: ${error instanceof Error ? error.message : "unknown error"}`); }
+  }
   if (Date.now() - lastSessionCleanup >= 60_000) {
     lastSessionCleanup = Date.now();
     await runSessionCleanup(pool);
@@ -1504,8 +1521,9 @@ while (!stopping) {
     await new Promise((resolve) => setTimeout(resolve, 500));
     continue;
   }
-  try {
-    if (job.type === "project.validate") {
+  await withLeaseHeartbeat(() => renewJobLease(job.id, workerId), async (ownsLease) => {
+    try {
+      if (job.type === "project.validate") {
       const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [job.payload_json.project_id])).rows[0];
       if (!project) throw new Error("project not found");
       const result = await validateProject({
@@ -1516,35 +1534,37 @@ while (!stopping) {
         [project.id, result.valid ? "healthy" : result.changedFiles.length ? "repository_dirty" : "invalid"],
       );
       if (!result.valid) throw new Error(result.errors.join("; "));
-    } else if (providerJobTypes.includes(job.type as typeof providerJobTypes[number])) {
-      await runProviderJob(job as Parameters<typeof runProviderJob>[0], pool);
-    } else if (publicationJobTypes.includes(job.type)) {
-      await retryPublication(job);
-    } else if (aiReviewJobTypes.includes(job.type)) {
-      await runPrAiReview(job);
-    } else if (followUpDescriptionJobTypes.includes(job.type)) {
-      await runFollowUpDescription(job);
-    } else if (conflictResolutionJobTypes.includes(job.type)) {
-      await runPrConflictResolution(job);
-    } else if (planningJobTypes.includes(job.type)) {
-      await runPlanning(job);
-    } else {
-      await runExecution(job);
+      } else if (providerJobTypes.includes(job.type as typeof providerJobTypes[number])) {
+        await runProviderJob(job as Parameters<typeof runProviderJob>[0], pool);
+      } else if (publicationJobTypes.includes(job.type)) {
+        await retryPublication(job);
+      } else if (aiReviewJobTypes.includes(job.type)) {
+        await runPrAiReview(job);
+      } else if (followUpDescriptionJobTypes.includes(job.type)) {
+        await runFollowUpDescription(job);
+      } else if (conflictResolutionJobTypes.includes(job.type)) {
+        await runPrConflictResolution(job);
+      } else if (planningJobTypes.includes(job.type)) {
+        await runPlanning(job);
+      } else {
+        await runExecution(job);
+      }
+      if (await ownsLease()) await completeJob(job.id, workerId);
+    } catch (error) {
+      if (error instanceof ClaudeAuthError) console.error(`${error.code}: ${error.message}`);
+      else console.error(error instanceof Error ? error.message : "job failed");
+      if (!(await ownsLease())) return;
+      if (error instanceof ClaudeExecutionError && error.code === "execution_cancelled") {
+        await pool.query(
+          `UPDATE jobs SET status='cancelled',completed_at=now(),claimed_by=NULL,lease_expires_at=NULL,updated_at=now()
+           WHERE id=$1 AND status='running' AND claimed_by=$2 AND lease_expires_at > now()`,
+          [job.id, workerId],
+        );
+      } else {
+        await failJob(job.id, workerId, error);
+      }
     }
-    await completeJob(job.id, workerId);
-  } catch (error) {
-    if (error instanceof ClaudeAuthError) console.error(`${error.code}: ${error.message}`);
-    else console.error(error instanceof Error ? error.message : "job failed");
-    if (error instanceof ClaudeExecutionError && error.code === "execution_cancelled") {
-      await pool.query(
-        `UPDATE jobs SET status='cancelled',completed_at=now(),updated_at=now()
-         WHERE id=$1 AND claimed_by=$2`,
-        [job.id, workerId],
-      );
-    } else {
-      await failJob(job.id, workerId, error);
-    }
-  }
+  });
 }
 
 await pool.end();

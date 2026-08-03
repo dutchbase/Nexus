@@ -65,6 +65,16 @@ function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+async function terminalRerunSource(client: any, metadata: any) {
+  const id = metadata?.job_id;
+  if (typeof id !== "string") return undefined;
+  const source = (await client.query("SELECT status FROM jobs WHERE id=$1 FOR UPDATE", [id])).rows[0];
+  if (!source || !["completed", "failed", "cancelled", "blocked_auth", "blocked_auth_configuration"].includes(source.status)) {
+    throw Object.assign(new Error("source job is still active"), { status: 409 });
+  }
+  return id;
+}
+
 function ticketAiConfiguration(ticket: any) {
   return {
     default: { model: ticket.default_model, reasoning_level: ticket.default_reasoning_level },
@@ -960,6 +970,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
           [source.execution_attempt_id],
         )).rowCount;
         if (active) throw Object.assign(new Error("a repair is already active"), { status: 409 });
+        const rerunOf = await terminalRerunSource(client, source.metadata_json);
         const job = await enqueueJob({
           type: "execution.repair",
           payload: {
@@ -971,6 +982,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
           },
           idempotencyKey: `execution.repair:${source.execution_attempt_id}:${randomUUID()}`,
           maxAttempts: 1,
+          rerunOf,
         }, client);
         await client.query("UPDATE tickets SET status='Execution Queued',updated_at=now() WHERE id=$1", [source.ticket_id]);
         await client.query(
@@ -994,6 +1006,21 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         reasoning_level: typeof body.reasoning_level === "string" ? body.reasoning_level : settings.default_reasoning_level,
       });
       const reviewRow = await inTransaction(async (client) => {
+        await client.query("SELECT id FROM pull_requests WHERE id=$1 FOR UPDATE", [pullRequest.id]);
+        const previous = (await client.query(
+          `SELECT r.id,j.id job_id,j.status job_status
+           FROM pr_ai_reviews r
+           LEFT JOIN LATERAL (
+             SELECT id,status FROM jobs
+             WHERE type='pr.ai_review' AND payload_json->>'pr_ai_review_id'=r.id::text
+             ORDER BY created_at DESC LIMIT 1
+           ) j ON true
+           WHERE r.pull_request_id=$1
+           ORDER BY r.created_at DESC LIMIT 1
+           FOR UPDATE OF r`,
+          [pullRequest.id],
+        )).rows[0];
+        if (previous && ["queued", "running"].includes(previous.job_status)) return previous;
         const row = (
           await client.query(
             `INSERT INTO pr_ai_reviews (pull_request_id, mode, status, model, reasoning_level, created_by)
@@ -1012,6 +1039,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
             target_branch: targetBranch,
           },
           idempotencyKey: `pr-ai-review:${row.id}`,
+          maxAttempts: 1,
+          rerunOf: previous?.job_id,
         }, client);
         return row;
       });
@@ -1023,6 +1052,21 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         reasoning_level: typeof body.reasoning_level === "string" ? body.reasoning_level : settings.default_reasoning_level,
       });
       const resolutionRow = await inTransaction(async (client) => {
+        await client.query("SELECT id FROM pull_requests WHERE id=$1 FOR UPDATE", [pullRequest.id]);
+        const previous = (await client.query(
+          `SELECT r.id,j.id job_id,j.status job_status
+           FROM pr_conflict_resolutions r
+           LEFT JOIN LATERAL (
+             SELECT id,status FROM jobs
+             WHERE type='pr.conflict_resolution' AND payload_json->>'pr_conflict_resolution_id'=r.id::text
+             ORDER BY created_at DESC LIMIT 1
+           ) j ON true
+           WHERE r.pull_request_id=$1
+           ORDER BY r.created_at DESC LIMIT 1
+           FOR UPDATE OF r`,
+          [pullRequest.id],
+        )).rows[0];
+        if (previous && ["queued", "running"].includes(previous.job_status)) return previous;
         const row = (
           await client.query(
             `INSERT INTO pr_conflict_resolutions (pull_request_id, status, model, reasoning_level, created_by)
@@ -1039,6 +1083,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
             reasoning_level: selection.reasoning_level,
           },
           idempotencyKey: `pr-conflict-resolution:${row.id}`,
+          maxAttempts: 1,
+          rerunOf: previous?.job_id,
         }, client);
         return row;
       });
@@ -1956,6 +2002,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         [source.execution_attempt_id],
       )).rowCount;
       if (active) throw Object.assign(new Error("a repair is already active"), { status: 409 });
+      const rerunOf = await terminalRerunSource(client, source.metadata_json);
       const job = await enqueueJob({
         type: "execution.repair",
         payload: {
@@ -1969,6 +2016,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         },
         idempotencyKey: `execution.repair:${source.execution_attempt_id}:${randomUUID()}`,
         maxAttempts: 1,
+        rerunOf,
       }, client);
       await client.query(
         "UPDATE tickets SET status='Execution Queued',updated_at=now() WHERE id=$1",
@@ -1988,7 +2036,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (runRetryMatch && request.method === "POST") {
     const result = await inTransaction(async (client) => {
       const source = (await client.query(
-        `SELECT ar.id run_id,ea.*,t.status ticket_status
+        `SELECT ar.id run_id,ar.metadata_json,ea.*,t.status ticket_status
          FROM agent_runs ar
          JOIN execution_attempts ea ON ea.agent_run_id=ar.id
          JOIN tickets t ON t.id=ea.ticket_id
@@ -1999,11 +2047,13 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       if (source.ticket_status !== "PR Creation Failed" || !source.result_commit) {
         throw Object.assign(new Error("run has no failed publication to retry"), { status: 409 });
       }
+      const rerunOf = await terminalRerunSource(client, source.metadata_json);
       const job = await enqueueJob({
         type: "pull-request.retry",
         payload: { ticket_id: source.ticket_id, execution_attempt_id: source.id },
         idempotencyKey: `pull-request.retry:${source.id}:${randomUUID()}`,
         maxAttempts: 1,
+        rerunOf,
       }, client);
       await client.query(
         "UPDATE tickets SET status='Validating',updated_at=now() WHERE id=$1",
