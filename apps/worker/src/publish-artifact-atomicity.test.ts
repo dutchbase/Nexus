@@ -1,64 +1,96 @@
-import { readFile } from "node:fs/promises";
-import { beforeAll, describe, expect, it } from "vitest";
+import { expect, test, vi } from "vitest";
 
-let publish = "";
-let runExecution = "";
+import {
+  failExecutionPublication,
+  PublicationError,
+  publishExternalResult,
+} from "./execution-publication.ts";
 
-beforeAll(async () => {
-  const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
-  runExecution = worker.slice(worker.indexOf("async function runExecution"), worker.indexOf("async function publishExecutionAttempt"));
-  publish = worker.slice(worker.indexOf("async function publishExecutionAttempt"), worker.indexOf("async function retryPublication"));
+function publicationClient(initialStatus: "pending" | "publishing" | "published" | "failed") {
+  let status = initialStatus;
+  const history: string[] = [];
+  const audits: string[] = [];
+  const query = vi.fn(async (sql: string) => {
+    if (sql.includes("FROM execution_publications ep")) return { rows: [{
+      id: "publication-1", status, ticket_id: "ticket-1", agent_run_id: "run-1",
+      plan_version_id: "plan-1",
+    }], rowCount: 1 };
+    if (sql.includes("UPDATE execution_publications")) {
+      if (!["pending", "publishing"].includes(status)) return { rows: [], rowCount: 0 };
+      status = "failed";
+      return { rows: [{ id: "publication-1" }], rowCount: 1 };
+    }
+    if (sql.includes("SELECT status FROM tickets")) return { rows: [{ status: "Validating" }], rowCount: 1 };
+    if (sql.includes("INSERT INTO ticket_status_history")) history.push("PR Creation Failed");
+    if (sql.includes("'execution.publication.failed'")) audits.push("failed");
+    return { rows: [], rowCount: 1 };
+  });
+  return { client: { query }, get status() { return status; }, set status(value) { status = value; }, history, audits };
+}
+
+const failure = {
+  attemptId: "attempt-1", jobId: "job-1", errorMessage: "provider unavailable",
+  reason: "Worker-controlled push or pull-request creation failed: provider unavailable",
+};
+
+test("provider failure records one retryable publication transition", async () => {
+  const state = publicationClient("publishing");
+
+  await expect(publishExternalResult({
+    push: async () => undefined,
+    find: async () => { throw new Error("provider unavailable"); },
+    create: async () => ({ number: 7 }),
+    complete: async () => undefined,
+    fail: (error) => failExecutionPublication(state.client, { ...failure, errorMessage: error.message }),
+  })).rejects.toBeInstanceOf(PublicationError);
+
+  expect(state.status).toBe("failed");
+  expect(state.history).toEqual(["PR Creation Failed"]);
+  expect(state.audits).toEqual(["failed"]);
 });
 
-describe("publishExecutionAttempt persistence", () => {
-  it("records the validated commit and pending publication intent before provider calls", () => {
-    const providerCall = publish.indexOf("await pushExecutionBranch");
-    const intent = publish.indexOf("INSERT INTO execution_publications");
-    const beforeProvider = publish.slice(0, providerCall);
+test("duplicate reconciliation completes the discovered pull request without creating another", async () => {
+  const create = vi.fn(async () => ({ number: 8 }));
+  let completed = 0;
 
-    expect(intent).toBeGreaterThan(0);
-    expect(intent).toBeLessThan(providerCall);
-    expect(beforeProvider).toContain("UPDATE execution_attempts SET result_commit=$2,validation_status='validated'");
-    expect(beforeProvider).toContain("'execution.commit'");
-    expect(beforeProvider).toContain("'pending'");
+  await publishExternalResult({
+    push: async () => undefined,
+    find: async () => ({ number: 7 }),
+    create,
+    complete: async (pullRequest) => { completed = pullRequest.number; },
+    fail: async () => "failed",
   });
 
-  it("marks the intent publishing and audits the request before provider calls", () => {
-    const providerCall = publish.indexOf("await pushExecutionBranch");
-    const beforeProvider = publish.slice(0, providerCall);
+  expect(create).not.toHaveBeenCalled();
+  expect(completed).toBe(7);
+});
 
-    expect(beforeProvider).toContain("SET status='publishing',attempt_count=attempt_count + 1,last_job_id=$2");
-    expect(beforeProvider).toContain("'execution.publication.requested'");
-  });
+test("ambiguous completion commit preserves published state without failure history or audit", async () => {
+  const state = publicationClient("publishing");
 
-  it("reconciles duplicates and completes publication in one final transaction", () => {
-    const reconcile = publish.indexOf("await findOpenPullRequestForHead");
-    const create = publish.indexOf("await createPullRequest");
-    const completion = publish.indexOf("await inTransaction(async (client) => {", create);
-    const transaction = publish.slice(completion, publish.indexOf("  } catch (error)"));
+  await expect(publishExternalResult({
+    push: async () => undefined,
+    find: async () => ({ number: 7 }),
+    create: async () => ({ number: 8 }),
+    complete: async () => {
+      state.status = "published";
+      throw new Error("connection closed after commit");
+    },
+    fail: (error) => failExecutionPublication(state.client, { ...failure, errorMessage: error.message }),
+  })).resolves.toBeUndefined();
 
-    expect(reconcile).toBeGreaterThan(0);
-    expect(reconcile).toBeLessThan(create);
-    expect(completion).toBeGreaterThan(create);
-    expect(transaction).toContain("INSERT INTO pull_requests");
-    expect(transaction).toContain("INSERT INTO artifacts");
-    expect(transaction).toContain("UPDATE tickets SET status='PR Ready for Review'");
-    expect(transaction).toContain("UPDATE execution_attempts SET validation_status='completed'");
-    expect(transaction).toContain("UPDATE execution_publications");
-    expect(transaction).toContain("status='published'");
-    expect(transaction).toContain("'execution.publication.published'");
-    expect(transaction).toContain("false, providerPr.head.ref, providerPr.base.ref, commit,");
-  });
+  expect(state.status).toBe("published");
+  expect(state.history).toEqual([]);
+  expect(state.audits).toEqual([]);
+});
 
-  it("preserves a failed publication and bypasses the generic execution failure rewrite", () => {
-    const failure = publish.slice(publish.indexOf("  } catch (error)"));
-    const executionCatch = runExecution.slice(runExecution.lastIndexOf("  } catch (error)"));
+test("repeated failure reconciliation does not duplicate history or audit", async () => {
+  const state = publicationClient("publishing");
 
-    expect(failure).toContain("UPDATE execution_publications");
-    expect(failure).toContain("status='failed'");
-    expect(failure).toContain('"PR Creation Failed"');
-    expect(failure).toContain("'execution.publication.failed'");
-    expect(failure).toContain("throw new PublicationError");
-    expect(executionCatch).toContain("if (error instanceof PublicationError) throw error;");
-  });
+  await expect(failExecutionPublication(state.client, failure)).resolves.toBe("failed");
+  await expect(failExecutionPublication(state.client, failure)).resolves.toBe("failed");
+
+  expect(state.status).toBe("failed");
+  expect(state.history).toEqual(["PR Creation Failed"]);
+  expect(state.audits).toEqual(["failed"]);
 });

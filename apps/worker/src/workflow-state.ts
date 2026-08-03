@@ -1,3 +1,5 @@
+import { failExecutionPublication } from "./execution-publication.ts";
+
 type QueryResult = { rows: any[]; rowCount?: number | null };
 type Client = { query: (sql: string, values?: unknown[]) => Promise<QueryResult> };
 type Transaction = <T>(callback: (client: Client) => Promise<T>) => Promise<T>;
@@ -30,6 +32,18 @@ async function transitionTicket(
 }
 
 async function reconcileJob(client: Client, job: Job, errorCode: string, message: string) {
+  if (errorCode === "worker_lease_expired" && (job.type === "execution.run" || job.type === "pull-request.retry")) {
+    const attemptId = job.payload_json.execution_attempt_id;
+    if (typeof attemptId === "string") {
+      const publication = await failExecutionPublication(client, {
+        attemptId,
+        jobId: job.id,
+        errorMessage: message,
+        reason: "Worker lease expired during pull-request publication",
+      });
+      if (publication !== "missing") return;
+    }
+  }
   const run = (await client.query(
     `UPDATE agent_runs
      SET status='failed',finished_at=now(),exit_code=COALESCE(exit_code,1),error_code=$2,error_message=$3

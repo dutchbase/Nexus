@@ -97,6 +97,41 @@ test("fails an exhausted recovered job and reconciles its run, attempt, ticket, 
   ]);
 });
 
+test.each(["execution.run", "pull-request.retry"])("recovers a stranded %s publication as retryable once", async (type) => {
+  let publicationStatus = "publishing";
+  let ticketStatus = "Validating";
+  const history: string[] = [];
+  const publicationAudits: string[] = [];
+  const query = vi.fn(async (sql: string): Promise<Result> => {
+    if (sql.includes("UPDATE jobs j") && sql.includes("lease_expires_at <= now()")) return { rows: [{
+      id: "job-1", type, status: "failed",
+      payload_json: { ticket_id: "ticket-1", execution_attempt_id: "attempt-1" },
+    }], rowCount: 1 };
+    if (sql.includes("UPDATE notification_deliveries nd")) return { rows: [], rowCount: 0 };
+    if (sql.includes("FROM execution_publications ep")) return { rows: [{
+      id: "publication-1", status: publicationStatus, ticket_id: "ticket-1",
+      agent_run_id: "run-1", plan_version_id: "plan-1",
+    }], rowCount: 1 };
+    if (sql.includes("UPDATE execution_publications")) {
+      publicationStatus = "failed";
+      return { rows: [{ id: "publication-1" }], rowCount: 1 };
+    }
+    if (sql.includes("SELECT status FROM tickets")) return { rows: [{ status: ticketStatus }], rowCount: 1 };
+    if (sql.includes("UPDATE tickets SET status='PR Creation Failed'")) ticketStatus = "PR Creation Failed";
+    if (sql.includes("INSERT INTO ticket_status_history")) history.push("PR Creation Failed");
+    if (sql.includes("'execution.publication.failed'")) publicationAudits.push("failed");
+    return { rows: [], rowCount: 1 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+
+  await recoverExpiredWorkflowState(inTransaction);
+
+  expect(publicationStatus).toBe("failed");
+  expect(ticketStatus).toBe("PR Creation Failed");
+  expect(history).toEqual(["PR Creation Failed"]);
+  expect(publicationAudits).toEqual(["failed"]);
+});
+
 test("authentication refusal applies the terminal state matrix without duplicate ticket history", async () => {
   const jobs = [
     { id: "planning", type: "planning.generate", payload_json: { ticket_id: "ticket-planning" } },
