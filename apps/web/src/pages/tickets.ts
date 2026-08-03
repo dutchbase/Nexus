@@ -7,6 +7,19 @@ export function selectedStatusesFrom(url: URL): string[] {
   return url.searchParams.getAll("status").filter((status) => validStatuses.has(status));
 }
 
+export function skillPresentation(skill: any) {
+  const required = skill.attachment_type === "required" || Boolean(skill.required);
+  const automatic = !required && skill.attachment_type === "automatic";
+  const projectAttached = required || automatic;
+  const overridable = automatic && skill.allow_ticket_override === true;
+  const selected = required || (automatic && !skill.excluded) || Boolean(skill.manual_selected);
+  return {
+    automatic, projectAttached, required, overridable, selected,
+    removable: !projectAttached || overridable,
+    badge: required ? "required" : automatic && !overridable ? "auto" : null,
+  };
+}
+
 export function ticketCreateModal(projects: Array<{ id: string; name: string }>) {
   const priorities = ["critical", "high", "medium", "low"];
   return `<button class="button primary" type="button" data-add-ticket-button>Add ticket</button><dialog data-add-ticket-modal aria-label="Add ticket"><div class="card-head">Add ticket</div><form data-add-ticket-form><div class="card-body"><label class="field"><span>Project</span><select name="project_id" required><option value="">Choose a project</option>${projects.map((project) => `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`).join("")}</select></label><label class="field"><span>Title</span><input name="title" required></label><label class="field"><span>Description</span><textarea name="description" rows="4" required></textarea></label><div class="grid two"><label class="field"><span>Category</span><input name="category"></label><label class="field"><span>Priority</span><select name="priority"><option value="">Choose priority</option>${priorities.map((priority) => `<option value="${priority}">${priority[0].toUpperCase()}${priority.slice(1)}</option>`).join("")}</select></label></div><label class="field"><span>Environment</span><input name="environment"></label><label class="field"><span>Expected behavior</span><textarea name="expected_behavior" rows="3"></textarea></label><label class="field"><span>Actual behavior</span><textarea name="actual_behavior" rows="3"></textarea></label><label class="field"><span>Reproduction steps</span><textarea name="reproduction_steps" rows="3"></textarea></label><p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Create ticket</button></div></form></dialog>`;
@@ -300,9 +313,16 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       pool.query("SELECT n.*,u.username FROM ticket_notes n LEFT JOIN users u ON u.id=n.author_id WHERE ticket_id=$1 ORDER BY n.created_at DESC", [ticket.id]),
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
       pool.query(
-        `SELECT s.*,ps.id IS NOT NULL automatic,ts.id IS NOT NULL selected
+        `SELECT s.*,ps.attachment_type,ps.required,ps.allow_ticket_override,
+                ts.id IS NOT NULL AND ts.source<>'excluded' manual_selected,ts.source='excluded' excluded
          FROM skills s
-         LEFT JOIN project_skills ps ON ps.skill_id=s.id AND ps.project_id=$1 AND ps.attachment_type='automatic'
+         LEFT JOIN LATERAL (
+           SELECT CASE WHEN bool_or(required OR attachment_type='required') THEN 'required' ELSE 'automatic' END attachment_type,
+                  bool_or(required OR attachment_type='required') required,bool_or(allow_ticket_override) allow_ticket_override
+           FROM project_skills WHERE skill_id=s.id AND project_id=$1
+             AND (attachment_type IN ('automatic','required') OR required)
+           HAVING count(*)>0
+         ) ps ON true
          LEFT JOIN ticket_skills ts ON ts.skill_id=s.id AND ts.ticket_id=$2
          ORDER BY s.category,s.name`,
         [ticket.project_id, ticket.id],
@@ -325,11 +345,11 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     ]);
     const notes = notesResult.rows;
     const history = historyResult.rows;
-    const skillRows = skillsResult.rows;
-    const selectedSkills = skillRows.filter((skill) => skill.automatic || skill.selected);
+    const skillRows = skillsResult.rows.map((skill) => ({ ...skill, ...skillPresentation(skill) }));
+    const selectedSkills = skillRows.filter((skill) => skill.selected);
     const chips = selectedSkills.map((skill) =>
-      `<span class="skill-chip" data-skill-chip="${skill.id}" data-slug="${escapeHtml(skill.slug)}" title="${skill.automatic ? "Automatically added by project" : "Selected on this ticket"} · ${escapeHtml(skill.filesystem_path)}">${escapeHtml(skill.name)}
-       ${skill.automatic ? '<small>auto</small>' : `<button type="button" aria-label="Remove ${escapeHtml(skill.name)}" data-remove-skill="${skill.id}">×</button>`}</span>`,
+      `<span class="skill-chip" data-skill-chip="${skill.id}" data-slug="${escapeHtml(skill.slug)}" title="${skill.required ? "Required by project" : skill.automatic ? "Automatically added by project" : "Selected on this ticket"} · ${escapeHtml(skill.filesystem_path)}">${escapeHtml(skill.name)}
+       ${skill.removable ? `<button type="button" aria-label="Remove ${escapeHtml(skill.name)}" data-remove-skill="${skill.id}">×</button>` : `<small>${skill.badge}</small>`}</span>`,
     ).join("");
     const referenceLines = selectedSkills.map((skill) => `- ${skill.slug}: ${skill.filesystem_path}`).join("\n") || "No skills resolved for this ticket.";
     const modelOptions = ["fable", "opus", "sonnet", "haiku"].map((model) => `<option value="${model}"${ticket.default_model === model ? " selected" : ""}>${model[0].toUpperCase()}${model.slice(1)}</option>`).join("");
@@ -373,7 +393,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
         <div class="skill-chips" data-skill-chips>${chips}</div>
         <button class="button" type="button" data-add-skill>+ Add skill</button>
         <div class="skill-options" data-skill-picker hidden><label class="field"><span>Search and select skills</span><input data-skill-search placeholder="Search skills or categories"></label>
-        ${skillRows.map((skill) => `<label data-skill-option data-search="${escapeHtml(`${skill.name} ${skill.slug} ${skill.category}`.toLowerCase())}"><input type="checkbox" value="${skill.id}" data-skill-toggle data-slug="${escapeHtml(skill.slug)}" data-name="${escapeHtml(skill.name)}" data-path="${escapeHtml(skill.filesystem_path)}"${skill.automatic ? " data-auto" : ""}${skill.automatic || skill.selected ? " checked" : ""}${skill.automatic || !skill.enabled ? " disabled" : ""}> ${escapeHtml(skill.name)} <small>${escapeHtml(skill.category)}${skill.automatic ? " · Automatically added by project" : ""}${!skill.enabled ? " · disabled" : ""}</small></label>`).join("")}</div>
+        ${skillRows.map((skill) => `<label data-skill-option data-search="${escapeHtml(`${skill.name} ${skill.slug} ${skill.category}`.toLowerCase())}"><input type="checkbox" value="${skill.id}" data-skill-toggle data-slug="${escapeHtml(skill.slug)}" data-name="${escapeHtml(skill.name)}" data-path="${escapeHtml(skill.filesystem_path)}"${skill.projectAttached ? " data-project" : ""}${skill.automatic ? " data-auto" : ""}${skill.required ? " data-required" : ""}${skill.overridable ? " data-overridable" : ""}${skill.badge ? ` data-badge="${skill.badge}"` : ""}${skill.selected ? " checked" : ""}${!skill.removable || !skill.enabled ? " disabled" : ""}> ${escapeHtml(skill.name)} <small>${escapeHtml(skill.category)}${skill.required ? " · Required by project" : skill.automatic ? " · Automatically added by project" : ""}${!skill.enabled ? " · disabled" : ""}</small></label>`).join("")}</div>
       </div></section>
       <section class="card"><div class="card-head">Resolved references injected into the prompt (<span data-ref-count>${selectedSkills.length}</span>)</div><div class="card-body"><pre class="references" data-skill-references>Use the following skills:
 ${escapeHtml(referenceLines)}</pre></div></section>`;

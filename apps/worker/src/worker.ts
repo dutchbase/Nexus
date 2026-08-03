@@ -9,7 +9,7 @@ import {
 } from "@dcc/claude-runner";
 import { artifactDataRoot, finalizeArtifact, inTransaction, legacyArtifactDataRoot, pool, reconcileArtifacts, stageArtifact, type StagedArtifact } from "@dcc/database";
 import {
-  approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
+  approveAndMergePullRequest, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
   claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, parsePrReviewVerdict,
   renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
@@ -31,7 +31,7 @@ import { resultCommitAfterSuccessfulExecution, runPrivateExecution } from "./exe
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
 import {
-  approvedPhaseSkills, assertExecutionPublicationGate, prReviewSnapshotInput, reviewedMergeBinding,
+  approvedExecutionInput, approvedPhaseSkills, assertApprovedSkillSnapshot, assertExecutionPublicationGate, prReviewSnapshotInput, reviewedMergeBinding,
 } from "./worker-boundary.ts";
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
@@ -204,11 +204,6 @@ function unionSkills(...sets: ResolvedSkill[][]) {
   return [...union.values()];
 }
 
-function taskBriefPlan(approvedPlan: string) {
-  if (!/^## 1\. Summary\b/m.test(approvedPlan) || !/^## 17\. Open Questions\b/m.test(approvedPlan)) return approvedPlan;
-  return `## Task 1: Implement the approved legacy plan\n\n${approvedPlan}`;
-}
-
 function isAgentToolEvent(eventType: string, event: any) {
   const toolUses = [event, event?.content_block, ...(Array.isArray(event?.message?.content) ? event.message.content : [])];
   return (eventType === "tool_use" || toolUses.some((item) => item?.type === "tool_use"))
@@ -295,70 +290,6 @@ async function planningInputs(ticket: any) {
     outputConstraints: "Planning is read-only. Do not edit or write repository files, commit, push, create branches, or open pull requests.",
   });
   return { project, ai, skills, skillUnion: unionSkills(skills, executionSkills, repairSkills), promptVersionIds, content };
-}
-
-async function executionInputs(ticket: any, phase: "execution" | "repair", approvedPlan: string, details: {
-  worktreePath: string;
-  branchName: string;
-  baseCommit: string | null;
-  currentDiff?: string;
-  validationOutput?: unknown;
-  administratorFeedback?: string;
-}, skills: SnapshottedSkill[]) {
-  const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
-  if (!project?.enabled) throw new Error("project is missing or disabled");
-  const [base, execution, repair] = await Promise.all([
-    resolvedPrompt("base", project.id),
-    resolvedPrompt("execution", project.id),
-    phase === "repair" ? resolvedPrompt("execution-repair", project.id) : Promise.resolve({ active_version_id: null, content: "" }),
-  ]);
-  const ai = resolveAiConfiguration({
-    phase,
-    system: { default: { model: "sonnet", reasoning_level: "high" } },
-    project: projectAiConfiguration(project),
-    ticket: ticketAiConfiguration(ticket),
-  });
-  const values = {
-    "project.slug": project.slug, "project.name": project.name,
-    "project.description": project.description,
-    "project.repository_path": project.repository_path, "project.agent_start_path": project.agent_start_path ?? project.repository_path, "project.default_branch": project.default_branch,
-    "ticket.title": ticket.title, "ticket.description": ticket.description,
-    "ticket.category": ticket.category, "ticket.priority": ticket.priority,
-  };
-  const promptVersionIds = Object.fromEntries([
-    // ponytail: a project override's version id is recorded under a global.* key;
-    // no consumer reads these keys, scoped keys if audit provenance ever matters.
-    ["global.base", base.active_version_id],
-    ["global.execution", execution.active_version_id],
-    ["global.execution-repair", repair.active_version_id],
-  ].filter((entry): entry is [string, string] => Boolean(entry[1])));
-  let content = buildExecutionPrompt({
-    globalBaseInstructions: renderTemplate(base.content ?? "", values),
-    globalExecutionInstructions: renderTemplate(execution.content ?? "", values),
-    projectContext: "",
-    projectExecutionInstructions: "",
-    projectTestingInstructions: "",
-    resolvedAiConfiguration: ai,
-    resolvedSkills: skills.map((skill) => ({
-      id: skill.skill_id, slug: skill.slug, version: skill.version, resolution_sources: skill.resolution_sources,
-    })),
-    exactApprovedPlan: taskBriefPlan(approvedPlan),
-    worktreeDetails: {
-      path: details.worktreePath, branch: details.branchName, base_commit: details.baseCommit,
-    },
-    validationCommands: project.config_json?.validation_commands ?? [],
-    definitionOfDone: project.config_json?.definition_of_done ?? "Implement the approved plan in the assigned worktree.",
-    outputConstraints: "Work only inside the assigned worktree. Local task commits are allowed; no push, merge, branch switch, PR, history rewrite, or publication; leave the final worktree ready for worker validation.",
-  });
-  if (phase === "repair") {
-    content += [
-      "\n## Repair instructions\n", renderTemplate(repair.content ?? "", values),
-      "\n## Current worktree diff\n", details.currentDiff ?? "",
-      "\n## Failed validation output\n", JSON.stringify(details.validationOutput ?? {}, null, 2),
-      "\n## Administrator feedback\n", details.administratorFeedback ?? "",
-    ].join("\n");
-  }
-  return { project, ai, skills, promptVersionIds, content };
 }
 
 async function transitionToPlanning(ticketId: string, jobId: string, runId: string) {
@@ -586,22 +517,21 @@ async function runExecution(job: any) {
   const repairing = job.type === "execution.repair";
   const ticket = (await pool.query("SELECT * FROM tickets WHERE id=$1", [job.payload_json.ticket_id])).rows[0];
   if (!ticket) throw new Error("ticket not found");
-  const gate = await checkPlanApprovalGate(pool, ticket.id);
+  if (typeof job.payload_json.approved_input_snapshot_id !== "string") throw new Error("execution job has no approved input snapshot");
+  const gate = await checkPlanApprovalGate(pool, ticket.id, job.payload_json.approved_input_snapshot_id);
   if ("code" in gate) throw new Error(`execution gate failed: ${gate.code}`);
   if (gate.planVersion.id !== job.payload_json.plan_version_id) {
     throw new Error("execution gate approved a different plan version");
   }
   const phase = repairing ? "repair" : "execution";
   const approvedSnapshot = (await pool.query(
-    "SELECT id,ticket_id,skills_json FROM skill_snapshots WHERE id=$1 AND ticket_id=$2",
+    "SELECT id,ticket_id,skills_json,content_hash FROM skill_snapshots WHERE id=$1 AND ticket_id=$2",
     [ticket.approved_skill_snapshot_id, ticket.id],
   )).rows[0];
+  assertApprovedSkillSnapshot(gate.approvedInputSnapshot.materialInput.skills, approvedSnapshot);
   const phaseSkills = approvedPhaseSkills(approvedSnapshot, ticket.id, phase);
   const attempt = (await pool.query(
-    `SELECT ea.*,pv.content_markdown
-     FROM execution_attempts ea
-     JOIN plan_versions pv ON pv.id=ea.plan_version_id
-     WHERE ea.id=$1 AND ea.ticket_id=$2`,
+    `SELECT ea.* FROM execution_attempts ea WHERE ea.id=$1 AND ea.ticket_id=$2`,
     [job.payload_json.execution_attempt_id, ticket.id],
   )).rows[0];
   if (!attempt) throw new Error("execution attempt not found");
@@ -619,20 +549,20 @@ async function runExecution(job: any) {
   };
   if (!repairing) {
     try {
+      const approvedProject = gate.approvedInputSnapshot.materialInput.project.config as any;
       const repository = await validateProject({
-        repositoryPath: (await pool.query("SELECT repository_path FROM projects WHERE id=$1", [ticket.project_id])).rows[0]?.repository_path,
-        defaultBranch: (await pool.query("SELECT default_branch FROM projects WHERE id=$1", [ticket.project_id])).rows[0]?.default_branch,
+        repositoryPath: approvedProject.repositoryPath,
+        defaultBranch: approvedProject.defaultBranch,
         requireRemote: false,
       });
       if (!repository.valid) throw new Error(`repository is not available for execution: ${repository.errors.join("; ")}`);
-      const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
       worktree = await createExecutionWorktree({
-        repositoryPath: project.repository_path,
-        defaultBranch: project.default_branch,
+        repositoryPath: approvedProject.repositoryPath,
+        defaultBranch: approvedProject.defaultBranch,
         dataRoot,
-        projectSlug: project.slug,
+        projectSlug: approvedProject.slug,
         ticketNumber: ticket.ticket_number,
-        title: ticket.title,
+        title: String((gate.approvedInputSnapshot.materialInput.ticket as any).title),
         attemptNumber: attempt.attempt_number,
       });
       await pool.query(
@@ -673,10 +603,11 @@ async function runExecution(job: any) {
     validationOutput: repairing ? job.payload_json.validation_output : undefined,
     administratorFeedback: repairing ? job.payload_json.feedback : undefined,
   };
-  const input = await executionInputs(ticket, phase, attempt.content_markdown, details, phaseSkills);
+  const approvedInput = approvedExecutionInput(gate.approvedInputSnapshot, phase, details);
+  const input = { ...approvedInput, project: { id: ticket.project_id, ...approvedInput.project } };
   try {
     await inTransaction(async (client) => {
-      await client.query(`INSERT INTO agent_runs (id,ticket_id,project_id,run_type,status,model,reasoning_level,working_directory,started_at,metadata_json) VALUES ($1,$2,$3,$4,'running',$5,$6,$7,now(),$8)`, [runId, ticket.id, input.project.id, repairing ? "execution.repair" : "execution", input.ai.model, input.ai.reasoning_level, worktree.worktreePath, { job_id: job.id, execution_attempt_id: attempt.id, project_config_version: input.project.config_version }]);
+      await client.query(`INSERT INTO agent_runs (id,ticket_id,project_id,run_type,status,model,reasoning_level,working_directory,started_at,metadata_json) VALUES ($1,$2,$3,$4,'running',$5,$6,$7,now(),$8)`, [runId, ticket.id, input.project.id, repairing ? "execution.repair" : "execution", input.ai.model, input.ai.reasoning_level, worktree.worktreePath, { job_id: job.id, execution_attempt_id: attempt.id, project_config_version: input.project.config_version, approved_input_snapshot_id: input.approvedInputSnapshotId, approved_input_hash: input.inputHash }]);
       await client.query("UPDATE execution_attempts SET agent_run_id=$2,validation_status='executing' WHERE id=$1", [attempt.id, runId]);
       await client.query(`INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,agent_run_id,execution_attempt_id) VALUES ($1,$2,'execution_log','staged',now() + interval '1 day',$3,$4)`, [logArtifactId, stagedLog.relativePath, runId, attempt.id]);
     });
@@ -711,6 +642,8 @@ async function runExecution(job: any) {
       ticketVersion: ticket.updated_at,
       planVersionId: attempt.plan_version_id,
       executionAttemptId: attempt.id,
+      approvedInputSnapshotId: input.approvedInputSnapshotId,
+      approvedInputHash: input.inputHash,
     },
   });
   await pool.query(
@@ -732,7 +665,7 @@ async function runExecution(job: any) {
     await writeFile(promptFile, input.content, { flag: "wx" });
     const skillBundle = await materializeSkillBundle(runId, phaseSkills, temporary);
     const executionPlanPath = path.join(skillBundle.additionalDirectory, "execution-plan.md");
-    await writeFile(executionPlanPath, materializeExecutionPlan(attempt.content_markdown), { flag: "wx" });
+    await writeFile(executionPlanPath, materializeExecutionPlan(gate.planVersion.content_markdown), { flag: "wx" });
     const scenarioKey = ["mock", "scenario", "path"].join("_");
     const executionBaseCommit = worktree.baseCommit ?? attempt.base_commit;
     if (!executionBaseCommit) throw new Error("execution attempt base commit is unavailable");
@@ -798,7 +731,7 @@ async function runExecution(job: any) {
       await enqueueNotification(client, "execution.completed", ticket.id, runId, { runId });
     });
     const commands = input.project.config_json?.commands ?? {};
-    const skillValidationCommands = input.skills.flatMap((skill: any) => {
+    const skillValidationCommands = phaseSkills.flatMap((skill: any) => {
       const configured = skill.configuration_json?.validation_scripts;
       return Array.isArray(configured) ? configured.filter((value: unknown): value is string => typeof value === "string") : [];
     });
@@ -861,8 +794,13 @@ async function runExecution(job: any) {
         branch_name: worktree.branchName,
         base_commit: worktree.baseCommit ?? attempt.base_commit,
       },
-      ticket, project: input.project, runId, jobId: job.id,
-      planMarkdown: attempt.content_markdown, skills: phaseSkills.map((skill) => skill.slug),
+      ticket: {
+        ...ticket,
+        title: String((gate.approvedInputSnapshot.materialInput.ticket as any).title),
+        description: (gate.approvedInputSnapshot.materialInput.ticket as any).description,
+      },
+      project: input.project, runId, jobId: job.id,
+      planMarkdown: gate.planVersion.content_markdown, skills: phaseSkills.map((skill) => skill.slug),
       validationResults: validation.results, changedFiles: validation.files,
     });
   } catch (error) {

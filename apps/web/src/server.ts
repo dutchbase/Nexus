@@ -8,16 +8,18 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
 import {
-  AiConfigurationError, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
-  globalPromptTypes, enqueueNotification, promptContentHash,
-  resolveAiConfiguration, setPullRequestTicketStatus, validateAiSelection, type AiPhase,
+  AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approveAndMergePullRequest, approvePlanDecision, buildApprovedInputSnapshot,
+  buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
+  globalPromptTypes, enqueueNotification, importGithubPullRequests, promptContentHash, PullRequestMergeError,
+  rejectPlanDecision, requestPlanRevisionDecision, requireApprovalPrompt, resolveAiConfiguration, setPullRequestTicketStatus, syncOpenPullRequests,
+  syncPullRequest, validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
 import {
   mergeNotificationConfiguration, parseNotificationConfiguration, parseNotificationConfigurationPatch,
   safeNotificationProvider,
 } from "../../../packages/notification-provider/src/index.ts";
 import {
-  resolveSkills, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
+  resolveSkills, snapshotSkillSet, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
 } from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
 import { normalizeAgentStartPath, validateAgentStartPath, validateProject } from "@dcc/project-config";
@@ -49,7 +51,7 @@ const maxUploadBytes = 5 * 1024 * 1024;
 const exec = promisify(execFile);
 const defaultRateLimit = 15;
 const dummyHash = await hashPassword(randomBytes(32).toString("hex"));
-const systemOnlyStatuses = new Set(["Planning", "Executing", "Validating", "PR Ready for Review", "Merged"]);
+const systemOnlyStatuses = new Set(["Planning", "Execution Queued", "Executing", "Validating", "PR Ready for Review", "Merged"]);
 const fieldTypes = new Set([
   "short_text", "long_text", "email", "url", "number", "dropdown", "radio", "checkbox", "multi_select",
   "project_selector", "category_selector", "environment_selector", "image_upload", "hidden", "static",
@@ -94,18 +96,20 @@ function resolvedAiFor(ticket: any, project: any, phase: AiPhase) {
 async function skillCandidates(ticket: any, phase: AiPhase, client: any = pool): Promise<SkillCandidate[]> {
   const rows = (await client.query(
     `SELECT resolved.* FROM (
-       SELECT s.*, 'global_mandatory'::text source, 1 source_order
+       SELECT s.*, 'global_mandatory'::text source, 1 source_order, NULL::boolean allow_ticket_override
        FROM skills s WHERE COALESCE((s.configuration_json->>'mandatory')::boolean, false)
        UNION ALL
-       SELECT s.*, 'project_automatic', 2
+       SELECT s.*, CASE WHEN ps.attachment_type='required' OR ps.required THEN 'project_required' ELSE 'project_automatic' END, 2,
+              ps.allow_ticket_override
        FROM project_skills ps JOIN skills s ON s.id=ps.skill_id
-       WHERE ps.project_id=$1 AND ps.attachment_type='automatic'
+       WHERE ps.project_id=$1 AND (ps.attachment_type IN ('automatic','required') OR ps.required)
        UNION ALL
-       SELECT s.*, 'ticket_selected', 3
+       SELECT s.*, CASE WHEN ts.source='excluded' THEN 'ticket_excluded' ELSE 'ticket_selected' END, 3, ps.allow_ticket_override
        FROM ticket_skills ts LEFT JOIN skills s ON s.id=ts.skill_id
+       LEFT JOIN project_skills ps ON ps.project_id=$1 AND ps.skill_id=ts.skill_id
        WHERE ts.ticket_id=$2
        UNION ALL
-       SELECT s.*, 'phase_required', 4
+       SELECT s.*, 'phase_required', 4, NULL::boolean
        FROM skills s WHERE s.configuration_json->'required_phases' ? $3
      ) resolved ORDER BY source_order, slug, id`,
     [ticket.project_id, ticket.id, phase],
@@ -115,6 +119,7 @@ async function skillCandidates(ticket: any, phase: AiPhase, client: any = pool):
     skillId: row.id,
     slug: row.slug,
     source: row.source as ResolutionSource,
+    allowTicketOverride: row.allow_ticket_override,
   }));
 }
 
@@ -136,8 +141,8 @@ function renderPromptTemplate(content: string, values: Record<string, unknown>) 
   return content.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_match, variable: string) => String(values[variable] ?? ""));
 }
 
-async function resolvedPrompt(promptType: string, projectId: string) {
-  const row = (await pool.query(
+async function resolvedPrompt(promptType: string, projectId: string, client: any = pool) {
+  const row = (await client.query(
     `SELECT pf.id prompt_file_id,pf.active_version_id,pv.content,pv.version
      FROM prompt_files pf LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id
      WHERE pf.prompt_type=$1 AND pf.active_version_id IS NOT NULL
@@ -149,15 +154,15 @@ async function resolvedPrompt(promptType: string, projectId: string) {
   return row ?? { prompt_file_id: null, active_version_id: null, content: "", version: null };
 }
 
-async function promptInputsFor(ticket: any, phase: "planning" | "execution", approvedPlan?: string) {
-  const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
+async function promptInputsFor(ticket: any, phase: "planning" | "execution", approvedPlan?: string, client: any = pool) {
+  const project = (await client.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
   if (!project) throw Object.assign(new Error("project not found"), { status: 404 });
   const [base, phaseResolved] = await Promise.all([
-    resolvedPrompt("base", project.id),
-    resolvedPrompt(phase, project.id),
+    resolvedPrompt("base", project.id, client),
+    resolvedPrompt(phase, project.id, client),
   ]);
   const ai = resolvedAiFor(ticket, project, phase);
-  const skills = await resolvedSkillsFor(ticket, phase);
+  const skills = await resolvedSkillsFor(ticket, phase, client);
   const templateValues = {
     "project.slug": project.slug,
     "project.name": project.name,
@@ -233,6 +238,90 @@ async function promptInputsFor(ticket: any, phase: "planning" | "execution", app
     }),
     ai, skills, promptVersionIds, project,
   };
+}
+
+export async function approvalInputsFor(ticket: any, version: any, client: any) {
+  const project = (await client.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
+  if (!project?.enabled) throw new ApprovalPolicyError("Project is missing or disabled");
+  const promptRows = (await client.query(
+    `SELECT pf.scope,pf.prompt_type,pf.active_version_id,pv.content,pv.content_hash
+     FROM prompt_files pf JOIN prompt_versions pv ON pv.id=pf.active_version_id
+     WHERE pf.prompt_type=ANY($1::text[]) AND pf.active_version_id IS NOT NULL
+       AND ((pf.scope='global' AND pf.project_id IS NULL) OR (pf.scope='project' AND pf.project_id=$2))`,
+    [["base", "execution", "execution-repair", "context", "testing"], project.id],
+  )).rows;
+  const prompt = (scope: string, type: string) => promptRows.find((row: any) => row.scope === scope && row.prompt_type === type);
+  const base = requireApprovalPrompt(prompt("global", "base"), "global", "base");
+  const execution = requireApprovalPrompt(prompt("global", "execution"), "global", "execution");
+  const repair = requireApprovalPrompt(prompt("global", "execution-repair"), "global", "execution-repair");
+  const phases: AiPhase[] = ["planning", "execution", "repair"];
+  const phaseSkills = await Promise.all(phases.map((phase) => resolvedSkillsFor(ticket, phase, client)));
+  const union = new Map<string, any>();
+  for (const skill of phaseSkills.flat()) {
+    const existing = union.get(skill.id);
+    if (!existing) union.set(skill.id, { ...skill, resolution_sources: [...skill.resolution_sources] });
+    else for (const source of skill.resolution_sources) if (!existing.resolution_sources.includes(source)) existing.resolution_sources.push(source);
+  }
+  const snapshotted = await snapshotSkillSet([...union.values()], phases);
+  const models = Object.fromEntries(phases.map((phase) => {
+    const resolved = resolvedAiFor(ticket, project, phase);
+    return [phase, { model: resolved.model, reasoningLevel: resolved.reasoning_level }];
+  }));
+  const values = {
+    "project.slug": project.slug, "project.name": project.name, "project.description": project.description,
+    "project.repository_path": project.repository_path, "project.agent_start_path": project.agent_start_path ?? project.repository_path,
+    "project.default_branch": project.default_branch, "ticket.title": ticket.title, "ticket.description": ticket.description,
+    "ticket.category": ticket.category, "ticket.priority": ticket.priority,
+  };
+  const rendered = (row: any) => renderPromptTemplate(row?.content ?? "", values);
+  const provenance = (...rows: any[]) => rows.filter(Boolean).map((row) => ({
+    scope: row.scope, promptType: row.prompt_type, versionId: row.active_version_id, contentHash: row.content_hash,
+  }));
+  const context = prompt("project", "context"), projectExecution = prompt("project", "execution"), testing = prompt("project", "testing");
+  const skillContent = (phase: AiPhase) => snapshotted.skills
+    .filter((skill) => !skill.phases || skill.phases.includes(phase))
+    .map((skill) => ({ id: skill.skill_id, slug: skill.slug, version: skill.version, resolution_sources: skill.resolution_sources }));
+  const phaseContent = (phase: "execution" | "repair") => buildExecutionPrompt({
+    globalBaseInstructions: rendered(base), globalExecutionInstructions: rendered(execution), projectContext: rendered(context),
+    projectExecutionInstructions: rendered(projectExecution), projectTestingInstructions: rendered(testing),
+    resolvedAiConfiguration: models[phase], resolvedSkills: skillContent(phase), exactApprovedPlan: version.content_markdown,
+    worktreeDetails: {}, validationCommands: project.config_json?.validation_commands ?? [],
+    definitionOfDone: project.config_json?.definition_of_done ?? "Implement the approved plan.",
+    outputConstraints: "Use the assigned worktree. Do not push, merge, or publish.",
+  });
+  const executionContent = phaseContent("execution");
+  const policySources = (await client.query(
+    `SELECT ps.skill_id,s.slug,ps.attachment_type,ps.required,ps.allow_ticket_override
+     FROM project_skills ps JOIN skills s ON s.id=ps.skill_id WHERE ps.project_id=$1 ORDER BY s.slug`,
+    [project.id],
+  )).rows;
+  const approvedInput: ApprovedInputSnapshot = {
+    plan: { versionId: version.id, version: Number(version.version), contentHash: version.content_hash },
+    ticket: {
+      title: ticket.title, description: ticket.description, category: ticket.category, priority: ticket.priority,
+      environment: ticket.environment, expectedBehavior: ticket.expected_behavior, actualBehavior: ticket.actual_behavior,
+      reproductionSteps: ticket.reproduction_steps, customValues: ticket.custom_values_json ?? {},
+    },
+    project: { configVersion: Number(project.config_version), config: {
+      slug: project.slug, name: project.name, description: project.description, enabled: project.enabled,
+      repositoryPath: project.repository_path, agentStartPath: project.agent_start_path ?? project.repository_path,
+      githubOwner: project.github_owner, githubRepository: project.github_repository, defaultBranch: project.default_branch,
+      configuration: project.config_json ?? {},
+    } },
+    models,
+    prompts: [
+      { phase: "execution", content: executionContent, provenance: provenance(base, execution, context, projectExecution, testing) },
+      { phase: "repair", content: `${phaseContent("repair")}\n## Repair instructions\n\n${rendered(repair)}\n`, provenance: provenance(base, execution, repair, context, projectExecution, testing) },
+    ],
+    skills: snapshotted.skills.map((skill) => ({
+      id: skill.skill_id, slug: skill.slug, version: skill.version, contentHash: skill.content_hash,
+      sources: skill.resolution_sources, filesystemPath: skill.filesystem_path, phase: skill.phase,
+      phases: skill.phases ?? [skill.phase], pluginName: skill.plugin_name ?? null,
+      invocationName: skill.invocation_name ?? null, configuration: (skill.configuration_json ?? {}) as ApprovalInputValue,
+    })),
+    policySources,
+  };
+  return { ...buildApprovedInputSnapshot(approvedInput), approvedInput, snapshottedSkills: snapshotted };
 }
 
 function json(response: ServerResponse, status: number, body: unknown, headers: Record<string, string | string[]> = {}) {
@@ -545,9 +634,30 @@ async function replaceFields(client: any, formId: string, fields: any[]) {
 
 async function transitionTicket(ticketRef: string, status: string, reason: string, session: any, request: IncomingMessage, response: ServerResponse) {
   const result = await inTransaction(async (client) => {
-    const before = (await client.query("SELECT * FROM tickets WHERE id::text = $1 OR ticket_number = $1 FOR UPDATE", [ticketRef])).rows[0];
+    const before = (await client.query("SELECT *,updated_at::text ticket_version FROM tickets WHERE id::text = $1 OR ticket_number = $1 FOR UPDATE", [ticketRef])).rows[0];
     if (!before) return null;
-    const after = (await client.query("UPDATE tickets SET status = $2, updated_at = now() WHERE id = $1 RETURNING *", [before.id, status])).rows[0];
+    let after;
+    if (status === "Rejected") {
+      if (!["Submitted", "Triage", "Needs Information"].includes(before.status)) {
+        throw new ApprovalConflictError(before.approved_input_snapshot_id ?? null);
+      }
+      const currentPlan = (await client.query(
+        "SELECT current_version_id FROM plans WHERE ticket_id=$1 AND current_version_id IS NOT NULL",
+        [before.id],
+      )).rows[0];
+      after = currentPlan ? (await rejectPlanDecision(client, {
+        ticketId: before.id, planVersionId: currentPlan.current_version_id, expectedTicketVersion: before.ticket_version, expectedStatus: before.status,
+        expectedSnapshotId: before.approved_input_snapshot_id ?? null, decidedBy: session.user_id, metadata: { reason },
+      })).ticket : (await client.query(
+        `UPDATE tickets SET status=$2,approved_plan_version_id=NULL,approved_plan_hash=NULL,
+           approved_ticket_version=NULL,approved_project_config_version=NULL,approved_model_config_json=NULL,
+           approved_skill_snapshot_id=NULL,approved_prompt_versions_json=NULL,approved_input_snapshot_id=NULL,
+           plan_approved_at=NULL,updated_at=now() WHERE id=$1 RETURNING *`,
+        [before.id, status],
+      )).rows[0];
+    } else {
+      after = (await client.query("UPDATE tickets SET status = $2, updated_at = now() WHERE id = $1 RETURNING *", [before.id, status])).rows[0];
+    }
     await client.query(
       `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
        VALUES ($1,$2,$3,$4,'admin',$5)`,
@@ -842,6 +952,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
           [pullRequest.agent_run_id],
         )).rows[0];
         if (!source?.worktree_path) throw Object.assign(new Error("repair worktree is unavailable"), { status: 409 });
+        const approvedSnapshotId = source.metadata_json?.approved_input_snapshot_id;
+        if (typeof approvedSnapshotId !== "string") throw Object.assign(new Error("repair run has no approved input snapshot"), { status: 409 });
         const active = (await client.query(
           `SELECT 1 FROM jobs WHERE status IN ('queued','running') AND type='execution.repair'
            AND payload_json->>'execution_attempt_id'=$1`,
@@ -852,7 +964,9 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
           type: "execution.repair",
           payload: {
             ticket_id: source.ticket_id, execution_attempt_id: source.execution_attempt_id,
-            plan_version_id: source.plan_version_id, feedback,
+            plan_version_id: source.plan_version_id,
+            approved_input_snapshot_id: approvedSnapshotId,
+            feedback,
             validation_output: source.metadata_json?.validation_output ?? {},
           },
           idempotencyKey: `execution.repair:${source.execution_attempt_id}:${randomUUID()}`,
@@ -1321,28 +1435,32 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (ticketSkillsMatch && request.method === "PUT") {
     const body = await bodyOf(request);
     const supplied = body.skill_ids ?? body.skills ?? body.skill_slugs ?? [];
-    if (!Array.isArray(supplied) || supplied.some((value: unknown) => typeof value !== "string")) {
-      return json(response, 400, { error: "skill_ids must be an array" });
+    const excluded = body.excluded_skill_ids ?? [];
+    if (!Array.isArray(supplied) || supplied.some((value: unknown) => typeof value !== "string")
+      || !Array.isArray(excluded) || excluded.some((value: unknown) => typeof value !== "string")) {
+      return json(response, 400, { error: "skill_ids and excluded_skill_ids must be arrays" });
     }
+    const requested = [...new Set([...supplied, ...excluded])];
     const ref = decodeURIComponent(ticketSkillsMatch[1]);
     const result = await inTransaction(async (client) => {
       const ticket = (await client.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE", [ref])).rows[0];
       if (!ticket) return null;
-      const skills = supplied.length ? (await client.query(
+      const skills = requested.length ? (await client.query(
         "SELECT * FROM skills WHERE id::text=ANY($1::text[]) OR slug=ANY($1::text[])",
-        [supplied],
+        [requested],
       )).rows : [];
-      for (const selected of supplied) {
+      for (const selected of requested) {
         const skill = skills.find((item: any) => item.id === selected || item.slug === selected);
         if (!skill) throw new SkillResolutionError(selected, "missing");
         if (!skill.enabled) throw new SkillResolutionError(skill.slug, "disabled");
       }
       await client.query("DELETE FROM ticket_skills WHERE ticket_id=$1", [ticket.id]);
       for (const skill of skills) {
+        const isExcluded = excluded.includes(skill.id) || excluded.includes(skill.slug);
         await client.query(
-          `INSERT INTO ticket_skills (ticket_id,skill_id,source,selected_by) VALUES ($1,$2,'manual',$3)
+          `INSERT INTO ticket_skills (ticket_id,skill_id,source,selected_by) VALUES ($1,$2,$3,$4)
            ON CONFLICT (ticket_id,skill_id) DO NOTHING`,
-          [ticket.id, skill.id, session.user_id],
+          [ticket.id, skill.id, isExcluded ? "excluded" : "manual", session.user_id],
         );
       }
       return { ticket, skills: await resolvedSkillsFor(ticket, "planning", client) };
@@ -1507,40 +1625,44 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (typeof body.feedback !== "string" || !body.feedback.trim() || body.feedback.length > 10000) {
       return json(response, 400, { error: "feedback is required" });
     }
-    const result = await inTransaction(async (client) => {
+    const expected = (await pool.query(
+      `SELECT p.ticket_id,p.current_version_id,t.status,t.updated_at::text ticket_version,t.approved_input_snapshot_id
+       FROM plans p JOIN tickets t ON t.id=p.ticket_id WHERE p.id=$1`,
+      [planRevisionMatch[1]],
+    )).rows[0];
+    if (!expected) return json(response, 404, { error: "plan not found" });
+    if (!["Plan Ready for Review", "Plan Approved", "Needs Information", "Planning Failed"].includes(expected.status)) {
+      return json(response, 409, { error: `revision cannot be requested from ${expected.status}` });
+    }
+    let result;
+    try { result = await inTransaction(async (client) => {
       const plan = (await client.query(
-        `SELECT p.*,t.status,t.id ticket_id
+        `SELECT p.*,t.id ticket_id
          FROM plans p JOIN tickets t ON t.id=p.ticket_id
          WHERE p.id=$1 FOR UPDATE OF p,t`,
         [planRevisionMatch[1]],
       )).rows[0];
       if (!plan) return null;
-      // ponytail: revisions are safe up through Plan Approved too — execution
-      // only starts once the ticket hits Execution Queued, and the approval
-      // gate already re-blocks Start execution once a new version supersedes
-      // the approved one (see checkPlanApprovalGate's current_version_id check).
-      if (!["Plan Ready for Review", "Plan Approved", "Needs Information", "Planning Failed"].includes(plan.status)) {
-        throw Object.assign(new Error(`revision cannot be requested from ${plan.status}`), { status: 409 });
-      }
       const current = (await client.query(
         "SELECT * FROM plan_versions WHERE id=$1 AND plan_id=$2",
-        [plan.current_version_id, plan.id],
+        [expected.current_version_id, plan.id],
       )).rows[0];
       if (!current) throw Object.assign(new Error("current plan version not found"), { status: 409 });
+      await requestPlanRevisionDecision(client, {
+        ticketId: expected.ticket_id, planVersionId: expected.current_version_id,
+        expectedTicketVersion: expected.ticket_version, expectedStatus: expected.status,
+        expectedSnapshotId: expected.approved_input_snapshot_id ?? null,
+      });
       const feedback = (await client.query(
         `INSERT INTO plan_review_feedback (plan_id,plan_version_id,feedback,created_by)
          VALUES ($1,$2,$3,$4) RETURNING *`,
         [plan.id, current.id, body.feedback.trim(), session.user_id],
       )).rows[0];
       await client.query(
-        "UPDATE tickets SET status='Plan Revision Requested',updated_at=now() WHERE id=$1",
-        [plan.ticket_id],
-      );
-      await client.query(
         `INSERT INTO ticket_status_history
          (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_plan_version_id)
          VALUES ($1,$2,'Plan Revision Requested','Plan revision requested','admin',$3,$4)`,
-        [plan.ticket_id, plan.status, session.user_id, current.id],
+        [plan.ticket_id, expected.status, session.user_id, current.id],
       );
       const job = await enqueueJob({
         type: "planning.revise",
@@ -1565,7 +1687,12 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         [plan.ticket_id, session.user_id, job.id, current.id],
       );
       return { ticket, job, feedback };
-    });
+    }); } catch (error) {
+      if (error instanceof ApprovalConflictError) return json(response, 409, {
+        error: error.code, message: error.message, current_snapshot_id: error.currentSnapshotId,
+      });
+      throw error;
+    }
     return result ? json(response, 202, result) : json(response, 404, { error: "plan not found" });
   }
   const planFeedbackMatch = url.pathname.match(/^\/api\/admin\/plans\/([0-9a-f-]+)\/feedback$/i);
@@ -1591,40 +1718,43 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   const planApproveMatch = url.pathname.match(/^\/api\/admin\/plan-versions\/([0-9a-f-]+)\/approve$/i);
   if (planApproveMatch && request.method === "POST") {
     const body = await bodyOf(request);
-    const approved = await inTransaction(async (client) => {
+    let approved;
+    try { approved = await inTransaction(async (client) => {
       const version = (await client.query(
-        `SELECT pv.*,p.ticket_id,p.current_version_id,t.updated_at ticket_version,t.project_id,
-                pr.config_version,ar.model,ar.reasoning_level,ar.skill_snapshot_id,ps.metadata_json
+        `SELECT pv.*,p.ticket_id,p.current_version_id,t.status ticket_status,t.updated_at::text ticket_version,
+                t.approved_input_snapshot_id,t.project_id
          FROM plan_versions pv
          JOIN plans p ON p.id=pv.plan_id
          JOIN tickets t ON t.id=p.ticket_id
          JOIN projects pr ON pr.id=t.project_id
-         LEFT JOIN agent_runs ar ON ar.id=pv.agent_run_id
-         LEFT JOIN prompt_snapshots ps ON ps.id=pv.prompt_snapshot_id
-         WHERE pv.id=$1 FOR UPDATE OF p,t`,
+         WHERE pv.id=$1 FOR UPDATE OF p,t,pr`,
         [planApproveMatch[1]],
       )).rows[0];
       if (!version) return null;
       if (body.plan_version_id !== undefined && body.plan_version_id !== version.id) {
-        throw Object.assign(new Error("plan version id does not match"), { status: 409 });
+        throw new ApprovalConflictError(version.approved_input_snapshot_id ?? null);
       }
       if (body.content_hash !== undefined && body.content_hash !== version.content_hash) {
-        throw Object.assign(new Error("plan content hash does not match"), { status: 409 });
+        throw new ApprovalConflictError(version.approved_input_snapshot_id ?? null);
       }
       if (version.current_version_id !== version.id) {
-        throw Object.assign(new Error("only the current plan version can be approved"), { status: 409 });
+        throw new ApprovalConflictError(version.approved_input_snapshot_id ?? null);
       }
-      const ticket = (await client.query(
-        `UPDATE tickets SET approved_plan_version_id=$2,approved_plan_hash=$3,
-           approved_ticket_version=$4,approved_project_config_version=$5,
-           approved_model_config_json=$6,approved_skill_snapshot_id=$7,
-           approved_prompt_versions_json=$8,plan_approved_at=now(),
-           status='Plan Approved',updated_at=now()
-         WHERE id=$1 RETURNING *`,
-        [version.ticket_id, version.id, version.content_hash, version.ticket_version, version.config_version,
-          { model: version.model, reasoning_level: version.reasoning_level }, version.skill_snapshot_id,
-          version.metadata_json?.promptVersionIds ?? {}],
+      const expectedStatus = body.reconfirm ? "Plan Approved" : "Plan Ready for Review";
+      if (version.ticket_status !== expectedStatus) throw new ApprovalConflictError(version.approved_input_snapshot_id ?? null);
+      await client.query("LOCK TABLE skills,prompt_files,prompt_versions,project_skills,ticket_skills IN SHARE MODE");
+      const ticketBefore = (await client.query("SELECT * FROM tickets WHERE id=$1", [version.ticket_id])).rows[0];
+      const resolved = await approvalInputsFor(ticketBefore, version, client);
+      const skillSnapshot = (await client.query(
+        `INSERT INTO skill_snapshots (ticket_id,skills_json,content_hash) VALUES ($1,$2,$3) RETURNING *`,
+        [version.ticket_id, JSON.stringify(resolved.snapshottedSkills.skills), resolved.snapshottedSkills.contentHash],
       )).rows[0];
+      const transition = await approvePlanDecision(client, {
+        ticketId: version.ticket_id, planVersionId: version.id, expectedTicketVersion: version.ticket_version,
+        expectedStatus, expectedSnapshotId: version.approved_input_snapshot_id, approvedInput: resolved.approvedInput,
+        decidedBy: session.user_id, skillSnapshotId: skillSnapshot.id,
+        metadata: { note: typeof body.note === "string" ? body.note.trim() : null, reconfirm: Boolean(body.reconfirm) },
+      });
       await client.query("UPDATE plans SET potentially_stale=false,updated_at=now() WHERE id=$1", [version.plan_id]);
       const approvalNote = typeof body.note === "string" && body.note.trim() ? body.note.trim() : null;
       const defaultReason = body.reconfirm ? "Approved plan reconfirmed" : "Plan approved";
@@ -1635,16 +1765,34 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         [version.ticket_id, body.reconfirm ? "Plan Approved" : "Plan Ready for Review",
           approvalNote ?? defaultReason, session.user_id, version.id],
       );
-      return { ticket, plan_version: version };
-    });
+      return { ticket: transition.ticket, plan_version: version, approved_input_snapshot: transition.approvedInputSnapshot, input_hash: resolved.inputHash };
+    }); } catch (error) {
+      if (error instanceof ApprovalConflictError) return json(response, 409, {
+        error: error.code, message: error.message, current_snapshot_id: error.currentSnapshotId,
+      });
+      throw error;
+    }
     return approved ? json(response, 200, approved) : json(response, 404, { error: "plan version not found" });
   }
   const planRejectMatch = url.pathname.match(/^\/api\/admin\/plan-versions\/([0-9a-f-]+)\/reject$/i);
   if (planRejectMatch && request.method === "POST") {
     const body = await bodyOf(request);
-    const rejected = await inTransaction(async (client) => {
+    const expected = (await pool.query(
+      `SELECT pv.id,p.ticket_id,p.current_version_id,t.status,t.updated_at::text ticket_version,t.approved_input_snapshot_id
+       FROM plan_versions pv JOIN plans p ON p.id=pv.plan_id JOIN tickets t ON t.id=p.ticket_id WHERE pv.id=$1`,
+      [planRejectMatch[1]],
+    )).rows[0];
+    if (!expected) return json(response, 404, { error: "plan version not found" });
+    if (body.plan_version_id !== undefined && body.plan_version_id !== expected.id) {
+      return json(response, 409, { error: "approval_conflict", message: "the ticket or current plan changed before the approval decision completed", current_snapshot_id: expected.approved_input_snapshot_id ?? null });
+    }
+    if (expected.current_version_id !== expected.id || !["Plan Ready for Review", "Plan Approved"].includes(expected.status)) {
+      return json(response, 409, { error: "approval_conflict", message: "the ticket or current plan changed before the approval decision completed", current_snapshot_id: expected.approved_input_snapshot_id ?? null });
+    }
+    let rejected;
+    try { rejected = await inTransaction(async (client) => {
       const version = (await client.query(
-        `SELECT pv.*,p.ticket_id,p.current_version_id,t.status
+        `SELECT pv.*,p.ticket_id,p.current_version_id,t.status,t.updated_at::text ticket_version,t.approved_input_snapshot_id
          FROM plan_versions pv
          JOIN plans p ON p.id=pv.plan_id
          JOIN tickets t ON t.id=p.ticket_id
@@ -1652,29 +1800,29 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         [planRejectMatch[1]],
       )).rows[0];
       if (!version) return null;
-      if (body.plan_version_id !== undefined && body.plan_version_id !== version.id) {
-        throw Object.assign(new Error("plan version id does not match"), { status: 409 });
-      }
-      if (version.current_version_id !== version.id) {
-        throw Object.assign(new Error("only the current plan version can be rejected"), { status: 409 });
-      }
-      const ticket = (await client.query(
-        "UPDATE tickets SET status='Rejected',approved_plan_version_id=NULL,approved_plan_hash=NULL,updated_at=now() WHERE id=$1 RETURNING *",
-        [version.ticket_id],
-      )).rows[0];
+      const reason = typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : "Plan rejected";
+      const transition = await rejectPlanDecision(client, {
+        ticketId: expected.ticket_id, planVersionId: expected.id, expectedTicketVersion: expected.ticket_version, expectedStatus: expected.status,
+        expectedSnapshotId: expected.approved_input_snapshot_id, decidedBy: session.user_id, metadata: { reason },
+      });
       await client.query(
         `INSERT INTO ticket_status_history
          (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_plan_version_id)
          VALUES ($1,$2,'Rejected',$3,'admin',$4,$5)`,
-        [version.ticket_id, version.status, typeof body.reason === "string" && body.reason.trim() ? body.reason.trim() : "Plan rejected", session.user_id, version.id],
+        [version.ticket_id, expected.status, reason, session.user_id, version.id],
       );
       await audit({
         actorType: "admin", actorId: session.user_id, action: "plan_version.reject",
-        entityType: "plan_version", entityId: version.id, before: { status: version.status }, after: { status: "Rejected" },
+        entityType: "plan_version", entityId: version.id, before: { status: expected.status }, after: { status: "Rejected" },
         metadata: { ticket_id: version.ticket_id, reason: body.reason ?? null }, ip: ipOf(request),
       }, client);
-      return { ticket, plan_version: version };
-    });
+      return { ticket: transition.ticket, plan_version: version, decision: transition.decision };
+    }); } catch (error) {
+      if (error instanceof ApprovalConflictError) return json(response, 409, {
+        error: error.code, message: error.message, current_snapshot_id: error.currentSnapshotId,
+      });
+      throw error;
+    }
     return rejected ? json(response, 200, rejected) : json(response, 404, { error: "plan version not found" });
   }
   const executeMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/execute$/);
@@ -1711,6 +1859,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         payload: {
           ticket_id: ticket.id, execution_attempt_id: attempt.id,
           plan_version_id: lockedGate.planVersion.id,
+          approved_input_snapshot_id: lockedGate.approvedInputSnapshot.id,
           ...(typeof body.mock_scenario_path === "string" ? { mock_scenario_path: body.mock_scenario_path } : {}),
         },
         idempotencyKey: `execution.run:${attempt.id}`, maxAttempts: 1,
@@ -1723,7 +1872,10 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
          VALUES ($1,$2,'Execution Queued','Execution job queued','admin',$3,$4,$5)`,
         [ticket.id, before, session.user_id, job.id, lockedGate.planVersion.id],
       );
-      return { attempt, job };
+      return {
+        attempt, job, approved_input_snapshot_id: lockedGate.approvedInputSnapshot.id,
+        input_hash: lockedGate.approvedInputSnapshot.inputHash,
+      };
     });
     return json(response, 202, result);
   }
@@ -1796,6 +1948,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       )).rows[0];
       if (!source) return null;
       if (!source.worktree_path) throw Object.assign(new Error("repair worktree is unavailable"), { status: 409 });
+      const approvedSnapshotId = source.metadata_json?.approved_input_snapshot_id;
+      if (typeof approvedSnapshotId !== "string") throw Object.assign(new Error("repair run has no approved input snapshot"), { status: 409 });
       const active = (await client.query(
         `SELECT 1 FROM jobs WHERE status IN ('queued','running')
          AND type='execution.repair' AND payload_json->>'execution_attempt_id'=$1`,
@@ -1808,6 +1962,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
           ticket_id: source.ticket_id,
           execution_attempt_id: source.execution_attempt_id,
           plan_version_id: source.plan_version_id,
+          approved_input_snapshot_id: approvedSnapshotId,
           feedback: body.feedback.trim(),
           validation_output: source.metadata_json?.validation_output ?? {},
           ...(typeof body.mock_scenario_path === "string" ? { mock_scenario_path: body.mock_scenario_path } : {}),
@@ -1868,19 +2023,38 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   const promptPreviewMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/prompt-preview$/);
   if (promptPreviewMatch && request.method === "GET") {
     const ref = decodeURIComponent(promptPreviewMatch[1]);
-    const ticket = (await pool.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
-    if (!ticket) return json(response, 404, { error: "ticket not found" });
     const phase = url.searchParams.get("phase") === "execution" ? "execution" : "planning";
-    if (phase === "execution") {
-      return json(response, 409, { error: "execution preview requires an approved plan; available after Phase 6" });
-    }
-    const preview = await promptInputsFor(ticket, "planning");
+    const preview = await inTransaction(async (client) => {
+      const ticket = (await client.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
+      if (!ticket) return null;
+      if (phase === "execution") {
+        const version = (await client.query(
+          `SELECT pv.* FROM plans p JOIN plan_versions pv ON pv.id=p.current_version_id WHERE p.ticket_id=$1`,
+          [ticket.id],
+        )).rows[0];
+        if (!version) return { unavailable: true };
+        const resolved = await approvalInputsFor(ticket, version, client);
+        return {
+          phase, content: resolved.approvedInput.prompts.find((item) => item.phase === "execution")?.content ?? "",
+          content_hash: promptContentHash(resolved.approvedInput.prompts.find((item) => item.phase === "execution")?.content ?? ""),
+          input_hash: resolved.inputHash, material_input: resolved.materialInput,
+          model: resolved.approvedInput.models.execution.model,
+          reasoning_level: resolved.approvedInput.models.execution.reasoningLevel,
+          project_config_version: resolved.approvedInput.project.configVersion, ticket_version: ticket.updated_at,
+        };
+      }
+      const resolved = await promptInputsFor(ticket, "planning", undefined, client);
+      return {
+        phase, content: resolved.content, content_hash: promptContentHash(resolved.content),
+        model: resolved.ai.model, reasoning_level: resolved.ai.reasoning_level,
+        prompt_version_ids: resolved.promptVersionIds, project_config_version: resolved.project.config_version,
+        ticket_version: ticket.updated_at,
+      };
+    });
+    if (!preview) return json(response, 404, { error: "ticket not found" });
+    if ("unavailable" in preview) return json(response, 409, { error: "execution preview requires a current plan" });
     return json(response, 200, {
-      phase, content: preview.content, content_hash: promptContentHash(preview.content),
-      model: preview.ai.model, reasoning_level: preview.ai.reasoning_level,
-      prompt_version_ids: preview.promptVersionIds,
-      project_config_version: preview.project.config_version,
-      ticket_version: ticket.updated_at,
+      ...preview,
     });
   }
   const ticketMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)$/);
@@ -1925,6 +2099,9 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (ticketMatch && request.method === "PATCH") {
     const ref = decodeURIComponent(ticketMatch[1]);
     const body = await bodyOf(request);
+    if (body.status !== undefined && ["Rejected", "Plan Approved"].includes(body.status)) {
+      return json(response, 422, { error: "status must use its decision endpoint" });
+    }
     if (body.status !== undefined && (!validStatuses.has(body.status) || systemOnlyStatuses.has(body.status))) return json(response, 422, { error: "status cannot be set manually" });
     const allowed = [
       "title", "description", "category", "priority", "status", "project_id", "submitter_name", "submitter_email",
@@ -2016,7 +2193,9 @@ const server = createServer((request, response) => {
   route(request, response).catch((error) => {
     console.error(error);
     const status = Number(error?.status) || 500;
-    if (!response.headersSent) json(response, status, {
+    if (!response.headersSent) json(response, status, error instanceof ApprovalConflictError ? {
+      error: error.code, message: error.message, current_snapshot_id: error.currentSnapshotId,
+    } : {
       error: status === 413 ? "request too large" : status < 500 ? error.message : "internal error",
       code: status < 500 ? error?.code : undefined,
     });

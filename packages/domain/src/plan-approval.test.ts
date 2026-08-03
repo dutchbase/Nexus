@@ -1,9 +1,29 @@
 import { describe, expect, it } from "vitest";
+import { buildApprovedInputSnapshot, type ApprovedInputSnapshot } from "./approval-input-snapshot.ts";
 import { checkPlanApprovalGate } from "./plan-approval.ts";
+
+const materialInput: ApprovedInputSnapshot = {
+  plan: { versionId: "version", version: 1, contentHash: "approved-hash" },
+  ticket: { title: "Approved title" },
+  project: { configVersion: 3, config: { repositoryPath: "/approved/repo", defaultBranch: "main" } },
+  models: { execution: { model: "approved-model", reasoningLevel: "high" } },
+  prompts: [{ phase: "execution", content: "Approved prompt", provenance: [] }],
+  skills: [],
+  policySources: [],
+};
+const snapshot = buildApprovedInputSnapshot(materialInput);
+const approvedSnapshotId = "00000000-0000-4000-8000-000000000001";
 
 const approved = {
   id: "ticket",
+  status: "Plan Approved",
   approved_plan_version_id: "version",
+  approved_input_snapshot_id: approvedSnapshotId,
+  gate_snapshot_id: approvedSnapshotId,
+  snapshot_ticket_id: "ticket",
+  snapshot_plan_version_id: "version",
+  snapshot_material_input: snapshot.materialInput,
+  snapshot_input_hash: snapshot.inputHash,
   gate_plan_version_id: "version",
   current_version_id: "version",
   approved_plan_hash: "approved-hash",
@@ -27,5 +47,35 @@ describe("plan approval gate", () => {
       .toMatchObject({ valid: false, code: "plan_approval_required" });
     expect(await checkPlanApprovalGate(clientWith({ ...approved, current_version_id: "new-version" }), "ticket"))
       .toMatchObject({ valid: false, code: "plan_approval_stale" });
+    expect(await checkPlanApprovalGate(clientWith({ ...approved, status: "Cancelled" }), "ticket"))
+      .toMatchObject({ valid: false, code: "plan_approval_status_invalid" });
+    expect(await checkPlanApprovalGate(clientWith({ ...approved, snapshot_plan_version_id: "other-version" }), "ticket"))
+      .toMatchObject({ valid: false, code: "approved_snapshot_mismatch" });
+  });
+
+  it("keeps the exact approved snapshot authorized from queueing through the worker recheck", async () => {
+    const rows = [approved, { ...approved, status: "Execution Queued" }];
+    const client = { query: async () => ({ rows: [rows.shift()] }) } as any;
+
+    const beforeQueue = await checkPlanApprovalGate(client, "ticket");
+    const workerRecheck = await checkPlanApprovalGate(client, "ticket", approvedSnapshotId);
+
+    expect(beforeQueue).toMatchObject({ valid: true, approvedInputSnapshot: { id: approvedSnapshotId, inputHash: snapshot.inputHash } });
+    expect(workerRecheck).toMatchObject({ valid: true, approvedInputSnapshot: { id: approvedSnapshotId, inputHash: snapshot.inputHash }, planVersion: { id: "version" } });
+  });
+
+  it("rejects stale queued work and a snapshot whose material no longer matches its hash", async () => {
+    expect(await checkPlanApprovalGate(clientWith(approved), "ticket", "00000000-0000-4000-8000-000000000002"))
+      .toMatchObject({ valid: false, code: "approved_snapshot_stale" });
+    expect(await checkPlanApprovalGate(clientWith({
+      ...approved,
+      snapshot_material_input: { ...snapshot.materialInput, ticket: { title: "Tampered title" } },
+    }), "ticket"))
+      .toMatchObject({ valid: false, code: "approved_snapshot_hash_mismatch" });
+  });
+
+  it.each(["", "not-a-uuid"])("rejects a malformed queued snapshot id %j instead of falling back to the current approval", async (queuedSnapshotId) => {
+    expect(await checkPlanApprovalGate(clientWith(approved), "ticket", queuedSnapshotId))
+      .toMatchObject({ valid: false, code: "approved_snapshot_id_invalid" });
   });
 });

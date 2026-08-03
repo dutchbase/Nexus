@@ -448,32 +448,33 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
   }
 }
 
-const requiredPlanHeadings = [
-  "# Implementation Plan", "## 1. Summary", "## 2. Problem Definition", "## 3. Current Behaviour",
-  "## 4. Expected Behaviour", "## 5. Relevant Architecture", "## 6. Relevant Files",
-  "## 7. Proposed Changes", "## 8. Implementation Steps", "## 9. Database or Migration Changes",
-  "## 10. Testing Strategy", "## 11. Security Considerations", "## 12. Performance Considerations",
-  "## 13. Risks and Edge Cases", "## 14. Rollback Strategy", "## 15. Acceptance Criteria Mapping",
-  "## 16. Out of Scope", "## 17. Open Questions",
+const requiredPlanSections = [
+  "Implementation Plan", "Summary", "Problem Definition", "Current Behaviour", "Expected Behaviour",
+  "Relevant Architecture", "Relevant Files", "Proposed Changes", "Implementation Steps",
+  "Database or Migration Changes", "Testing Strategy", "Security Considerations",
+  "Performance Considerations", "Risks and Edge Cases", "Rollback Strategy",
+  "Acceptance Criteria Mapping", "Out of Scope", "Open Questions",
 ] as const;
 
 export function parsePlanMarkdown(markdown: string) {
-  const headings = markdown.split(/\r?\n/).filter((line) => /^#{1,2} /.test(line.trim())).map((line) => line.trim());
-  const mismatchIndex = headings.length !== requiredPlanHeadings.length
-    ? Math.min(headings.length, requiredPlanHeadings.length)
-    // ponytail: startsWith, not ===, so a heading like "# Implementation
-    // Plan — DCC-1001: ..." (model adds a descriptive suffix) still counts —
-    // only order/count/prefix are structural, trailing text is harmless.
-    : requiredPlanHeadings.findIndex((heading, index) => !headings[index]?.startsWith(heading));
-  if (mismatchIndex !== -1) {
-    // ponytail: name the actual mismatch instead of a generic message, so a
-    // failed run is diagnosable without re-running the (costly) CLI call.
-    throw new Error(
-      `invalid_plan_structure: expected the complete ordered 17-section implementation plan ` +
-      `(got ${headings.length} headings, expected ${requiredPlanHeadings.length}; ` +
-      `first mismatch at position ${mismatchIndex + 1}: expected "${requiredPlanHeadings[mismatchIndex] ?? "<end>"}", ` +
-      `got "${headings[mismatchIndex] ?? "<end>"}")`,
-    );
+  const normalize = (heading: string) => heading.toLowerCase()
+    .replace(/^\s*\d+\s*(?:[^\p{L}\p{N}\s]+)?\s*/u, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const headings = markdown.split(/\r?\n/)
+    .map((line) => line.trim().match(/^#{1,6}\s+(.+?)\s*#*\s*$/)?.[1])
+    .filter((heading): heading is string => Boolean(heading))
+    .map(normalize);
+  const counts = requiredPlanSections.map((section) => headings.filter((heading) => {
+    const normalized = normalize(section);
+    return heading === normalized || heading.startsWith(`${normalized} `);
+  }).length);
+  const missing = requiredPlanSections.filter((_, index) => counts[index] === 0);
+  const duplicates = requiredPlanSections.filter((_, index) => counts[index] > 1);
+  if (missing.length || duplicates.length) {
+    const problems = [
+      missing.length && `missing sections: ${missing.join(", ")}`,
+      duplicates.length && `duplicate sections: ${duplicates.join(", ")}`,
+    ].filter(Boolean).join("; ");
+    throw new Error(`invalid_plan_structure: ${problems}`);
   }
   return markdown.endsWith("\n") ? markdown : `${markdown}\n`;
 }

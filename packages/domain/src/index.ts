@@ -1,6 +1,7 @@
 import type pg from "pg";
 import { inTransaction, pool } from "@dcc/database";
 export * from "./prompts.ts";
+export * from "./approval-input-snapshot.ts";
 export * from "./plan-approval.ts";
 export * from "./pull-request.ts";
 export * from "./pull-request-sync.ts";

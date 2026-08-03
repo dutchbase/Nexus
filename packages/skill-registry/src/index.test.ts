@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { materializeSkillBundle, skillsForPhase, snapshotSkillSet, type ResolvedSkill } from "./index.ts";
+import { materializeSkillBundle, resolveSkills, SkillResolutionError, skillsForPhase, snapshotSkillSet, type ResolvedSkill } from "./index.ts";
 
 const directories: string[] = [];
 
@@ -59,5 +59,50 @@ describe("skill bundles", () => {
     directories.push(root);
     const bundle = await materializeSkillBundle("00000000-0000-0000-0000-000000000000", [], root);
     await expect(access(bundle.additionalDirectory)).resolves.toBeUndefined();
+  });
+});
+
+describe("approval skill policy", () => {
+  const skill = {
+    id: "secure", slug: "secure", name: "Secure", filesystem_path: "secure/SKILL.md",
+    enabled: true, version: "1", configuration_json: {},
+  };
+
+  test("rejects exclusion of an automatic skill when ticket overrides are disabled", () => {
+    expect(() => resolveSkills([
+      { skill, skillId: skill.id, source: "project_automatic", allowTicketOverride: false },
+      { skill, skillId: skill.id, source: "ticket_excluded" },
+    ], "project", "planning")).toThrow(SkillResolutionError);
+  });
+
+  test("excludes an automatic skill when ticket overrides are enabled", () => {
+    expect(resolveSkills([
+      { skill, skillId: skill.id, source: "project_automatic", allowTicketOverride: true },
+      { skill, skillId: skill.id, source: "ticket_excluded" },
+    ], "project", "planning")).toEqual([]);
+  });
+
+  test("does not mistake an explicit selection for an override", () => {
+    expect(resolveSkills([
+      { skill, skillId: skill.id, source: "project_automatic", allowTicketOverride: false },
+      { skill, skillId: skill.id, source: "ticket_selected" },
+    ], "project", "planning")[0]?.resolution_sources).toEqual(["project_automatic", "ticket_selected"]);
+  });
+
+  test("does not allow a ticket exclusion to remove a required project skill", () => {
+    expect(resolveSkills([
+      { skill, skillId: skill.id, source: "project_required", allowTicketOverride: true },
+      { skill, skillId: skill.id, source: "ticket_excluded" },
+    ], "project", "planning")[0]?.resolution_sources).toEqual(["project_required"]);
+  });
+
+  test.each([
+    [null, "missing"],
+    [{ ...skill, enabled: false }, "disabled"],
+    [{ ...skill, configuration_json: { allowed_phases: ["execution"] } }, "incompatible"],
+  ])("fails closed when a required skill is %s", (requiredSkill, reason) => {
+    expect(() => resolveSkills([
+      { skill: requiredSkill, skillId: skill.id, slug: skill.slug, source: "project_required" },
+    ], "project", "planning")).toThrow(`Skill "secure" is ${reason}`);
   });
 });

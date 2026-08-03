@@ -134,11 +134,11 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         function renderSkills(){
           const selected=toggles.filter(input=>input.checked);
           chips.replaceChildren(...selected.map(input=>{
-            const auto=input.dataset.auto!==undefined;
+            const project=input.dataset.project!==undefined,auto=input.dataset.auto!==undefined,required=input.dataset.required!==undefined;
             const chip=document.createElement("span");chip.className="skill-chip";chip.dataset.skillChip=input.value;chip.dataset.slug=input.dataset.slug;
-            chip.title=(auto?"Automatically added by project":"Selected on this ticket")+" · "+input.dataset.path;
+            chip.title=(required?"Required by project":auto?"Automatically added by project":"Selected on this ticket")+" · "+input.dataset.path;
             chip.append(document.createTextNode(input.dataset.name+" "));
-            if(auto){const tag=document.createElement("small");tag.textContent="auto";chip.append(tag)}
+            if(project&&input.dataset.overridable===undefined){const tag=document.createElement("small");tag.textContent=input.dataset.badge;chip.append(tag)}
             else{const remove=document.createElement("button");remove.type="button";remove.dataset.removeSkill=input.value;remove.setAttribute("aria-label","Remove "+input.dataset.name);remove.textContent="×";chip.append(remove)}
             return chip;
           }));
@@ -166,8 +166,9 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(response.ok)location.reload();else alert((await response.json()).error);
         });
         async function persistSkills(){
-          const skill_ids=toggles.filter(input=>input.checked&&!input.disabled).map(input=>input.value);
-          const response=await fetch("/api/admin/tickets/"+ticketId+"/skills",{method:"PUT",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({skill_ids})});
+          const skill_ids=toggles.filter(input=>input.checked&&input.dataset.project===undefined).map(input=>input.value);
+          const excluded_skill_ids=toggles.filter(input=>!input.checked&&input.dataset.overridable!==undefined).map(input=>input.value);
+          const response=await fetch("/api/admin/tickets/"+ticketId+"/skills",{method:"PUT",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({skill_ids,excluded_skill_ids})});
           if(!response.ok){const result=await response.json();alert(result.error)}
         }
         toggles.forEach(input=>input.addEventListener("change",()=>{renderSkills();persistSkills()}));
