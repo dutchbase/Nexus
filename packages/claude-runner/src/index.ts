@@ -378,6 +378,10 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     let pending = "";
     let stderr = "";
     let eventWrites = Promise.resolve();
+    let logWrites = Promise.resolve();
+    const appendLog = (text: string) => {
+      logWrites = logWrites.then(() => appendFile(input.logPath, text));
+    };
     let terminationTimer: NodeJS.Timeout | undefined;
     let outcome: "running" | "timeout" | "cancelled" = "running";
     const stop = (reason: "timeout" | "cancelled") => {
@@ -391,7 +395,7 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     input.signal?.addEventListener("abort", abort, { once: true });
     child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
-      void appendFile(input.logPath, text);
+      appendLog(text);
       pending += text;
       const lines = pending.split(/\r?\n/);
       pending = lines.pop() ?? "";
@@ -407,14 +411,14 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     child.stderr.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       stderr += text;
-      void appendFile(input.logPath, text);
+      appendLog(text);
     });
     child.on("error", reject);
     child.on("close", (code) => {
       clearTimeout(timeout);
       if (terminationTimer) clearTimeout(terminationTimer);
       input.signal?.removeEventListener("abort", abort);
-      eventWrites.then(() => {
+      Promise.all([eventWrites, logWrites]).then(() => {
         if (outcome === "cancelled") {
           reject(new ClaudeExecutionError("Claude execution was cancelled", code ?? 1, "execution_cancelled"));
         } else if (outcome === "timeout" || code === 124) {

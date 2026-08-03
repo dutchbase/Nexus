@@ -1,11 +1,12 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
 import { clientIpOf, csrfMatches, secureCookieAttributes, securityHeaders, validateWebRuntime } from "./security.ts";
-import { mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { pool, inTransaction } from "@dcc/database";
+import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
 import {
   AiConfigurationError, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
   globalPromptTypes, enqueueNotification, promptContentHash,
@@ -37,7 +38,9 @@ import * as operatePage from "./pages/operate.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const { production, trustedProxyHops } = validateWebRuntime();
-const uploadRoot = resolve(process.env.DCC_DATA_DIR ?? "data", "uploads");
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
+const dataRoot = artifactDataRoot(REPO_ROOT);
+const legacyDataRoot = legacyArtifactDataRoot(REPO_ROOT);
 const lockoutThreshold = 5;
 const lockoutWindowMinutes = 15;
 const sessionHours = 8;
@@ -476,17 +479,41 @@ async function upload(request: IncomingMessage, response: ServerResponse) {
   if (!bytes.length || bytes.length > maxUploadBytes) return json(response, 413, { error: "upload too large" });
   const sniffed = sniffImage(bytes);
   if (!sniffed) return json(response, 415, { error: "only PNG and JPEG images are accepted" });
-  const filename = `${randomUUID()}${sniffed.extension}`;
-  await mkdir(uploadRoot, { recursive: true });
-  const path = resolve(uploadRoot, filename);
-  await writeFile(path, bytes, { flag: "wx" });
-  const originalName = /filename="([^"]*)"/i.exec(raw.subarray(0, headerEnd).toString("utf8"))?.[1] ?? null;
-  const row = (await pool.query(
-    `INSERT INTO uploads (storage_path,original_name,media_type,size_bytes) VALUES ($1,$2,$3,$4) RETURNING *`,
-    [path, originalName ? originalName.slice(0, 255) : null, sniffed.mediaType, bytes.length],
-  )).rows[0];
-  await pool.query("INSERT INTO attachments (upload_id) VALUES ($1)", [row.id]);
-  json(response, 201, { upload_id: row.id, reference: `/uploads/${row.id}` });
+  const artifactId = randomUUID();
+  const staged = await stageArtifact({
+    root: dataRoot, id: artifactId, storagePath: `uploads/${artifactId}${sniffed.extension}`, content: bytes,
+  });
+  let registered = false;
+  try {
+    const originalName = /filename="([^"]*)"/i.exec(raw.subarray(0, headerEnd).toString("utf8"))?.[1] ?? null;
+    const row = await inTransaction(async (client) => {
+      const upload = (await client.query(
+        `INSERT INTO uploads (storage_path,original_name,media_type,size_bytes) VALUES ($1,$2,$3,$4) RETURNING *`,
+        [staged.storagePath, originalName ? originalName.slice(0, 255) : null, sniffed.mediaType, bytes.length],
+      )).rows[0];
+      await client.query(
+        `INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,upload_id)
+         VALUES ($1,$2,'upload','staged',now() + interval '1 hour',$3)`,
+        [artifactId, staged.relativePath, upload.id],
+      );
+      await client.query("INSERT INTO attachments (upload_id) VALUES ($1)", [upload.id]);
+      return upload;
+    });
+    registered = true;
+    await inTransaction(async (client) => {
+        if (!(await client.query("SELECT id FROM artifacts WHERE id=$1 AND status='staged' FOR UPDATE", [artifactId])).rowCount) throw new Error("artifact is no longer staged");
+        const finalized = await finalizeArtifact(staged);
+        if (!(await client.query(
+          `UPDATE artifacts SET status='finalized',sha256=$2,finalized_at=now(),expires_at=NULL
+           WHERE id=$1 AND status='staged'`,
+          [artifactId, finalized.sha256],
+        )).rowCount) throw new Error("artifact is no longer staged");
+    });
+    json(response, 201, { upload_id: row.id, reference: `/uploads/${row.id}` });
+  } catch (error) {
+    if (!registered) await rm(staged.stagedPath, { force: true });
+    throw error;
+  }
 }
 
 function normalizeFields(fields: any[]) {
@@ -562,7 +589,7 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
   return html(response, 404, adminPage(url.pathname, "Page not found", "<h1>Page not found</h1><p>Page not found.</p>", metrics, session.username));
 }
 
-async function adminApi(request: IncomingMessage, response: ServerResponse, url: URL, session: any) {
+export async function adminApi(request: IncomingMessage, response: ServerResponse, url: URL, session: any) {
   if (request.method === "GET" && url.pathname === "/api/admin/session") return json(response, 200, { user: { id: session.user_id, username: session.username, role: session.role } });
   if (request.method === "POST" && url.pathname === "/api/admin/logout") {
     await pool.query("UPDATE admin_sessions SET invalidated_at = now() WHERE id = $1", [session.id]);
@@ -1715,13 +1742,21 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
   const runLogMatch = url.pathname.match(/^\/api\/admin\/runs\/([0-9a-f-]+)\/log$/i);
   if (runLogMatch && request.method === "GET") {
     const row = (await pool.query(
-      `SELECT ar.id,ar.metadata_json->>'log_path' log_path FROM agent_runs ar
-       JOIN execution_attempts ea ON ea.agent_run_id=ar.id WHERE ar.id=$1`,
+      `SELECT ar.id,a.id artifact_id,a.storage_path,a.status,a.storage_root FROM agent_runs ar
+       JOIN artifacts a ON a.agent_run_id=ar.id AND a.artifact_type='execution_log' AND a.status IN ('staged','finalized')
+       WHERE ar.id=$1`,
       [runLogMatch[1]],
     )).rows[0];
     if (!row) return json(response, 404, { error: "execution log not found" });
-    const content = row.log_path ? await readFile(row.log_path, "utf8").catch(() => "") : "";
-    return json(response, 200, { run_id: row.id, content });
+    try {
+      const root = row.storage_root === "legacy" ? legacyDataRoot : dataRoot;
+      const content = await (row.status === "staged"
+        ? readStagedArtifact(root, row.artifact_id).catch(() => readArtifact(root, row.storage_path))
+        : readArtifact(root, row.storage_path)).then((content) => content.toString("utf8"));
+      return json(response, 200, { run_id: row.id, content });
+    } catch {
+      return json(response, 404, { error: "execution log not found" });
+    }
   }
   const runCancelMatch = url.pathname.match(/^\/api\/admin\/runs\/([0-9a-f-]+)\/cancel$/i);
   const attemptCancelMatch = url.pathname.match(/^\/api\/admin\/execution-attempts\/([0-9a-f-]+)\/cancel$/i);
@@ -1947,7 +1982,7 @@ async function route(request: IncomingMessage, response: ServerResponse) {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/api/health")) {
     if (url.pathname === "/") { response.writeHead(302, { location: "/login" }); return response.end(); }
-    try { await pool.query("SELECT 1"); return json(response, 200, { status: "ok", database: "ok", web: "ok" }); }
+    try { const health = await pool.query("SELECT current_database() AS name, (pg_control_system()).system_identifier AS system_identifier"); const database = health.rows[0]; return json(response, 200, { status: "ok", database: "ok", web: "ok", database_identity: createHash("sha256").update(`${database.name}|${database.system_identifier}`).digest("hex") }); }
     catch { return json(response, 503, { status: "degraded", database: "unavailable", web: "ok" }); }
   }
   if (request.method === "GET" && url.pathname === "/login") return html(response, 200, loginPage());
@@ -1988,4 +2023,4 @@ const server = createServer((request, response) => {
     else response.end();
   });
 });
-server.listen(port, process.env.HOST ?? "0.0.0.0", () => console.log(`web listening on ${port}`));
+if (process.env.NODE_ENV !== "test") server.listen(port, process.env.HOST ?? "0.0.0.0", () => console.log(`web listening on ${port}`));
