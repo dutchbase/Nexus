@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { clientIpOf, csrfMatches, secureCookieAttributes, securityHeaders, validateWebRuntime } from "./security.ts";
 import { rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, resolve } from "node:path";
@@ -7,12 +8,14 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
 import {
-  AiConfigurationError, approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
-  globalPromptTypes, enqueueNotification, importGithubPullRequests, promptContentHash, PullRequestMergeError,
-  resolveAiConfiguration, setPullRequestTicketStatus, syncOpenPullRequests, syncPullRequest, validateAiSelection, type AiPhase,
+  AiConfigurationError, buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
+  globalPromptTypes, enqueueNotification, promptContentHash,
+  resolveAiConfiguration, setPullRequestTicketStatus, validateAiSelection, type AiPhase,
 } from "@dcc/domain";
-import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
-import { mergeBranch } from "../../../packages/github-provider/src/index.ts";
+import {
+  mergeNotificationConfiguration, parseNotificationConfiguration, parseNotificationConfigurationPatch,
+  safeNotificationProvider,
+} from "../../../packages/notification-provider/src/index.ts";
 import {
   resolveSkills, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
 } from "../../../packages/skill-registry/src/index.ts";
@@ -34,7 +37,7 @@ import * as auditPage from "./pages/audit.ts";
 import * as operatePage from "./pages/operate.ts";
 
 const port = Number(process.env.PORT ?? 3000);
-const production = process.env.NODE_ENV === "production";
+const { production, trustedProxyHops } = validateWebRuntime();
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const dataRoot = artifactDataRoot(REPO_ROOT);
 const legacyDataRoot = legacyArtifactDataRoot(REPO_ROOT);
@@ -233,12 +236,12 @@ async function promptInputsFor(ticket: any, phase: "planning" | "execution", app
 }
 
 function json(response: ServerResponse, status: number, body: unknown, headers: Record<string, string | string[]> = {}) {
-  response.writeHead(status, { "content-type": "application/json; charset=utf-8", ...(headers as Record<string, string | string[]>) });
+  response.writeHead(status, { "content-type": "application/json; charset=utf-8", ...securityHeaders(), ...(headers as Record<string, string | string[]>) });
   response.end(JSON.stringify(body));
 }
 
 function html(response: ServerResponse, status: number, body: string, headers: Record<string, string> = {}) {
-  response.writeHead(status, { "content-type": "text/html; charset=utf-8", ...headers });
+  response.writeHead(status, { "content-type": "text/html; charset=utf-8", ...securityHeaders(), ...headers });
   response.end(body);
 }
 
@@ -271,31 +274,7 @@ function cookieValue(request: IncomingMessage, name: string) {
 }
 
 function ipOf(request: IncomingMessage) {
-  return request.socket.remoteAddress ?? "unknown";
-}
-
-// A stored literal secret (e.g. a pasted authorization header) is never echoed back;
-// a *reference* (env var name) is not itself a secret and stays visible per §23.5.
-function redactProviderConfig(configuration: Record<string, unknown> | null | undefined) {
-  const { authorization_header, ...rest } = configuration ?? {};
-  return { ...rest, has_authorization_header: Boolean(authorization_header) };
-}
-
-function providerConfigFrom(body: Record<string, unknown>, existing: Record<string, unknown> = {}) {
-  const configuration: Record<string, unknown> = { ...existing };
-  if (body.base_url !== undefined) configuration.base_url = body.base_url || null;
-  if (body.endpoint !== undefined) configuration.endpoint = body.endpoint || null;
-  if (body.timeout_seconds !== undefined) configuration.timeout_seconds = Number(body.timeout_seconds) || 10;
-  if (body.max_attempts !== undefined) configuration.max_attempts = Number(body.max_attempts) || 5;
-  if (body.auth_type !== undefined || body.secret_reference !== undefined) {
-    const existingAuth = (existing.authentication ?? {}) as Record<string, unknown>;
-    configuration.authentication = {
-      type: body.auth_type ?? existingAuth.type ?? "none",
-      secret_reference: body.secret_reference ?? existingAuth.secret_reference ?? null,
-    };
-  }
-  if (body.authorization_header) configuration.authorization_header = body.authorization_header;
-  return configuration;
+  return clientIpOf(request, trustedProxyHops);
 }
 
 async function audit(values: {
@@ -331,7 +310,7 @@ async function requireAdmin(request: IncomingMessage, response: ServerResponse) 
   }
   if (!["GET", "HEAD", "OPTIONS"].includes(request.method ?? "GET")) {
     const csrf = request.headers["x-csrf-token"];
-    if (typeof csrf !== "string" || hash(csrf) !== session.csrf_token_hash) {
+    if (typeof csrf !== "string" || !csrfMatches(csrf, session.csrf_token_hash)) {
       json(response, 403, { error: "invalid CSRF token" });
       return null;
     }
@@ -343,37 +322,39 @@ async function login(request: IncomingMessage, response: ServerResponse) {
   const body = await bodyOf(request);
   const username = typeof body.username === "string" ? body.username : "";
   const password = typeof body.password === "string" ? body.password : "";
+  const ip = ipOf(request);
   const failures = await pool.query(
-    `SELECT count(*)::integer AS count FROM login_attempts
-     WHERE username = $1 AND succeeded = false AND attempted_at > now() - make_interval(mins => $2)`,
-    [username, lockoutWindowMinutes],
+    `SELECT count(*)::integer AS count,
+       COALESCE(ceil(extract(epoch FROM (min(attempted_at) + make_interval(mins => $2) - now()))), 0)::integer AS retry_after_seconds
+     FROM login_attempts
+     WHERE ip_address = $1 AND succeeded = false AND attempted_at > now() - make_interval(mins => $2)`,
+    [ip, lockoutWindowMinutes],
   );
   if (failures.rows[0].count >= lockoutThreshold) {
-    await audit({ actorType: "anonymous", action: "login.failed", entityType: "user", after: { success: false }, metadata: { reason: "locked" }, ip: ipOf(request) });
-    return json(response, 429, { error: "account temporarily locked" });
+    await audit({ actorType: "anonymous", action: "login.failed", entityType: "user", after: { success: false }, metadata: { reason: "throttled" }, ip });
+    return json(response, 429, { error: "too many login attempts", retry_after_seconds: Math.max(1, failures.rows[0].retry_after_seconds) });
   }
   const user = (await pool.query("SELECT * FROM users WHERE username = $1 AND is_active = true", [username])).rows[0];
   const valid = await verifyPassword(user?.password_hash ?? dummyHash, password);
-  await pool.query("INSERT INTO login_attempts (username, succeeded) VALUES ($1, $2)", [username, Boolean(user && valid)]);
+  await pool.query("INSERT INTO login_attempts (username, ip_address, succeeded) VALUES ($1, $2, $3)", [username, ip, Boolean(user && valid)]);
   if (!user || !valid) {
-    await audit({ actorType: "anonymous", action: "login.failed", entityType: "user", after: { success: false }, ip: ipOf(request) });
+    await audit({ actorType: "anonymous", action: "login.failed", entityType: "user", after: { success: false }, ip });
     return json(response, 401, { error: "invalid credentials" });
   }
   const token = randomBytes(32).toString("base64url");
   const csrf = randomBytes(32).toString("base64url");
   await inTransaction(async (client) => {
-    await client.query("DELETE FROM login_attempts WHERE username = $1", [username]);
+    await client.query("DELETE FROM login_attempts WHERE ip_address = $1", [ip]);
     await client.query(
       `INSERT INTO admin_sessions (user_id, token_hash, csrf_token_hash, expires_at)
        VALUES ($1, $2, $3, now() + make_interval(hours => $4))`,
       [user.id, hash(token), hash(csrf), sessionHours],
     );
     await client.query("UPDATE users SET last_login_at = now(), updated_at = now() WHERE id = $1", [user.id]);
-    await audit({ actorType: "admin", actorId: user.id, action: "login", entityType: "user", entityId: user.id, after: { success: true }, ip: ipOf(request) }, client);
+    await audit({ actorType: "admin", actorId: user.id, action: "login", entityType: "user", entityId: user.id, after: { success: true }, ip }, client);
   });
-  const sessionAttributes = [`dcc_session=${token}`, "Path=/", "HttpOnly", "SameSite=Lax", `Max-Age=${sessionHours * 3600}`];
-  const csrfAttributes = [`dcc_csrf=${csrf}`, "Path=/", "SameSite=Lax", `Max-Age=${sessionHours * 3600}`];
-  if (production) { sessionAttributes.push("Secure"); csrfAttributes.push("Secure"); }
+  const sessionAttributes = [`dcc_session=${token}`, "HttpOnly", ...secureCookieAttributes(production), `Max-Age=${sessionHours * 3600}`];
+  const csrfAttributes = [`dcc_csrf=${csrf}`, ...secureCookieAttributes(production), `Max-Age=${sessionHours * 3600}`];
   json(response, 200, { user: { id: user.id, username: user.username, role: user.role }, csrfToken: csrf }, { "set-cookie": [sessionAttributes.join("; "), csrfAttributes.join("; ")] });
 }
 
@@ -613,7 +594,10 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (request.method === "POST" && url.pathname === "/api/admin/logout") {
     await pool.query("UPDATE admin_sessions SET invalidated_at = now() WHERE id = $1", [session.id]);
     await audit({ actorType: "admin", actorId: session.user_id, action: "logout", entityType: "user", entityId: session.user_id, ip: ipOf(request) });
-    return json(response, 200, { ok: true }, { "set-cookie": ["dcc_session=; Path=/; HttpOnly; SameSite=Lax; Max-Age=0", "dcc_csrf=; Path=/; SameSite=Lax; Max-Age=0"] });
+    return json(response, 200, { ok: true }, { "set-cookie": [
+      ["dcc_session=", "HttpOnly", ...secureCookieAttributes(production), "Max-Age=0"].join("; "),
+      ["dcc_csrf=", ...secureCookieAttributes(production), "Max-Age=0"].join("; "),
+    ] });
   }
   if (url.pathname === "/api/admin/pull-requests" && request.method === "GET") {
     const params: any[] = [];
@@ -683,7 +667,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (!pullRequest) return json(response, 404, { error: "pull request not found" });
     const validation = pullRequest.run_metadata?.validation_output ?? {};
     const notifications = (await pool.query(
-      `SELECT nd.*,np.name provider,np.configuration_encrypted_json->>'recipient' recipient
+      `SELECT nd.*,np.name provider
        FROM notification_deliveries nd LEFT JOIN notification_providers np ON np.id=nd.provider_id
        WHERE nd.pull_request_id=$1 OR (nd.pull_request_id IS NULL AND nd.ticket_id=$2)
        ORDER BY nd.created_at DESC`,
@@ -711,37 +695,34 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   }
   if (url.pathname === "/api/admin/notifications/providers" && request.method === "GET") {
     const providers = (await pool.query("SELECT * FROM notification_providers ORDER BY name")).rows;
-    return json(response, 200, {
-      providers: providers.map((provider) => ({ ...provider, configuration_encrypted_json: redactProviderConfig(provider.configuration_encrypted_json) })),
-    });
+    return json(response, 200, { providers: providers.map(safeNotificationProvider) });
   }
   if (url.pathname === "/api/admin/notifications/providers" && request.method === "POST") {
     const body = await bodyOf(request);
     if (!body.name || !body.type) return json(response, 400, { error: "name and type are required" });
+    const configuration = parseNotificationConfiguration(body.configuration);
+    if (!configuration) return json(response, 400, { error: "invalid notification configuration" });
     const result = await pool.query(
       `INSERT INTO notification_providers (name,type,enabled,configuration_encrypted_json) VALUES ($1,$2,$3,$4) RETURNING *`,
-      [body.name, body.type, body.enabled ?? true, providerConfigFrom(body)],
+      [body.name, body.type, body.enabled ?? true, configuration],
     );
-    await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.create", entityType: "notification_provider", entityId: result.rows[0].id, after: { ...result.rows[0], configuration_encrypted_json: redactProviderConfig(result.rows[0].configuration_encrypted_json) }, ip: ipOf(request) });
-    return json(response, 201, { provider: { ...result.rows[0], configuration_encrypted_json: redactProviderConfig(result.rows[0].configuration_encrypted_json) } });
+    await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.create", entityType: "notification_provider", entityId: result.rows[0].id, after: safeNotificationProvider(result.rows[0]), ip: ipOf(request) });
+    return json(response, 201, { provider: safeNotificationProvider(result.rows[0]) });
   }
   const providerMatch = url.pathname.match(/^\/api\/admin\/notifications\/providers\/([0-9a-f-]+)$/i);
   if (providerMatch && request.method === "PATCH") {
     const before = (await pool.query("SELECT * FROM notification_providers WHERE id=$1", [providerMatch[1]])).rows[0];
     if (!before) return json(response, 404, { error: "notification provider not found" });
     const body = await bodyOf(request);
-    const configuration = providerConfigFrom(body, before.configuration_encrypted_json ?? {});
+    const configurationPatch = body.configuration === undefined ? {} : parseNotificationConfigurationPatch(body.configuration);
+    if (!configurationPatch) return json(response, 400, { error: "invalid notification configuration" });
+    const configuration = mergeNotificationConfiguration(before.configuration_encrypted_json, configurationPatch);
     const after = (await pool.query(
       `UPDATE notification_providers SET name=COALESCE($2,name),enabled=COALESCE($3,enabled),configuration_encrypted_json=$4,updated_at=now() WHERE id=$1 RETURNING *`,
       [before.id, body.name ?? null, body.enabled ?? null, configuration],
     )).rows[0];
-    await audit({
-      actorType: "admin", actorId: session.user_id, action: "notification_provider.update", entityType: "notification_provider", entityId: after.id,
-      before: { ...before, configuration_encrypted_json: redactProviderConfig(before.configuration_encrypted_json) },
-      after: { ...after, configuration_encrypted_json: redactProviderConfig(after.configuration_encrypted_json) },
-      ip: ipOf(request),
-    });
-    return json(response, 200, { provider: { ...after, configuration_encrypted_json: redactProviderConfig(after.configuration_encrypted_json) } });
+    await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.update", entityType: "notification_provider", entityId: after.id, before: safeNotificationProvider(before), after: safeNotificationProvider(after), ip: ipOf(request) });
+    return json(response, 200, { provider: safeNotificationProvider(after) });
   }
   const providerTestMatch = url.pathname.match(/^\/api\/admin\/notifications\/providers\/([0-9a-f-]+)\/test$/i);
   if (providerTestMatch && request.method === "POST") {
@@ -758,32 +739,16 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   const notificationRetryMatch = url.pathname.match(/^\/api\/admin\/notifications\/deliveries\/([0-9a-f-]+)\/retry$/i);
   if (notificationRetryMatch && request.method === "POST") {
     const delivery = (await pool.query(
-      `SELECT nd.*,np.type provider_type,np.configuration_encrypted_json
-       FROM notification_deliveries nd LEFT JOIN notification_providers np ON np.id=nd.provider_id
-       WHERE nd.id=$1`,
+      `UPDATE notification_deliveries SET status='queued',next_attempt_at=now(),error_message=NULL,response_status=NULL,updated_at=now() WHERE id=$1 RETURNING *`,
       [notificationRetryMatch[1]],
     )).rows[0];
     if (!delivery) return json(response, 404, { error: "notification delivery not found" });
-    const provider = createNotificationProvider(delivery.provider_type ?? "webhook", delivery.configuration_encrypted_json ?? {});
-    const result = await provider.send(delivery.payload_json);
-    const updated = (await pool.query(
-      `UPDATE notification_deliveries
-       SET attempt_count=COALESCE(attempt_count,0)+1,status=$2,response_status=COALESCE($3,response_status),error_message=$4,
-           sent_at=CASE WHEN $2='sent' THEN now() ELSE sent_at END,
-           next_attempt_at=CASE WHEN $2='failed' THEN now() + interval '2 seconds' * power(2,LEAST(COALESCE(attempt_count,0),8)) ELSE next_attempt_at END,
-           updated_at=now()
-       WHERE id=$1 RETURNING *`,
-      [delivery.id, result.ok ? "sent" : "failed", result.responseStatus, redactNotificationError(result.errorMessage)],
-    )).rows[0];
-    return json(response, 200, { delivery: updated });
+    await audit({ actorType: "admin", actorId: session.user_id, action: "notification_delivery.retry", entityType: "notification_delivery", entityId: delivery.id, after: delivery, ip: ipOf(request) });
+    return json(response, 202, { delivery });
   }
   if (url.pathname === "/api/admin/pull-requests/sync" && request.method === "POST") {
-    // ponytail: the worker already re-syncs every open pull request on a 2.5s
-    // timer loop (apps/worker/src/worker.ts) — there is no job type or table
-    // to enqueue into. Running the same sync function inline here just makes
-    // "Sync all" a manual nudge instead of waiting for the next tick.
-    syncOpenPullRequests().catch((error) => console.error(`Manual pull-request sync failed: ${error instanceof Error ? error.message : "unknown error"}`));
-    return json(response, 202, { ok: true, note: "Sync started. The worker also syncs open pull requests automatically every few seconds." });
+    const job = await enqueueJob({ type: "github.sync_open", payload: { actor_id: session.user_id }, idempotencyKey: `g07:github.sync_open:all:${randomUUID()}` });
+    return json(response, 202, { job });
   }
   if (url.pathname === "/api/admin/settings/ai-review" && request.method === "POST") {
     const body = await bodyOf(request);
@@ -848,17 +813,14 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     )).rows[0];
     if (!pullRequest) return json(response, 404, { error: "pull request not found" });
     if (action === "refresh") {
-      await syncPullRequest(pullRequest.id, "admin", session.user_id);
+      const job = await enqueueJob({ type: "github.sync_one", payload: { actor_id: session.user_id, pull_request_id: pullRequest.id }, idempotencyKey: `g07:github.sync_one:${pullRequest.id}:${randomUUID()}` });
+      return json(response, 202, { job });
     } else if (action === "mark-reviewed") {
       await pool.query("UPDATE pull_requests SET internal_review_state='reviewed',updated_at=now() WHERE id=$1", [pullRequest.id]);
     } else if (action === "approve") {
-      const targetBranch = typeof body.target_branch === "string" ? body.target_branch.trim() : undefined;
-      try {
-        await approveAndMergePullRequest(pool, pullRequest, targetBranch, { type: "admin", id: session.user_id });
-      } catch (error) {
-        if (error instanceof PullRequestMergeError) return json(response, 502, { error: error.message });
-        throw error;
-      }
+      const targetBranch = typeof body.target_branch === "string" && body.target_branch.trim() ? body.target_branch.trim() : undefined;
+      const job = await enqueueJob({ type: "github.merge_pull_request", payload: { actor_id: session.user_id, pull_request_id: pullRequest.id, ...(targetBranch ? { target_branch: targetBranch } : {}) }, idempotencyKey: `g07:github.merge_pull_request:${pullRequest.id}:${randomUUID()}` });
+      return json(response, 202, { job });
     } else if (action === "request-changes") {
       await pool.query("UPDATE pull_requests SET internal_review_state='changes_requested',updated_at=now() WHERE id=$1", [pullRequest.id]);
       await setPullRequestTicketStatus(pullRequest.id, "PR Changes Requested", "Internal changes requested", "admin", session.user_id);
@@ -980,35 +942,20 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const head = typeof body.head === "string" ? body.head.trim() : "";
     const base = typeof body.base === "string" ? body.base.trim() : "";
     if (!head || !base) return json(response, 400, { error: "head and base branch are required" });
-    let result;
-    try { result = await mergeBranch(project.github_owner, project.github_repository, base, head); }
-    catch (error) { return json(response, 502, { error: error instanceof Error ? error.message : "branch merge failed" }); }
-    await audit({ actorType: "admin", actorId: session.user_id, action: "project.merge_branches", entityType: "project", entityId: project.id, metadata: { head, base, outcome: result.outcome }, ip: ipOf(request) });
-    if (result.outcome === "conflict") return json(response, 409, { error: `Merge conflict merging ${head} into ${base}. Resolve manually on GitHub.` });
-    return json(response, 200, { outcome: result.outcome, sha: "sha" in result ? result.sha : null });
+    const job = await enqueueJob({ type: "github.merge_branches", payload: { actor_id: session.user_id, project_id: project.id, head, base }, idempotencyKey: `g07:github.merge_branches:${project.id}:${randomUUID()}` });
+    return json(response, 202, { job });
   }
-  const importAllGithubPullRequestsMatch = url.pathname === "/api/admin/projects/import-github-prs";
-  if (importAllGithubPullRequestsMatch && request.method === "POST") {
-    const projects = (await pool.query(
-      "SELECT * FROM projects WHERE github_owner IS NOT NULL AND github_repository IS NOT NULL",
-    )).rows;
-    let imported = 0;
-    const errors: string[] = [];
-    for (const project of projects) {
-      try { imported += (await importGithubPullRequests(pool, project)).imported; }
-      catch (error) { errors.push(`${project.name}: ${error instanceof Error ? error.message : "import failed"}`); }
-    }
-    return json(response, 200, { imported, projects: projects.length, errors });
+  if (url.pathname === "/api/admin/projects/import-github-prs" && request.method === "POST") {
+    const job = await enqueueJob({ type: "github.import", payload: { actor_id: session.user_id }, idempotencyKey: `g07:github.import:all:${randomUUID()}` });
+    return json(response, 202, { job });
   }
-  const importGithubPullRequestsMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/import-github-prs$/i);
-  if (importGithubPullRequestsMatch && request.method === "POST") {
-    const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [importGithubPullRequestsMatch[1]])).rows[0];
+  const importGithubPrsMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/import-github-prs$/i);
+  if (importGithubPrsMatch && request.method === "POST") {
+    const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [importGithubPrsMatch[1]])).rows[0];
     if (!project) return json(response, 404, { error: "project not found" });
     if (!project.github_owner || !project.github_repository) return json(response, 400, { error: "project has no GitHub repository configured" });
-    let result;
-    try { result = await importGithubPullRequests(pool, project); }
-    catch (error) { return json(response, 502, { error: error instanceof Error ? error.message : "failed to list GitHub pull requests" }); }
-    return json(response, 200, result);
+    const job = await enqueueJob({ type: "github.import", payload: { actor_id: session.user_id, project_id: project.id }, idempotencyKey: `g07:github.import:${project.id}:${randomUUID()}` });
+    return json(response, 202, { job });
   }
   if (url.pathname === "/api/admin/prompts" && request.method === "GET") {
     const projectId = url.searchParams.get("project_id");
@@ -1964,7 +1911,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       pool.query("SELECT * FROM ticket_notes WHERE ticket_id=$1 ORDER BY created_at", [ticket.id]),
       pool.query("SELECT a.*,u.media_type,u.size_bytes FROM attachments a JOIN uploads u ON u.id=a.upload_id WHERE a.ticket_id=$1", [ticket.id]),
       pool.query(
-        `SELECT nd.*,np.name provider,np.configuration_encrypted_json->>'recipient' recipient
+        `SELECT nd.*,np.name provider
          FROM notification_deliveries nd LEFT JOIN notification_providers np ON np.id=nd.provider_id
          WHERE nd.ticket_id=$1 ORDER BY nd.created_at`,
         [ticket.id],

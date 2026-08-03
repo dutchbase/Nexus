@@ -1,5 +1,6 @@
 import { escapeHtml, pool, shortRefs } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
+import { safeNotificationProvider } from "../../../../packages/notification-provider/src/index.ts";
 
 const REQUIRED_EVENTS = [
   "ticket.created", "planning.started", "plan.ready_for_review",
@@ -19,8 +20,9 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
        LEFT JOIN notification_providers np ON np.id=nd.provider_id ORDER BY nd.created_at DESC LIMIT 200`,
     ),
   ]);
-  const whatsapp = providers.rows.find((provider) => provider.type === "whatsapp") ?? null;
-  const webhook = providers.rows.find((provider) => provider.type === "webhook") ?? null;
+  const safeProviders = providers.rows.map(safeNotificationProvider);
+  const whatsapp = safeProviders.find((provider) => provider.type === "whatsapp") ?? null;
+  const webhook = safeProviders.find((provider) => provider.type === "webhook") ?? null;
   const webhookConfig = webhook?.configuration_encrypted_json ?? {};
   const auth = webhookConfig.authentication ?? {};
 
@@ -39,10 +41,9 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         <label class="field"><span>Name</span><input name="name" value="${escapeHtml(webhook?.name ?? "Generic webhook")}" required></label>
         <label class="field"><span>Base URL</span><input name="base_url" value="${escapeHtml(webhookConfig.base_url ?? "")}" placeholder="https://ops-hooks.internal"></label>
         <label class="field"><span>Endpoint</span><input name="endpoint" value="${escapeHtml(webhookConfig.endpoint ?? "")}" placeholder="/dcc"></label>
-        <label class="field"><span>Auth type</span><select name="auth_type"><option value="none"${auth.type === "none" || !auth.type ? " selected" : ""}>None</option><option value="bearer"${auth.type === "bearer" ? " selected" : ""}>Bearer</option><option value="header"${auth.type === "header" ? " selected" : ""}>Header key</option></select></label>
-        <label class="field"><span>Secret reference</span><input name="secret_reference" class="mono" value="${escapeHtml(auth.secret_reference ?? "")}" placeholder="WHATSAPP_SERVER_API_TOKEN"></label>
+        <label class="field"><span>Auth type</span><select name="auth_type"><option value="none"${!auth.type ? " selected" : ""}>None</option><option value="bearer"${auth.type === "bearer" ? " selected" : ""}>Bearer</option><option value="header"${auth.type === "raw" ? " selected" : ""}>Header key</option></select></label>
+        <label class="field"><span>Secret reference</span><input name="secret_reference" class="mono" value="${escapeHtml(auth.secret_reference ?? "")}" placeholder="DCC_NOTIFICATION_SECRET_WEBHOOK_TOKEN"><small>Use an environment variable beginning with DCC_NOTIFICATION_SECRET_.</small></label>
         <label class="field"><span>Timeout (s)</span><input name="timeout_seconds" type="number" value="${webhookConfig.timeout_seconds ?? 10}"></label>
-        <label class="field"><span>Max attempts</span><input name="max_attempts" type="number" value="${webhookConfig.max_attempts ?? 5}"></label>
         <label style="display:flex;gap:9px;align-items:center;font-size:13px;margin:10px 0"><input type="checkbox" name="enabled"${webhook?.enabled ?? true ? " checked" : ""}> Enable provider</label>
         <button class="button primary" type="submit">Save</button>
         <button class="button" type="button" data-test-provider${webhook ? "" : " disabled"}>Send test notification</button>

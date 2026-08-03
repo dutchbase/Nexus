@@ -4,7 +4,6 @@ import { fileURLToPath } from "node:url";
 import { artifactDataRoot } from "../../../../packages/database/src/artifacts.ts";
 import { escapeHtml, pool, shortRef } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
-import { forbiddenClaudeAuthVariables } from "../../../../packages/claude-runner/src/auth-guard.ts";
 import { aiModels, reasoningLevels } from "@dcc/domain";
 
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..", "..");
@@ -48,13 +47,12 @@ function settingsBody(aiReviewSettings: any): string {
     <div style="padding-top:10px">${check("Argon2id password hashing")}${check("Secure + HttpOnly + SameSite session cookie")}${check("CSRF token on every mutating request")}</div>
   </section>`;
 
-  const tokenConfigured = Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN);
   const claude = `<section class="card"><div class="card-body">
     <div class="card-head" style="margin:-18px -18px 14px;border-radius:6px 6px 0 0">Subscription-only authentication</div>
-    <p style="font-size:13px;color:${tokenConfigured ? "var(--t-ok)" : "var(--t-danger)"}">${tokenConfigured ? "CLAUDE_CODE_OAUTH_TOKEN present." : "CLAUDE_CODE_OAUTH_TOKEN not configured."}</p>
-    <p style="font-size:12.5px;color:var(--text3)">Worker-only. No Anthropic API variable is set in any worker environment. There is no fallback path to the API.</p>
+    <p style="font-size:13px;color:var(--text2)">Worker-only credentials are not exposed to the web process.</p>
+    <p style="font-size:12.5px;color:var(--text3)">The worker rejects API authentication variables; there is no fallback path to the API.</p>
     <div class="eyebrow" style="margin-top:14px">Refused environment variables</div>
-    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${forbiddenClaudeAuthVariables.map((name) => `<span class="mono" style="font-size:11px;padding:3px 8px;border-radius:99px;background:var(--s-danger);color:var(--t-danger)">${escapeHtml(name)}</span>`).join("")}</div>
+    <div style="font-size:12.5px;color:var(--text3);margin-top:8px">Anthropic API, Bedrock, Vertex, and Foundry credentials.</div>
     <div class="grid two" style="margin-top:14px">${field("Planning max turns", "40")}${field("Planning timeout (min)", "45")}${field("Execution max turns", "150")}${field("Execution timeout (min)", "180")}</div>
   </div></section>`;
 
@@ -111,13 +109,14 @@ export function backupStatusCards(retentionDays: string | undefined, latest: { s
 }
 
 async function systemBody(): Promise<string> {
-  const [heartbeat, depth, projects, failedJobs, failedDeliveries, failedRuns, latestBackupVerification] = await Promise.all([
+  const [heartbeat, depth, projects, failedJobs, failedDeliveries, failedRuns, sessionCleanup, latestBackupVerification] = await Promise.all([
     pool.query("SELECT MAX(claimed_at) hb, (array_agg(claimed_by ORDER BY claimed_at DESC))[1] worker FROM jobs WHERE claimed_at IS NOT NULL"),
     pool.query("SELECT status, count(*)::int c FROM jobs GROUP BY status"),
     pool.query("SELECT slug, name, repository_path, health_status FROM projects ORDER BY name"),
     pool.query("SELECT id, type, error_json->>'message' message, updated_at FROM jobs WHERE status='failed' ORDER BY updated_at DESC LIMIT 10"),
     pool.query("SELECT id, event_type, error_message, response_status, updated_at FROM notification_deliveries WHERE status='failed' ORDER BY updated_at DESC LIMIT 10"),
     pool.query("SELECT id, run_type, error_code, error_message, finished_at FROM agent_runs WHERE status='failed' ORDER BY finished_at DESC LIMIT 10"),
+    pool.query("SELECT created_at, (metadata_json->>'deleted_count')::integer deleted_count FROM audit_events WHERE action='admin_sessions.cleanup' ORDER BY created_at DESC LIMIT 1"),
     pool.query("SELECT status, verified_at FROM backup_recovery_verifications ORDER BY verified_at DESC LIMIT 1"),
   ]);
 
@@ -128,6 +127,9 @@ async function systemBody(): Promise<string> {
 
   const claudeVersion = process.env.CLAUDE_CODE_VERSION ?? "unknown";
   const claudeCard = statCard("Claude Code", claudeVersion, "subscription auth", claudeVersion === "unknown" ? "muted" : "ok");
+
+  const cleanup = sessionCleanup.rows[0];
+  const cleanupCard = statCard("Session cleanup", cleanup ? String(cleanup.deleted_count) : "not run", cleanup ? `last run ${since(cleanup.created_at)} ago` : "worker has not completed cleanup yet", cleanup ? "ok" : "muted");
 
   const depthByStatus = new Map(depth.rows.map((row) => [row.status, row.c]));
   const running = depthByStatus.get("running") ?? 0;
@@ -181,7 +183,7 @@ async function systemBody(): Promise<string> {
       <div><div class="eyebrow">Observability</div><h1>System health</h1></div>
       <button type="button" class="button" ${preflightDisabled}>Run all preflight checks</button>
     </div>
-    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(230px,1fr));margin-top:16px">${workerCard}${claudeCard}${queueCard}${diskCard}${backupCards}</div>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(230px,1fr));margin-top:16px">${workerCard}${claudeCard}${cleanupCard}${queueCard}${diskCard}${backupCards}</div>
     <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr));margin-top:22px;align-items:start">
       <section class="card" style="margin-top:0"><div class="card-head">Project health</div>${projectRows}</section>
       <section class="card" style="margin-top:0"><div class="card-head">Recent system errors</div>${errorList}</section>

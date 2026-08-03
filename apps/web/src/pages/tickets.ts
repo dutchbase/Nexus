@@ -308,7 +308,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
         [ticket.project_id, ticket.id],
       ),
       pool.query(
-        `SELECT nd.*,np.name provider,np.configuration_encrypted_json->>'recipient' recipient
+        `SELECT nd.*,np.name provider
          FROM notification_deliveries nd LEFT JOIN notification_providers np ON np.id=nd.provider_id
          WHERE nd.ticket_id=$1 ORDER BY nd.created_at DESC`,
         [ticket.id],

@@ -15,7 +15,7 @@ async function deploy({ failSync = false } = {}) {
   const marker = join(directory, "marker");
   await mkdir(bin);
   await Promise.all(["git", "pnpm", "pm2"].map(async (command) => {
-    const script = `#!/bin/sh\necho '${command}' \"$*\" >> \"$DCC_LOG\"\n${command === "pnpm" ? "if [ \"$DCC_FAIL_SYNC\" = 1 ] && [ \"$*\" = 'exec tsx scripts/sync-agent-content.ts' ]; then exit 78; fi\n" : ""}${command === "pm2" ? "if [ \"$*\" = 'restart dcc-webhook' ] && [ ! -f \"$DCC_MARKER\" ]; then exit 79; fi\n" : ""}`;
+    const script = `#!/bin/sh\necho '${command}' \"$*\" >> \"$DCC_LOG\"\n${command === "pnpm" ? "if [ \"$DCC_FAIL_SYNC\" = 1 ] && [ \"$*\" = 'exec tsx scripts/sync-agent-content.ts' ]; then exit 78; fi\n" : ""}${command === "pm2" ? "if [ \"$*\" = 'startOrReload ecosystem.config.cjs --only dcc-webhook --update-env' ] && [ ! -f \"$DCC_MARKER\" ]; then exit 79; fi\n" : ""}`;
     const file = join(bin, command);
     await writeFile(file, script);
     await chmod(file, 0o755);
@@ -41,8 +41,9 @@ describe("Task 8 automation", () => {
       "pnpm install --frozen-lockfile",
       "pnpm --filter database migrate",
       "pnpm exec tsx scripts/sync-agent-content.ts",
-      "pm2 restart dcc-web dcc-worker",
-      "pm2 restart dcc-webhook",
+      "pm2 startOrReload ecosystem.config.cjs --only dcc-web --update-env",
+      "pm2 startOrReload ecosystem.config.cjs --only dcc-worker --update-env",
+      "pm2 startOrReload ecosystem.config.cjs --only dcc-webhook --update-env",
       "",
     ].join("\n"));
     expect(result.marker).toBe("0");

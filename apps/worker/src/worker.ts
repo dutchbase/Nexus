@@ -33,6 +33,10 @@ import { persistConflictResolutionSuccess } from "./conflict-resolution-success.
 import {
   approvedPhaseSkills, assertExecutionPublicationGate, prReviewSnapshotInput, reviewedMergeBinding,
 } from "./worker-boundary.ts";
+import { runSessionCleanup } from "./security-maintenance.ts";
+import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
+
+if (process.env.DCC_PROCESS_ROLE !== "worker") throw new Error("worker requires DCC_PROCESS_ROLE=worker");
 
 // Resolved relative to this module's own file, not process.cwd() — `pnpm
 // --filter worker dev/start` runs with cwd=apps/worker, so a cwd-relative
@@ -54,6 +58,7 @@ let activeExecutionCancellation: AbortController | null = null;
 let lastPullRequestSync = 0;
 let lastNotificationDelivery = 0;
 let lastGithubImport = 0;
+let lastSessionCleanup = 0;
 
 process.on("SIGTERM", () => { stopping = true; activeExecutionCancellation?.abort(); });
 process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort(); });
@@ -1541,6 +1546,10 @@ async function deliverDueNotification() {
 }
 
 while (!stopping) {
+  if (Date.now() - lastSessionCleanup >= 60_000) {
+    lastSessionCleanup = Date.now();
+    await runSessionCleanup(pool);
+  }
   if (Date.now() - lastPullRequestSync >= 2500) {
     lastPullRequestSync = Date.now();
     await syncOpenPullRequests();
@@ -1563,7 +1572,7 @@ while (!stopping) {
       catch (error) { console.error(`github import failed for ${project.name}:`, error); }
     }
   }
-  let job = await claimJob(workerId, ["project.validate", ...publicationJobTypes]);
+  let job = await claimJob(workerId, ["project.validate", ...publicationJobTypes, ...providerJobTypes]);
   if (!job) {
     const waiting = (await pool.query(
       "SELECT 1 FROM jobs WHERE status='queued' AND type=ANY($1::text[]) LIMIT 1",
@@ -1589,6 +1598,8 @@ while (!stopping) {
         [project.id, result.valid ? "healthy" : result.changedFiles.length ? "repository_dirty" : "invalid"],
       );
       if (!result.valid) throw new Error(result.errors.join("; "));
+    } else if (providerJobTypes.includes(job.type as typeof providerJobTypes[number])) {
+      await runProviderJob(job as Parameters<typeof runProviderJob>[0], pool);
     } else if (publicationJobTypes.includes(job.type)) {
       await retryPublication(job);
     } else if (aiReviewJobTypes.includes(job.type)) {

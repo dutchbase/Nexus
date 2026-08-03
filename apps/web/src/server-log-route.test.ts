@@ -1,5 +1,7 @@
 import { beforeEach, expect, it, vi } from "vitest";
 
+process.env.DCC_PROCESS_ROLE = "web";
+
 const query = vi.fn();
 const readStagedArtifact = vi.fn();
 const readArtifact = vi.fn();
