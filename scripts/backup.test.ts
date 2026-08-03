@@ -60,6 +60,12 @@ identity="\${DCC_TEST_HEALTH_DATABASE_IDENTITY:-1639b9318a3b6e0d3c7ac28cc33e5ceb
 if [ -f "\${DCC_TEST_RESTORE_COMPLETE:-}" ]; then identity="\${DCC_TEST_POST_RESTORE_HEALTH_DATABASE_IDENTITY:-\$identity}"; fi
 printf "{\\"status\\":\\"ok\\",\\"database_identity\\":\\"%s\\"}\n" "$identity"
 `);
+  await shellTool(bin, "mv", `#!/usr/bin/env bash
+set -euo pipefail
+if [ "$DCC_TEST_PUBLISH_RACE" = "true" ]; then mkdir -p "$target"; fi
+if [ "$DCC_TEST_PUBLISH_RACE" = "true" ] && [[ "$*" == *".dcc-restore."* ]]; then mkdir -p "$target"; fi
+exec /bin/mv "$@"
+`);
   await shellTool(bin, "psql", `#!/usr/bin/env bash
 set -euo pipefail
 printf 'psql %s\\n' "$*" >> "$DCC_TEST_COMMAND_LOG"
@@ -88,6 +94,7 @@ fi
     env: {
       ...process.env,
       PATH: `${bin}:${process.env.PATH}`,
+      DCC_TEST_PUBLISH_RACE: "false",
       DATABASE_URL: "postgresql://primary:primary@127.0.0.1:5432/dcc_primary",
       DCC_RESTORE_DATABASE_URL: "postgresql://restore:restore@127.0.0.1:5433/dcc_restore_test",
       DCC_RESTORE_HEALTH_URL: "http://127.0.0.1:39153/api/health",
@@ -326,6 +333,18 @@ describe("backup and recovery drill", () => {
     await expect(readFile(join(test.env.DCC_RESTORE_ROOT!, "data", "artifact.txt"))).rejects.toThrow();
     expect(await readFile(test.commandLog, "utf8")).not.toContain("pg_restore");
   });
+  it("fails the late recovery-root publish race without nesting payloads", async () => {
+    const test = await fixture();
+    expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
+    const backup = await newestBackup(test.backups);
+    const result = run("scripts/restore-drill.sh", [backup], { ...test.env, DCC_TEST_PUBLISH_RACE: "true" });
+    expect(result.status).not.toBe(0);
+    expect(await readdir(test.env.DCC_RESTORE_ROOT!).catch(() => [])).toEqual([]);
+    const log = await readFile(test.commandLog, "utf8");
+    expect(log).toContain("failed");
+    expect(log).not.toContain("passed");
+  });
+
 
   it("rejects checksum-mismatched payloads before restore", async () => {
     const test = await fixture();
