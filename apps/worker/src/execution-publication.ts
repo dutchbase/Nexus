@@ -53,6 +53,17 @@ export async function failExecutionPublication(
   return "failed";
 }
 
+export async function handleExecutionPublicationFailure(
+  error: unknown,
+  fail: (error: Error) => Promise<FailureState>,
+): Promise<void> {
+  const cause = error instanceof Error ? error : new Error(String(error));
+  const state = await fail(cause);
+  if (state === "published") return;
+  if (state === "missing") throw cause;
+  throw new PublicationError(cause.message);
+}
+
 export async function publishExternalResult<T>(input: {
   push: () => Promise<void>;
   find: () => Promise<T | null>;
@@ -65,8 +76,6 @@ export async function publishExternalResult<T>(input: {
     const pullRequest = await input.find() ?? await input.create();
     await input.complete(pullRequest);
   } catch (error) {
-    const cause = error instanceof Error ? error : new Error(String(error));
-    if (await input.fail(cause) === "published") return;
-    throw new PublicationError(cause.message);
+    await handleExecutionPublicationFailure(error, input.fail);
   }
 }

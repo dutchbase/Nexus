@@ -8,6 +8,9 @@ ALTER TABLE notification_deliveries
   ADD COLUMN lease_expires_at timestamptz,
   ADD COLUMN recovery_reason text;
 
+UPDATE jobs SET lease_expires_at=now() WHERE status='running';
+UPDATE notification_deliveries SET lease_expires_at=now() WHERE status='sending';
+
 CREATE TABLE execution_publications (
   id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
   execution_attempt_id uuid NOT NULL UNIQUE REFERENCES execution_attempts(id) ON DELETE RESTRICT,

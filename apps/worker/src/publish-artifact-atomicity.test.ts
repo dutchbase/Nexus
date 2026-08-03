@@ -2,6 +2,7 @@ import { expect, test, vi } from "vitest";
 
 import {
   failExecutionPublication,
+  handleExecutionPublicationFailure,
   PublicationError,
   publishExternalResult,
 } from "./execution-publication.ts";
@@ -47,6 +48,14 @@ test("provider failure records one retryable publication transition", async () =
   expect(state.status).toBe("failed");
   expect(state.history).toEqual(["PR Creation Failed"]);
   expect(state.audits).toEqual(["failed"]);
+});
+
+test.each(["commit/effective validation", "publication intent insert"])("%s failure stays generic when no publication intent exists", async () => {
+  const failure = new Error("pre-intent failure");
+  const fail = vi.fn(async () => "missing" as const);
+
+  await expect(handleExecutionPublicationFailure(failure, fail)).rejects.toBe(failure);
+  expect(fail).toHaveBeenCalledWith(failure);
 });
 
 test("duplicate reconciliation completes the discovered pull request without creating another", async () => {

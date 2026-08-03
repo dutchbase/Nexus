@@ -30,7 +30,7 @@ import {
   type ResolutionSource, type SkillCandidate, type ResolvedSkill, type SnapshottedSkill,
 } from "@dcc/skill-registry";
 import { resultCommitAfterSuccessfulExecution, runPrivateExecution } from "./execution-handoff.ts";
-import { failExecutionPublication, PublicationError, publishExternalResult } from "./execution-publication.ts";
+import { failExecutionPublication, handleExecutionPublicationFailure, PublicationError, publishExternalResult } from "./execution-publication.ts";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
 import {
@@ -1062,8 +1062,8 @@ async function publishExecutionAttempt(input: {
     // A blocked commit never produced one; a failed *push* must keep its local
     // commit (PRD §28.9) so the retry can resume without re-invoking Claude.
     if (!blocked) {
-      if (await failPublication(err) === "published") return;
-      throw new PublicationError(err.message);
+      await handleExecutionPublicationFailure(err, failPublication);
+      return;
     }
     await lease.run(() => pool.query(
       `UPDATE execution_attempts SET validation_status='failed',completed_at=now(),result_commit=NULL WHERE id=$1`,

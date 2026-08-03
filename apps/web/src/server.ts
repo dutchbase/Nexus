@@ -1425,7 +1425,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const type = url.searchParams.get("type");
     if (type) { params.push(type); where.push(`type=$${params.length}`); }
     const [jobs, capacity] = await Promise.all([pool.query(
-      `SELECT * FROM jobs ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC LIMIT 200`,
+      `SELECT *,id AS attempt_id FROM jobs ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC LIMIT 200`,
       params,
     ), pool.query("SELECT count(*)::int observed_running FROM jobs WHERE status='running'")]);
     return json(response, 200, { jobs: jobs.rows, capacity: { configured: 1, observed_running: capacity.rows[0]?.observed_running ?? 0 } });

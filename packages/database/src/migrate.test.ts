@@ -590,12 +590,15 @@ integration("migrate", () => {
       const planId = (await client.query("INSERT INTO plans (ticket_id) VALUES ($1) RETURNING id", [ticketId])).rows[0].id;
       const planVersionId = (await client.query("INSERT INTO plan_versions (plan_id,version,content_markdown,content_hash) VALUES ($1,1,$q$x$q$,encode(digest($q$x$q$,$q$sha256$q$),$q$hex$q$)) RETURNING id", [planId])).rows[0].id;
       const executionAttemptId = (await client.query("INSERT INTO execution_attempts (ticket_id,plan_version_id,attempt_number) VALUES ($1,$2,1) RETURNING id", [ticketId, planVersionId])).rows[0].id;
+      const secondExecutionAttemptId = (await client.query("INSERT INTO execution_attempts (ticket_id,plan_version_id,attempt_number) VALUES ($1,$2,2) RETURNING id", [ticketId, planVersionId])).rows[0].id;
       const publicationJobId = (await client.query("INSERT INTO jobs (type,idempotency_key) VALUES ($q$workflow$q$,$q$workflow-publication-job$q$) RETURNING id")).rows[0].id;
       const pullRequestId = (await client.query("INSERT INTO pull_requests (project_id) VALUES ($1) RETURNING id", [projectId])).rows[0].id;
       const publicationId = (await client.query("INSERT INTO execution_publications (execution_attempt_id,idempotency_key,last_job_id,pull_request_id) VALUES ($1,$q$workflow-publication$q$,$2,$3) RETURNING id", [executionAttemptId, publicationJobId, pullRequestId])).rows[0].id;
       expect((await client.query("SELECT status,attempt_count FROM execution_publications WHERE id=$1", [publicationId])).rows[0]).toEqual({ status: "pending", attempt_count: 0 });
       await expect(client.query("INSERT INTO execution_publications (execution_attempt_id,idempotency_key) VALUES ($1,$q$workflow-second-key$q$)", [executionAttemptId])).rejects.toThrow();
-      await expect(client.query("INSERT INTO execution_publications (execution_attempt_id,idempotency_key) VALUES (gen_random_uuid(),$q$workflow-publication$q$)")).rejects.toThrow();
+      await expect(client.query("INSERT INTO execution_publications (execution_attempt_id,idempotency_key) VALUES ($1,$q$workflow-publication$q$)", [secondExecutionAttemptId])).rejects.toMatchObject({
+        code: "23505", constraint: "execution_publications_idempotency_key_key",
+      });
       await expect(client.query("UPDATE execution_publications SET status=$q$invalid$q$ WHERE id=$1", [publicationId])).rejects.toThrow();
       await client.query("DELETE FROM jobs WHERE id=$1", [publicationJobId]);
       await client.query("DELETE FROM pull_requests WHERE id=$1", [pullRequestId]);
@@ -603,6 +606,32 @@ integration("migrate", () => {
       await expect(client.query("DELETE FROM execution_attempts WHERE id=$1", [executionAttemptId])).rejects.toThrow();
     } finally {
       await client.end();
+    }
+  });
+
+  it("makes live pre-migration jobs and deliveries immediately recoverable", async () => {
+    await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
+    await rm(join(migrationDirectory, "037_workflow_state.sql"));
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const providerId = (await client.query("INSERT INTO notification_providers (name,type) VALUES ($q$legacy-live$q$,$q$test$q$) RETURNING id")).rows[0].id;
+      await client.query("INSERT INTO jobs (type,status,idempotency_key) VALUES ($q$workflow$q$,$q$running$q$,$q$legacy-running$q$)");
+      await client.query("INSERT INTO notification_deliveries (provider_id,status) VALUES ($1,$q$sending$q$)", [providerId]);
+    } finally {
+      await client.end();
+    }
+
+    await cp(new URL("../migrations/037_workflow_state.sql", import.meta.url), join(migrationDirectory, "037_workflow_state.sql"));
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const verify = new pg.Client({ connectionString: testDatabaseUrl });
+    await verify.connect();
+    try {
+      expect((await verify.query("SELECT lease_expires_at <= now() AS recoverable FROM jobs WHERE idempotency_key=$q$legacy-running$q$")).rows[0]).toEqual({ recoverable: true });
+      expect((await verify.query("SELECT lease_expires_at <= now() AS recoverable FROM notification_deliveries WHERE status=$q$sending$q$")).rows[0]).toEqual({ recoverable: true });
+    } finally {
+      await verify.end();
     }
   });
 });

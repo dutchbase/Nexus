@@ -46,7 +46,9 @@ test("queue reports sequential capacity and the running job's workflow state", a
 test("jobs API returns the observed running count with jobs", async () => {
   query.mockImplementation(async (sql?: string) => {
     if (!sql) return { rows: [] };
-    if (sql.includes("SELECT * FROM jobs")) return { rows: [job] };
+    if (sql.includes("FROM jobs") && !sql.includes("count(*)")) {
+      return { rows: [{ ...job, ...(sql.includes("id AS attempt_id") ? { attempt_id: job.id } : {}) }] };
+    }
     if (sql.includes("count(*)") && sql.includes("status='running'")) return { rows: [{ observed_running: 1 }] };
     throw new Error(`unexpected query: ${sql}`);
   });
@@ -55,6 +57,6 @@ test("jobs API returns the observed running count with jobs", async () => {
   await adminApi({ method: "GET" } as any, response, new URL("http://test/api/admin/jobs"), { user_id: "admin" });
 
   expect(JSON.parse(response.end.mock.calls[0][0])).toMatchObject({
-    jobs: [job], capacity: { configured: 1, observed_running: 1 },
+    jobs: [{ ...job, attempt_id: job.id }], capacity: { configured: 1, observed_running: 1 },
   });
 });

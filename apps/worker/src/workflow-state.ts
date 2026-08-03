@@ -32,7 +32,7 @@ async function transitionTicket(
 }
 
 async function reconcileJob(client: Client, job: Job, errorCode: string, message: string) {
-  if (errorCode === "worker_lease_expired" && (job.type === "execution.run" || job.type === "pull-request.retry")) {
+  if (errorCode === "worker_lease_expired" && ["execution.run", "execution.repair", "pull-request.retry"].includes(job.type)) {
     const attemptId = job.payload_json.execution_attempt_id;
     if (typeof attemptId === "string") {
       const publication = await failExecutionPublication(client, {
@@ -41,6 +41,13 @@ async function reconcileJob(client: Client, job: Job, errorCode: string, message
         errorMessage: message,
         reason: "Worker lease expired during pull-request publication",
       });
+      if (publication === "published") {
+        await client.query(
+          "UPDATE jobs SET status='completed',completed_at=now(),error_json=NULL,updated_at=now() WHERE id=$1",
+          [job.id],
+        );
+        job.status = "completed";
+      }
       if (publication !== "missing") return;
     }
   }
