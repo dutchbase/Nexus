@@ -78,6 +78,18 @@ test("requires Claude versions that support strict sandbox allowlists", () => {
 });
 
 describe("buildPlanningArguments", () => {
+  test("builds a ten-turn read-only PR review invocation", () => {
+    const args = buildPlanningArguments({
+      ...invocation,
+      task: "Review the supplied immutable PR diff first, then inspect the checked-out repository.",
+      tools: ["Read", "Glob", "Grep"],
+      maxTurns: 10,
+    });
+
+    expect(args).toEqual(expect.arrayContaining(["--tools", "Read,Glob,Grep", "--max-turns", "10"]));
+    expect(args).not.toContain("Bash");
+  });
+
   test("uses the supplied restricted tool list", () => {
     expect(buildPlanningArguments({ ...invocation, tools: ["Read", "Glob", "Grep"] })).toContain("Read,Glob,Grep");
   });
