@@ -157,8 +157,12 @@ test.each(["execution.run", "execution.repair", "pull-request.retry"])("complete
   expect(query.mock.calls.some(([sql]) => (sql as string).includes("UPDATE tickets"))).toBe(false);
 });
 
-test("does not complete a recovered repair from an older job's published publication", async () => {
+test("fails a recovered repair whose publication belongs to an older job", async () => {
   let jobStatus = "failed";
+  let runStatus = "running";
+  let attemptStatus = "completed";
+  let ticketStatus = "PR Ready for Review";
+  const history: string[] = [];
   const query = vi.fn(async (sql: string): Promise<Result> => {
     if (sql.includes("UPDATE jobs j") && sql.includes("lease_expires_at <= now()")) return { rows: [{
       id: "job-2", type: "execution.repair", status: "failed",
@@ -170,6 +174,14 @@ test("does not complete a recovered repair from an older job's published publica
       agent_run_id: "run-1", plan_version_id: "plan-1",
     }], rowCount: 1 };
     if (sql.includes("UPDATE jobs SET status='completed'")) jobStatus = "completed";
+    if (sql.includes("UPDATE agent_runs")) {
+      runStatus = "failed";
+      return { rows: [{ id: "run-2" }], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE execution_attempts")) attemptStatus = "failed";
+    if (sql.includes("SELECT status FROM tickets")) return { rows: [{ status: ticketStatus }], rowCount: 1 };
+    if (sql.includes("UPDATE tickets SET status=$2")) ticketStatus = "Execution Failed";
+    if (sql.includes("INSERT INTO ticket_status_history")) history.push("Execution Failed");
     return { rows: [], rowCount: 1 };
   });
   const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
@@ -177,9 +189,10 @@ test("does not complete a recovered repair from an older job's published publica
   await recoverExpiredWorkflowState(inTransaction);
 
   expect(jobStatus).toBe("failed");
-  expect(query.mock.calls.some(([sql]) => (sql as string).includes("UPDATE execution_attempts"))).toBe(false);
-  expect(query.mock.calls.some(([sql]) => (sql as string).includes("UPDATE agent_runs"))).toBe(false);
-  expect(query.mock.calls.some(([sql]) => (sql as string).includes("UPDATE tickets"))).toBe(false);
+  expect(runStatus).toBe("failed");
+  expect(attemptStatus).toBe("failed");
+  expect(ticketStatus).toBe("Execution Failed");
+  expect(history).toEqual(["Execution Failed"]);
 });
 
 test("authentication refusal applies the terminal state matrix without duplicate ticket history", async () => {

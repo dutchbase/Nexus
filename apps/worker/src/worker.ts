@@ -30,7 +30,7 @@ import {
   type ResolutionSource, type SkillCandidate, type ResolvedSkill, type SnapshottedSkill,
 } from "@dcc/skill-registry";
 import { resultCommitAfterSuccessfulExecution, runPrivateExecution } from "./execution-handoff.ts";
-import { failExecutionPublication, handleExecutionPublicationFailure, PublicationError, publishExternalResult } from "./execution-publication.ts";
+import { failExecutionPublication, handleExecutionPublicationFailure, prepareExecutionPublication, PublicationError, publishExternalResult } from "./execution-publication.ts";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
 import {
@@ -901,33 +901,11 @@ async function publishExecutionAttempt(input: {
     });
     await lease.assertOwned();
     const publication = await inTransaction(async (client) => {
-      const intent = (await lease.run(() => client.query(
-        `INSERT INTO execution_publications (execution_attempt_id,idempotency_key,status)
-         VALUES ($1,$2,'pending')
-         ON CONFLICT (execution_attempt_id) DO UPDATE
-         SET updated_at=execution_publications.updated_at
-         RETURNING *`,
-        [input.attempt.id, `execution-publication:${input.attempt.id}`],
-      ))).rows[0];
-      if (intent.status === "published") {
-        await lease.run(() => client.query(
-          "UPDATE execution_publications SET last_job_id=$2,updated_at=now() WHERE id=$1 AND status='published'",
-          [intent.id, input.jobId],
-        ));
-        return intent;
-      }
-      await lease.run(() => client.query(
-        "UPDATE execution_attempts SET result_commit=$2,validation_status='validated' WHERE id=$1",
-        [input.attempt.id, commit],
-      ));
-      if (committedNow) {
-        await lease.run(() => client.query(
-          `INSERT INTO audit_events (actor_type,action,entity_type,entity_id,after_json)
-           VALUES ('worker','execution.commit','execution_attempt',$1,$2)`,
-          [input.attempt.id, { commit }],
-        ));
-      }
-      return intent;
+      return prepareExecutionPublication({
+        query: (sql, values) => lease.run(() => client.query(sql, values)),
+      }, {
+        attemptId: input.attempt.id, jobId: input.jobId, commit: commit!, committedNow,
+      });
     });
     if (publication.status === "published") return;
     await inTransaction(async (client) => {

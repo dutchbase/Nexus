@@ -16,3 +16,4 @@ Task 5: complete (commits f3e50ad..15e18a3, review clean)
 Final review: fix wave required — published repair recovery, migration null leases, pre-intent publication failure, attempt_id API, uniqueness test isolation.
 Final review fix wave: complete — all five findings addressed; focused 57 passed/21 DB-backed skipped, typecheck and diff check passed; full suite retained 2 baseline-known failing files.
 Second fix cycle: publication recovery now requires `execution_publications.last_job_id` to match the recovered job; commit pending.
+Corrected publication cycle: complete — older-job publications reopen transactionally for repair, exact-job published recovery remains idempotent, and published-by-other-job failures use generic live/expired execution reconciliation; focused 65 passed/21 DB-backed skipped, typecheck and diff check passed.

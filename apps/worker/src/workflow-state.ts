@@ -48,7 +48,7 @@ async function reconcileJob(client: Client, job: Job, errorCode: string, message
         );
         job.status = "completed";
       }
-      if (publication !== "missing") return;
+      if (publication === "published" || publication === "failed") return;
     }
   }
   const run = (await client.query(

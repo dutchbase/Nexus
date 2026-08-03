@@ -3,6 +3,44 @@ export class PublicationError extends Error {}
 export type FailureState = "failed" | "published" | "published_by_other_job" | "missing";
 type Client = { query: (sql: string, values?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> };
 
+export async function prepareExecutionPublication(
+  client: Client,
+  input: { attemptId: string; jobId: string; commit: string; committedNow: boolean },
+) {
+  const intent = (await client.query(
+    `INSERT INTO execution_publications (execution_attempt_id,idempotency_key,status)
+     VALUES ($1,$2,'pending')
+     ON CONFLICT (execution_attempt_id) DO UPDATE
+     SET updated_at=execution_publications.updated_at
+     RETURNING *`,
+    [input.attemptId, `execution-publication:${input.attemptId}`],
+  )).rows[0];
+  if (intent.status === "published" && intent.last_job_id === input.jobId) return intent;
+
+  await client.query(
+    "UPDATE execution_attempts SET result_commit=$2,validation_status='validated' WHERE id=$1",
+    [input.attemptId, input.commit],
+  );
+  if (input.committedNow) {
+    await client.query(
+      `INSERT INTO audit_events (actor_type,action,entity_type,entity_id,after_json)
+       VALUES ('worker','execution.commit','execution_attempt',$1,$2)`,
+      [input.attemptId, { commit: input.commit }],
+    );
+  }
+  if (intent.status !== "published") return intent;
+
+  const reset = await client.query(
+    `UPDATE execution_publications
+     SET status='pending',last_job_id=NULL,error_message=NULL,published_at=NULL,updated_at=now()
+     WHERE id=$1 AND status='published' AND last_job_id IS DISTINCT FROM $2
+     RETURNING *`,
+    [intent.id, input.jobId],
+  );
+  if (reset.rowCount !== 1) throw new Error("published execution belongs to the current job");
+  return reset.rows[0];
+}
+
 export async function failExecutionPublication(
   client: Client,
   input: { attemptId: string; jobId: string; errorMessage: string; reason: string },
@@ -60,7 +98,7 @@ export async function handleExecutionPublicationFailure(
   const cause = error instanceof Error ? error : new Error(String(error));
   const state = await fail(cause);
   if (state === "published") return;
-  if (state === "missing") throw cause;
+  if (state === "missing" || state === "published_by_other_job") throw cause;
   throw new PublicationError(cause.message);
 }
 
