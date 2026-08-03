@@ -1537,8 +1537,8 @@ while (!stopping) {
     else console.error(error instanceof Error ? error.message : "job failed");
     if (error instanceof ClaudeExecutionError && error.code === "execution_cancelled") {
       await pool.query(
-        `UPDATE jobs SET status='cancelled',completed_at=now(),claimed_by=NULL,lease_expires_at=NULL,updated_at=now()
-         WHERE id=$1 AND claimed_by=$2 AND lease_expires_at > now()`,
+        `UPDATE jobs SET status='cancelled',completed_at=now(),updated_at=now()
+         WHERE id=$1 AND claimed_by=$2`,
         [job.id, workerId],
       );
     } else {
