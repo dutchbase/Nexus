@@ -54,7 +54,16 @@ export async function failExecutionPublication(
   )).rows[0];
   if (!publication) return "missing";
   if (publication.status === "published") return publication.last_job_id === input.jobId ? "published" : "published_by_other_job";
-  if (publication.status === "failed") return "failed";
+  if (publication.status === "failed") {
+    if (!input.preserveRetryable) return "failed";
+    const reopened = await client.query(
+      `UPDATE execution_publications
+       SET status='pending',last_job_id=NULL,error_message=NULL,published_at=NULL,updated_at=now()
+       WHERE id=$1 AND status='failed' RETURNING id`,
+      [publication.id],
+    );
+    return reopened.rowCount === 1 ? "retryable" : "failed";
+  }
   if (input.preserveRetryable) return "retryable";
 
   const transitioned = await client.query(

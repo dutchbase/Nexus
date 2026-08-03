@@ -177,6 +177,75 @@ test.each(
   expect(history).toEqual(["Execution Queued"]);
 });
 
+test.each(["execution.run", "execution.repair", "pull-request.retry"])("reopens a requeued %s failed publication and reconciles its workflow state", async (type) => {
+  let publicationStatus = "failed";
+  let publicationOwner: string | null = "job-0";
+  let publicationError: string | null = "provider failed";
+  let publicationPublishedAt: string | null = "2026-08-03T17:00:00Z";
+  let runStatus = "running";
+  let attemptStatus = "validated";
+  let ticketStatus = "PR Creation Failed";
+  const query = vi.fn(async (sql: string): Promise<Result> => {
+    if (sql.includes("UPDATE jobs j") && sql.includes("lease_expires_at <= now()")) return { rows: [{
+      id: "job-1", type, status: "queued",
+      payload_json: { ticket_id: "ticket-1", execution_attempt_id: "attempt-1" },
+    }], rowCount: 1 };
+    if (sql.includes("UPDATE notification_deliveries nd")) return { rows: [], rowCount: 0 };
+    if (sql.includes("FROM execution_publications ep")) return { rows: [{
+      id: "publication-1", status: publicationStatus, last_job_id: publicationOwner, ticket_id: "ticket-1",
+      agent_run_id: "run-1", plan_version_id: "plan-1",
+    }], rowCount: 1 };
+    if (sql.includes("SET status='pending',last_job_id=NULL,error_message=NULL,published_at=NULL")) {
+      publicationStatus = "pending";
+      publicationOwner = null;
+      publicationError = null;
+      publicationPublishedAt = null;
+      return { rows: [{ id: "publication-1" }], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE agent_runs")) {
+      runStatus = "failed";
+      return { rows: [{ id: "run-1" }], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE execution_attempts")) attemptStatus = "queued";
+    if (sql.includes("SELECT status FROM tickets")) return { rows: [{ status: ticketStatus }], rowCount: 1 };
+    if (sql.includes("UPDATE tickets SET status=$2")) ticketStatus = "Execution Queued";
+    return { rows: [], rowCount: 1 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+
+  await recoverExpiredWorkflowState(inTransaction);
+
+  expect(publicationStatus).toBe("pending");
+  expect(publicationOwner).toBeNull();
+  expect(publicationError).toBeNull();
+  expect(publicationPublishedAt).toBeNull();
+  expect(runStatus).toBe("failed");
+  expect(attemptStatus).toBe("queued");
+  expect(ticketStatus).toBe("Execution Queued");
+});
+
+test.each(["execution.run", "execution.repair", "pull-request.retry"])("does not reopen a terminal %s failed publication", async (type) => {
+  let publicationStatus = "failed";
+  const query = vi.fn(async (sql: string): Promise<Result> => {
+    if (sql.includes("UPDATE jobs j") && sql.includes("lease_expires_at <= now()")) return { rows: [{
+      id: "job-1", type, status: "failed",
+      payload_json: { ticket_id: "ticket-1", execution_attempt_id: "attempt-1" },
+    }], rowCount: 1 };
+    if (sql.includes("UPDATE notification_deliveries nd")) return { rows: [], rowCount: 0 };
+    if (sql.includes("FROM execution_publications ep")) return { rows: [{
+      id: "publication-1", status: publicationStatus, last_job_id: "job-1", ticket_id: "ticket-1",
+      agent_run_id: "run-1", plan_version_id: "plan-1",
+    }], rowCount: 1 };
+    if (sql.includes("SET status='pending'")) publicationStatus = "pending";
+    return { rows: [], rowCount: 1 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+
+  await recoverExpiredWorkflowState(inTransaction);
+
+  expect(publicationStatus).toBe("failed");
+});
+
 test.each(
   ["execution.run", "execution.repair", "pull-request.retry"].flatMap((type) =>
     ["failed", "queued"].map((status) => [type, status] as const),
