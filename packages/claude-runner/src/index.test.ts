@@ -63,6 +63,15 @@ describe("parsePlanMarkdown", () => {
     expect(parsePlanMarkdown(markdown)).toBe(`${markdown}\n`);
   });
 
+  test("accepts comma and em dash after leading section numbers with or without whitespace", () => {
+    const headings = planSections.map((section, index) =>
+      `## ${index + 1}${[", ", " — ", ",", "—"][index % 4]}${section}`,
+    );
+    const markdown = headings.map((heading) => `${heading}\nContent`).join("\n\n");
+
+    expect(parsePlanMarkdown(markdown)).toBe(`${markdown}\n`);
+  });
+
   test("reports missing semantic sections", () => {
     const markdown = planMarkdown(planSections.filter((heading) => heading !== "Rollback Strategy"));
 

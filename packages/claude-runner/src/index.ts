@@ -458,7 +458,7 @@ const requiredPlanSections = [
 
 export function parsePlanMarkdown(markdown: string) {
   const normalize = (heading: string) => heading.toLowerCase()
-    .replace(/^\s*\d+\s*[.)\-:]*\s*/, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+    .replace(/^\s*\d+\s*(?:[^\p{L}\p{N}\s]+)?\s*/u, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
   const headings = markdown.split(/\r?\n/)
     .map((line) => line.trim().match(/^#{1,6}\s+(.+?)\s*#*\s*$/)?.[1])
     .filter((heading): heading is string => Boolean(heading))
