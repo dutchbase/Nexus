@@ -38,7 +38,8 @@ import {
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
 import {
-  LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, withContainedLeaseHeartbeat, withLeaseHeartbeat, type LeaseGuard,
+  LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch,
+  withContainedLeaseHeartbeat, withLeaseHeartbeat, type LeaseGuard,
 } from "./workflow-state.ts";
 
 if (process.env.DCC_PROCESS_ROLE !== "worker") throw new Error("worker requires DCC_PROCESS_ROLE=worker");
@@ -299,45 +300,45 @@ async function planningInputs(ticket: any) {
   return { project, ai, skills, skillUnion: unionSkills(skills, executionSkills, repairSkills), promptVersionIds, content };
 }
 
-async function transitionToPlanning(ticketId: string, jobId: string, runId: string) {
+async function transitionToPlanning(ticketId: string, jobId: string, runId: string, lease: LeaseGuard) {
   await inTransaction(async (client) => {
     const ticket = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticketId])).rows[0];
     if (!ticket) throw new Error("ticket not found");
-    await client.query("UPDATE tickets SET status='Planning',updated_at=now() WHERE id=$1", [ticketId]);
-    await client.query(
+    await lease.run(() => client.query("UPDATE tickets SET status='Planning',updated_at=now() WHERE id=$1", [ticketId]));
+    await lease.run(() => client.query(
       `INSERT INTO ticket_status_history
        (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
        VALUES ($1,$2,'Planning','Planning job started','worker',$3,$4)`,
       [ticketId, ticket.status, jobId, runId],
-    );
-    await enqueueNotification(client, "planning.started", ticketId, runId, { runId });
+    ));
+    await enqueueNotification(client, "planning.started", ticketId, runId, { runId }, lease.assertOwned);
   });
 }
 
 async function storePlan(input: {
   ticket: any; jobId: string; runId: string; sessionId: string; promptSnapshotId: string; markdown: string;
-}) {
+}, lease: LeaseGuard) {
   return inTransaction(async (client) => {
-    const plan = (await client.query(
+    const plan = (await lease.run(() => client.query(
       `INSERT INTO plans (ticket_id,planning_session_id) VALUES ($1,$2) RETURNING *`,
       [input.ticket.id, input.sessionId],
-    )).rows[0];
-    const version = (await client.query(
+    ))).rows[0];
+    const version = (await lease.run(() => client.query(
       `INSERT INTO plan_versions
        (plan_id,version,content_markdown,content_hash,prompt_snapshot_id,agent_run_id)
        VALUES ($1,1,$2,$3,$4,$5) RETURNING *`,
       [plan.id, input.markdown, hash(input.markdown), input.promptSnapshotId, input.runId],
-    )).rows[0];
-    await client.query("UPDATE plans SET current_version_id=$2,updated_at=now() WHERE id=$1", [plan.id, version.id]);
+    ))).rows[0];
+    await lease.run(() => client.query("UPDATE plans SET current_version_id=$2,updated_at=now() WHERE id=$1", [plan.id, version.id]));
     const ticket = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
-    await client.query("UPDATE tickets SET status='Plan Ready for Review',updated_at=now() WHERE id=$1", [input.ticket.id]);
-    await client.query(
+    await lease.run(() => client.query("UPDATE tickets SET status='Plan Ready for Review',updated_at=now() WHERE id=$1", [input.ticket.id]));
+    await lease.run(() => client.query(
       `INSERT INTO ticket_status_history
        (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
        VALUES ($1,$2,'Plan Ready for Review','Planning completed','worker',$3,$4,$5)`,
       [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
-    );
-    await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId });
+    ));
+    await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId }, lease.assertOwned);
     return { plan, version };
   });
 }
@@ -345,39 +346,39 @@ async function storePlan(input: {
 async function storeRevisedPlan(input: {
   ticket: any; plan: any; previousVersion: any; jobId: string; runId: string;
   promptSnapshotId: string; markdown: string;
-}) {
+}, lease: LeaseGuard) {
   const versionNumber = Number(input.previousVersion.version) + 1;
   return inTransaction(async (client) => {
     const locked = (await client.query("SELECT * FROM plans WHERE id=$1 FOR UPDATE", [input.plan.id])).rows[0];
     if (!locked || locked.current_version_id !== input.previousVersion.id) {
       throw new Error("plan changed while revision was running");
     }
-    const version = (await client.query(
+    const version = (await lease.run(() => client.query(
       `INSERT INTO plan_versions
        (plan_id,version,content_markdown,content_hash,prompt_snapshot_id,agent_run_id)
        VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
       [locked.id, versionNumber, input.markdown, hash(input.markdown), input.promptSnapshotId, input.runId],
-    )).rows[0];
-    await client.query(
+    ))).rows[0];
+    await lease.run(() => client.query(
       "UPDATE plans SET current_version_id=$2,potentially_stale=false,updated_at=now() WHERE id=$1",
       [locked.id, version.id],
-    );
+    ));
     const ticket = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
-    await client.query(
+    await lease.run(() => client.query(
       `UPDATE tickets SET status='Plan Ready for Review',approved_plan_version_id=NULL,
        approved_plan_hash=NULL,approved_ticket_version=NULL,approved_project_config_version=NULL,
        approved_model_config_json=NULL,approved_skill_snapshot_id=NULL,
        approved_prompt_versions_json=NULL,plan_approved_at=NULL,updated_at=now()
        WHERE id=$1`,
       [input.ticket.id],
-    );
-    await client.query(
+    ));
+    await lease.run(() => client.query(
       `INSERT INTO ticket_status_history
        (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
        VALUES ($1,$2,'Plan Ready for Review','Plan revision completed','worker',$3,$4,$5)`,
       [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
-    );
-    await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId });
+    ));
+    await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId }, lease.assertOwned);
     return { version };
   });
 }
@@ -417,36 +418,35 @@ async function runPlanning(job: any, lease: LeaseGuard) {
   // so a revision doesn't need real CLI session continuity — just a fresh id.
   const sessionId = randomUUID();
   const runType = revising ? "plan_revision" : "planning";
-  await lease.assertOwned();
-  await pool.query(
+  await lease.run(() => pool.query(
     `INSERT INTO agent_runs
      (id,ticket_id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
      VALUES ($1,$2,$3,$4,'running',NULL,$5,$6,$7,now(),$8)`,
     [runId, ticket.id, input.project.id, runType, input.ai.model, input.ai.reasoning_level,
       planningStartPath, { job_id: job.id, project_config_version: input.project.config_version, planning_start_path: planningStartPath }],
-  );
-  await transitionToPlanning(ticket.id, job.id, runId);
+  ));
+  await transitionToPlanning(ticket.id, job.id, runId, lease);
 
   const copied = await snapshotSkillSet(input.skillUnion, ["planning", "execution", "repair"]);
-  const skillSnapshot = (await pool.query(
+  const skillSnapshot = (await lease.run(() => pool.query(
     `INSERT INTO skill_snapshots (ticket_id,run_id,skills_json,content_hash) VALUES ($1,$2,$3,$4) RETURNING *`,
     [ticket.id, runId, JSON.stringify(copied.skills), copied.contentHash],
-  )).rows[0];
+  ))).rows[0];
   const completePrompt = revising
     ? `${input.content}\n\n## Plan revision instructions\n\n${revisionInstructions?.content ?? ""}\n\n## Previous approved-for-review plan\n\n${revision.previous_markdown}\n\n## Administrator feedback\n\n${revision.feedback}\n`
     : input.content;
-  const promptSnapshot = await snapshotPrompt({
+  const promptSnapshot = await lease.run(() => snapshotPrompt({
     ticketId: ticket.id, projectId: input.project.id, phase: "planning", content: completePrompt,
     model: input.ai.model, reasoningLevel: input.ai.reasoning_level, skillSnapshotId: skillSnapshot.id,
     metadata: {
       promptVersionIds: input.promptVersionIds, projectConfigVersion: input.project.config_version,
       ticketVersion: ticket.updated_at, runType, planningStartPath,
     },
-  });
-  await pool.query(
+  }));
+  await lease.run(() => pool.query(
     "UPDATE agent_runs SET prompt_snapshot_id=$2,skill_snapshot_id=$3 WHERE id=$1",
     [runId, promptSnapshot.id, skillSnapshot.id],
-  );
+  ));
 
   const temporary = await mkdtemp(path.join(tmpdir(), "dcc-planning-"));
   let rawMarkdownForDebug: string | undefined;
@@ -470,29 +470,30 @@ async function runPlanning(job: any, lease: LeaseGuard) {
     await lease.assertOwned();
     // Publish the correlation id only after the CLI has logged/completed,
     // so observers cannot see a run before its matching invocation exists.
-    await pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]);
+    await lease.run(() => pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]));
     rawMarkdownForDebug = result.markdown;
     const markdown = parsePlanMarkdown(result.markdown);
-    if (revising) {
-      await storeRevisedPlan({
+    const store = revising
+      ? () => storeRevisedPlan({
         ticket, plan: revision,
         previousVersion: {
           id: job.payload_json.plan_version_id,
           version: revision.previous_version,
         },
         jobId: job.id, runId, promptSnapshotId: promptSnapshot.id, markdown,
-      });
-    } else {
-      await storePlan({ ticket, jobId: job.id, runId, sessionId, promptSnapshotId: promptSnapshot.id, markdown });
-    }
-    await pool.query(
-      `UPDATE agent_runs SET status='completed',finished_at=now(),exit_code=$2,metadata_json=metadata_json || $3::jsonb WHERE id=$1`,
-      [runId, result.exitCode, JSON.stringify({ response: result.raw })],
-    );
+      }, lease)
+      : () => storePlan({ ticket, jobId: job.id, runId, sessionId, promptSnapshotId: promptSnapshot.id, markdown }, lease);
+    await runLeaseFencedBatch(lease, [
+      store,
+      () => pool.query(
+        `UPDATE agent_runs SET status='completed',finished_at=now(),exit_code=$2,metadata_json=metadata_json || $3::jsonb WHERE id=$1`,
+        [runId, result.exitCode, JSON.stringify({ response: result.raw })],
+      ),
+    ]);
   } catch (error) {
     await lease.assertOwned();
     const message = error instanceof Error ? error.message : "planning failed";
-    await pool.query(
+    await lease.run(() => pool.query(
       `UPDATE agent_runs SET status='failed',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4,metadata_json=metadata_json || $5::jsonb WHERE id=$1`,
       [runId, (error as any)?.exitCode ?? 1,
         error instanceof Error && error.message.startsWith("invalid_plan_structure") ? "invalid_plan_structure" : "planning_failed",
@@ -500,7 +501,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
         // ponytail: capture the raw markdown so an invalid_plan_structure
         // failure is diagnosable without re-running the costly CLI call.
         JSON.stringify(rawMarkdownForDebug ? { raw_markdown: rawMarkdownForDebug.slice(0, 8000) } : {})],
-    );
+    ));
     // ponytail: transitionToPlanning() moves the ticket to Planning before
     // invocation; on failure it must land on a state the admin can recover
     // from. "Planning Failed" is a valid status the approve/revision
@@ -509,14 +510,14 @@ async function runPlanning(job: any, lease: LeaseGuard) {
     await inTransaction(async (client) => {
       const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
       if (current?.status !== "Planning") return;
-      await client.query("UPDATE tickets SET status='Planning Failed',updated_at=now() WHERE id=$1", [ticket.id]);
-      await client.query(
+      await lease.run(() => client.query("UPDATE tickets SET status='Planning Failed',updated_at=now() WHERE id=$1", [ticket.id]));
+      await lease.run(() => client.query(
         `INSERT INTO ticket_status_history
          (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
          VALUES ($1,'Planning','Planning Failed',$2,'worker',$3,$4)`,
         [ticket.id, `Planning job failed: ${message.slice(0, 500)}`, job.id, runId],
-      );
-      await enqueueNotification(client, "planning.failed", ticket.id, runId, { runId });
+      ));
+      await enqueueNotification(client, "planning.failed", ticket.id, runId, { runId }, lease.assertOwned);
     });
     throw error;
   } finally {
@@ -1137,7 +1138,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
       await updatePullRequestBase(owner, repo, pullRequest.number, payload.target_branch);
       await lease.assertOwned();
       pullRequest.base_branch = payload.target_branch;
-      await pool.query("UPDATE pull_requests SET base_branch=$2,updated_at=now() WHERE id=$1", [pullRequest.id, pullRequest.base_branch]);
+      await lease.run(() => pool.query("UPDATE pull_requests SET base_branch=$2,updated_at=now() WHERE id=$1", [pullRequest.id, pullRequest.base_branch]));
     }
     const [owner, repo] = pullRequest.repository.split("/");
     await lease.assertOwned();
@@ -1148,7 +1149,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     }
     if (pullRequest.base_branch !== providerPullRequest.base.ref) {
       pullRequest.base_branch = providerPullRequest.base.ref;
-      await pool.query("UPDATE pull_requests SET base_branch=$2,updated_at=now() WHERE id=$1", [pullRequest.id, pullRequest.base_branch]);
+      await lease.run(() => pool.query("UPDATE pull_requests SET base_branch=$2,updated_at=now() WHERE id=$1", [pullRequest.id, pullRequest.base_branch]));
     }
     reviewWorktree = await createPullRequestReviewWorktree({
       repositoryPath: project.repository_path,
@@ -1169,7 +1170,9 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     ]);
     if (!promptRow.active_version_id || !reviewRubric.active_version_id) throw new Error("pinned PR-review prompts are not synchronized");
 
-    if (!reviewWorktree.diff || !reviewWorktree.baseCommit) throw new Error("immutable pull request review diff is unavailable");
+    const reviewedBaseSha = reviewWorktree.baseCommit;
+    if (!reviewWorktree.diff || !reviewedBaseSha) throw new Error("immutable pull request review diff is unavailable");
+    const immutableReview = reviewWorktree;
     const diff = reviewWorktree.diff;
 
     const prompt = renderPrReviewPrompt(promptRow.content ?? "", {
@@ -1193,17 +1196,16 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     // invocation fail deterministically at this exact step forever, permanently
     // defeating retry/backoff for this job type.
     const sessionId = randomUUID();
-    await lease.assertOwned();
-    await pool.query(
+    await lease.run(() => pool.query(
       `INSERT INTO agent_runs
        (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
        VALUES ($1,$2,'pr_ai_review','running',NULL,$3,$4,$5,now(),$6)`,
-      [newRunId, project.id, model, reasoningLevel, reviewWorktree.worktreePath,
+      [newRunId, project.id, model, reasoningLevel, immutableReview.worktreePath,
         { job_id: job.id, pr_ai_review_id: payload.pr_ai_review_id }],
-    );
+    ));
     runId = newRunId;
-    await pool.query("UPDATE pr_ai_reviews SET agent_run_id=$1 WHERE id=$2", [runId, payload.pr_ai_review_id]);
-    const promptSnapshot = await snapshotPrompt(prReviewSnapshotInput({
+    await lease.run(() => pool.query("UPDATE pr_ai_reviews SET agent_run_id=$1 WHERE id=$2", [runId, payload.pr_ai_review_id]));
+    const promptSnapshot = await lease.run(() => snapshotPrompt(prReviewSnapshotInput({
       projectId: project.id,
       content: prompt,
       model,
@@ -1213,11 +1215,11 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
         "global.code-reviewer": reviewRubric.active_version_id,
       },
       pullRequestId: pullRequest.id,
-      reviewedHeadSha: reviewWorktree.headCommit,
+      reviewedHeadSha: immutableReview.headCommit,
       reviewedBaseBranch: pullRequest.base_branch,
-      reviewedBaseSha: reviewWorktree.baseCommit,
-    }));
-    await pool.query("UPDATE agent_runs SET prompt_snapshot_id=$2 WHERE id=$1", [runId, promptSnapshot.id]);
+      reviewedBaseSha,
+    })));
+    await lease.run(() => pool.query("UPDATE agent_runs SET prompt_snapshot_id=$2 WHERE id=$1", [runId, promptSnapshot.id]));
 
     const temporary = await mkdtemp(path.join(tmpdir(), "dcc-pr-review-"));
     try {
@@ -1241,25 +1243,24 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
       // Publish the correlation id only after the CLI has completed, matching
       // runPlanning's same ordering (agent_runs.claude_session_id stays NULL
       // until the invocation this run actually used has finished).
-      await pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]);
+      await lease.run(() => pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]));
 
       const verdict = parsePrReviewVerdict(result.markdown);
 
-      await pool.query(
+      await lease.run(() => pool.query(
         "UPDATE agent_runs SET status='completed',finished_at=now(),exit_code=$2 WHERE id=$1",
         [runId, result.exitCode],
-      );
+      ));
 
       const comment = await lease.run(() => createPullRequestComment(owner, repo, pullRequest.number, result.markdown));
 
-      await lease.assertOwned();
-      await pool.query(
+      await lease.run(() => pool.query(
         `UPDATE pr_ai_reviews SET status=$2,summary=$3,github_comment_url=$4,completed_at=now() WHERE id=$1`,
         [payload.pr_ai_review_id, verdict.verdict === "approved" ? "approved" : "rejected", verdict.summary, comment.html_url],
-      );
+      ));
 
       const mergeBinding = reviewedMergeBinding(
-        payload.mode, verdict.verdict, reviewWorktree.headCommit, pullRequest.base_branch, reviewWorktree.baseCommit,
+        payload.mode, verdict.verdict, immutableReview.headCommit, pullRequest.base_branch, reviewedBaseSha,
       );
       if (mergeBinding) {
         await lease.assertOwned();
@@ -1275,16 +1276,16 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     }
   } catch (error: any) {
     await lease.assertOwned();
-    if (runId) {
-      await pool.query(
+    await runLeaseFencedBatch(lease, [
+      ...(runId ? [() => pool.query(
         "UPDATE agent_runs SET status='failed',finished_at=now(),error_message=$2 WHERE id=$1",
         [runId, error.message],
-      );
-    }
-    await pool.query(
+      )] : []),
+      () => pool.query(
       "UPDATE pr_ai_reviews SET status='error',error_message=$2,completed_at=now() WHERE id=$1",
       [payload.pr_ai_review_id, error.message],
-    );
+      ),
+    ]);
     // ponytail: rethrow so the main loop's failJob()/completeJob() dispatch
     // (which every other job handler relies on) retries or hard-fails this
     // job through the normal jobs-table lifecycle instead of silently
@@ -1315,13 +1316,12 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
     });
     runId = randomUUID();
     const sessionId = randomUUID();
-    await lease.assertOwned();
-    await pool.query(
+    await lease.run(() => pool.query(
       `INSERT INTO agent_runs
        (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
-       VALUES ($1,$2,$3,$4,NULL,$5,$6,$7,now(),$8)`,
+      VALUES ($1,$2,$3,$4,NULL,$5,$6,$7,now(),$8)`,
       [runId, project.id, "pr_follow_up_description", "running", "haiku", "low", project.repository_path, { job_id: job.id, pull_request_id: pullRequest.id }],
-    );
+    ));
     const temporary = await mkdtemp(path.join(tmpdir(), "dcc-follow-up-description-"));
     try {
       const promptFile = path.join(temporary, "follow-up-ticket-prompt.md");
@@ -1336,17 +1336,20 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
       });
       await lease.assertOwned();
       const description = formatFollowUpDescription({ number: pullRequest.number, title: pullRequest.title, url: pullRequest.url }, result.markdown);
-      await pool.query("UPDATE jobs SET payload_json=payload_json || jsonb_build_object($2::text,$3::text),updated_at=now() WHERE id=$1", [job.id, "generated_description", description]);
-      if (payload.ticket_id && payload.initial_description) {
-        await pool.query("UPDATE tickets SET description=$2,updated_at=now() WHERE id=$1 AND description=$3", [payload.ticket_id, description, payload.initial_description]);
-      }
-      await pool.query("UPDATE agent_runs SET status=$2,claude_session_id=$3,finished_at=now(),exit_code=$4 WHERE id=$1", [runId, "completed", sessionId, result.exitCode]);
+      await runLeaseFencedBatch(lease, [
+        () => pool.query("UPDATE jobs SET payload_json=payload_json || jsonb_build_object($2::text,$3::text),updated_at=now() WHERE id=$1", [job.id, "generated_description", description]),
+        ...(payload.ticket_id && payload.initial_description ? [() => pool.query(
+          "UPDATE tickets SET description=$2,updated_at=now() WHERE id=$1 AND description=$3",
+          [payload.ticket_id, description, payload.initial_description],
+        )] : []),
+        () => pool.query("UPDATE agent_runs SET status=$2,claude_session_id=$3,finished_at=now(),exit_code=$4 WHERE id=$1", [runId, "completed", sessionId, result.exitCode]),
+      ]);
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }
   } catch (error) {
     await lease.assertOwned();
-    if (runId) await pool.query("UPDATE agent_runs SET status=$2,finished_at=now(),error_message=$3 WHERE id=$1", [runId, "failed", error instanceof Error ? error.message : "follow-up description failed"]);
+    if (runId) await lease.run(() => pool.query("UPDATE agent_runs SET status=$2,finished_at=now(),error_message=$3 WHERE id=$1", [runId, "failed", error instanceof Error ? error.message : "follow-up description failed"]));
     throw error;
   }
 }

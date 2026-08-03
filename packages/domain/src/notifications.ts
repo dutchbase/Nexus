@@ -37,6 +37,7 @@ export async function enqueueNotification(
   ticketId: string,
   entityId: string,
   options: { runId?: string | null; pullRequestId?: string | null } = {},
+  assertOwned: () => Promise<void> = async () => {},
 ) {
   const row = (await client.query(
     `SELECT t.id,t.ticket_number,t.title,t.status,t.priority,p.id project_id,p.name project_name,
@@ -53,6 +54,7 @@ export async function enqueueNotification(
     project: { id: row.project_id, name: row.project_name },
     run: row.run_id ? row : null,
   });
+  await assertOwned();
   await client.query(
     `INSERT INTO notification_deliveries
        (provider_id,event_type,ticket_id,project_id,run_id,pull_request_id,idempotency_key,payload_json,status,attempt_count)

@@ -408,6 +408,7 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
           try { event = JSON.parse(raw); } catch { event = { type: "unparsed", text: raw }; }
           await input.onEvent({ eventType: String(event?.type ?? "event"), event, raw });
         });
+        void eventWrites.catch(() => undefined);
       }
     });
     child.stderr.on("data", (chunk: Buffer) => {

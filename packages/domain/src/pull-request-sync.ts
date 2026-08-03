@@ -142,6 +142,7 @@ export async function syncOpenPullRequests(assertOwned: () => Promise<void> = as
     try {
       await syncPullRequest(row.id, "worker", undefined, assertOwned);
     } catch (error) {
+      await assertOwned();
       console.error(`Pull-request sync failed for ${row.id}:`, error);
     }
   }

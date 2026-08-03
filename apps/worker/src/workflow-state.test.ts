@@ -173,4 +173,18 @@ test("contains lease loss raised while recording a normal handler failure", asyn
   })).resolves.toBeUndefined();
 });
 
+test("stops a terminal write batch when ownership is lost between writes", async () => {
+  const workflow = await import("./workflow-state.ts") as any;
+  expect(typeof workflow.runLeaseFencedBatch).toBe("function");
+  const renew = vi.fn().mockResolvedValueOnce(true).mockResolvedValueOnce(false);
+  const writes: string[] = [];
+
+  await expect(withLeaseHeartbeat(renew, (lease) => workflow.runLeaseFencedBatch(lease, [
+    async () => { writes.push("first"); },
+    async () => { writes.push("stale-second"); },
+  ]))).rejects.toBeInstanceOf(LeaseLostError);
+
+  expect(writes).toEqual(["first"]);
+});
+
 afterEach(() => vi.useRealTimers());

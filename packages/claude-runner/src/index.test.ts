@@ -366,6 +366,38 @@ node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1], JSON.str
   });
 });
 
+test("observes a rejected execution event write immediately and still rejects the invocation", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-event-rejection-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  await mkdir(path.join(root, ".git"));
+  await writeFile(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '%s\\n' '2.1.220 (Claude Code)'; exit 0; fi
+printf '%s\\n' '{"type":"assistant","message":"event"}'
+sleep 0.2
+`);
+  await chmod(executable, 0o755);
+  const unhandled: unknown[] = [];
+  const onUnhandled = (error: unknown) => { unhandled.push(error); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    await expect(invokeExecutionClaude({
+      ...invocation,
+      claudeExecutable: executable,
+      workingDirectory: root,
+      executionDirectory: root,
+      gitMetadataPaths: [path.join(root, ".git")],
+      logPath: path.join(root, "run.log"),
+      timeoutMs: 1_000,
+      onEvent: async () => { throw new Error("event write failed"); },
+    })).rejects.toThrow("event write failed");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
 test("keeps shell execution behind guarded subagents", () => {
   const args = buildExecutionArguments(executionInvocation, "/settings");
 

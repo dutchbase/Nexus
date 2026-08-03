@@ -223,3 +223,10 @@ export async function withContainedLeaseHeartbeat(
     if (!(error instanceof LeaseLostError)) throw error;
   }
 }
+
+export async function runLeaseFencedBatch(
+  lease: LeaseGuard,
+  actions: Array<() => Promise<unknown>>,
+): Promise<void> {
+  for (const action of actions) await lease.run(action);
+}
