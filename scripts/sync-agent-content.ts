@@ -67,7 +67,7 @@ export async function syncAgentContent(client: QueryClient, catalog: AgentConten
   for (const [promptType, sourceHash] of Object.entries(catalog.prompt_hashes)) {
     if (previous.prompt_hashes?.[promptType] === sourceHash) { promptsPreserved++; continue; }
     const file = (await client.query(
-      `SELECT pf.id,pv.content_hash active_content_hash FROM prompt_files pf LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id WHERE pf.scope='global' AND pf.prompt_type=$1 FOR UPDATE`, [promptType],
+      `SELECT pf.id,pv.content_hash active_content_hash FROM prompt_files pf LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id WHERE pf.scope='global' AND pf.prompt_type=$1 FOR UPDATE OF pf`, [promptType],
     )).rows[0];
     if (file?.active_content_hash === sourceHash) { promptsPreserved++; continue; }
     const promptFile = file ?? (await client.query(
