@@ -38,7 +38,7 @@ import {
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
 import {
-  LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, withLeaseHeartbeat, type LeaseGuard,
+  LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, withContainedLeaseHeartbeat, withLeaseHeartbeat, type LeaseGuard,
 } from "./workflow-state.ts";
 
 if (process.env.DCC_PROCESS_ROLE !== "worker") throw new Error("worker requires DCC_PROCESS_ROLE=worker");
@@ -465,6 +465,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
       maxTurns: Number(input.project.config_json?.planning_max_turns ?? 40),
       oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
       scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
+      signal: lease.signal,
     });
     await lease.assertOwned();
     // Publish the correlation id only after the CLI has logged/completed,
@@ -710,11 +711,11 @@ async function runExecution(job: any, lease: LeaseGuard) {
         onEvent: async ({ eventType, event }: { eventType: string; event: unknown }) => {
           usedAgent ||= isAgentToolEvent(eventType, event);
           sequence += 1;
-          await pool.query(
+          await lease.run(() => pool.query(
             `INSERT INTO agent_run_events (agent_run_id,sequence,event_type,event_json)
              VALUES ($1,$2,$3,$4)`,
             [runId, sequence, eventType, event],
-          );
+          ));
         },
       },
       invoke: invokeExecutionClaude,
@@ -1234,6 +1235,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
         tools: ["Read", "Glob", "Grep"],
         maxTurns: 10,
         oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
+        signal: lease.signal,
       });
       await lease.assertOwned();
       // Publish the correlation id only after the CLI has completed, matching
@@ -1265,6 +1267,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
           pool, pullRequest, undefined, { type: "worker", id: payload.pr_ai_review_id },
           mergeBinding.expectedHeadSha, mergeBinding.expectedBaseBranch,
           mergeBinding.expectedBaseSha,
+          lease.assertOwned,
         );
       }
     } finally {
@@ -1329,6 +1332,7 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
         sessionId, model: "haiku", effort: "low", promptFile,
         skillBundleDir: temporary, workingDirectory: temporary, tools: [], maxTurns: 1,
         oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
+        signal: lease.signal,
       });
       await lease.assertOwned();
       const description = formatFollowUpDescription({ number: pullRequest.number, title: pullRequest.title, url: pullRequest.url }, result.markdown);
@@ -1447,6 +1451,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
         workingDirectory: worktree.worktreePath,
         maxTurns: 10,
         oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
+        signal: lease.signal,
       });
       await lease.assertOwned();
       await pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]);
@@ -1575,7 +1580,7 @@ while (!stopping) {
     await new Promise((resolve) => setTimeout(resolve, 500));
     continue;
   }
-  await withLeaseHeartbeat(() => renewJobLease(job.id, workerId), async (lease) => {
+  await withContainedLeaseHeartbeat(() => renewJobLease(job.id, workerId), async (lease) => {
     try {
       if (job.type === "project.validate") {
       const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [job.payload_json.project_id])).rows[0];

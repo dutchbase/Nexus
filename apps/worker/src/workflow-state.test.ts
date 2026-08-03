@@ -159,4 +159,18 @@ test("fences irreversible actions with a fresh lease check and aborts after owne
   expect(action).toHaveBeenCalledTimes(1);
 });
 
+test("contains lease loss raised while recording a normal handler failure", async () => {
+  const workflow = await import("./workflow-state.ts") as any;
+  expect(typeof workflow.withContainedLeaseHeartbeat).toBe("function");
+  const renew = vi.fn().mockResolvedValue(false);
+
+  await expect(workflow.withContainedLeaseHeartbeat(renew, async (lease: any) => {
+    try {
+      throw new Error("handler failed");
+    } catch {
+      await lease.run(async () => undefined);
+    }
+  })).resolves.toBeUndefined();
+});
+
 afterEach(() => vi.useRealTimers());

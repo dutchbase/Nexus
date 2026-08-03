@@ -289,6 +289,32 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan","session_
   })).resolves.toMatchObject({ markdown: "# Plan" });
 });
 
+test("cancels an in-flight planning process when its ownership signal aborts", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-abort-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const started = path.join(root, "started");
+  await writeFile(executable, `#!/bin/sh
+printf started > ${JSON.stringify(started)}
+sleep 0.2
+printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan"}'
+`);
+  await chmod(executable, 0o755);
+  const controller = new AbortController();
+  const running = invokePlanningClaude({
+    ...invocation,
+    claudeExecutable: executable,
+    workingDirectory: root,
+    signal: controller.signal,
+  });
+  while (true) {
+    try { await access(started); break; } catch { await new Promise((resolve) => setImmediate(resolve)); }
+  }
+  controller.abort();
+
+  await expect(running).rejects.toMatchObject({ name: "AbortError" });
+});
+
 test("invokes execution with a materialized guard outside the worktree", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "claude-execution-"));
   directories.push(root);

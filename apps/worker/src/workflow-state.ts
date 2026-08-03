@@ -212,3 +212,14 @@ export async function withLeaseHeartbeat<T>(
     await renewal;
   }
 }
+
+export async function withContainedLeaseHeartbeat(
+  renew: () => Promise<boolean>,
+  work: (lease: LeaseGuard) => Promise<unknown>,
+): Promise<void> {
+  try {
+    await withLeaseHeartbeat(renew, work);
+  } catch (error) {
+    if (!(error instanceof LeaseLostError)) throw error;
+  }
+}

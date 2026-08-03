@@ -53,7 +53,7 @@ export async function runProviderJob(
 
   if (job.type === "github.sync_open") {
     await assertOwned();
-    await syncOpenPullRequests();
+    await syncOpenPullRequests(assertOwned);
     await assertOwned();
     await audit(db, job, actorId, "github.sync_open", "pull_request", null, {});
     return;
@@ -62,7 +62,7 @@ export async function runProviderJob(
   if (job.type === "github.sync_one") {
     const pullRequestId = required(job.payload_json, "pull_request_id");
     await assertOwned();
-    await syncPullRequest(pullRequestId, "admin", actorId);
+    await syncPullRequest(pullRequestId, "admin", actorId, assertOwned);
     await assertOwned();
     await audit(db, job, actorId, "github.sync_one", "pull_request", pullRequestId, {});
     return;
@@ -81,7 +81,7 @@ export async function runProviderJob(
     let imported = 0;
     for (const project of projects) {
       await assertOwned();
-      imported += (await importGithubPullRequests(db as pg.Pool, project)).imported;
+      imported += (await importGithubPullRequests(db as pg.Pool, project, assertOwned)).imported;
     }
     await assertOwned();
     await audit(db, job, actorId, "github.import", "project", projectId ?? null, { imported });
@@ -95,7 +95,10 @@ export async function runProviderJob(
     const targetBranch = typeof job.payload_json.target_branch === "string" && job.payload_json.target_branch.trim()
       ? job.payload_json.target_branch.trim() : undefined;
     await assertOwned();
-    await approveAndMergePullRequest(db as pg.Pool, pullRequest, targetBranch, { type: "admin", id: actorId });
+    await approveAndMergePullRequest(
+      db as pg.Pool, pullRequest, targetBranch, { type: "admin", id: actorId },
+      undefined, undefined, undefined, assertOwned,
+    );
     await assertOwned();
     await audit(db, job, actorId, "github.merge_pull_request", "pull_request", pullRequestId, {
       ...(targetBranch ? { target_branch: targetBranch } : {}),
