@@ -44,18 +44,26 @@ async function audit(
   );
 }
 
-export async function runProviderJob(job: ProviderJob, db: Database): Promise<void> {
+export async function runProviderJob(
+  job: ProviderJob,
+  db: Database,
+  assertOwned: () => Promise<void> = async () => {},
+): Promise<void> {
   const actorId = required(job.payload_json, "actor_id");
 
   if (job.type === "github.sync_open") {
-    await syncOpenPullRequests();
+    await assertOwned();
+    await syncOpenPullRequests(assertOwned);
+    await assertOwned();
     await audit(db, job, actorId, "github.sync_open", "pull_request", null, {});
     return;
   }
 
   if (job.type === "github.sync_one") {
     const pullRequestId = required(job.payload_json, "pull_request_id");
-    await syncPullRequest(pullRequestId, "admin", actorId);
+    await assertOwned();
+    await syncPullRequest(pullRequestId, "admin", actorId, assertOwned);
+    await assertOwned();
     await audit(db, job, actorId, "github.sync_one", "pull_request", pullRequestId, {});
     return;
   }
@@ -71,7 +79,11 @@ export async function runProviderJob(job: ProviderJob, db: Database): Promise<vo
     )).rows;
     if (projectId && !projects[0]) throw new Error("project not found or has no GitHub repository configured");
     let imported = 0;
-    for (const project of projects) imported += (await importGithubPullRequests(db as pg.Pool, project)).imported;
+    for (const project of projects) {
+      await assertOwned();
+      imported += (await importGithubPullRequests(db as pg.Pool, project, assertOwned)).imported;
+    }
+    await assertOwned();
     await audit(db, job, actorId, "github.import", "project", projectId ?? null, { imported });
     return;
   }
@@ -82,7 +94,12 @@ export async function runProviderJob(job: ProviderJob, db: Database): Promise<vo
     if (!pullRequest) throw new Error("pull request not found");
     const targetBranch = typeof job.payload_json.target_branch === "string" && job.payload_json.target_branch.trim()
       ? job.payload_json.target_branch.trim() : undefined;
-    await approveAndMergePullRequest(db as pg.Pool, pullRequest, targetBranch, { type: "admin", id: actorId });
+    await assertOwned();
+    await approveAndMergePullRequest(
+      db as pg.Pool, pullRequest, targetBranch, { type: "admin", id: actorId },
+      undefined, undefined, undefined, assertOwned,
+    );
+    await assertOwned();
     await audit(db, job, actorId, "github.merge_pull_request", "pull_request", pullRequestId, {
       ...(targetBranch ? { target_branch: targetBranch } : {}),
     });
@@ -94,7 +111,9 @@ export async function runProviderJob(job: ProviderJob, db: Database): Promise<vo
   const base = required(job.payload_json, "base");
   const project = (await db.query("SELECT * FROM projects WHERE id=$1", [projectId])).rows[0];
   if (!project?.github_owner || !project.github_repository) throw new Error("project has no GitHub repository configured");
+  await assertOwned();
   const result = await mergeBranch(project.github_owner, project.github_repository, base, head);
+  await assertOwned();
   await audit(db, job, actorId, "project.merge_branches", "project", projectId, {
     head, base, outcome: result.outcome, ...("sha" in result ? { sha: result.sha } : {}),
   });

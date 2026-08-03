@@ -289,6 +289,32 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan","session_
   })).resolves.toMatchObject({ markdown: "# Plan" });
 });
 
+test("cancels an in-flight planning process when its ownership signal aborts", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-abort-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const started = path.join(root, "started");
+  await writeFile(executable, `#!/bin/sh
+printf started > ${JSON.stringify(started)}
+sleep 0.2
+printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan"}'
+`);
+  await chmod(executable, 0o755);
+  const controller = new AbortController();
+  const running = invokePlanningClaude({
+    ...invocation,
+    claudeExecutable: executable,
+    workingDirectory: root,
+    signal: controller.signal,
+  });
+  while (true) {
+    try { await access(started); break; } catch { await new Promise((resolve) => setImmediate(resolve)); }
+  }
+  controller.abort();
+
+  await expect(running).rejects.toMatchObject({ name: "AbortError" });
+});
+
 test("invokes execution with a materialized guard outside the worktree", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "claude-execution-"));
   directories.push(root);
@@ -338,6 +364,38 @@ node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1], JSON.str
   expect(settings.sandbox).toMatchObject({
     enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false,
   });
+});
+
+test("observes a rejected execution event write immediately and still rejects the invocation", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-event-rejection-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  await mkdir(path.join(root, ".git"));
+  await writeFile(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '%s\\n' '2.1.220 (Claude Code)'; exit 0; fi
+printf '%s\\n' '{"type":"assistant","message":"event"}'
+sleep 0.2
+`);
+  await chmod(executable, 0o755);
+  const unhandled: unknown[] = [];
+  const onUnhandled = (error: unknown) => { unhandled.push(error); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    await expect(invokeExecutionClaude({
+      ...invocation,
+      claudeExecutable: executable,
+      workingDirectory: root,
+      executionDirectory: root,
+      gitMetadataPaths: [path.join(root, ".git")],
+      logPath: path.join(root, "run.log"),
+      timeoutMs: 1_000,
+      onEvent: async () => { throw new Error("event write failed"); },
+    })).rejects.toThrow("event write failed");
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
 });
 
 test("keeps shell execution behind guarded subagents", () => {

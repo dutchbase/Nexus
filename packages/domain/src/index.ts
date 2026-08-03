@@ -79,6 +79,7 @@ export type JobInput = {
   type: string;
   payload: Record<string, unknown>;
   idempotencyKey: string;
+  rerunOf?: string;
   priority?: "low" | "normal" | "high";
   maxAttempts?: number;
   availableAt?: Date;
@@ -86,12 +87,19 @@ export type JobInput = {
 
 export async function enqueueJob(input: JobInput, client?: pg.PoolClient) {
   const db = client ?? pool;
+  if (input.rerunOf) {
+    const source = await db.query(
+      `SELECT 1 FROM jobs WHERE id = $1 AND status IN ('completed', 'failed', 'cancelled', 'blocked_auth', 'blocked_auth_configuration')`,
+      [input.rerunOf],
+    );
+    if (source.rowCount !== 1) throw new Error("rerun source must be terminal");
+  }
   const result = await db.query(
-    `INSERT INTO jobs (type, status, priority, payload_json, idempotency_key, max_attempts, available_at)
-     VALUES ($1, 'queued', $2, $3, $4, $5, COALESCE($6, now()))
+    `INSERT INTO jobs (type, status, priority, payload_json, idempotency_key, max_attempts, available_at, rerun_of)
+     VALUES ($1, 'queued', $2, $3, $4, $5, COALESCE($6, now()), $7)
      ON CONFLICT (idempotency_key) DO UPDATE SET idempotency_key = EXCLUDED.idempotency_key
      RETURNING *`,
-    [input.type, input.priority ?? "normal", input.payload, input.idempotencyKey, input.maxAttempts ?? 3, input.availableAt],
+    [input.type, input.priority ?? "normal", input.payload, input.idempotencyKey, input.maxAttempts ?? 3, input.availableAt, input.rerunOf ?? null],
   );
   return result.rows[0];
 }
@@ -111,6 +119,7 @@ export async function claimJob(workerId: string, supportedTypes: string[]) {
        )
        UPDATE jobs j
        SET status = 'running', claimed_at = now(), claimed_by = $1,
+           lease_expires_at = now() + interval '60 seconds',
            attempt = attempt + 1, updated_at = now()
        FROM candidate
        WHERE j.id = candidate.id AND j.status = 'queued'
@@ -121,24 +130,36 @@ export async function claimJob(workerId: string, supportedTypes: string[]) {
   });
 }
 
-export async function completeJob(id: string, workerId: string) {
-  await pool.query(
-    `UPDATE jobs SET status = 'completed', completed_at = now(), updated_at = now()
-     WHERE id = $1 AND status = 'running' AND claimed_by = $2`,
+export async function renewJobLease(id: string, workerId: string): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE jobs SET lease_expires_at = now() + interval '60 seconds', updated_at = now()
+     WHERE id = $1 AND status = 'running' AND claimed_by = $2 AND lease_expires_at > now()`,
     [id, workerId],
   );
+  return result.rowCount === 1;
 }
 
-export async function failJob(id: string, workerId: string, error: unknown) {
+export async function completeJob(id: string, workerId: string): Promise<boolean> {
+  const result = await pool.query(
+    `UPDATE jobs SET status = 'completed', completed_at = now(), claimed_by = NULL,
+       lease_expires_at = NULL, updated_at = now()
+     WHERE id = $1 AND status = 'running' AND claimed_by = $2 AND lease_expires_at > now()`,
+    [id, workerId],
+  );
+  return result.rowCount === 1;
+}
+
+export async function failJob(id: string, workerId: string, error: unknown): Promise<boolean> {
   const message = error instanceof Error ? error.message : "job failed";
-  await pool.query(
+  const result = await pool.query(
     `UPDATE jobs SET
        status = CASE WHEN attempt < max_attempts THEN 'queued' ELSE 'failed' END,
        available_at = CASE WHEN attempt < max_attempts THEN now() + make_interval(secs => LEAST(300, power(2, attempt)::integer)) ELSE available_at END,
-       claimed_at = NULL, claimed_by = NULL,
+       claimed_at = NULL, claimed_by = NULL, lease_expires_at = NULL,
        completed_at = CASE WHEN attempt < max_attempts THEN NULL ELSE now() END,
        error_json = jsonb_build_object('message', $3::text), updated_at = now()
-     WHERE id = $1 AND status = 'running' AND claimed_by = $2`,
+     WHERE id = $1 AND status = 'running' AND claimed_by = $2 AND lease_expires_at > now()`,
     [id, workerId, message],
   );
+  return result.rowCount === 1;
 }

@@ -1,4 +1,4 @@
-import { expect, test, vi } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
 const syncOpenPullRequests = vi.fn();
 const syncPullRequest = vi.fn();
@@ -15,6 +15,8 @@ vi.mock("@dcc/domain", () => ({
 vi.mock("@dcc/github-provider", () => ({ mergeBranch }));
 
 const { runProviderJob } = await import("./provider-jobs.ts");
+
+beforeEach(() => vi.clearAllMocks());
 
 type Query = { text: string; values?: unknown[] };
 function db(rows: any[] = []) {
@@ -39,6 +41,7 @@ test("records the source job and initiating admin after a pull-request merge", a
 
   expect(approveAndMergePullRequest).toHaveBeenCalledWith(
     database, expect.objectContaining({ id: "pr-1" }), "release", { type: "admin", id: "admin-1" },
+    undefined, undefined, undefined, expect.any(Function),
   );
   expect(database.queries.at(-1)).toEqual(expect.objectContaining({
     values: ["admin", "admin-1", "github.merge_pull_request", "pull_request", "pr-1", {
@@ -110,10 +113,24 @@ test("dispatches sync jobs with their initiating admin", async () => {
     payload_json: { actor_id: "admin-1" },
   }, database as any);
 
-  expect(syncPullRequest).toHaveBeenCalledWith("pr-1", "admin", "admin-1");
-  expect(syncOpenPullRequests).toHaveBeenCalledOnce();
+  expect(syncPullRequest).toHaveBeenCalledWith("pr-1", "admin", "admin-1", expect.any(Function));
+  expect(syncOpenPullRequests).toHaveBeenCalledWith(expect.any(Function));
   expect(database.queries.at(-1)?.values).toEqual([
     "admin", "admin-1", "github.sync_open", "pull_request", null,
     { job_id: "job-5", idempotency_key: "g07:github.sync_open:all:once" },
   ]);
+});
+
+test("fences provider side effects before dispatch", async () => {
+  const database = db([{ id: "pr-1", repository: "acme/widgets", number: 4 }]);
+  const fence = vi.fn().mockRejectedValue(new Error("lease lost"));
+
+  await expect(runProviderJob({
+    id: "job-6",
+    type: "github.merge_pull_request",
+    idempotency_key: "g07:github.merge_pull_request:pr-1:once",
+    payload_json: { actor_id: "admin-1", pull_request_id: "pr-1" },
+  }, database as any, fence)).rejects.toThrow("lease lost");
+
+  expect(approveAndMergePullRequest).not.toHaveBeenCalled();
 });

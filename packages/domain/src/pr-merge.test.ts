@@ -120,3 +120,37 @@ test("readies a remotely draft pull request before merging", async () => {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });
+
+test("stops a merge compound operation when ownership is lost after reading GitHub state", async () => {
+  const requests: string[] = [];
+  let databaseWrites = 0;
+  const server = createServer((incoming, outgoing) => {
+    requests.push(`${incoming.method} ${incoming.url}`);
+    outgoing.setHeader("content-type", "application/json");
+    outgoing.end(JSON.stringify({ draft: false, base: { ref: "main", sha: "base-sha" } }));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no TCP port");
+    process.env.GITHUB_API_BASE_URL = `http://127.0.0.1:${address.port}`;
+    process.env.GITHUB_TOKEN = "test-token";
+    const assertOwned = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValue(new Error("lease lost"));
+
+    await expect(approveAndMergePullRequest(
+      { query: async () => { databaseWrites++; return { rows: [] }; } } as any,
+      { id: "pr-id", repository: "acme/widgets", number: 42, base_branch: "main", is_draft: false },
+      undefined,
+      { type: "worker", id: "review-id" },
+      undefined,
+      undefined,
+      undefined,
+      assertOwned,
+    )).rejects.toThrow("lease lost");
+
+    expect(requests).toEqual(["GET /repos/acme/widgets/pulls/42"]);
+    expect(databaseWrites).toBe(0);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});

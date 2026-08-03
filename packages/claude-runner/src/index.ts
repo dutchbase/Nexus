@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import { assertSubscriptionOnlyEnvironment, ClaudeAuthError } from "./auth-guard.ts";
 export { assertSubscriptionOnlyEnvironment, ClaudeAuthError, forbiddenClaudeAuthVariables } from "./auth-guard.ts";
 
-async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; executable?: string } = {}) {
+async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; executable?: string; signal?: AbortSignal } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "dcc-claude-output-"));
   const stdoutPath = path.join(directory, "stdout");
   const stderrPath = path.join(directory, "stderr");
@@ -17,7 +17,7 @@ async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.P
   try {
     const exitCode = await new Promise<number | null>((resolve, reject) => {
       const child = spawn(options.executable ?? "claude", args, {
-        cwd: options.cwd, env: options.env, stdio: ["ignore", stdoutFile.fd, stderrFile.fd],
+        cwd: options.cwd, env: options.env, stdio: ["ignore", stdoutFile.fd, stderrFile.fd], signal: options.signal,
       });
       child.on("error", reject);
       child.on("close", resolve);
@@ -64,7 +64,7 @@ export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = pro
 export type PlanningInvocation = {
   task: string; sessionId: string; model: string; effort: string; promptFile: string;
   skillBundleDir?: string; pluginDirectories?: readonly string[]; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string; tools?: string[]; claudeExecutable?: string; guardPath?: string;
-  gitMetadataPaths?: string[]; sensitiveEnvironmentVariables?: string[];
+  gitMetadataPaths?: string[]; sensitiveEnvironmentVariables?: string[]; signal?: AbortSignal;
 };
 
 const trustedBashGuard = fileURLToPath(new URL("./bash-guard.mjs", import.meta.url));
@@ -277,7 +277,9 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   assertSubscriptionOnlyEnvironment();
   const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken, AGENT_CONTROL_DISABLE: "1" };
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
-  const result = await runClaude(buildPlanningArguments(input), { cwd: input.workingDirectory, env, executable: input.claudeExecutable });
+  const result = await runClaude(buildPlanningArguments(input), {
+    cwd: input.workingDirectory, env, executable: input.claudeExecutable, signal: input.signal,
+  });
   if (result.exitCode !== 0) {
     throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), { exitCode: result.exitCode });
   }
@@ -406,6 +408,7 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
           try { event = JSON.parse(raw); } catch { event = { type: "unparsed", text: raw }; }
           await input.onEvent({ eventType: String(event?.type ?? "event"), event, raw });
         });
+        void eventWrites.catch(() => undefined);
       }
     });
     child.stderr.on("data", (chunk: Buffer) => {

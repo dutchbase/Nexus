@@ -45,10 +45,11 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     pool.query("SELECT DISTINCT status FROM jobs ORDER BY status"),
     pool.query("SELECT DISTINCT type FROM jobs ORDER BY type"),
     pool.query("SELECT status,count(*)::int c FROM jobs GROUP BY status"),
-    pool.query("SELECT MAX(claimed_at) hb FROM jobs"),
+    pool.query("SELECT MAX(updated_at) hb FROM jobs WHERE status='running'"),
   ]);
 
   const depthByStatus = new Map(depth.rows.map((row) => [row.status, row.c]));
+  const running = depthByStatus.get("running") ?? 0;
   const depthLabel = depth.rows.length
     ? depth.rows.map((row) => `${row.c} ${row.status}`).join(" · ")
     : "0 jobs";
@@ -56,21 +57,30 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   const hbFresh = hb && Date.now() - new Date(hb).getTime() < 5 * 60_000;
   const heartbeatLabel = hb ? `${since(hb)} ago` : "no recent activity";
 
-  const rows = jobs.rows.map((job) => `<div class="ticket-row queue-row">
+  const rows = jobs.rows.map((job) => {
+    const workflow = [
+      job.claimed_by && `owner: ${job.claimed_by}`,
+      job.lease_expires_at && `lease expires ${new Date(job.lease_expires_at) > new Date() ? `in ${since(job.lease_expires_at)}` : `${since(job.lease_expires_at)} ago`}`,
+      job.rerun_of && `rerun of ${shortRef("JOB", job.rerun_of)}`,
+      job.recovery_reason && `recovery: ${job.recovery_reason.replaceAll("_", " ")}`,
+    ].filter(Boolean).join(" · ");
+    return `<div class="ticket-row queue-row">
       <span class="mono">${shortRef("JOB", job.id)}</span>
       <span class="mono">${escapeHtml(job.type)}</span>
       <span>${job.ticket_label ? escapeHtml(job.ticket_label) : `<span style="color:var(--text3)">—</span>`}${job.project_name ? ` · ${escapeHtml(job.project_name)}` : ""}</span>
       <span>${escapeHtml(cap(job.priority))}</span>
       <span class="mono">${job.attempt} / ${job.max_attempts}</span>
       <span class="status">${escapeHtml(cap(job.status))}</span>
-      <span style="text-align:right">${escapeHtml(availability(job))}</span>
-    </div>`).join("");
+      <span style="text-align:right">${escapeHtml(availability(job))}${workflow ? `<br><span style="font-size:11.5px;color:var(--text3)">${escapeHtml(workflow)}</span>` : ""}</span>
+    </div>`;
+  }).join("");
 
   const body = `<div style="display:flex;align-items:flex-end;justify-content:space-between;gap:18px;flex-wrap:wrap">
       <div><div class="eyebrow">Work · PostgreSQL queue</div><h1>Job queue</h1></div>
       <div style="display:flex;gap:14px;flex-wrap:wrap">
         <div><div class="eyebrow">Queue depth</div><div style="font-size:13px;color:var(--text2);margin-top:3px">${escapeHtml(depthLabel)}</div></div>
-        <div><div class="eyebrow">Claude concurrency</div><div style="font-size:13px;color:var(--text2);margin-top:3px">1 global · 1 per project</div></div>
+        <div><div class="eyebrow">Worker capacity</div><div style="font-size:13px;color:var(--text2);margin-top:3px">1 total · sequential</div></div>
+        <div><div class="eyebrow">Observed running</div><div style="font-size:13px;color:var(--text2);margin-top:3px">${running} observed running</div></div>
         <div><div class="eyebrow">Worker heartbeat</div><div style="font-size:13px;color:${hbFresh ? "var(--t-ok)" : "var(--text3)"};margin-top:3px">${escapeHtml(heartbeatLabel)}</div></div>
       </div>
     </div>
@@ -79,6 +89,6 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <select name="type" onchange="this.form.submit()"><option value="">All types</option>${types.rows.map((row) => `<option value="${escapeHtml(row.type)}"${type === row.type ? " selected" : ""}>${escapeHtml(row.type)}</option>`).join("")}</select>
       <a class="button" href="/admin/queue">Reset</a><span aria-live="polite">${jobs.rows.length} shown</span>
     </form>
-    <section class="card"><div class="list-head queue-head"><span>Job</span><span>Type</span><span>Ticket · project</span><span>Priority</span><span>Attempt</span><span>Status</span><span style="text-align:right">Available</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">${status || type ? "No jobs match these filters." : "The queue is empty."}</div>`}</section>`;
+    <section class="card"><div class="list-head queue-head"><span>Job</span><span>Type</span><span>Ticket · project</span><span>Priority</span><span>Attempt</span><span>Status</span><span style="text-align:right">Available · workflow</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">${status || type ? "No jobs match these filters." : "The queue is empty."}</div>`}</section>`;
   return { status: 200, title: "Job queue", body };
 }

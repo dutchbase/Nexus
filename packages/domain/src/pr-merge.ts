@@ -24,28 +24,37 @@ export async function approveAndMergePullRequest(
   expectedHeadSha?: string,
   expectedBaseBranch?: string,
   expectedBaseSha?: string,
+  assertOwned: () => Promise<void> = async () => {},
 ): Promise<void> {
   const [owner, repo] = pullRequest.repository.split("/");
-  try {
-    if (targetBranch && targetBranch !== pullRequest.base_branch) {
-      await updatePullRequestBase(owner, repo, pullRequest.number, targetBranch);
+  const providerCall = async <T>(action: () => Promise<T>) => {
+    await assertOwned();
+    let result: T;
+    try {
+      result = await action();
+    } catch (error) {
+      throw new PullRequestMergeError(error instanceof Error ? error.message : "merge failed");
     }
-    const remote = await getPullRequest(owner, repo, pullRequest.number);
-    if (remote.draft) await markReadyForReview(owner, repo, pullRequest.number);
-    if (expectedBaseBranch) {
-      if (remote.base.ref !== expectedBaseBranch || (expectedBaseSha && remote.base.sha !== expectedBaseSha)) {
-        throw new Error("pull request base changed after AI review");
-      }
-    }
-    await mergePullRequest(owner, repo, pullRequest.number, "squash", expectedHeadSha);
-  } catch (error) {
-    throw new PullRequestMergeError(error instanceof Error ? error.message : "merge failed");
+    await assertOwned();
+    return result;
+  };
+  if (targetBranch && targetBranch !== pullRequest.base_branch) {
+    await providerCall(() => updatePullRequestBase(owner, repo, pullRequest.number, targetBranch));
   }
+  const remote = await providerCall(() => getPullRequest(owner, repo, pullRequest.number));
+  if (remote.draft) await providerCall(() => markReadyForReview(owner, repo, pullRequest.number));
+  if (expectedBaseBranch) {
+    if (remote.base.ref !== expectedBaseBranch || (expectedBaseSha && remote.base.sha !== expectedBaseSha)) {
+      throw new PullRequestMergeError("pull request base changed after AI review");
+    }
+  }
+  await providerCall(() => mergePullRequest(owner, repo, pullRequest.number, "squash", expectedHeadSha));
 
   await pool.query(
     "UPDATE pull_requests SET internal_review_state='approved',updated_at=now() WHERE id=$1",
     [pullRequest.id],
   );
+  await assertOwned();
 
-  await syncPullRequest(pullRequest.id, actor.type, actor.id);
+  await syncPullRequest(pullRequest.id, actor.type, actor.id, assertOwned);
 }
