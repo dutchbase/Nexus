@@ -11,5 +11,12 @@ test("web provider routes only persist or enqueue provider work", async () => {
     expect(source).toContain(type);
   }
   expect(source).toContain("parseNotificationConfiguration");
+  expect(source).toContain("parseNotificationConfigurationPatch");
+  expect(source).toContain("mergeNotificationConfiguration");
+  expect(source).toContain("safeNotificationProvider");
+  expect(source).toContain("providers: providers.map(safeNotificationProvider)");
+  expect(source).toContain("after: safeNotificationProvider(result.rows[0])");
+  expect(source).toContain("before: safeNotificationProvider(before), after: safeNotificationProvider(after)");
+  expect(source).toContain("provider: safeNotificationProvider(after)");
   expect(source).toContain("next_attempt_at=now()");
 });

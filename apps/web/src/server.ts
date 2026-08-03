@@ -11,7 +11,10 @@ import {
   globalPromptTypes, enqueueNotification, promptContentHash,
   resolveAiConfiguration, setPullRequestTicketStatus, validateAiSelection, type AiPhase,
 } from "@dcc/domain";
-import { parseNotificationConfiguration } from "../../../packages/notification-provider/src/index.ts";
+import {
+  mergeNotificationConfiguration, parseNotificationConfiguration, parseNotificationConfigurationPatch,
+  safeNotificationProvider,
+} from "../../../packages/notification-provider/src/index.ts";
 import {
   resolveSkills, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
 } from "../../../packages/skill-registry/src/index.ts";
@@ -637,7 +640,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
     if (!pullRequest) return json(response, 404, { error: "pull request not found" });
     const validation = pullRequest.run_metadata?.validation_output ?? {};
     const notifications = (await pool.query(
-      `SELECT nd.*,np.name provider,np.configuration_encrypted_json->>'recipient' recipient
+      `SELECT nd.*,np.name provider
        FROM notification_deliveries nd LEFT JOIN notification_providers np ON np.id=nd.provider_id
        WHERE nd.pull_request_id=$1 OR (nd.pull_request_id IS NULL AND nd.ticket_id=$2)
        ORDER BY nd.created_at DESC`,
@@ -665,7 +668,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
   }
   if (url.pathname === "/api/admin/notifications/providers" && request.method === "GET") {
     const providers = (await pool.query("SELECT * FROM notification_providers ORDER BY name")).rows;
-    return json(response, 200, { providers });
+    return json(response, 200, { providers: providers.map(safeNotificationProvider) });
   }
   if (url.pathname === "/api/admin/notifications/providers" && request.method === "POST") {
     const body = await bodyOf(request);
@@ -676,22 +679,23 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
       `INSERT INTO notification_providers (name,type,enabled,configuration_encrypted_json) VALUES ($1,$2,$3,$4) RETURNING *`,
       [body.name, body.type, body.enabled ?? true, configuration],
     );
-    await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.create", entityType: "notification_provider", entityId: result.rows[0].id, after: result.rows[0], ip: ipOf(request) });
-    return json(response, 201, { provider: result.rows[0] });
+    await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.create", entityType: "notification_provider", entityId: result.rows[0].id, after: safeNotificationProvider(result.rows[0]), ip: ipOf(request) });
+    return json(response, 201, { provider: safeNotificationProvider(result.rows[0]) });
   }
   const providerMatch = url.pathname.match(/^\/api\/admin\/notifications\/providers\/([0-9a-f-]+)$/i);
   if (providerMatch && request.method === "PATCH") {
     const before = (await pool.query("SELECT * FROM notification_providers WHERE id=$1", [providerMatch[1]])).rows[0];
     if (!before) return json(response, 404, { error: "notification provider not found" });
     const body = await bodyOf(request);
-    const configuration = parseNotificationConfiguration(body.configuration);
-    if (!configuration) return json(response, 400, { error: "invalid notification configuration" });
+    const configurationPatch = body.configuration === undefined ? {} : parseNotificationConfigurationPatch(body.configuration);
+    if (!configurationPatch) return json(response, 400, { error: "invalid notification configuration" });
+    const configuration = mergeNotificationConfiguration(before.configuration_encrypted_json, configurationPatch);
     const after = (await pool.query(
       `UPDATE notification_providers SET name=COALESCE($2,name),enabled=COALESCE($3,enabled),configuration_encrypted_json=$4,updated_at=now() WHERE id=$1 RETURNING *`,
       [before.id, body.name ?? null, body.enabled ?? null, configuration],
     )).rows[0];
-    await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.update", entityType: "notification_provider", entityId: after.id, before, after, ip: ipOf(request) });
-    return json(response, 200, { provider: after });
+    await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.update", entityType: "notification_provider", entityId: after.id, before: safeNotificationProvider(before), after: safeNotificationProvider(after), ip: ipOf(request) });
+    return json(response, 200, { provider: safeNotificationProvider(after) });
   }
   const providerTestMatch = url.pathname.match(/^\/api\/admin\/notifications\/providers\/([0-9a-f-]+)\/test$/i);
   if (providerTestMatch && request.method === "POST") {
@@ -1872,7 +1876,7 @@ async function adminApi(request: IncomingMessage, response: ServerResponse, url:
       pool.query("SELECT * FROM ticket_notes WHERE ticket_id=$1 ORDER BY created_at", [ticket.id]),
       pool.query("SELECT a.*,u.media_type,u.size_bytes FROM attachments a JOIN uploads u ON u.id=a.upload_id WHERE a.ticket_id=$1", [ticket.id]),
       pool.query(
-        `SELECT nd.*,np.name provider,np.configuration_encrypted_json->>'recipient' recipient
+        `SELECT nd.*,np.name provider
          FROM notification_deliveries nd LEFT JOIN notification_providers np ON np.id=nd.provider_id
          WHERE nd.ticket_id=$1 ORDER BY nd.created_at`,
         [ticket.id],
