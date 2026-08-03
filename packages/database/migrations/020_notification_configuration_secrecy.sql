@@ -3,11 +3,13 @@ SET configuration_encrypted_json = jsonb_strip_nulls(jsonb_build_object(
   'base_url', CASE
     WHEN jsonb_typeof(configuration_encrypted_json->'base_url') = 'string'
       AND configuration_encrypted_json->>'base_url' <> ''
+      AND configuration_encrypted_json->>'base_url' !~ '^([A-Za-z][A-Za-z0-9+._-]*:)?//[^/?#]*@'
     THEN configuration_encrypted_json->'base_url'
   END,
   'endpoint', CASE
     WHEN jsonb_typeof(configuration_encrypted_json->'endpoint') = 'string'
       AND configuration_encrypted_json->>'endpoint' <> ''
+      AND configuration_encrypted_json->>'endpoint' !~ '^([A-Za-z][A-Za-z0-9+._-]*:)?//[^/?#]*@'
     THEN configuration_encrypted_json->'endpoint'
   END,
   'method', CASE

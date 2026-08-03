@@ -32,11 +32,20 @@ function validAuthentication(value: unknown): value is NonNullable<NotificationC
     typeof value.secret_reference === "string" && secretReferencePattern.test(value.secret_reference);
 }
 
+function hasUrlUserinfo(value: string) {
+  try {
+    const url = new URL(value, "https://notification.invalid");
+    return Boolean(url.username || url.password);
+  } catch {
+    return false;
+  }
+}
+
 export function safeNotificationConfiguration(value: unknown): NotificationConfiguration {
   if (!object(value)) return {};
   const safe: NotificationConfiguration = {};
-  if (typeof value.base_url === "string" && value.base_url) safe.base_url = value.base_url;
-  if (typeof value.endpoint === "string" && value.endpoint) safe.endpoint = value.endpoint;
+  if (typeof value.base_url === "string" && value.base_url && !hasUrlUserinfo(value.base_url)) safe.base_url = value.base_url;
+  if (typeof value.endpoint === "string" && value.endpoint && !hasUrlUserinfo(value.endpoint)) safe.endpoint = value.endpoint;
   if (value.method === "POST" || value.method === "PUT" || value.method === "PATCH") safe.method = value.method;
   if (typeof value.timeout_seconds === "number" && Number.isFinite(value.timeout_seconds) && value.timeout_seconds >= 1 && value.timeout_seconds <= 60) safe.timeout_seconds = value.timeout_seconds;
   if (validAuthentication(value.authentication)) safe.authentication = value.authentication;

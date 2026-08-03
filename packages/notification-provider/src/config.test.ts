@@ -29,6 +29,14 @@ describe("notification configuration", () => {
     })).toBeNull();
   });
 
+  test("rejects userinfo in notification URLs", () => {
+    for (const configuration of [
+      { endpoint: "https://user:literal-secret@example.test/hook" },
+      { base_url: "https://user:literal-secret@example.test", endpoint: "/hook" },
+      { base_url: "https://notify.example", endpoint: "//user:literal-secret@example.test/hook" },
+    ]) expect(parseNotificationConfiguration(configuration)).toBeNull();
+  });
+
   test("projects legacy configuration without its inline secret", () => {
     expect(safeNotificationConfiguration({
       endpoint: "https://notify.example", method: "PUT", timeout_seconds: 4,
