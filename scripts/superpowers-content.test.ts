@@ -175,6 +175,28 @@ describe("Superpowers content", () => {
     expect(calls.find((call) => call.sql.startsWith("UPDATE skills SET enabled=false"))?.values).toEqual([[]]);
   });
 
+  it("locks only prompt files when the active version is nullable", async () => {
+    const { root } = await fixture();
+    await mkdir(join(root, "prompts", "global"), { recursive: true });
+    await writeFile(join(root, "prompts", "global", "base.md"), "source prompt\n");
+    const catalog = await buildAgentContentCatalog({ root, manifest: { superpowers: { tag: "v4.1.0" } }, skills: [] });
+    const queries: string[] = [];
+    const client = {
+      async query(sql: string) {
+        queries.push(sql);
+        if (sql.includes("FROM agent_content")) return { rows: [{ sync: {} }] };
+        if (sql.includes("FROM prompt_files")) return { rows: [{ id: "prompt-1", active_content_hash: "old" }] };
+        if (sql.includes("COALESCE(max(version)")) return { rows: [{ version: 1 }] };
+        if (sql.includes("INSERT INTO prompt_versions")) return { rows: [{ id: "version-1" }] };
+        return { rows: [] };
+      },
+    };
+
+    await syncAgentContent(client, catalog);
+
+    expect(queries.find((sql) => sql.includes("FROM prompt_files"))).toContain("FOR UPDATE OF pf");
+  });
+
   it("makes freshly synced phase skills eligible for resolution and snapshots", async () => {
     const { root } = await fixture();
     await mkdir(join(root, "prompts", "global"), { recursive: true });
