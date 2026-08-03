@@ -8,7 +8,7 @@ execFileSync("gcc", [source, "-O2", "-Wl,-l:libargon2.so.1", "-o", binary], { st
 
 const passwordError = "Password must be 1-4096 UTF-8 bytes without NUL, CR, or LF";
 
-function validatePassword(password: string) {
+export function validatePassword(password: string) {
   const bytes = Buffer.byteLength(password, "utf8");
   if (!bytes || bytes > 4096 || /[\0\r\n]/.test(password)) throw new Error(passwordError);
 }

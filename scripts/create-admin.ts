@@ -1,5 +1,5 @@
 import { pool } from "../packages/database/src/index.ts";
-import { hashPassword } from "../packages/database/src/password.ts";
+import { hashPassword, validatePassword } from "../packages/database/src/password.ts";
 
 async function passwordFromStdin() {
   const decoder = new TextDecoder("utf-8", { fatal: true });
@@ -20,6 +20,7 @@ if (usernameFlag !== "--username" || !username || passwordStdin !== "--password-
   process.exitCode = 2;
 } else {
   const password = await passwordFromStdin();
+  validatePassword(password);
   const existing = await pool.query("SELECT id FROM users WHERE username = $1", [username]);
   if (!existing.rowCount) {
     const passwordHash = await hashPassword(password);

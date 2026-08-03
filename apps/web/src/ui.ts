@@ -453,7 +453,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const authType=data.get("auth_type");
           const payload={name:data.get("name"),type:"webhook",enabled:providerForm.elements.enabled.checked,
             configuration:{base_url:data.get("base_url"),endpoint:data.get("endpoint"),timeout_seconds:Number(data.get("timeout_seconds")),
-              authentication:authType==="none"?undefined:{type:authType==="header"?"raw":authType,secret_reference:data.get("secret_reference")}}};
+              authentication:authType==="none"?(providerId?null:undefined):{type:authType==="header"?"raw":authType,secret_reference:data.get("secret_reference")}}};
           const response=await fetch(providerId?"/api/admin/notifications/providers/"+providerId:"/api/admin/notifications/providers",
             {method:providerId?"PATCH":"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
           const result=await response.json();

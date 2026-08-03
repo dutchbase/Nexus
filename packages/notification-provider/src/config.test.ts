@@ -70,6 +70,20 @@ describe("notification configuration", () => {
     });
   });
 
+  test("clears authentication only when explicitly requested", async () => {
+    const patch = parseNotificationConfigurationPatch({ authentication: null });
+    const configuration = mergeNotificationConfiguration({
+      endpoint: "https://notify.example", authentication: { type: "bearer", secret_reference: "DCC_NOTIFICATION_SECRET_OLD" },
+    }, patch!);
+    expect(configuration).toEqual({ endpoint: "https://notify.example" });
+
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue({ ok: true, status: 200 }));
+    await createNotificationProvider("webhook", configuration).send({ event: "test" });
+    expect(fetch).toHaveBeenCalledWith("https://notify.example/", expect.objectContaining({
+      headers: { "content-type": "application/json" },
+    }));
+  });
+
   test("fails closed when a dedicated secret is absent", async () => {
     vi.stubGlobal("fetch", vi.fn());
     const result = await createNotificationProvider("webhook", {

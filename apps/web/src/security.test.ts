@@ -15,6 +15,16 @@ describe("web security", () => {
     expect(validateWebRuntime({ NODE_ENV: "development", DCC_PROCESS_ROLE: "web" })).toMatchObject({ production: false, trustedProxyHops: 0 });
   });
 
+  test("production web refuses every known worker-only credential", () => {
+    for (const credential of [
+      "GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "DCC_NOTIFICATION_SECRET_WEBHOOK",
+      "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY",
+    ]) {
+      expect(() => validateWebRuntime({ NODE_ENV: "production", DCC_PROCESS_ROLE: "web", APP_BASE_URL: "https://dcc.test", [credential]: "secret" }))
+        .toThrow(credential);
+    }
+  });
+
   test("uses the documented browser hardening header baseline", () => {
     expect(securityHeaders()).toMatchObject({
       "content-security-policy": expect.stringContaining("frame-ancestors 'none'"),

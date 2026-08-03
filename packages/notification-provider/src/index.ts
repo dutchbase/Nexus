@@ -16,7 +16,9 @@ export type NotificationConfiguration = {
   timeout_seconds?: number;
   authentication?: { type: "bearer" | "raw"; secret_reference: string };
 };
-export type NotificationConfigurationPatch = Partial<NotificationConfiguration>;
+export type NotificationConfigurationPatch = Omit<Partial<NotificationConfiguration>, "authentication"> & {
+  authentication?: NotificationConfiguration["authentication"] | null;
+};
 
 const configurationKeys = new Set(["base_url", "endpoint", "method", "timeout_seconds", "authentication"]);
 const authenticationKeys = new Set(["type", "secret_reference"]);
@@ -64,16 +66,24 @@ export function safeNotificationProvider(value: unknown): any {
 
 export function parseNotificationConfigurationPatch(value: unknown): NotificationConfigurationPatch | null {
   if (!object(value) || Object.keys(value).some((key) => !configurationKeys.has(key))) return null;
-  const safe = safeNotificationConfiguration(value);
-  return Object.keys(value).every((key) => key in safe) ? safe : null;
+  const { authentication, ...rest } = value;
+  const safe = safeNotificationConfiguration(rest);
+  if (!Object.keys(rest).every((key) => key in safe)) return null;
+  if (!Object.hasOwn(value, "authentication")) return safe;
+  return authentication === null ? { ...safe, authentication: null } : validAuthentication(authentication) ? { ...safe, authentication } : null;
 }
 
 export function parseNotificationConfiguration(value: unknown): NotificationConfiguration | null {
-  return parseNotificationConfigurationPatch(value);
+  const patch = parseNotificationConfigurationPatch(value);
+  if (!patch || patch.authentication === null) return null;
+  const { authentication, ...rest } = patch;
+  return authentication ? { ...rest, authentication } : rest;
 }
 
 export function mergeNotificationConfiguration(existing: unknown, patch: NotificationConfigurationPatch): NotificationConfiguration {
-  return { ...safeNotificationConfiguration(existing), ...patch };
+  const { authentication, ...rest } = patch;
+  const { authentication: existingAuthentication, ...safe } = safeNotificationConfiguration(existing);
+  return authentication === null ? { ...safe, ...rest } : { ...safe, ...(existingAuthentication ? { authentication: existingAuthentication } : {}), ...rest, ...(authentication ? { authentication } : {}) };
 }
 
 function endpointFor(configuration: NotificationConfiguration) {

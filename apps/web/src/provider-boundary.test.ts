@@ -3,6 +3,7 @@ import { expect, test } from "vitest";
 
 test("web provider routes only persist or enqueue provider work", async () => {
   const source = await readFile(new URL("./server.ts", import.meta.url), "utf8");
+  const ui = await readFile(new URL("./ui.ts", import.meta.url), "utf8");
   for (const directCall of ["approveAndMergePullRequest", "syncOpenPullRequests", "syncPullRequest", "importGithubPullRequests", "createNotificationProvider", "redactNotificationError"]) {
     expect(source).not.toContain(directCall);
   }
@@ -19,4 +20,5 @@ test("web provider routes only persist or enqueue provider work", async () => {
   expect(source).toContain("before: safeNotificationProvider(before), after: safeNotificationProvider(after)");
   expect(source).toContain("provider: safeNotificationProvider(after)");
   expect(source).toContain("next_attempt_at=now()");
+  expect(ui).toContain('authentication:authType==="none"?(providerId?null:undefined)');
 });

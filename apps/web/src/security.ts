@@ -1,8 +1,11 @@
 import { createHash, timingSafeEqual } from "node:crypto";
 import { isIP } from "node:net";
+import { forbiddenClaudeAuthVariables } from "../../../packages/claude-runner/src/auth-guard.ts";
 
 type Environment = Record<string, string | undefined>;
 type RequestIdentity = { socket: { remoteAddress?: string | undefined }; headers: { [name: string]: string | string[] | undefined } };
+
+const workerOnlyCredentials = ["GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", ...forbiddenClaudeAuthVariables];
 
 export function validateWebRuntime(env: Environment = process.env) {
   const trustedProxyHops = Number(env.DCC_TRUST_PROXY_HOPS ?? "0");
@@ -17,9 +20,8 @@ export function validateWebRuntime(env: Environment = process.env) {
   } catch {
     throw new Error("production web requires a HTTPS APP_BASE_URL");
   }
-  for (const key of ["GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"] as const) {
-    if (env[key]) throw new Error(`production web must not receive ${key}`);
-  }
+  const credential = workerOnlyCredentials.find((key) => env[key]) ?? Object.keys(env).find((key) => key.startsWith("DCC_NOTIFICATION_SECRET_") && env[key]);
+  if (credential) throw new Error(`production web must not receive ${credential}`);
   return { production, trustedProxyHops };
 }
 

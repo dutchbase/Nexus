@@ -2,7 +2,6 @@ import { statfsSync } from "node:fs";
 import { resolve } from "node:path";
 import { escapeHtml, pool, shortRef } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
-import { forbiddenClaudeAuthVariables } from "../../../../packages/claude-runner/src/auth-guard.ts";
 import { aiModels, reasoningLevels } from "@dcc/domain";
 
 // Coarse relative-duration label — same rule as queue.ts (minutes below an
@@ -45,13 +44,12 @@ function settingsBody(aiReviewSettings: any): string {
     <div style="padding-top:10px">${check("Argon2id password hashing")}${check("Secure + HttpOnly + SameSite session cookie")}${check("CSRF token on every mutating request")}</div>
   </section>`;
 
-  const tokenConfigured = Boolean(process.env.CLAUDE_CODE_OAUTH_TOKEN);
   const claude = `<section class="card"><div class="card-body">
     <div class="card-head" style="margin:-18px -18px 14px;border-radius:6px 6px 0 0">Subscription-only authentication</div>
-    <p style="font-size:13px;color:${tokenConfigured ? "var(--t-ok)" : "var(--t-danger)"}">${tokenConfigured ? "CLAUDE_CODE_OAUTH_TOKEN present." : "CLAUDE_CODE_OAUTH_TOKEN not configured."}</p>
-    <p style="font-size:12.5px;color:var(--text3)">Worker-only. No Anthropic API variable is set in any worker environment. There is no fallback path to the API.</p>
+    <p style="font-size:13px;color:var(--text2)">Worker-only credentials are not exposed to the web process.</p>
+    <p style="font-size:12.5px;color:var(--text3)">The worker rejects API authentication variables; there is no fallback path to the API.</p>
     <div class="eyebrow" style="margin-top:14px">Refused environment variables</div>
-    <div style="display:flex;gap:6px;flex-wrap:wrap;margin-top:8px">${forbiddenClaudeAuthVariables.map((name) => `<span class="mono" style="font-size:11px;padding:3px 8px;border-radius:99px;background:var(--s-danger);color:var(--t-danger)">${escapeHtml(name)}</span>`).join("")}</div>
+    <div style="font-size:12.5px;color:var(--text3);margin-top:8px">Anthropic API, Bedrock, Vertex, and Foundry credentials.</div>
     <div class="grid two" style="margin-top:14px">${field("Planning max turns", "40")}${field("Planning timeout (min)", "45")}${field("Execution max turns", "150")}${field("Execution timeout (min)", "180")}</div>
   </div></section>`;
 
