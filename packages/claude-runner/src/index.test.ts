@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
-import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, createExecutionSandboxSettings, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
+import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, createExecutionSandboxSettings, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parsePlanMarkdown, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -35,6 +35,52 @@ const executionInvocation: ExecutionInvocation = {
   timeoutMs: 1000,
   onEvent: async () => undefined,
 };
+
+const planSections = [
+  "Implementation Plan", "Summary", "Problem Definition", "Current Behaviour", "Expected Behaviour",
+  "Relevant Architecture", "Relevant Files", "Proposed Changes", "Implementation Steps",
+  "Database or Migration Changes", "Testing Strategy", "Security Considerations",
+  "Performance Considerations", "Risks and Edge Cases", "Rollback Strategy",
+  "Acceptance Criteria Mapping", "Out of Scope", "Open Questions",
+];
+
+function planMarkdown(headings = planSections) {
+  return headings.map((heading) => `## ${heading}\nContent`).join("\n\n");
+}
+
+describe("parsePlanMarkdown", () => {
+  test("accepts semantic sections despite number, punctuation, level, and order variations", () => {
+    const headings = [
+      "##### 10) Testing Strategy:", "# Implementation Plan — DCC-1001", "### Relevant Files!",
+      "#### 4 - Expected Behaviour", "## Summary", "###### Open Questions?", "# 2. Problem Definition",
+      "### Relevant Architecture", "## 9: Database or Migration Changes", "#### Proposed Changes",
+      "# 3) Current Behaviour", "##### Acceptance Criteria Mapping", "## 16. Out of Scope",
+      "### Performance Considerations", "#### Implementation Steps", "# Security Considerations",
+      "## 13. Risks and Edge Cases", "###### Rollback Strategy",
+    ];
+
+    const markdown = headings.map((heading) => `${heading}\nContent`).join("\n\n");
+    expect(parsePlanMarkdown(markdown)).toBe(`${markdown}\n`);
+  });
+
+  test("reports missing semantic sections", () => {
+    const markdown = planMarkdown(planSections.filter((heading) => heading !== "Rollback Strategy"));
+
+    expect(() => parsePlanMarkdown(markdown)).toThrow("invalid_plan_structure: missing sections: Rollback Strategy");
+  });
+
+  test("reports duplicate semantic sections", () => {
+    const markdown = planMarkdown([...planSections, "Summary"]);
+
+    expect(() => parsePlanMarkdown(markdown)).toThrow("invalid_plan_structure: duplicate sections: Summary");
+  });
+
+  test("preserves legacy Markdown unchanged apart from its final newline", () => {
+    const markdown = ["# Implementation Plan", ...planSections.slice(1).map((heading, index) => `## ${index + 1}. ${heading}`)].join("\n\n");
+
+    expect(parsePlanMarkdown(markdown)).toBe(`${markdown}\n`);
+  });
+});
 
 test("writes fail-closed workspace-only sandbox settings for execution", async () => {
   const settingsDirectory = await mkdtemp(path.join(tmpdir(), "claude-runner-test-"));
