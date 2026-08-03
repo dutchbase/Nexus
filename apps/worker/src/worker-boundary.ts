@@ -1,5 +1,6 @@
 import { reviewedHeadShaForMerge } from "@dcc/domain";
 import { skillsForPhase, type SkillPhase, type SnapshottedSkill } from "@dcc/skill-registry";
+import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 
@@ -23,10 +24,41 @@ export function approvedPhaseSkills(
   return skillsForPhase(snapshot.skills_json, phase);
 }
 
-export function assertApprovedSkillSet(
+export function assertApprovedSkillSnapshot(
   approved: readonly { readonly slug: string; readonly version: string | null; readonly contentHash: string; readonly sources: readonly string[] }[],
-  stored: SnapshottedSkill[],
+  snapshot: { skills_json?: SnapshottedSkill[]; content_hash?: string } | null,
 ) {
+  const fail = () => { throw new Error("approved skill snapshot integrity check failed"); };
+  if (!snapshot || !Array.isArray(snapshot.skills_json) || typeof snapshot.content_hash !== "string") {
+    throw new Error("approved skill snapshot integrity check failed");
+  }
+  const hash = (value: string | Buffer) => createHash("sha256").update(value).digest("hex");
+  const stored = snapshot.skills_json;
+  const rebuilt = stored.map((skill) => {
+    if (!Array.isArray(skill.files) || !Array.isArray(skill.resolution_sources)) fail();
+    const files = skill.files.map((file) => {
+      if (typeof file.path !== "string" || typeof file.content_base64 !== "string" || typeof file.content_hash !== "string") fail();
+      const bytes = Buffer.from(file.content_base64, "base64");
+      if (bytes.toString("base64") !== file.content_base64 || hash(bytes) !== file.content_hash) fail();
+      return { path: file.path, content_base64: file.content_base64, content_hash: file.content_hash };
+    });
+    if (hash(JSON.stringify(files)) !== skill.content_hash) fail();
+    return {
+      skill_id: skill.skill_id,
+      slug: skill.slug,
+      version: skill.version,
+      filesystem_path: skill.filesystem_path,
+      resolution_sources: skill.resolution_sources,
+      phase: skill.phase,
+      ...(skill.phases === undefined ? {} : { phases: skill.phases }),
+      ...(skill.plugin_name === undefined ? {} : { plugin_name: skill.plugin_name }),
+      ...(skill.invocation_name === undefined ? {} : { invocation_name: skill.invocation_name }),
+      ...(skill.configuration_json === undefined ? {} : { configuration_json: skill.configuration_json }),
+      files,
+      content_hash: skill.content_hash,
+    };
+  });
+  if (hash(JSON.stringify(rebuilt)) !== snapshot.content_hash) fail();
   const normalize = (skills: readonly { readonly slug: string; readonly version: string | null; readonly contentHash: string; readonly sources: readonly string[] }[]) => skills
     .map((skill) => ({ ...skill, sources: [...skill.sources].sort() }))
     .sort((left, right) => left.slug.localeCompare(right.slug));
@@ -34,7 +66,7 @@ export function assertApprovedSkillSet(
     slug: skill.slug, version: skill.version, contentHash: skill.content_hash, sources: skill.resolution_sources,
   })));
   if (JSON.stringify(normalize(approved)) !== JSON.stringify(actual)) {
-    throw new Error("approved skill snapshot does not match the approved input");
+    fail();
   }
 }
 

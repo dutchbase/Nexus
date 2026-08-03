@@ -31,7 +31,7 @@ import { resultCommitAfterSuccessfulExecution, runPrivateExecution } from "./exe
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
 import {
-  approvedExecutionInput, approvedPhaseSkills, assertApprovedSkillSet, assertExecutionPublicationGate, prReviewSnapshotInput, reviewedMergeBinding,
+  approvedExecutionInput, approvedPhaseSkills, assertApprovedSkillSnapshot, assertExecutionPublicationGate, prReviewSnapshotInput, reviewedMergeBinding,
 } from "./worker-boundary.ts";
 
 // Resolved relative to this module's own file, not process.cwd() — `pnpm
@@ -520,10 +520,10 @@ async function runExecution(job: any) {
   }
   const phase = repairing ? "repair" : "execution";
   const approvedSnapshot = (await pool.query(
-    "SELECT id,ticket_id,skills_json FROM skill_snapshots WHERE id=$1 AND ticket_id=$2",
+    "SELECT id,ticket_id,skills_json,content_hash FROM skill_snapshots WHERE id=$1 AND ticket_id=$2",
     [ticket.approved_skill_snapshot_id, ticket.id],
   )).rows[0];
-  assertApprovedSkillSet(gate.approvedInputSnapshot.materialInput.skills, approvedSnapshot?.skills_json ?? []);
+  assertApprovedSkillSnapshot(gate.approvedInputSnapshot.materialInput.skills, approvedSnapshot);
   const phaseSkills = approvedPhaseSkills(approvedSnapshot, ticket.id, phase);
   const attempt = (await pool.query(
     `SELECT ea.* FROM execution_attempts ea WHERE ea.id=$1 AND ea.ticket_id=$2`,

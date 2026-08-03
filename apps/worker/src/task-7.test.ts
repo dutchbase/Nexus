@@ -1,4 +1,5 @@
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -15,13 +16,20 @@ const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
 function skill(slug: string, phases: SnapshottedSkill["phases"]): SnapshottedSkill {
+  const bytes = Buffer.from(`# ${slug}\n`);
+  const files = [{ path: "SKILL.md", content_base64: bytes.toString("base64"), content_hash: createHash("sha256").update(bytes).digest("hex") }];
   return {
     skill_id: `${slug}-id`, slug, version: "v4.1.0", filesystem_path: `skills/${slug}/SKILL.md`,
     resolution_sources: ["phase_required"], phase: phases?.[0] ?? "planning", phases,
     plugin_name: "superpowers", invocation_name: `superpowers:${slug}`, configuration_json: { phases },
-    files: [{ path: "SKILL.md", content_base64: "", content_hash: "hash" }], content_hash: "hash",
+    files, content_hash: createHash("sha256").update(JSON.stringify(files)).digest("hex"),
   };
 }
+
+const snapshotRow = (skills: SnapshottedSkill[]) => ({
+  id: "skill-snapshot", ticket_id: "ticket-1", skills_json: skills,
+  content_hash: createHash("sha256").update(JSON.stringify(skills)).digest("hex"),
+});
 
 describe("worker orchestration boundary", () => {
   test("places execution worktrees and bundles outside the denied host home", () => {
@@ -89,13 +97,32 @@ describe("worker orchestration boundary", () => {
   });
 
   test("rejects a stored skill bundle that drifted from the approved input", () => {
-    const assertApprovedSkillSet = (workerBoundary as any).assertApprovedSkillSet;
-    expect(assertApprovedSkillSet).toBeTypeOf("function");
-    const approved = [{ slug: "test-driven-development", version: "1", contentHash: "approved", sources: ["phase_required"] }];
+    const assertApprovedSkillSnapshot = (workerBoundary as any).assertApprovedSkillSnapshot;
+    expect(assertApprovedSkillSnapshot).toBeTypeOf("function");
     const stored = [skill("test-driven-development", ["execution", "repair"])];
-    stored[0].version = "2";
+    const approved = [{ slug: stored[0].slug, version: stored[0].version, contentHash: stored[0].content_hash, sources: stored[0].resolution_sources }];
+    const row = snapshotRow(stored);
+    expect(() => assertApprovedSkillSnapshot(approved, row)).not.toThrow();
+    stored[0].files[0].content_base64 = Buffer.from("tampered bytes").toString("base64");
 
-    expect(() => assertApprovedSkillSet(approved, stored)).toThrow("approved skill snapshot does not match");
+    expect(() => assertApprovedSkillSnapshot(approved, row)).toThrow("approved skill snapshot integrity check failed");
+  });
+
+  test.each([
+    ["phases", (stored: SnapshottedSkill) => { stored.phases = ["planning"]; }],
+    ["plugin", (stored: SnapshottedSkill) => { stored.plugin_name = "tampered-plugin"; }],
+    ["invocation", (stored: SnapshottedSkill) => { stored.invocation_name = "tampered:skill"; }],
+    ["configuration", (stored: SnapshottedSkill) => { stored.configuration_json = { phases: ["planning"] }; }],
+    ["resolution sources", (stored: SnapshottedSkill) => { stored.resolution_sources = ["ticket_selected"]; }],
+  ])("rejects tampered stored skill %s metadata", (_field, mutate) => {
+    const assertApprovedSkillSnapshot = (workerBoundary as any).assertApprovedSkillSnapshot;
+    expect(assertApprovedSkillSnapshot).toBeTypeOf("function");
+    const stored = [skill("test-driven-development", ["execution", "repair"])];
+    const approved = [{ slug: stored[0].slug, version: stored[0].version, contentHash: stored[0].content_hash, sources: stored[0].resolution_sources }];
+    const row = snapshotRow(stored);
+    mutate(stored[0]);
+
+    expect(() => assertApprovedSkillSnapshot(approved, row)).toThrow("approved skill snapshot integrity check failed");
   });
 
   test("never schedules an unsafe automated merge", () => {

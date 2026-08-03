@@ -12,13 +12,14 @@ const materialInput: ApprovedInputSnapshot = {
   policySources: [],
 };
 const snapshot = buildApprovedInputSnapshot(materialInput);
+const approvedSnapshotId = "00000000-0000-4000-8000-000000000001";
 
 const approved = {
   id: "ticket",
   status: "Plan Approved",
   approved_plan_version_id: "version",
-  approved_input_snapshot_id: "snapshot",
-  gate_snapshot_id: "snapshot",
+  approved_input_snapshot_id: approvedSnapshotId,
+  gate_snapshot_id: approvedSnapshotId,
   snapshot_ticket_id: "ticket",
   snapshot_plan_version_id: "version",
   snapshot_material_input: snapshot.materialInput,
@@ -57,19 +58,24 @@ describe("plan approval gate", () => {
     const client = { query: async () => ({ rows: [rows.shift()] }) } as any;
 
     const beforeQueue = await checkPlanApprovalGate(client, "ticket");
-    const workerRecheck = await checkPlanApprovalGate(client, "ticket", "snapshot");
+    const workerRecheck = await checkPlanApprovalGate(client, "ticket", approvedSnapshotId);
 
-    expect(beforeQueue).toMatchObject({ valid: true, approvedInputSnapshot: { id: "snapshot", inputHash: snapshot.inputHash } });
-    expect(workerRecheck).toMatchObject({ valid: true, approvedInputSnapshot: { id: "snapshot", inputHash: snapshot.inputHash }, planVersion: { id: "version" } });
+    expect(beforeQueue).toMatchObject({ valid: true, approvedInputSnapshot: { id: approvedSnapshotId, inputHash: snapshot.inputHash } });
+    expect(workerRecheck).toMatchObject({ valid: true, approvedInputSnapshot: { id: approvedSnapshotId, inputHash: snapshot.inputHash }, planVersion: { id: "version" } });
   });
 
   it("rejects stale queued work and a snapshot whose material no longer matches its hash", async () => {
-    expect(await checkPlanApprovalGate(clientWith(approved), "ticket", "older-snapshot"))
+    expect(await checkPlanApprovalGate(clientWith(approved), "ticket", "00000000-0000-4000-8000-000000000002"))
       .toMatchObject({ valid: false, code: "approved_snapshot_stale" });
     expect(await checkPlanApprovalGate(clientWith({
       ...approved,
       snapshot_material_input: { ...snapshot.materialInput, ticket: { title: "Tampered title" } },
     }), "ticket"))
       .toMatchObject({ valid: false, code: "approved_snapshot_hash_mismatch" });
+  });
+
+  it.each(["", "not-a-uuid"])("rejects a malformed queued snapshot id %j instead of falling back to the current approval", async (queuedSnapshotId) => {
+    expect(await checkPlanApprovalGate(clientWith(approved), "ticket", queuedSnapshotId))
+      .toMatchObject({ valid: false, code: "approved_snapshot_id_invalid" });
   });
 });

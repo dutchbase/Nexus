@@ -12,6 +12,10 @@ export async function checkPlanApprovalGate(
   ticketId: string,
   expectedSnapshotId?: string,
 ): Promise<PlanApprovalGate> {
+  if (expectedSnapshotId !== undefined && (typeof expectedSnapshotId !== "string"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(expectedSnapshotId))) {
+    return { valid: false, code: "approved_snapshot_id_invalid", message: "the queued approved input snapshot ID is invalid" };
+  }
   const row = (await client.query(
     `SELECT t.*,p.id plan_id,p.current_version_id,p.potentially_stale,
             pv.id gate_plan_version_id,pv.version current_version_number,pv.content_hash current_content_hash,
@@ -39,7 +43,7 @@ export async function checkPlanApprovalGate(
     || row.snapshot_ticket_id !== row.id || row.snapshot_plan_version_id !== row.approved_plan_version_id) {
     return { valid: false, code: "approved_snapshot_mismatch", message: "the approved input snapshot does not match this ticket and plan" };
   }
-  if (expectedSnapshotId && row.gate_snapshot_id !== expectedSnapshotId) {
+  if (expectedSnapshotId !== undefined && row.gate_snapshot_id !== expectedSnapshotId) {
     return { valid: false, code: "approved_snapshot_stale", message: "the queued approved input snapshot is no longer current" };
   }
   if (!row.approved_plan_hash || row.approved_plan_hash !== row.current_content_hash) {
