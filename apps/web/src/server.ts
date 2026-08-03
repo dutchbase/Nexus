@@ -985,6 +985,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
           [pullRequest.agent_run_id],
         )).rows[0];
         if (!source?.worktree_path) throw Object.assign(new Error("repair worktree is unavailable"), { status: 409 });
+        const approvedSnapshotId = source.metadata_json?.approved_input_snapshot_id;
+        if (typeof approvedSnapshotId !== "string") throw Object.assign(new Error("repair run has no approved input snapshot"), { status: 409 });
         const active = (await client.query(
           `SELECT 1 FROM jobs WHERE status IN ('queued','running') AND type='execution.repair'
            AND payload_json->>'execution_attempt_id'=$1`,
@@ -995,7 +997,9 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
           type: "execution.repair",
           payload: {
             ticket_id: source.ticket_id, execution_attempt_id: source.execution_attempt_id,
-            plan_version_id: source.plan_version_id, feedback,
+            plan_version_id: source.plan_version_id,
+            approved_input_snapshot_id: approvedSnapshotId,
+            feedback,
             validation_output: source.metadata_json?.validation_output ?? {},
           },
           idempotencyKey: `execution.repair:${source.execution_attempt_id}:${randomUUID()}`,
@@ -1903,6 +1907,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         payload: {
           ticket_id: ticket.id, execution_attempt_id: attempt.id,
           plan_version_id: lockedGate.planVersion.id,
+          approved_input_snapshot_id: lockedGate.approvedInputSnapshot.id,
           ...(typeof body.mock_scenario_path === "string" ? { mock_scenario_path: body.mock_scenario_path } : {}),
         },
         idempotencyKey: `execution.run:${attempt.id}`, maxAttempts: 1,
@@ -1915,7 +1920,10 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
          VALUES ($1,$2,'Execution Queued','Execution job queued','admin',$3,$4,$5)`,
         [ticket.id, before, session.user_id, job.id, lockedGate.planVersion.id],
       );
-      return { attempt, job };
+      return {
+        attempt, job, approved_input_snapshot_id: lockedGate.approvedInputSnapshot.id,
+        input_hash: lockedGate.approvedInputSnapshot.inputHash,
+      };
     });
     return json(response, 202, result);
   }
@@ -1988,6 +1996,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       )).rows[0];
       if (!source) return null;
       if (!source.worktree_path) throw Object.assign(new Error("repair worktree is unavailable"), { status: 409 });
+      const approvedSnapshotId = source.metadata_json?.approved_input_snapshot_id;
+      if (typeof approvedSnapshotId !== "string") throw Object.assign(new Error("repair run has no approved input snapshot"), { status: 409 });
       const active = (await client.query(
         `SELECT 1 FROM jobs WHERE status IN ('queued','running')
          AND type='execution.repair' AND payload_json->>'execution_attempt_id'=$1`,
@@ -2000,6 +2010,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
           ticket_id: source.ticket_id,
           execution_attempt_id: source.execution_attempt_id,
           plan_version_id: source.plan_version_id,
+          approved_input_snapshot_id: approvedSnapshotId,
           feedback: body.feedback.trim(),
           validation_output: source.metadata_json?.validation_output ?? {},
           ...(typeof body.mock_scenario_path === "string" ? { mock_scenario_path: body.mock_scenario_path } : {}),

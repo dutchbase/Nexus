@@ -5,9 +5,11 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { createPullRequestReviewWorktree } from "../../../packages/git-runner/src/index.ts";
 import type { SnapshottedSkill } from "@dcc/skill-registry";
+import { buildApprovedInputSnapshot, type ApprovedInputSnapshot } from "@dcc/domain";
 import {
   approvedPhaseSkills, assertExecutionPublicationGate, executionRoot, prReviewSnapshotInput, reviewedMergeBinding,
 } from "./worker-boundary.ts";
+import * as workerBoundary from "./worker-boundary.ts";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -44,6 +46,56 @@ describe("worker orchestration boundary", () => {
     expect(() => assertExecutionPublicationGate(false, false)).toThrow("did not invoke Agent");
     expect(() => assertExecutionPublicationGate(false, true)).not.toThrow();
     expect(() => assertExecutionPublicationGate(true, false)).not.toThrow();
+  });
+
+  test("builds execution inputs from approved material while keeping runtime repair data dynamic", () => {
+    const approvedExecutionInput = (workerBoundary as any).approvedExecutionInput;
+    expect(approvedExecutionInput).toBeTypeOf("function");
+    const materialInput: ApprovedInputSnapshot = {
+      plan: { versionId: "plan-v1", version: 1, contentHash: "a".repeat(64) },
+      ticket: { title: "Approved title" },
+      skills: [], policySources: [],
+      project: { configVersion: 7, config: {
+        enabled: true, slug: "approved-project", repositoryPath: "/approved/repo",
+        defaultBranch: "approved-main", configuration: { execution_max_turns: 12 },
+      } },
+      models: { repair: { model: "approved-model", reasoningLevel: "xhigh" } },
+      prompts: [{
+        phase: "repair", content: "Approved immutable repair prompt.\n",
+        provenance: [{ scope: "global", promptType: "execution-repair", versionId: "prompt-v1", contentHash: "e".repeat(64) }],
+      }],
+    };
+    const preview = buildApprovedInputSnapshot(materialInput);
+    const result = approvedExecutionInput({
+      id: "approved-input-1",
+      inputHash: preview.inputHash,
+      materialInput: preview.materialInput,
+    }, "repair", {
+      worktreePath: "/runtime/worktree", branchName: "runtime-branch", baseCommit: "runtime-base",
+      currentDiff: "+runtime diff", validationOutput: { failed: true }, administratorFeedback: "runtime feedback",
+    });
+
+    expect(result).toMatchObject({
+      approvedInputSnapshotId: "approved-input-1", inputHash: preview.inputHash,
+      project: { config_version: 7, repository_path: "/approved/repo", default_branch: "approved-main" },
+      ai: { model: "approved-model", reasoning_level: "xhigh" },
+      promptVersionIds: { "global.execution-repair": "prompt-v1" },
+    });
+    expect(result.content).toContain("Approved immutable repair prompt.");
+    expect(result.content).toContain("/runtime/worktree");
+    expect(result.content).toContain("+runtime diff");
+    expect(result.content).toContain("runtime feedback");
+    expect(result.inputHash).toBe(preview.inputHash);
+  });
+
+  test("rejects a stored skill bundle that drifted from the approved input", () => {
+    const assertApprovedSkillSet = (workerBoundary as any).assertApprovedSkillSet;
+    expect(assertApprovedSkillSet).toBeTypeOf("function");
+    const approved = [{ slug: "test-driven-development", version: "1", contentHash: "approved", sources: ["phase_required"] }];
+    const stored = [skill("test-driven-development", ["execution", "repair"])];
+    stored[0].version = "2";
+
+    expect(() => assertApprovedSkillSet(approved, stored)).toThrow("approved skill snapshot does not match");
   });
 
   test("never schedules an unsafe automated merge", () => {

@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
+import { buildApprovedInputSnapshot, type ApprovedInputSnapshot } from "./approval-input-snapshot.ts";
 import { checkPlanApprovalGate } from "./plan-approval.ts";
+
+const materialInput: ApprovedInputSnapshot = {
+  plan: { versionId: "version", version: 1, contentHash: "approved-hash" },
+  ticket: { title: "Approved title" },
+  project: { configVersion: 3, config: { repositoryPath: "/approved/repo", defaultBranch: "main" } },
+  models: { execution: { model: "approved-model", reasoningLevel: "high" } },
+  prompts: [{ phase: "execution", content: "Approved prompt", provenance: [] }],
+  skills: [],
+  policySources: [],
+};
+const snapshot = buildApprovedInputSnapshot(materialInput);
 
 const approved = {
   id: "ticket",
@@ -9,6 +21,8 @@ const approved = {
   gate_snapshot_id: "snapshot",
   snapshot_ticket_id: "ticket",
   snapshot_plan_version_id: "version",
+  snapshot_material_input: snapshot.materialInput,
+  snapshot_input_hash: snapshot.inputHash,
   gate_plan_version_id: "version",
   current_version_id: "version",
   approved_plan_hash: "approved-hash",
@@ -43,9 +57,19 @@ describe("plan approval gate", () => {
     const client = { query: async () => ({ rows: [rows.shift()] }) } as any;
 
     const beforeQueue = await checkPlanApprovalGate(client, "ticket");
-    const workerRecheck = await checkPlanApprovalGate(client, "ticket");
+    const workerRecheck = await checkPlanApprovalGate(client, "ticket", "snapshot");
 
-    expect(beforeQueue).toMatchObject({ valid: true, ticket: { approved_input_snapshot_id: "snapshot" } });
-    expect(workerRecheck).toMatchObject({ valid: true, ticket: { approved_input_snapshot_id: "snapshot" }, planVersion: { id: "version" } });
+    expect(beforeQueue).toMatchObject({ valid: true, approvedInputSnapshot: { id: "snapshot", inputHash: snapshot.inputHash } });
+    expect(workerRecheck).toMatchObject({ valid: true, approvedInputSnapshot: { id: "snapshot", inputHash: snapshot.inputHash }, planVersion: { id: "version" } });
+  });
+
+  it("rejects stale queued work and a snapshot whose material no longer matches its hash", async () => {
+    expect(await checkPlanApprovalGate(clientWith(approved), "ticket", "older-snapshot"))
+      .toMatchObject({ valid: false, code: "approved_snapshot_stale" });
+    expect(await checkPlanApprovalGate(clientWith({
+      ...approved,
+      snapshot_material_input: { ...snapshot.materialInput, ticket: { title: "Tampered title" } },
+    }), "ticket"))
+      .toMatchObject({ valid: false, code: "approved_snapshot_hash_mismatch" });
   });
 });

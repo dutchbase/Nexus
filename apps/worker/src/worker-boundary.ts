@@ -23,6 +23,70 @@ export function approvedPhaseSkills(
   return skillsForPhase(snapshot.skills_json, phase);
 }
 
+export function assertApprovedSkillSet(
+  approved: readonly { readonly slug: string; readonly version: string | null; readonly contentHash: string; readonly sources: readonly string[] }[],
+  stored: SnapshottedSkill[],
+) {
+  const normalize = (skills: readonly { readonly slug: string; readonly version: string | null; readonly contentHash: string; readonly sources: readonly string[] }[]) => skills
+    .map((skill) => ({ ...skill, sources: [...skill.sources].sort() }))
+    .sort((left, right) => left.slug.localeCompare(right.slug));
+  const actual = normalize(stored.map((skill) => ({
+    slug: skill.slug, version: skill.version, contentHash: skill.content_hash, sources: skill.resolution_sources,
+  })));
+  if (JSON.stringify(normalize(approved)) !== JSON.stringify(actual)) {
+    throw new Error("approved skill snapshot does not match the approved input");
+  }
+}
+
+export function approvedExecutionInput(snapshot: {
+  id: string;
+  inputHash: string;
+  materialInput: any;
+}, phase: "execution" | "repair", details: {
+  worktreePath: string;
+  branchName: string;
+  baseCommit: string | null;
+  currentDiff?: string;
+  validationOutput?: unknown;
+  administratorFeedback?: string;
+}) {
+  const material = snapshot.materialInput;
+  const config = material?.project?.config;
+  const ai = material?.models?.[phase];
+  const prompt = material?.prompts?.find((item: any) => item.phase === phase);
+  if (!config?.enabled || !config.repositoryPath || !config.defaultBranch || !ai?.model || !ai.reasoningLevel || !prompt?.content) {
+    throw new Error("approved execution input is incomplete");
+  }
+  const runtime = [
+    "## Runtime worktree details", `\`\`\`json\n${JSON.stringify({ path: details.worktreePath, branch: details.branchName, base_commit: details.baseCommit }, null, 2)}\n\`\`\``,
+  ];
+  if (phase === "repair") runtime.push(
+    "## Current worktree diff", details.currentDiff ?? "",
+    "## Failed validation output", `\`\`\`json\n${JSON.stringify(details.validationOutput ?? {}, null, 2)}\n\`\`\``,
+    "## Administrator feedback", details.administratorFeedback ?? "",
+  );
+  return {
+    approvedInputSnapshotId: snapshot.id,
+    inputHash: snapshot.inputHash,
+    project: {
+      config_version: material.project.configVersion,
+      config_json: config.configuration ?? {},
+      slug: config.slug,
+      name: config.name,
+      description: config.description,
+      enabled: config.enabled,
+      repository_path: config.repositoryPath,
+      agent_start_path: config.agentStartPath ?? config.repositoryPath,
+      default_branch: config.defaultBranch,
+      github_owner: config.githubOwner,
+      github_repository: config.githubRepository,
+    },
+    ai: { model: ai.model, reasoning_level: ai.reasoningLevel },
+    promptVersionIds: Object.fromEntries(prompt.provenance.map((source: any) => [`${source.scope}.${source.promptType}`, source.versionId])),
+    content: `${prompt.content.trimEnd()}\n\n${runtime.join("\n\n")}\n`,
+  };
+}
+
 export function assertExecutionPublicationGate(repairing: boolean, usedAgent: boolean) {
   if (!repairing && !usedAgent) throw new Error("execution did not invoke Agent tool");
 }

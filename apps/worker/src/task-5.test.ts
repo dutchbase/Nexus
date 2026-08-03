@@ -27,10 +27,8 @@ test("requires a normal execution to invoke Agent before worker validation and p
   expect(source).toContain("assertExecutionPublicationGate(repairing, usedAgent)");
 });
 
-test("wraps legacy 17-section plans as synthetic Task 1 for execution", async () => {
+test("materializes the immutable approved plan for execution", async () => {
   const source = await worker();
 
-  expect(source).toContain("function taskBriefPlan(approvedPlan: string)");
-  expect(source).toContain("## Task 1: Implement the approved legacy plan");
-  expect(source).toContain("exactApprovedPlan: taskBriefPlan(approvedPlan)");
+  expect(source).toContain("materializeExecutionPlan(gate.planVersion.content_markdown)");
 });
