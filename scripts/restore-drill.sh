@@ -191,6 +191,14 @@ if [ "$post_restore_health_database_identity" != "$restore_database_fingerprint"
   echo "health endpoint changed database after restore" >&2
   exit 1
 fi
+if [ "$(psql "$DCC_RESTORE_DATABASE_URL" --quiet --tuples-only --no-align --command "SELECT to_regclass('public.projects')")" != "projects" ]; then
+  echo "restored application schema is incomplete" >&2
+  exit 1
+fi
+if [ ! -r "$published/config/projects.yaml" ]; then
+  echo "restored managed configuration is inaccessible" >&2
+  exit 1
+fi
 
 published=""
 step=""

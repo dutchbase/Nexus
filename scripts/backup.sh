@@ -82,5 +82,5 @@ if ! mv -T -n -- "$stage" "$backup" || [ -d "$stage" ]; then
 fi
 stage=""
 
-find "$backup_directory" -mindepth 1 -maxdepth 1 -type d \( -name "dcc-*" -o -name ".dcc-backup.*" \) -mtime "+$retention_days" -exec rm -rf -- {} +
+find "$backup_directory" -mindepth 1 -maxdepth 1 -type d \( -name "dcc-*" -o -name ".dcc-backup.*" \) ! -newermt "$retention_days days ago" -exec rm -rf -- {} +
 echo "backup created: $backup"

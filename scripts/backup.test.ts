@@ -88,6 +88,9 @@ fi
 if [[ "$*" == *"current_setting"* ]]; then
   printf "%s\n" "\${DCC_TEST_SESSION_DISPOSABLE:-false}"
 fi
+if [[ "$*" == *"to_regclass"* ]]; then
+  printf "%s\n" "\${DCC_TEST_RESTORED_PROJECTS_TABLE:-projects}"
+fi
 `);
   return {
     root, backups, commandLog,
@@ -237,6 +240,14 @@ describe("backup and recovery drill", () => {
 
     expect(result.status).not.toBe(0);
     expect(await readFile(test.commandLog, "utf8")).not.toContain("pg_restore");
+  });
+
+  it("fails when the restored application schema is absent", async () => {
+    const test = await fixture();
+    expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
+    const result = run("scripts/restore-drill.sh", [await newestBackup(test.backups)], { ...test.env, DCC_TEST_RESTORED_PROJECTS_TABLE: "missing" });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("restored application schema is incomplete");
   });
 
   it("fails when the post-restore health endpoint changes database identity", async () => {
