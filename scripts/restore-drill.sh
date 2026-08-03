@@ -191,8 +191,10 @@ fi
 
 step="publish"
 rm -- "$stage/database.dump" "$stage/manifest-v1.sha256"
-if [ -e "$recovery_root" ] || [ -L "$recovery_root" ]; then echo "DCC_RESTORE_ROOT appeared before publish" >&2; exit 1; fi
-mv -T -- "$stage" "$recovery_root"
+if ! mv -T -n -- "$stage" "$recovery_root" || [ -d "$stage" ]; then
+  echo "DCC_RESTORE_ROOT appeared before publish" >&2
+  exit 1
+fi
 stage=""
 step=""
 echo "restore drill passed: $backup_directory"

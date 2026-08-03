@@ -61,7 +61,7 @@ if [ -f "\${DCC_TEST_RESTORE_COMPLETE:-}" ]; then identity="\${DCC_TEST_POST_RES
 printf "{\\"status\\":\\"ok\\",\\"database_identity\\":\\"%s\\"}\n" "$identity"
 `);
   await shellTool(bin, "mv", `#!/usr/bin/env bash
-set -euo pipefail
+target="$(printf "%s\n" "$@" | tail -n 1)"
 if [ "$DCC_TEST_PUBLISH_RACE" = "true" ]; then mkdir -p "$target"; fi
 if [ "$DCC_TEST_PUBLISH_RACE" = "true" ] && [[ "$*" == *".dcc-restore."* ]]; then mkdir -p "$target"; fi
 exec /bin/mv "$@"
