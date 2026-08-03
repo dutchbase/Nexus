@@ -1,4 +1,4 @@
-import { chmod, mkdtemp, mkdir, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, readdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -155,6 +155,15 @@ describe("backup and recovery drill", () => {
     await expect(readFile(join(backup, "config", "secrets", "token"))).rejects.toThrow();
     expect(spawnSync("sha256sum", ["--check", "manifest-v1.sha256"], { cwd: backup, encoding: "utf8" }).status).toBe(0);
     await expect(readFile(test.commandLog, "utf8")).resolves.toContain("pg_dump postgresql://primary:primary@127.0.0.1:5432/dcc_primary --format=custom");
+  });
+
+  it("rejects unsupported symlinks before backup publication", async () => {
+    const test = await fixture();
+    await symlink(join(test.root, "outside"), join(test.env.DCC_DATA_DIR!, "linked"));
+    const result = run("scripts/backup.sh", [], test.env);
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("unsupported symlink");
+    expect(await readdir(test.backups)).toEqual([]);
   });
 
   it("backs up the shared data directory from DCC_DATA_ROOT when DCC_DATA_DIR is unset", async () => {

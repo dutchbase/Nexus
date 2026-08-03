@@ -68,7 +68,7 @@ describe("artifact lifecycle", () => {
       root,
       records,
       finalize: async (id, sha256) => { finalized.push({ id, sha256 }); },
-      abandon: async (id) => { abandoned.push(id); },
+      abandon: async (id) => { abandoned.push(id); return true; },
     });
 
     expect(finalized).toEqual([{

@@ -44,11 +44,11 @@ it("reconciles primary and legacy artifacts only from their registered roots", a
     { id: "33333333-3333-4333-8333-333333333333", storage_path: "logs/legacy-missing.log", storage_root: "legacy", status: "finalized", expires_at: null },
   ];
   const finalized = new Map<string, string>();
-  const abandoned: string[] = [];
+  const abandoned: Array<[string, string]> = [];
   database.query.mockImplementation(async (sql: string, values?: unknown[]) => {
     if (sql.startsWith("SELECT")) return { rows: records };
     if (sql.includes("status='finalized'")) finalized.set(values![0] as string, values![1] as string);
-    if (sql.includes("status='abandoned'")) abandoned.push(values![0] as string);
+    if (sql.includes("status='abandoned'")) abandoned.push(values as [string, string]);
     return { rowCount: 1, rows: [] };
   });
 
@@ -58,6 +58,6 @@ it("reconciles primary and legacy artifacts only from their registered roots", a
     [records[0].id, createHash("sha256").update("primary bytes").digest("hex")],
     [records[1].id, createHash("sha256").update("legacy bytes").digest("hex")],
   ]));
-  expect(abandoned).toEqual([records[2].id]);
+  expect(abandoned).toEqual([[records[2].id, "finalized"]]);
   expect(database.end).toHaveBeenCalledOnce();
 });

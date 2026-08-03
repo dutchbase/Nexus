@@ -52,11 +52,11 @@ export async function migrate(input: { connectionString?: string; directory?: st
       : [];
     validateMigrations(names, appliedNames);
     await client.query("CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())");
-    await client.query("CREATE TABLE IF NOT EXISTS migration_attempts (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, migration_name text NOT NULL, status text NOT NULL CHECK (status IN ($running$, $applied$, $failed$)), started_at timestamptz NOT NULL DEFAULT now(), finished_at timestamptz, error_text text)");
+    await client.query("CREATE TABLE IF NOT EXISTS migration_attempts (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, migration_name text NOT NULL, status text NOT NULL CHECK (status IN ('running', 'applied', 'failed')), started_at timestamptz NOT NULL DEFAULT now(), finished_at timestamptz, error_text text)");
 
     for (const name of names) {
       if (appliedNames.includes(name) || appliedNames.includes(legacyAppliedNames[name])) continue;
-      const attempt = await client.query<{ id: string }>("INSERT INTO migration_attempts (migration_name,status) VALUES ($1,$running$) RETURNING id", [name]);
+      const attempt = await client.query<{ id: string }>("INSERT INTO migration_attempts (migration_name,status) VALUES ($1,'running') RETURNING id", [name]);
       let transactionStarted = false;
       try {
         await client.query("BEGIN");
@@ -65,11 +65,11 @@ export async function migrate(input: { connectionString?: string; directory?: st
         await client.query("INSERT INTO schema_migrations (name) VALUES ($1)", [name]);
         await client.query("COMMIT");
         transactionStarted = false;
-        await client.query("UPDATE migration_attempts SET status=$applied$, finished_at=now() WHERE id=$1", [attempt.rows[0].id]);
+        await client.query("UPDATE migration_attempts SET status='applied', finished_at=now() WHERE id=$1", [attempt.rows[0].id]);
         console.log("applied " + name);
       } catch (error) {
         if (transactionStarted) await client.query("ROLLBACK");
-        await client.query("UPDATE migration_attempts SET status=$failed$, finished_at=now(), error_text=$2 WHERE id=$1", [attempt.rows[0].id, error instanceof Error ? error.message : String(error)]);
+        await client.query("UPDATE migration_attempts SET status='failed', finished_at=now(), error_text=$2 WHERE id=$1", [attempt.rows[0].id, error instanceof Error ? error.message : String(error)]);
         throw error;
       }
     }

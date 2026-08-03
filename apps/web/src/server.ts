@@ -502,6 +502,7 @@ async function upload(request: IncomingMessage, response: ServerResponse) {
   const staged = await stageArtifact({
     root: dataRoot, id: artifactId, storagePath: `uploads/${artifactId}${sniffed.extension}`, content: bytes,
   });
+  let registered = false;
   try {
     const originalName = /filename="([^"]*)"/i.exec(raw.subarray(0, headerEnd).toString("utf8"))?.[1] ?? null;
     const row = await inTransaction(async (client) => {
@@ -517,28 +518,19 @@ async function upload(request: IncomingMessage, response: ServerResponse) {
       await client.query("INSERT INTO attachments (upload_id) VALUES ($1)", [upload.id]);
       return upload;
     });
-    try {
-      const finalized = await finalizeArtifact(staged);
-      await pool.query(
-        `UPDATE artifacts SET status='finalized',sha256=$2,finalized_at=now(),expires_at=NULL
-         WHERE id=$1 AND status='staged'`,
-        [artifactId, finalized.sha256],
-      );
-    } catch (error) {
-      await Promise.all([
-        inTransaction(async (client) => {
-          await client.query("DELETE FROM artifacts WHERE id=$1", [artifactId]);
-          await client.query("DELETE FROM attachments WHERE upload_id=$1 AND ticket_id IS NULL", [row.id]);
-          await client.query("DELETE FROM uploads WHERE id=$1", [row.id]);
-        }).catch(() => undefined),
-        rm(staged.stagedPath, { force: true }),
-        rm(staged.storagePath, { force: true }),
-      ]);
-      throw error;
-    }
+    registered = true;
+    await inTransaction(async (client) => {
+        if (!(await client.query("SELECT id FROM artifacts WHERE id=$1 AND status='staged' FOR UPDATE", [artifactId])).rowCount) throw new Error("artifact is no longer staged");
+        const finalized = await finalizeArtifact(staged);
+        if (!(await client.query(
+          `UPDATE artifacts SET status='finalized',sha256=$2,finalized_at=now(),expires_at=NULL
+           WHERE id=$1 AND status='staged'`,
+          [artifactId, finalized.sha256],
+        )).rowCount) throw new Error("artifact is no longer staged");
+    });
     json(response, 201, { upload_id: row.id, reference: `/uploads/${row.id}` });
   } catch (error) {
-    await rm(staged.stagedPath, { force: true });
+    if (!registered) await rm(staged.stagedPath, { force: true });
     throw error;
   }
 }
@@ -1816,7 +1808,6 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         : readArtifact(root, row.storage_path)).then((content) => content.toString("utf8"));
       return json(response, 200, { run_id: row.id, content });
     } catch {
-      await pool.query("UPDATE artifacts SET status='abandoned',abandoned_at=now() WHERE id=$1 AND status IN ('staged','finalized')", [row.artifact_id]);
       return json(response, 404, { error: "execution log not found" });
     }
   }

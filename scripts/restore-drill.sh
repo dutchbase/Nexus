@@ -23,6 +23,7 @@ manifest_sha256=""
 step="preflight"
 stage=""
 actual_manifest=""
+published=""
 
 record_result() {
   local code=$?
@@ -30,6 +31,7 @@ record_result() {
   trap - EXIT
   if [ -n "$actual_manifest" ]; then rm -f -- "$actual_manifest" || true; fi
   if [ -n "$stage" ]; then rm -rf -- "$stage" || true; fi
+  if [ "$code" -ne 0 ] && [ -n "$published" ]; then rm -rf -- "$published" || true; fi
   [ "$code" -eq 0 ] && status="passed"
   if ! psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=backup_path="$backup_directory" --set=manifest_sha256="$manifest_sha256" --set=status="$status" --set=failure_step="$step" --command "INSERT INTO backup_recovery_verifications (backup_path,manifest_sha256,status,failure_step) VALUES (:'backup_path',NULLIF(:'manifest_sha256',''),:'status',NULLIF(:'failure_step',''));" ; then
     [ "$code" -ne 0 ] || code=1
@@ -156,18 +158,10 @@ cp -- "$backup_directory/database.dump" "$backup_directory/manifest-v1.sha256" "
 for payload in data config; do
   mkdir "$stage/$payload"
   (cd "$backup_directory/$payload" && tar -cf - .) | tar -C "$stage/$payload" -xf -
-  find "$stage/$payload" -type f -print -quit | grep -q . || {
-    echo "restored payload is empty: $payload" >&2
-    exit 1
-  }
 done
 if [ -d "$backup_directory/legacy-data" ]; then
   mkdir "$stage/legacy-data"
   (cd "$backup_directory/legacy-data" && tar -cf - .) | tar -C "$stage/legacy-data" -xf -
-  find "$stage/legacy-data" -type f -print -quit | grep -q . || {
-    echo "restored payload is empty: legacy-data" >&2
-    exit 1
-  }
 fi
 verify_exact_manifest "$stage"
 
@@ -179,6 +173,15 @@ if [ "$(database_identity "$DCC_RESTORE_DATABASE_URL")" != "$restore_database_id
   exit 1
 fi
 
+step="publish"
+rm -- "$stage/database.dump" "$stage/manifest-v1.sha256"
+if ! mv -T -n -- "$stage" "$recovery_root" || [ -d "$stage" ]; then
+  echo "DCC_RESTORE_ROOT appeared before publish" >&2
+  exit 1
+fi
+published="$recovery_root"
+stage=""
+
 step="health"
 if ! post_restore_health_database_identity="$(curl --fail --silent --show-error "$DCC_RESTORE_HEALTH_URL" | node -e 'let body=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => body += chunk); process.stdin.on("end", () => { const identity = JSON.parse(body).database_identity; if (typeof identity !== "string" || !identity) process.exit(1); process.stdout.write(identity); });')"; then
   echo "health endpoint must expose a database identity after restore" >&2
@@ -189,12 +192,6 @@ if [ "$post_restore_health_database_identity" != "$restore_database_fingerprint"
   exit 1
 fi
 
-step="publish"
-rm -- "$stage/database.dump" "$stage/manifest-v1.sha256"
-if ! mv -T -n -- "$stage" "$recovery_root" || [ -d "$stage" ]; then
-  echo "DCC_RESTORE_ROOT appeared before publish" >&2
-  exit 1
-fi
-stage=""
+published=""
 step=""
 echo "restore drill passed: $backup_directory"

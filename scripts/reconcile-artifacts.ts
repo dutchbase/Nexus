@@ -22,11 +22,13 @@ try {
           [id, sha256],
         )).rowCount ?? 0;
       },
-      abandon: async (id) => {
-        abandoned += (await pool.query(
-          "UPDATE artifacts SET status='abandoned',abandoned_at=now() WHERE id=$1 AND status IN ('staged','finalized')",
-          [id],
+      abandon: async (id, status) => {
+        const changed = (await pool.query(
+          "UPDATE artifacts SET status='abandoned',abandoned_at=now() WHERE id=$1 AND status=$2",
+          [id, status],
         )).rowCount ?? 0;
+        abandoned += changed;
+        return changed > 0;
       },
     });
   }

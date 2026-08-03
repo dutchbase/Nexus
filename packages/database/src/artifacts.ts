@@ -109,10 +109,16 @@ export async function reconcileArtifacts(input: {
   root: string;
   records: ArtifactRecord[];
   finalize: (id: string, sha256: string) => Promise<void>;
-  abandon: (id: string) => Promise<void>;
+  abandon: (id: string, status: ArtifactRecord["status"]) => Promise<boolean | void>;
   now?: Date;
 }) {
   const now = input.now ?? new Date();
+  try {
+    await realpath(input.root);
+  } catch (error: any) {
+    if (error?.code === "ENOENT") return;
+    throw error;
+  }
   for (const record of input.records) {
     if (record.status === "abandoned") continue;
     const expiresAt = record.expires_at ? new Date(record.expires_at) : null;
@@ -122,12 +128,12 @@ export async function reconcileArtifacts(input: {
       storagePath = artifactPath(input.root, record.storage_path);
       pendingPath = stagedPath(input.root, record.id);
     } catch {
-      await input.abandon(record.id);
+      await input.abandon(record.id, record.status);
       continue;
     }
     const stored = await location(input.root, storagePath);
     if (stored === "unsafe") {
-      await input.abandon(record.id);
+      await input.abandon(record.id, record.status);
       continue;
     }
     if (record.status === "staged" && stored === "present") {
@@ -139,15 +145,26 @@ export async function reconcileArtifacts(input: {
       continue;
     }
     if (record.status === "finalized") {
-      if (stored !== "present") await input.abandon(record.id);
+      if (stored !== "present") await input.abandon(record.id, record.status);
+      continue;
+    }
+    const pending = await location(input.root, pendingPath);
+    if (pending === "unsafe") {
+      await input.abandon(record.id, record.status);
       continue;
     }
     if (expiresAt && expiresAt <= now) {
-      await removeArtifact(input.root, pendingPath);
-      await input.abandon(record.id);
-      continue;
+      const recovered = await location(input.root, storagePath);
+      if (recovered === "present") {
+        try {
+          await input.finalize(record.id, createHash("sha256").update(await readArtifact(input.root, record.storage_path)).digest("hex"));
+        } catch {
+          // The bytes are intact at the finalized location; retry database finalization later.
+        }
+      } else if (await input.abandon(record.id, record.status)) {
+        await removeArtifact(input.root, pendingPath);
+      }
     }
-    if (await location(input.root, pendingPath) !== "present") await input.abandon(record.id);
   }
 
   const registered = new Set(input.records.map((record) => record.id));

@@ -7,7 +7,7 @@ import {
   assertSubscriptionOnlyEnvironment, ClaudeAuthError, invokePlanningClaude,
   ClaudeExecutionError, invokeExecutionClaude, parsePlanMarkdown, preflightClaudeAuthentication,
 } from "@dcc/claude-runner";
-import { inTransaction, pool } from "@dcc/database";
+import { artifactDataRoot, finalizeArtifact, inTransaction, legacyArtifactDataRoot, pool, reconcileArtifacts, type StagedArtifact } from "@dcc/database";
 import {
   approveAndMergePullRequest, buildExecutionPrompt, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
   claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, parsePrReviewVerdict,
@@ -39,6 +39,8 @@ import {
 // of the repo root's data/ (PRD §18.5).
 const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const EXECUTION_ROOT = executionRoot(process.env.DCC_EXECUTION_ROOT);
+const dataRoot = artifactDataRoot(REPO_ROOT);
+const legacyDataRoot = legacyArtifactDataRoot(REPO_ROOT);
 
 const workerId = `worker-${randomUUID()}`;
 const planningJobTypes = ["planning.generate", "planning.revise"];
@@ -58,6 +60,51 @@ process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort
 
 function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+async function finalizeRegisteredArtifact(staged: StagedArtifact) {
+  try {
+    await inTransaction(async (client) => {
+      if (!(await client.query("SELECT id FROM artifacts WHERE id=$1 AND status='staged' FOR UPDATE", [staged.id])).rowCount) throw new Error("artifact is no longer staged");
+      const finalized = await finalizeArtifact(staged);
+      if (!(await client.query(
+        `UPDATE artifacts SET status='finalized',sha256=$2,finalized_at=now(),expires_at=NULL
+         WHERE id=$1 AND status='staged'`,
+        [staged.id, finalized.sha256],
+      )).rowCount) throw new Error("artifact is no longer staged");
+    });
+  } catch (error) {
+    throw error;
+  }
+}
+
+async function reconcileArtifactRegistry() {
+  const records = (await pool.query(
+    "SELECT id,storage_path,status,expires_at,storage_root FROM artifacts WHERE status IN ('staged','finalized')",
+  )).rows as Array<{ id: string; storage_path: string; status: "staged" | "finalized" | "abandoned"; expires_at: Date | string | null; storage_root?: "primary" | "legacy" }>;
+  let finalized = 0;
+  let abandoned = 0;
+  for (const storageRoot of ["primary", "legacy"] as const) {
+    await reconcileArtifacts({
+      root: storageRoot === "legacy" ? legacyDataRoot : dataRoot,
+      records: records.filter((record) => (record.storage_root ?? "primary") === storageRoot),
+    finalize: async (id, sha256) => {
+      finalized += (await pool.query(
+        "UPDATE artifacts SET status='finalized',sha256=$2,finalized_at=now(),expires_at=NULL WHERE id=$1 AND status='staged'",
+        [id, sha256],
+      )).rowCount ?? 0;
+    },
+    abandon: async (id, status) => {
+      const changed = (await pool.query(
+        "UPDATE artifacts SET status='abandoned',abandoned_at=now() WHERE id=$1 AND status=$2",
+        [id, status],
+      )).rowCount ?? 0;
+      abandoned += changed;
+      return changed > 0;
+    },
+    });
+  }
+  return { finalized, abandoned };
 }
 
 async function refuseQueuedClaudeJobs(code: string, message: string) {
@@ -91,6 +138,7 @@ async function subscriptionPreflightOrRefuse() {
 // auth is missing/invalid. project.validate and pull-request.retry jobs
 // never call Claude and must still be claimable by the main loop below.
 await subscriptionPreflightOrRefuse();
+await reconcileArtifactRegistry().catch((error) => console.error(`artifact reconciliation failed: ${error instanceof Error ? error.message : "unknown error"}`));
 
 function ticketAiConfiguration(ticket: any) {
   return {

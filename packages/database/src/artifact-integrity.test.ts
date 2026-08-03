@@ -77,6 +77,10 @@ integration("artifact integrity migration", () => {
         [otherRunId, attemptId],
       )).rejects.toThrow("worktree artifacts require matching run and execution attempt owners");
 
+      await expect(client.query(
+        "INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,agent_run_id,execution_attempt_id) VALUES (gen_random_uuid(),$q$logs/wrong-owner.log$q$,$q$execution_log$q$,$q$staged$q$,now() + interval $q$1 hour$q$,$1,$2)",
+        [otherRunId, attemptId],
+      )).rejects.toThrow("execution logs require a matching run owner");
       const artifactId = (await client.query(
         "INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,agent_run_id,execution_attempt_id) VALUES (gen_random_uuid(),$q$logs/valid.log$q$,$q$execution_log$q$,$q$staged$q$,now() + interval $q$1 hour$q$,$1,$2) RETURNING id",
         [runId, attemptId],
@@ -164,7 +168,34 @@ integration("artifact integrity migration", () => {
     }
   });
 
-  it("transfers a retained worktree to a repair run before reconciliation or retry publication", async () => {
+  it("backfills only controlled legacy upload and worktree paths", async () => {
+    await resetDatabase();
+    const migrationName = "028_artifact_provenance.sql";
+    await rm(join(migrationDirectory, migrationName));
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const uploadFile = `${randomUUID()}.png`;
+      const uploadId = (await client.query("INSERT INTO uploads (storage_path,media_type,size_bytes) VALUES ($1,$q$image/png$q$,1) RETURNING id", [`/srv/current/uploads/${uploadFile}`])).rows[0].id;
+      const ignoredUploadId = (await client.query("INSERT INTO uploads (storage_path,media_type,size_bytes) VALUES ($1,$q$image/png$q$,1) RETURNING id", [`/srv/current/not-uploads/${randomUUID()}.png`])).rows[0].id;
+      const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ($q$legacy-project$q$,$q$Project$q$,$q$/tmp/project$q$) RETURNING id")).rows[0].id;
+      const ticketId = (await client.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$A-3$q$,$1,$q$Legacy worktree$q$,$q$Executing$q$) RETURNING id", [projectId])).rows[0].id;
+      const planId = (await client.query("INSERT INTO plans (ticket_id) VALUES ($1) RETURNING id", [ticketId])).rows[0].id;
+      const planVersionId = (await client.query("INSERT INTO plan_versions (plan_id,version,content_markdown,content_hash) VALUES ($1,1,$q$x$q$,encode(digest($q$x$q$,$q$sha256$q$),$q$hex$q$)) RETURNING id", [planId])).rows[0].id;
+      const runId = (await client.query("INSERT INTO agent_runs (status) VALUES ($q$completed$q$) RETURNING id")).rows[0].id;
+      const attemptId = (await client.query(`INSERT INTO execution_attempts (ticket_id,plan_version_id,agent_run_id,attempt_number,worktree_path,base_commit,validation_status) VALUES ($1,$2,$3,1,$q$/srv/legacy/data/worktrees/legacy-project/A-3/1$q$,$q$abc$q$,$q$completed$q$) RETURNING id`, [ticketId, planVersionId, runId])).rows[0].id;
+      await cp(new URL("../migrations/028_artifact_provenance.sql", import.meta.url), join(migrationDirectory, migrationName));
+      await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+      expect((await client.query("SELECT storage_path,storage_root,status FROM artifacts WHERE upload_id=$1", [uploadId])).rows[0]).toMatchObject({ storage_path: `uploads/${uploadFile}`, storage_root: "primary", status: "staged" });
+      expect((await client.query("SELECT id FROM artifacts WHERE upload_id=$1", [ignoredUploadId])).rowCount).toBe(0);
+      expect((await client.query("SELECT storage_path,storage_root,status,agent_run_id FROM artifacts WHERE execution_attempt_id=$1", [attemptId])).rows[0]).toMatchObject({ storage_path: "worktrees/legacy-project/A-3/1", storage_root: "legacy", status: "finalized", agent_run_id: runId });
+    } finally {
+      await client.end();
+    }
+  });
+
+  it("keeps retained worktree provenance immutable across repair runs", async () => {
     const client = new pg.Client({ connectionString: testDatabaseUrl });
     await client.connect();
     try {
@@ -194,7 +225,9 @@ integration("artifact integrity migration", () => {
 
       await client.query("UPDATE execution_attempts SET agent_run_id=$1 WHERE id=$2", [repairRunId, attemptId]);
 
-      expect((await client.query("SELECT agent_run_id FROM artifacts WHERE id=$1", [artifactId])).rows[0].agent_run_id).toBe(repairRunId);
+      expect((await client.query("SELECT agent_run_id FROM artifacts WHERE id=$1", [artifactId])).rows[0].agent_run_id).toBe(originalRunId);
+      await expect(client.query("UPDATE artifacts SET agent_run_id=$2 WHERE id=$1", [artifactId, repairRunId])).rejects.toThrow("artifact identity and owner are immutable");
+      await expect(client.query("UPDATE artifacts SET storage_root=$q$legacy$q$ WHERE id=$1", [artifactId])).rejects.toThrow("artifact identity and owner are immutable");
       await expect(client.query(
         `INSERT INTO artifacts (id,storage_path,artifact_type,status,sha256,finalized_at,agent_run_id,execution_attempt_id)
          VALUES (gen_random_uuid(),$q$worktrees/repair-artifact-project/A-2/1$q$,$q$worktree$q$,$q$finalized$q$,repeat($q$b$q$,64),now(),$1,$2)
