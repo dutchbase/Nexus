@@ -10,8 +10,8 @@ export function validateWebRuntime(env: Environment = process.env) {
     throw new Error("DCC_TRUST_PROXY_HOPS must be an integer from 0 to 10");
   }
   const production = env.NODE_ENV === "production";
+  if (env.DCC_PROCESS_ROLE !== "web") throw new Error("web requires DCC_PROCESS_ROLE=web");
   if (!production) return { production, trustedProxyHops };
-  if (env.DCC_PROCESS_ROLE !== "web") throw new Error("production web requires DCC_PROCESS_ROLE=web");
   try {
     if (new URL(env.APP_BASE_URL ?? "").protocol !== "https:") throw new Error();
   } catch {
@@ -33,6 +33,10 @@ export function securityHeaders() {
   };
 }
 
+export function secureCookieAttributes(production: boolean) {
+  return ["Path=/", "SameSite=Lax", ...(production ? ["Secure"] : [])];
+}
+
 export function csrfMatches(token: string, storedHash: string) {
   if (!/^[a-f0-9]{64}$/i.test(storedHash)) return false;
   const received = createHash("sha256").update(token).digest();
@@ -45,6 +49,7 @@ export function clientIpOf(request: RequestIdentity, trustedProxyHops: number) {
   if (!trustedProxyHops) return socketIp;
   const forwarded = request.headers["x-forwarded-for"];
   const addresses = (Array.isArray(forwarded) ? forwarded.join(",") : forwarded ?? "")
-    .split(",").map((value) => value.trim()).filter((value) => isIP(value) !== 0);
-  return addresses[addresses.length - trustedProxyHops] ?? socketIp;
+    .split(",").map((value) => value.trim());
+  const selected = addresses[addresses.length - trustedProxyHops];
+  return selected && isIP(selected) !== 0 ? selected : socketIp;
 }

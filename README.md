@@ -87,15 +87,10 @@ up via systemd `EnvironmentFile=`, pm2's `env`, or similar):
 # Required
 DATABASE_URL=postgresql://dcc:change-me@127.0.0.1:5432/dcc
 
-# Web process
+# Web process only — never put worker credentials in this file
 PORT=3000                                # apps/web listens here
 APP_BASE_URL=https://control.example.com # used to build links in notifications
-
-# Worker process — Claude Code auth (pick whichever your `claude` CLI uses)
-CLAUDE_CODE_OAUTH_TOKEN=...
-
-# GitHub API (omit to use https://api.github.com)
-GITHUB_API_BASE_URL=https://api.github.com
+DCC_TRUST_PROXY_HOPS=1                   # Caddy/nginx hop count; use 0 without a proxy
 
 # Optional overrides (sane defaults if unset)
 DB_POOL_SIZE=10
@@ -104,6 +99,20 @@ DCC_DATA_ROOT=.                  # worker: ticket plans/logs/skill bundles under
 DCC_SKILLS_ROOT=.                # worker: where skill definitions are read from
 PROJECTS_CONFIG_PATH=./config/projects.yaml
 ```
+
+Create a separate, mode-600 `.env.worker` for worker-only credentials:
+
+```bash
+# Worker process only — never expose these to dcc-web
+CLAUDE_CODE_OAUTH_TOKEN=...
+GITHUB_TOKEN=...
+GITHUB_API_BASE_URL=https://api.github.com
+```
+
+Production always runs with `NODE_ENV=production`. The web process requires
+`DCC_PROCESS_ROLE=web`, an HTTPS `APP_BASE_URL`, and no worker credentials;
+the worker requires `DCC_PROCESS_ROLE=worker`. `pnpm dev` assigns those roles
+automatically for local development.
 
 Then source it in your shell for the one-off setup commands below:
 
@@ -142,6 +151,8 @@ printf %s 'a-strong-password' | pnpm admin:create -- --username admin --password
 ```
 
 Passwords are UTF-8 input of 1–4096 bytes; NUL, CR, and LF are rejected.
+Use `printf %s`, not `echo`: the input is read from stdin incrementally and
+never accepted as a command-line argument.
 
 ## 7. Run it
 
@@ -171,6 +182,8 @@ Type=simple
 User=dcc
 WorkingDirectory=/opt/dev-control
 EnvironmentFile=/opt/dev-control/.env
+Environment=DCC_PROCESS_ROLE=web
+Environment=NODE_ENV=production
 ExecStart=/usr/bin/env pnpm --filter web dev
 Restart=on-failure
 RestartSec=3
@@ -191,6 +204,9 @@ Type=simple
 User=dcc
 WorkingDirectory=/opt/dev-control
 EnvironmentFile=/opt/dev-control/.env
+EnvironmentFile=/opt/dev-control/.env.worker
+Environment=DCC_PROCESS_ROLE=worker
+Environment=NODE_ENV=production
 ExecStart=/usr/bin/env pnpm --filter worker start
 Restart=on-failure
 RestartSec=3
@@ -221,7 +237,15 @@ control.example.com {
 ```
 
 Make sure `APP_BASE_URL` in `.env` matches the public HTTPS URL — it's
-used to build links in outgoing notifications.
+used to build links in outgoing notifications. Set `DCC_TRUST_PROXY_HOPS` to
+the exact number of trusted proxies: the web server selects that raw
+`X-Forwarded-For` position and falls back to the socket address for malformed
+or missing values.
+
+The worker deletes only sessions whose `expires_at <= now()` once per minute.
+Each successful pass is recorded in the audit log; System health shows its
+latest timestamp and deleted count. A failed pass is logged and does not stop
+the worker.
 
 ## Updating
 

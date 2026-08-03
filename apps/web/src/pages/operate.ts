@@ -96,13 +96,14 @@ function statCard(label: string, value: string, detail: string, tone: string) {
 }
 
 async function systemBody(): Promise<string> {
-  const [heartbeat, depth, projects, failedJobs, failedDeliveries, failedRuns] = await Promise.all([
+  const [heartbeat, depth, projects, failedJobs, failedDeliveries, failedRuns, sessionCleanup] = await Promise.all([
     pool.query("SELECT MAX(claimed_at) hb, (array_agg(claimed_by ORDER BY claimed_at DESC))[1] worker FROM jobs WHERE claimed_at IS NOT NULL"),
     pool.query("SELECT status, count(*)::int c FROM jobs GROUP BY status"),
     pool.query("SELECT slug, name, repository_path, health_status FROM projects ORDER BY name"),
     pool.query("SELECT id, type, error_json->>'message' message, updated_at FROM jobs WHERE status='failed' ORDER BY updated_at DESC LIMIT 10"),
     pool.query("SELECT id, event_type, error_message, response_status, updated_at FROM notification_deliveries WHERE status='failed' ORDER BY updated_at DESC LIMIT 10"),
     pool.query("SELECT id, run_type, error_code, error_message, finished_at FROM agent_runs WHERE status='failed' ORDER BY finished_at DESC LIMIT 10"),
+    pool.query("SELECT created_at, (metadata_json->>'deleted_count')::integer deleted_count FROM audit_events WHERE action='admin_sessions.cleanup' ORDER BY created_at DESC LIMIT 1"),
   ]);
 
   const hb = heartbeat.rows[0]?.hb;
@@ -112,6 +113,9 @@ async function systemBody(): Promise<string> {
 
   const claudeVersion = process.env.CLAUDE_CODE_VERSION ?? "unknown";
   const claudeCard = statCard("Claude Code", claudeVersion, "subscription auth", claudeVersion === "unknown" ? "muted" : "ok");
+
+  const cleanup = sessionCleanup.rows[0];
+  const cleanupCard = statCard("Session cleanup", cleanup ? String(cleanup.deleted_count) : "not run", cleanup ? `last run ${since(cleanup.created_at)} ago` : "worker has not completed cleanup yet", cleanup ? "ok" : "muted");
 
   const depthByStatus = new Map(depth.rows.map((row) => [row.status, row.c]));
   const running = depthByStatus.get("running") ?? 0;
@@ -163,7 +167,7 @@ async function systemBody(): Promise<string> {
       <div><div class="eyebrow">Observability</div><h1>System health</h1></div>
       <button type="button" class="button" ${preflightDisabled}>Run all preflight checks</button>
     </div>
-    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(230px,1fr));margin-top:16px">${workerCard}${claudeCard}${queueCard}${diskCard}</div>
+    <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(230px,1fr));margin-top:16px">${workerCard}${claudeCard}${cleanupCard}${queueCard}${diskCard}</div>
     <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(320px,1fr));margin-top:22px;align-items:start">
       <section class="card" style="margin-top:0"><div class="card-head">Project health</div>${projectRows}</section>
       <section class="card" style="margin-top:0"><div class="card-head">Recent system errors</div>${errorList}</section>

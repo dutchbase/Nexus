@@ -16,3 +16,12 @@ export async function cleanupExpiredSessions(db: Queryable): Promise<{ deletedCo
   );
   return { deletedCount: result.rows[0]?.deleted_count ?? 0 };
 }
+
+export async function runSessionCleanup(db: Queryable, report: (message: string) => void = console.error) {
+  try {
+    return await cleanupExpiredSessions(db);
+  } catch (error) {
+    report(`Session cleanup failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    return null;
+  }
+}

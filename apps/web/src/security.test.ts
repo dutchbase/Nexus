@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, test } from "vitest";
-import { clientIpOf, csrfMatches, securityHeaders, validateWebRuntime } from "./security.ts";
+import { clientIpOf, csrfMatches, securityHeaders, secureCookieAttributes, validateWebRuntime } from "./security.ts";
 
 describe("web security", () => {
   test("production requires the web role and a HTTPS public URL", () => {
@@ -9,9 +9,10 @@ describe("web security", () => {
     expect(validateWebRuntime({ NODE_ENV: "production", DCC_PROCESS_ROLE: "web", APP_BASE_URL: "https://dcc.test" }).production).toBe(true);
   });
 
-  test("production web refuses worker credentials while development is explicit", () => {
+  test("production web refuses worker credentials and development still requires the web role", () => {
     expect(() => validateWebRuntime({ NODE_ENV: "production", DCC_PROCESS_ROLE: "web", APP_BASE_URL: "https://dcc.test", GITHUB_TOKEN: "secret" })).toThrow("GITHUB_TOKEN");
-    expect(validateWebRuntime({ NODE_ENV: "development" })).toMatchObject({ production: false, trustedProxyHops: 0 });
+    expect(() => validateWebRuntime({ NODE_ENV: "development" })).toThrow("DCC_PROCESS_ROLE=web");
+    expect(validateWebRuntime({ NODE_ENV: "development", DCC_PROCESS_ROLE: "web" })).toMatchObject({ production: false, trustedProxyHops: 0 });
   });
 
   test("uses the documented browser hardening header baseline", () => {
@@ -20,6 +21,11 @@ describe("web security", () => {
       "x-frame-options": "DENY", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
       "permissions-policy": expect.stringContaining("camera=()"),
     });
+  });
+
+  test("uses one secure-cookie baseline for production and development", () => {
+    expect(secureCookieAttributes(false)).toEqual(["Path=/", "SameSite=Lax"]);
+    expect(secureCookieAttributes(true)).toEqual(["Path=/", "SameSite=Lax", "Secure"]);
   });
 
   test("compares valid CSRF hashes in constant time and rejects malformed values", () => {
@@ -37,6 +43,12 @@ describe("web security", () => {
     expect(clientIpOf(direct, 1)).toBe("198.51.100.9");
     const chained = { socket: { remoteAddress: "203.0.113.11" }, headers: { "x-forwarded-for": "198.51.100.9, 203.0.113.10" } } as any;
     expect(clientIpOf(chained, 2)).toBe("198.51.100.9");
+  });
+
+  test("rejects malformed selected forwarded identities instead of skipping to another value", () => {
+    const spoofed = { socket: { remoteAddress: "203.0.113.10" }, headers: { "x-forwarded-for": "198.51.100.9, not-an-ip" } } as any;
+    expect(clientIpOf(spoofed, 1)).toBe("203.0.113.10");
+    expect(clientIpOf(spoofed, 2)).toBe("198.51.100.9");
   });
 
   test("rejects invalid trusted proxy settings", () => {

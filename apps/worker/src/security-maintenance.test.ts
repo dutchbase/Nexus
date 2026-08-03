@@ -1,5 +1,5 @@
 import { expect, test } from "vitest";
-import { cleanupExpiredSessions } from "./security-maintenance.ts";
+import { cleanupExpiredSessions, runSessionCleanup } from "./security-maintenance.ts";
 
 test("removes expired sessions and records their count without an actor", async () => {
   const queries: Array<{ text: string; values: unknown[] | undefined }> = [];
@@ -18,4 +18,12 @@ test("removes expired sessions and records their count without an actor", async 
   expect(queries[0]?.text).toContain("'system'");
   expect(queries[0]?.text).toContain("'admin_sessions.cleanup'");
   expect(queries[0]?.text).toContain("'deleted_count'");
+});
+
+test("contains cleanup failures so the worker loop can continue", async () => {
+  const messages: string[] = [];
+  await expect(runSessionCleanup({
+    async query() { throw new Error("database unavailable"); },
+  }, (message) => messages.push(message))).resolves.toBeNull();
+  expect(messages).toEqual(["Session cleanup failed: database unavailable"]);
 });

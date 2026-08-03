@@ -41,7 +41,8 @@ describe("Task 8 automation", () => {
       "pnpm install --frozen-lockfile",
       "pnpm --filter database migrate",
       "pnpm exec tsx scripts/sync-agent-content.ts",
-      "pm2 restart dcc-web dcc-worker",
+      "pm2 restart dcc-web --update-env",
+      "pm2 restart dcc-worker --update-env",
       "pm2 restart dcc-webhook",
       "",
     ].join("\n"));

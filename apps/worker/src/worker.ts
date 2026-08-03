@@ -32,8 +32,10 @@ import { formatFollowUpDescription } from "./follow-up-description.ts";
 import {
   approvedPhaseSkills, assertExecutionPublicationGate, executionRoot, prReviewSnapshotInput, reviewedMergeBinding,
 } from "./worker-boundary.ts";
-import { cleanupExpiredSessions } from "./security-maintenance.ts";
+import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
+
+if (process.env.DCC_PROCESS_ROLE !== "worker") throw new Error("worker requires DCC_PROCESS_ROLE=worker");
 
 // Resolved relative to this module's own file, not process.cwd() — `pnpm
 // --filter worker dev/start` runs with cwd=apps/worker, so a cwd-relative
@@ -1523,7 +1525,7 @@ async function deliverDueNotification() {
 while (!stopping) {
   if (Date.now() - lastSessionCleanup >= 60_000) {
     lastSessionCleanup = Date.now();
-    await cleanupExpiredSessions(pool);
+    await runSessionCleanup(pool);
   }
   if (Date.now() - lastPullRequestSync >= 2500) {
     lastPullRequestSync = Date.now();

@@ -31,6 +31,7 @@ git reset --hard "$SHA"
 pnpm install --frozen-lockfile
 pnpm --filter database migrate
 pnpm exec tsx scripts/sync-agent-content.ts
-pm2 restart dcc-web dcc-worker
+NODE_ENV=production DCC_PROCESS_ROLE=web pm2 restart dcc-web --update-env
+NODE_ENV=production DCC_PROCESS_ROLE=worker pm2 restart dcc-worker --update-env
 write_marker 0
 pm2 restart dcc-webhook
