@@ -1424,11 +1424,11 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (status) { params.push(status); where.push(`status=$${params.length}`); }
     const type = url.searchParams.get("type");
     if (type) { params.push(type); where.push(`type=$${params.length}`); }
-    const jobs = (await pool.query(
+    const [jobs, capacity] = await Promise.all([pool.query(
       `SELECT * FROM jobs ${where.length ? `WHERE ${where.join(" AND ")}` : ""} ORDER BY created_at DESC LIMIT 200`,
       params,
-    )).rows;
-    return json(response, 200, { jobs });
+    ), pool.query("SELECT count(*)::int observed_running FROM jobs WHERE status='running'")]);
+    return json(response, 200, { jobs: jobs.rows, capacity: { configured: 1, observed_running: capacity.rows[0]?.observed_running ?? 0 } });
   }
   if (url.pathname === "/api/admin/tickets" && request.method === "GET") {
     const params: any[] = [];
