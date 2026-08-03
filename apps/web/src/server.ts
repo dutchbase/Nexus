@@ -2076,4 +2076,4 @@ const server = createServer((request, response) => {
     else response.end();
   });
 });
-if (process.env.NODE_ENV !== "test") server.listen(port, process.env.HOST ?? "0.0.0.0", () => console.log(`web listening on `));
+if (process.env.NODE_ENV !== "test") server.listen(port, process.env.HOST ?? "0.0.0.0", () => console.log(`web listening on ${port}`));

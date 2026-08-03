@@ -157,13 +157,12 @@ describe("backup and recovery drill", () => {
     await expect(readFile(test.commandLog, "utf8")).resolves.toContain("pg_dump postgresql://primary:primary@127.0.0.1:5432/dcc_primary --format=custom");
   });
 
-  it("rejects unsupported symlinks before backup publication", async () => {
+  it("preserves symlinks in the backup manifest", async () => {
     const test = await fixture();
     await symlink(join(test.root, "outside"), join(test.env.DCC_DATA_DIR!, "linked"));
-    const result = run("scripts/backup.sh", [], test.env);
-    expect(result.status).not.toBe(0);
-    expect(result.stderr).toContain("unsupported symlink");
-    expect(await readdir(test.backups)).toEqual([]);
+    expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
+    const [backup] = await readdir(test.backups);
+    await expect(readFile(join(test.backups, backup, "manifest-v1.sha256"), "utf8")).resolves.toContain("symlink ./data/linked");
   });
 
   it("backs up the shared data directory from DCC_DATA_ROOT when DCC_DATA_DIR is unset", async () => {

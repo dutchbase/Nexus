@@ -94,6 +94,9 @@ integration("artifact integrity migration", () => {
         "UPDATE artifacts SET status=$q$staged$q$,sha256=NULL,expires_at=now() + interval $q$1 hour$q$,finalized_at=NULL WHERE id=$1",
         [artifactId],
       )).rejects.toThrow("artifact lifecycle cannot move backward");
+      await expect(client.query("DELETE FROM artifacts WHERE id=$1", [artifactId])).rejects.toThrow("artifacts are append-only");
+      const verificationId = (await client.query("INSERT INTO backup_recovery_verifications (backup_path,status) VALUES ($q$/tmp/backup$q$,$q$passed$q$) RETURNING id")).rows[0].id;
+      await expect(client.query("DELETE FROM backup_recovery_verifications WHERE id=$1", [verificationId])).rejects.toThrow("backup recovery verifications are append-only");
     } finally {
       await client.end();
     }
@@ -101,7 +104,7 @@ integration("artifact integrity migration", () => {
 
   it("backfills and serves a pre-022 controlled legacy execution log", async () => {
     await resetDatabase();
-    const migrationName = "022_historic_execution_log_artifacts.sql";
+    const migrationName = "024_historic_execution_log_artifacts.sql";
     await rm(join(migrationDirectory, migrationName));
     await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
     const root = await mkdtemp(join(tmpdir(), "dcc-legacy-log-"));
@@ -118,7 +121,7 @@ integration("artifact integrity migration", () => {
       await mkdir(join(root, "logs"), { recursive: true });
       await writeFile(join(root, storagePath), "legacy execution output");
 
-      await cp(new URL("../migrations/022_historic_execution_log_artifacts.sql", import.meta.url), join(migrationDirectory, migrationName));
+      await cp(new URL("../migrations/024_historic_execution_log_artifacts.sql", import.meta.url), join(migrationDirectory, migrationName));
       await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
 
       const row = (await client.query(
@@ -137,7 +140,7 @@ integration("artifact integrity migration", () => {
 
   it("preserves the legacy root when DCC_DATA_DIR differs during upgrade", async () => {
     await resetDatabase();
-    const migrationNames = ["022_historic_execution_log_artifacts.sql", "023_legacy_artifact_root.sql"];
+    const migrationNames = ["024_historic_execution_log_artifacts.sql", "025_legacy_artifact_root.sql"];
     await Promise.all(migrationNames.map((name) => rm(join(migrationDirectory, name))));
     await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
     const primaryRoot = await mkdtemp(join(tmpdir(), "dcc-primary-root-"));
@@ -170,7 +173,7 @@ integration("artifact integrity migration", () => {
 
   it("backfills only controlled legacy upload and worktree paths", async () => {
     await resetDatabase();
-    const migrationName = "028_artifact_provenance.sql";
+    const migrationName = "030_artifact_provenance.sql";
     await rm(join(migrationDirectory, migrationName));
     await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
     const client = new pg.Client({ connectionString: testDatabaseUrl });
@@ -185,7 +188,7 @@ integration("artifact integrity migration", () => {
       const planVersionId = (await client.query("INSERT INTO plan_versions (plan_id,version,content_markdown,content_hash) VALUES ($1,1,$q$x$q$,encode(digest($q$x$q$,$q$sha256$q$),$q$hex$q$)) RETURNING id", [planId])).rows[0].id;
       const runId = (await client.query("INSERT INTO agent_runs (status) VALUES ($q$completed$q$) RETURNING id")).rows[0].id;
       const attemptId = (await client.query(`INSERT INTO execution_attempts (ticket_id,plan_version_id,agent_run_id,attempt_number,worktree_path,base_commit,validation_status) VALUES ($1,$2,$3,1,$q$/srv/legacy/data/worktrees/legacy-project/A-3/1$q$,$q$abc$q$,$q$completed$q$) RETURNING id`, [ticketId, planVersionId, runId])).rows[0].id;
-      await cp(new URL("../migrations/028_artifact_provenance.sql", import.meta.url), join(migrationDirectory, migrationName));
+      await cp(new URL("../migrations/030_artifact_provenance.sql", import.meta.url), join(migrationDirectory, migrationName));
       await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
       expect((await client.query("SELECT storage_path,storage_root,status FROM artifacts WHERE upload_id=$1", [uploadId])).rows[0]).toMatchObject({ storage_path: `uploads/${uploadFile}`, storage_root: "primary", status: "staged" });
       expect((await client.query("SELECT id FROM artifacts WHERE upload_id=$1", [ignoredUploadId])).rowCount).toBe(0);

@@ -28,12 +28,6 @@ if [ "$legacy_data_directory" != "$data_directory" ] && [ ! -d "$legacy_data_dir
   echo "required backup root is missing: $legacy_data_directory" >&2
   exit 1
 fi
-for required_root in "$data_directory" "$config_directory" "$legacy_data_directory"; do
-  if find "$required_root" -type l -print -quit | grep -q .; then
-    echo "backup root contains unsupported symlink: $required_root" >&2
-    exit 1
-  fi
-done
 
 mkdir -p "$backup_directory"
 backup_directory="$(cd "$backup_directory" && pwd -P)"
@@ -81,7 +75,7 @@ if [ "$legacy_data_directory" != "$data_directory" ]; then
   copy_tree "$legacy_data_directory" "$stage/legacy-data" "$legacy_data_backup_relative"
 fi
 copy_tree "$config_directory" "$stage/config"
-(cd "$stage" && find . -type f ! -path './manifest-v1.sha256' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$stage/manifest-v1.sha256"
+(cd "$stage" && { find . -type f ! -path './manifest-v1.sha256' -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum; find . -type l -printf 'symlink %p %l\n'; } | LC_ALL=C sort) > "$stage/manifest-v1.sha256"
 if ! mv -T -n -- "$stage" "$backup" || [ -d "$stage" ]; then
   echo "backup destination appeared before publish" >&2
   exit 1

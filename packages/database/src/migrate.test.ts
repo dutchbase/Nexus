@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { cp, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import pg from "pg";
@@ -8,6 +8,9 @@ process.env.DATABASE_URL ??= "postgres://unused:unused@127.0.0.1:1/unused";
 const { migrate, validateMigrations } = await import("./migrate.js");
 
 describe("validateMigrations", () => {
+  it("accepts the repository migration directory", async () => {
+    await expect(readdir(new URL("../migrations/", import.meta.url)).then((names) => validateMigrations(names, []))).resolves.toBeUndefined();
+  });
   it("rejects invalid filenames", () => {
     expect(() => validateMigrations(["foundation.sql"], [])).toThrow("invalid migration filename foundation.sql");
   });
@@ -21,7 +24,7 @@ describe("validateMigrations", () => {
   });
 
   it("recognizes the renamed migration through its legacy applied name", () => {
-    expect(() => validateMigrations(["017_project_agent_start_path.sql"], ["015_project_agent_start_path.sql"])).not.toThrow();
+    expect(() => validateMigrations(["019_project_agent_start_path.sql"], ["015_project_agent_start_path.sql"])).not.toThrow();
   });
 
   it("permits the known follow-up migration after legacy project start path", () => {
@@ -115,7 +118,7 @@ integration("migrate", () => {
     } finally {
       await client.end();
     }
-    await writeFile(join(migrationDirectory, "017_project_agent_start_path.sql"), "CREATE TABLE should_not_exist (id integer);");
+    await writeFile(join(migrationDirectory, "019_project_agent_start_path.sql"), "CREATE TABLE should_not_exist (id integer);");
     await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
     const verify = new pg.Client({ connectionString: testDatabaseUrl });
     await verify.connect();

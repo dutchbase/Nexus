@@ -7,7 +7,7 @@ const defaultDirectory = join(dirname(fileURLToPath(import.meta.url)), "..", "mi
 const filenamePattern = /^(\d{3})_[a-z0-9][a-z0-9_-]*\.sql$/;
 const advisoryLock = 827618744171;
 const legacyAppliedNames: Record<string, string> = {
-  "017_project_agent_start_path.sql": "015_project_agent_start_path.sql",
+  "019_project_agent_start_path.sql": "015_project_agent_start_path.sql",
 };
 const legacyPendingNames: Record<string, string> = {
   "015_follow_up_ticket_prompt.sql": "015_project_agent_start_path.sql",

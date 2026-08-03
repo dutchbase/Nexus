@@ -113,7 +113,7 @@ if [ ! -f "$manifest" ]; then
 fi
 manifest_sha256="$(sha256sum "$manifest" | awk '{print $1}')"
 
-if find "$backup_directory" -mindepth 1 ! -type d ! -type f -print -quit | grep -q .; then
+if find "$backup_directory" -mindepth 1 ! -type d ! -type f ! -type l -print -quit | grep -q .; then
   echo "backup contains unsupported filesystem entries" >&2
   exit 1
 fi
@@ -141,7 +141,7 @@ fi
 verify_exact_manifest() {
   local root="$1"
   actual_manifest="$(mktemp "$recovery_parent/.dcc-restore-manifest.XXXXXX")"
-  (cd "$root" && find . -type f ! -path './manifest-v1.sha256' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$actual_manifest"
+  (cd "$root" && { find . -type f ! -path './manifest-v1.sha256' -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum; find . -type l -printf 'symlink %p %l\n'; } | LC_ALL=C sort) > "$actual_manifest"
   if ! cmp -s "$root/manifest-v1.sha256" "$actual_manifest"; then
     echo "backup manifest does not match the exact file set" >&2
     exit 1
