@@ -40,6 +40,7 @@ async function reconcileJob(client: Client, job: Job, errorCode: string, message
         jobId: job.id,
         errorMessage: message,
         reason: "Worker lease expired during pull-request publication",
+        preserveRetryable: job.status === "queued",
       });
       if (publication === "published") {
         await client.query(
@@ -70,7 +71,7 @@ async function reconcileJob(client: Client, job: Job, errorCode: string, message
     );
     return;
   }
-  if (job.type === "execution.run" || job.type === "execution.repair") {
+  if (["execution.run", "execution.repair", "pull-request.retry"].includes(job.type)) {
     const attemptId = job.payload_json.execution_attempt_id;
     if (typeof attemptId === "string") {
       await client.query(

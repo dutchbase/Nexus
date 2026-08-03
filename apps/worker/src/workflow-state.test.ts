@@ -132,11 +132,60 @@ test.each(["execution.run", "execution.repair", "pull-request.retry"])("recovers
   expect(publicationAudits).toEqual(["failed"]);
 });
 
-test.each(["execution.run", "execution.repair", "pull-request.retry"])("completes a recovered %s job when publication already succeeded for that job", async (type) => {
+test.each(
+  ["execution.run", "execution.repair", "pull-request.retry"].flatMap((type) =>
+    ["pending", "publishing"].map((publicationState) => [type, publicationState] as const),
+  ),
+)("keeps a requeued %s publication %s and reconciles its workflow state", async (type, publicationState) => {
+  let publicationStatus = publicationState;
+  let runStatus = "running";
+  let attemptStatus = "validated";
+  let ticketStatus = "Validating";
+  const history: string[] = [];
+  const query = vi.fn(async (sql: string): Promise<Result> => {
+    if (sql.includes("UPDATE jobs j") && sql.includes("lease_expires_at <= now()")) return { rows: [{
+      id: "job-1", type, status: "queued",
+      payload_json: { ticket_id: "ticket-1", execution_attempt_id: "attempt-1" },
+    }], rowCount: 1 };
+    if (sql.includes("UPDATE notification_deliveries nd")) return { rows: [], rowCount: 0 };
+    if (sql.includes("FROM execution_publications ep")) return { rows: [{
+      id: "publication-1", status: publicationStatus, ticket_id: "ticket-1",
+      agent_run_id: "run-1", plan_version_id: "plan-1",
+    }], rowCount: 1 };
+    if (sql.includes("UPDATE execution_publications")) {
+      publicationStatus = "failed";
+      return { rows: [{ id: "publication-1" }], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE agent_runs")) {
+      runStatus = "failed";
+      return { rows: [{ id: "run-1" }], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE execution_attempts")) attemptStatus = "queued";
+    if (sql.includes("SELECT status FROM tickets")) return { rows: [{ status: ticketStatus }], rowCount: 1 };
+    if (sql.includes("UPDATE tickets SET status=$2")) ticketStatus = "Execution Queued";
+    if (sql.includes("INSERT INTO ticket_status_history")) history.push("Execution Queued");
+    return { rows: [], rowCount: 1 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+
+  await recoverExpiredWorkflowState(inTransaction);
+
+  expect(publicationStatus).toBe(publicationState);
+  expect(runStatus).toBe("failed");
+  expect(attemptStatus).toBe("queued");
+  expect(ticketStatus).toBe("Execution Queued");
+  expect(history).toEqual(["Execution Queued"]);
+});
+
+test.each(
+  ["execution.run", "execution.repair", "pull-request.retry"].flatMap((type) =>
+    ["failed", "queued"].map((status) => [type, status] as const),
+  ),
+)("completes a recovered %s job with status %s when publication already succeeded for that job", async (type, status) => {
   let jobStatus = "failed";
   const query = vi.fn(async (sql: string): Promise<Result> => {
     if (sql.includes("UPDATE jobs j") && sql.includes("lease_expires_at <= now()")) return { rows: [{
-      id: "job-1", type, status: "failed",
+      id: "job-1", type, status,
       payload_json: { ticket_id: "ticket-1", execution_attempt_id: "attempt-1" },
     }], rowCount: 1 };
     if (sql.includes("UPDATE notification_deliveries nd")) return { rows: [], rowCount: 0 };
