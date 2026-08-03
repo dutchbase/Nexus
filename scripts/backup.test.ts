@@ -26,12 +26,14 @@ async function fixture() {
   const commandLog = join(root, "commands.log");
   await Promise.all([
     mkdir(join(data, "secrets"), { recursive: true }),
+    mkdir(join(data, "nested"), { recursive: true }),
     mkdir(legacyData, { recursive: true }),
     mkdir(join(config, "secrets"), { recursive: true }),
     mkdir(bin, { recursive: true }),
     mkdir(backups, { recursive: true }),
   ]);
   await Promise.all([
+    writeFile(join(data, "nested", "manifest-v1.sha256"), "nested manifest"),
     writeFile(join(data, "artifact.txt"), "artifact"),
     writeFile(join(legacyData, "legacy-artifact.txt"), "legacy artifact"),
     writeFile(join(data, ".env"), "DATABASE_URL=do-not-back-up"),
@@ -139,6 +141,7 @@ describe("backup and recovery drill", () => {
     await expect(readFile(join(backup, "data", "artifact.txt"), "utf8")).resolves.toBe("artifact");
     await expect(readFile(join(backup, "legacy-data", "legacy-artifact.txt"), "utf8")).resolves.toBe("legacy artifact");
     await expect(readFile(join(backup, "config", "projects.yaml"), "utf8")).resolves.toBe("projects: []\n");
+    await expect(readFile(join(backup, "data", "nested", "manifest-v1.sha256"), "utf8")).resolves.toBe("nested manifest");
     await expect(readFile(join(backup, "data", ".env"))).rejects.toThrow();
     await expect(readFile(join(backup, "data", "secrets", "token"))).rejects.toThrow();
     await expect(readFile(join(backup, "config", ".env.production"))).rejects.toThrow();

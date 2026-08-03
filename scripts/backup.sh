@@ -75,7 +75,7 @@ if [ "$legacy_data_directory" != "$data_directory" ]; then
   copy_tree "$legacy_data_directory" "$stage/legacy-data" "$legacy_data_backup_relative"
 fi
 copy_tree "$config_directory" "$stage/config"
-(cd "$stage" && find . -type f ! -name 'manifest-v1.sha256' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$stage/manifest-v1.sha256"
+(cd "$stage" && find . -type f ! -path './manifest-v1.sha256' -print0 | LC_ALL=C sort -z | xargs -0 sha256sum) > "$stage/manifest-v1.sha256"
 mv -- "$stage" "$backup"
 stage=""
 
