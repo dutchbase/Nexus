@@ -1,6 +1,6 @@
 import { createServer } from "node:http";
 import { afterEach, expect, test } from "vitest";
-import { createPullRequestComment, mergePullRequest } from "./index.ts";
+import { createPullRequest, createPullRequestComment, mergePullRequest } from "./index.ts";
 
 const originalApiBaseUrl = process.env.GITHUB_API_BASE_URL;
 const originalToken = process.env.GITHUB_TOKEN;
@@ -42,6 +42,32 @@ test("posts the complete Markdown review as a pull-request comment", async () =>
       authorization: "Bearer test-token",
       body: markdown,
     });
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
+test("creates system pull requests ready for review", async () => {
+  let body: Record<string, unknown> | undefined;
+  const server = createServer(async (incoming, outgoing) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
+    body = JSON.parse(Buffer.concat(chunks).toString());
+    outgoing.setHeader("content-type", "application/json");
+    outgoing.end(JSON.stringify({}));
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no TCP port");
+    process.env.GITHUB_API_BASE_URL = `http://127.0.0.1:${address.port}`;
+    process.env.GITHUB_TOKEN = "test-token";
+
+    await createPullRequest({
+      owner: "acme", repository: "widgets", title: "Ready", body: "", head: "feature", base: "main",
+    });
+
+    expect(body).toMatchObject({ title: "Ready", head: "feature", base: "main", draft: false });
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }

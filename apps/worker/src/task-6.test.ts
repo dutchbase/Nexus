@@ -18,3 +18,13 @@ test("runs PR review in a disposable detached worktree and cleans it up", async 
   expect(source).toContain("workingDirectory: reviewWorktree.worktreePath");
   expect(source).toContain("await reviewWorktree.cleanup()");
 });
+
+test("gives the read-only PR review an immutable-diff-first ten-turn budget", async () => {
+  const source = await worker();
+  const start = source.indexOf("async function runPrAiReview");
+  const invocation = source.slice(start, source.indexOf("async function runFollowUpDescription", start));
+
+  expect(invocation).toContain("Inspect the supplied immutable diff first");
+  expect(invocation).toContain('tools: ["Read", "Glob", "Grep"]');
+  expect(invocation).toContain("maxTurns: 10");
+});
