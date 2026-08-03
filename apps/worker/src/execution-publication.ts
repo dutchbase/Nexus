@@ -1,6 +1,6 @@
 export class PublicationError extends Error {}
 
-export type FailureState = "failed" | "published" | "missing";
+export type FailureState = "failed" | "published" | "published_by_other_job" | "missing";
 type Client = { query: (sql: string, values?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> };
 
 export async function failExecutionPublication(
@@ -8,14 +8,14 @@ export async function failExecutionPublication(
   input: { attemptId: string; jobId: string; errorMessage: string; reason: string },
 ): Promise<FailureState> {
   const publication = (await client.query(
-    `SELECT ep.id,ep.status,ea.ticket_id,ea.agent_run_id,ea.plan_version_id
+    `SELECT ep.id,ep.status,ep.last_job_id,ea.ticket_id,ea.agent_run_id,ea.plan_version_id
      FROM execution_publications ep
      JOIN execution_attempts ea ON ea.id=ep.execution_attempt_id
      WHERE ep.execution_attempt_id=$1 FOR UPDATE OF ep,ea`,
     [input.attemptId],
   )).rows[0];
   if (!publication) return "missing";
-  if (publication.status === "published") return "published";
+  if (publication.status === "published") return publication.last_job_id === input.jobId ? "published" : "published_by_other_job";
   if (publication.status === "failed") return "failed";
 
   const transitioned = await client.query(

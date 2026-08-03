@@ -13,7 +13,7 @@ function publicationClient(initialStatus: "pending" | "publishing" | "published"
   const audits: string[] = [];
   const query = vi.fn(async (sql: string) => {
     if (sql.includes("FROM execution_publications ep")) return { rows: [{
-      id: "publication-1", status, ticket_id: "ticket-1", agent_run_id: "run-1",
+      id: "publication-1", status, last_job_id: "job-1", ticket_id: "ticket-1", agent_run_id: "run-1",
       plan_version_id: "plan-1",
     }], rowCount: 1 };
     if (sql.includes("UPDATE execution_publications")) {

@@ -909,7 +909,13 @@ async function publishExecutionAttempt(input: {
          RETURNING *`,
         [input.attempt.id, `execution-publication:${input.attempt.id}`],
       ))).rows[0];
-      if (intent.status === "published") return intent;
+      if (intent.status === "published") {
+        await lease.run(() => client.query(
+          "UPDATE execution_publications SET last_job_id=$2,updated_at=now() WHERE id=$1 AND status='published'",
+          [intent.id, input.jobId],
+        ));
+        return intent;
+      }
       await lease.run(() => client.query(
         "UPDATE execution_attempts SET result_commit=$2,validation_status='validated' WHERE id=$1",
         [input.attempt.id, commit],
