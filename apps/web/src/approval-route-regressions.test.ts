@@ -186,6 +186,9 @@ test.each([
       id: "attempt-1", run_id: "a1", ticket_id: "ticket", execution_attempt_id: "attempt-1",
       plan_version_id: "plan-version", validation_status: "failed", worktree_path: "/worktree",
       result_commit: "commit", ticket_status: path.endsWith("/retry") ? "PR Creation Failed" : "Execution Failed",
+      publication_id: path.endsWith("/retry") ? "publication-1" : undefined,
+      publication_status: path.endsWith("/retry") ? "failed" : undefined,
+      publication_idempotency_key: path.endsWith("/retry") ? "execution-publication:attempt-1" : undefined,
       metadata_json: { job_id: "source-job", approved_input_snapshot_id: "approved-input-1" },
     }] };
     if (sql.includes("FROM jobs WHERE status IN")) return { rows: [], rowCount: 0 };
@@ -211,6 +214,9 @@ test.each([
       id: "attempt-1", run_id: "a1", ticket_id: "ticket", execution_attempt_id: "attempt-1",
       plan_version_id: "plan-version", validation_status: "failed", worktree_path: "/worktree",
       result_commit: "commit", ticket_status: path.endsWith("/retry") ? "PR Creation Failed" : "Execution Failed",
+      publication_id: path.endsWith("/retry") ? "publication-1" : undefined,
+      publication_status: path.endsWith("/retry") ? "failed" : undefined,
+      publication_idempotency_key: path.endsWith("/retry") ? "execution-publication:attempt-1" : undefined,
       metadata_json: { job_id: "source-job", approved_input_snapshot_id: "approved-input-1" },
     }] };
     if (sql.includes("FROM jobs WHERE status IN")) return { rows: [], rowCount: 0 };
@@ -222,4 +228,44 @@ test.each([
 
   await expect(adminApi(request({ feedback: "Repair it." }, "POST"), response, new URL(`http://test${path}`), { user_id: "admin" }))
     .rejects.toMatchObject({ status: 409 });
+});
+
+test("publication retry requires a failed durable publication", async () => {
+  transactionClient = { query: vi.fn(async (sql: string) => {
+    if (sql.includes("FROM agent_runs ar")) return { rows: [{
+      id: "attempt-1", run_id: "a1", ticket_id: "ticket", plan_version_id: "plan-version",
+      result_commit: "commit", ticket_status: "PR Creation Failed", metadata_json: { job_id: "source-job" },
+      publication_id: "publication-1", publication_status: "pending",
+      publication_idempotency_key: "execution-publication:attempt-1",
+    }] };
+    return { rows: [], rowCount: 0 };
+  }) };
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await expect(adminApi(request({}, "POST"), response, new URL("http://test/api/admin/runs/a1/retry"), { user_id: "admin" }))
+    .rejects.toMatchObject({ status: 409 });
+  expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("INSERT INTO jobs"))).toBe(false);
+});
+
+test("publication retry resets the same intent without changing its external key", async () => {
+  transactionClient = { query: vi.fn(async (sql: string, values?: unknown[]) => {
+    if (sql.includes("FROM agent_runs ar")) return { rows: [{
+      id: "attempt-1", run_id: "a1", ticket_id: "ticket", plan_version_id: "plan-version",
+      result_commit: "commit", ticket_status: "PR Creation Failed", metadata_json: { job_id: "source-job" },
+      publication_id: "publication-1", publication_status: "failed",
+      publication_idempotency_key: "execution-publication:attempt-1",
+    }] };
+    if (sql.includes("SELECT status FROM jobs")) return { rows: [{ status: "failed" }], rowCount: 1 };
+    if (sql.includes("INSERT INTO jobs")) return { rows: [{ id: "retry-job" }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  }) };
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await adminApi(request({}, "POST"), response, new URL("http://test/api/admin/runs/a1/retry"), { user_id: "admin" });
+
+  const reset = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("UPDATE execution_publications"));
+  expect(reset?.[0]).toContain("status='pending'");
+  expect(reset?.[0]).not.toContain("idempotency_key");
+  expect(reset?.[1]).toContain("publication-1");
+  expect(response.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
 });

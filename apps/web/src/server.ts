@@ -2036,15 +2036,18 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (runRetryMatch && request.method === "POST") {
     const result = await inTransaction(async (client) => {
       const source = (await client.query(
-        `SELECT ar.id run_id,ar.metadata_json,ea.*,t.status ticket_status
+        `SELECT ar.id run_id,ar.metadata_json,ea.*,t.status ticket_status,
+                ep.id publication_id,ep.status publication_status,
+                ep.idempotency_key publication_idempotency_key
          FROM agent_runs ar
          JOIN execution_attempts ea ON ea.agent_run_id=ar.id
          JOIN tickets t ON t.id=ea.ticket_id
-         WHERE ar.id=$1 FOR UPDATE OF ea,t`,
+         JOIN execution_publications ep ON ep.execution_attempt_id=ea.id
+         WHERE ar.id=$1 FOR UPDATE OF ea,t,ep`,
         [runRetryMatch[1]],
       )).rows[0];
       if (!source) return null;
-      if (source.ticket_status !== "PR Creation Failed" || !source.result_commit) {
+      if (source.publication_status !== "failed" || source.ticket_status !== "PR Creation Failed" || !source.result_commit) {
         throw Object.assign(new Error("run has no failed publication to retry"), { status: 409 });
       }
       const rerunOf = await terminalRerunSource(client, source.metadata_json);
@@ -2055,6 +2058,12 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         maxAttempts: 1,
         rerunOf,
       }, client);
+      await client.query(
+        `UPDATE execution_publications
+         SET status='pending',error_message=NULL,updated_at=now()
+         WHERE id=$1 AND status='failed'`,
+        [source.publication_id],
+      );
       await client.query(
         "UPDATE tickets SET status='Validating',updated_at=now() WHERE id=$1",
         [source.ticket_id],

@@ -74,6 +74,8 @@ function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");
 }
 
+class PublicationError extends Error {}
+
 async function finalizeRegisteredArtifact(staged: StagedArtifact) {
   try {
     await inTransaction(async (client) => {
@@ -825,6 +827,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
       validationResults: validation.results, changedFiles: validation.files,
     }, lease);
   } catch (error) {
+    if (error instanceof PublicationError) throw error;
     await lease.assertOwned();
     const executionError = error instanceof ClaudeExecutionError ? error : null;
     const cancelled = executionError?.code === "execution_cancelled";
@@ -874,6 +877,7 @@ async function publishExecutionAttempt(input: {
   try {
     await lease.assertOwned();
     let commit = input.attempt.result_commit as string | null;
+    const committedNow = !commit;
     if (!commit) {
       await lease.assertOwned();
       commit = await commitExecutionChanges({
@@ -882,15 +886,6 @@ async function publishExecutionAttempt(input: {
         protectedPaths: input.project.config_json?.protected_paths,
         baseCommit: input.attempt.base_commit,
       });
-      await lease.assertOwned();
-      await pool.query("UPDATE execution_attempts SET result_commit=$2,validation_status='validated' WHERE id=$1", [
-        input.attempt.id, commit,
-      ]);
-      await pool.query(
-        `INSERT INTO audit_events (actor_type,action,entity_type,entity_id,after_json)
-         VALUES ('worker','execution.commit','execution_attempt',$1,$2)`,
-        [input.attempt.id, { commit }],
-      );
     }
     await validateEffectiveWorktree({
       worktreePath: input.attempt.worktree_path,
@@ -898,67 +893,94 @@ async function publishExecutionAttempt(input: {
       protectedPaths: input.project.config_json?.protected_paths,
     });
     await lease.assertOwned();
+    const publication = await inTransaction(async (client) => {
+      const intent = (await lease.run(() => client.query(
+        `INSERT INTO execution_publications (execution_attempt_id,idempotency_key,status)
+         VALUES ($1,$2,'pending')
+         ON CONFLICT (execution_attempt_id) DO UPDATE
+         SET updated_at=execution_publications.updated_at
+         RETURNING *`,
+        [input.attempt.id, `execution-publication:${input.attempt.id}`],
+      ))).rows[0];
+      if (intent.status === "published") return intent;
+      await lease.run(() => client.query(
+        "UPDATE execution_attempts SET result_commit=$2,validation_status='validated' WHERE id=$1",
+        [input.attempt.id, commit],
+      ));
+      if (committedNow) {
+        await lease.run(() => client.query(
+          `INSERT INTO audit_events (actor_type,action,entity_type,entity_id,after_json)
+           VALUES ('worker','execution.commit','execution_attempt',$1,$2)`,
+          [input.attempt.id, { commit }],
+        ));
+      }
+      return intent;
+    });
+    if (publication.status === "published") return;
+    await inTransaction(async (client) => {
+      const started = await lease.run(() => client.query(
+        `UPDATE execution_publications
+         SET status='publishing',attempt_count=attempt_count + 1,last_job_id=$2,
+             error_message=NULL,updated_at=now()
+         WHERE id=$1 AND status IN ('pending','publishing') RETURNING *`,
+        [publication.id, input.jobId],
+      ));
+      if (started.rowCount !== 1) throw new Error("publication is not pending");
+      await lease.run(() => client.query(
+        `INSERT INTO audit_events (actor_type,action,entity_type,entity_id,after_json)
+         VALUES ('worker','execution.publication.requested','execution_publication',$1,$2)`,
+        [publication.id, {
+          execution_attempt_id: input.attempt.id,
+          idempotency_key: publication.idempotency_key,
+          job_id: input.jobId,
+        }],
+      ));
+    });
+    await lease.assertOwned();
     await pushExecutionBranch(input.attempt.worktree_path, input.attempt.branch_name);
     await lease.assertOwned();
-    await pool.query(
+    await lease.run(() => pool.query(
       `INSERT INTO audit_events (actor_type,action,entity_type,entity_id,after_json)
        VALUES ('worker','execution.push','execution_attempt',$1,$2)`,
       [input.attempt.id, { branch: input.attempt.branch_name }],
-    );
+    ));
 
-    let stored = (await pool.query(
-      `SELECT * FROM pull_requests
-       WHERE execution_attempt_id=$1
-          OR (project_id=$2 AND head_branch=$3)
-       ORDER BY (execution_attempt_id IS NOT DISTINCT FROM $1) DESC, created_at_provider DESC
-       LIMIT 1`,
-      [input.attempt.id, input.project.id, input.attempt.branch_name],
-    )).rows[0];
-    if (stored && (!stored.ticket_id || !stored.execution_attempt_id)) {
-      await lease.assertOwned();
-      stored = (await pool.query(
-        `UPDATE pull_requests
-           SET ticket_id=COALESCE(ticket_id,$2),
-               execution_attempt_id=COALESCE(execution_attempt_id,$3),
-               updated_at=now()
-         WHERE id=$1 RETURNING *`,
-        [stored.id, input.ticket.id, input.attempt.id],
-      )).rows[0];
-    }
-    if (!stored) {
-      const body = buildPullRequestBody({
-        ticketNumber: input.ticket.ticket_number,
-        ticketTitle: input.ticket.title,
-        project: input.project.name,
-        problemSummary: input.ticket.description ?? "",
-        approvedPlanSummary: input.planMarkdown.slice(0, 4000),
-        model: (await pool.query("SELECT model FROM agent_runs WHERE id=$1", [input.runId])).rows[0]?.model ?? "",
-        reasoningLevel: (await pool.query("SELECT reasoning_level FROM agent_runs WHERE id=$1", [input.runId])).rows[0]?.reasoning_level ?? "",
-        appliedSkills: input.skills,
-        changedFiles: input.changedFiles,
-        validationResults: input.validationResults,
-        knownLimitations: input.project.config_json?.known_limitations ?? "None known.",
-        planHash: input.ticket.approved_plan_hash ?? "",
-        executionRunId: input.runId,
-        internalTicketUrl: `${process.env.APP_BASE_URL ?? "http://127.0.0.1:3000"}/admin/tickets/${input.ticket.ticket_number}`,
+    const body = buildPullRequestBody({
+      ticketNumber: input.ticket.ticket_number,
+      ticketTitle: input.ticket.title,
+      project: input.project.name,
+      problemSummary: input.ticket.description ?? "",
+      approvedPlanSummary: input.planMarkdown.slice(0, 4000),
+      model: (await pool.query("SELECT model FROM agent_runs WHERE id=$1", [input.runId])).rows[0]?.model ?? "",
+      reasoningLevel: (await pool.query("SELECT reasoning_level FROM agent_runs WHERE id=$1", [input.runId])).rows[0]?.reasoning_level ?? "",
+      appliedSkills: input.skills,
+      changedFiles: input.changedFiles,
+      validationResults: input.validationResults,
+      knownLimitations: input.project.config_json?.known_limitations ?? "None known.",
+      planHash: input.ticket.approved_plan_hash ?? "",
+      executionRunId: input.runId,
+      internalTicketUrl: `${process.env.APP_BASE_URL ?? "http://127.0.0.1:3000"}/admin/tickets/${input.ticket.ticket_number}`,
+    });
+    await lease.assertOwned();
+    let providerPr = await findOpenPullRequestForHead(
+      input.project.github_owner, input.project.github_repository, input.attempt.branch_name,
+    );
+    await lease.assertOwned();
+    if (!providerPr) {
+      providerPr = await createPullRequest({
+        owner: input.project.github_owner,
+        repository: input.project.github_repository,
+        title: `${input.ticket.ticket_number}: ${input.ticket.title}`,
+        body,
+        head: input.attempt.branch_name,
+        base: input.project.default_branch,
       });
-      await lease.assertOwned();
-      let providerPr = await findOpenPullRequestForHead(
-        input.project.github_owner, input.project.github_repository, input.attempt.branch_name,
-      );
-      await lease.assertOwned();
-      if (!providerPr) {
-        providerPr = await createPullRequest({
-          owner: input.project.github_owner,
-          repository: input.project.github_repository,
-          title: `${input.ticket.ticket_number}: ${input.ticket.title}`,
-          body,
-          head: input.attempt.branch_name,
-          base: input.project.default_branch,
-        });
-      }
-      await lease.assertOwned();
-      stored = (await pool.query(
+    }
+    await lease.assertOwned();
+    const relativeWorktree = path.relative(dataRoot, input.attempt.worktree_path);
+    if (!relativeWorktree || relativeWorktree === ".." || relativeWorktree.startsWith(`..${path.sep}`) || path.isAbsolute(relativeWorktree)) throw new Error("worktree artifact path escapes controlled root");
+    await inTransaction(async (client) => {
+      const stored = (await lease.run(() => client.query(
         `INSERT INTO pull_requests
          (project_id,ticket_id,execution_attempt_id,provider,repository,number,url,title,author,state,
           review_state,check_state,is_draft,head_branch,base_branch,head_sha,merge_commit_sha,
@@ -985,29 +1007,36 @@ async function publishExecutionAttempt(input: {
           providerPr.merge_commit_sha ?? null, providerPr.created_at, providerPr.updated_at,
           providerPr.merged_at ?? null, providerPr.closed_at ?? null, input.changedFiles.length,
         ],
-      )).rows[0];
-    }
-    const relativeWorktree = path.relative(dataRoot, input.attempt.worktree_path);
-    if (!relativeWorktree || relativeWorktree === ".." || relativeWorktree.startsWith(`..${path.sep}`) || path.isAbsolute(relativeWorktree)) throw new Error("worktree artifact path escapes controlled root");
-    await lease.assertOwned();
-    await inTransaction(async (client) => {
-      await client.query(`INSERT INTO artifacts (id,storage_path,artifact_type,status,sha256,finalized_at,agent_run_id,execution_attempt_id) VALUES ($1,$2,'worktree','finalized',$3,now(),$4,$5) ON CONFLICT (storage_path) DO NOTHING`, [randomUUID(), relativeWorktree, hash(commit!), input.runId, input.attempt.id]);
+      ))).rows[0];
+      await lease.run(() => client.query(`INSERT INTO artifacts (id,storage_path,artifact_type,status,sha256,finalized_at,agent_run_id,execution_attempt_id) VALUES ($1,$2,'worktree','finalized',$3,now(),$4,$5) ON CONFLICT (storage_path) DO NOTHING`, [randomUUID(), relativeWorktree, hash(commit!), input.runId, input.attempt.id]));
       const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
-      await client.query("UPDATE tickets SET status='PR Ready for Review',updated_at=now() WHERE id=$1", [input.ticket.id]);
-      await client.query(
+      await lease.run(() => client.query("UPDATE tickets SET status='PR Ready for Review',updated_at=now() WHERE id=$1", [input.ticket.id]));
+      await lease.run(() => client.query(
         `INSERT INTO ticket_status_history
          (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,
           related_plan_version_id,related_pull_request_id)
          VALUES ($1,$2,'PR Ready for Review','Draft pull request created','worker',$3,$4,$5,$6)`,
         [input.ticket.id, current.status, input.jobId, input.runId, input.attempt.plan_version_id, stored.id],
-      );
+      ));
       await enqueueNotification(client, "pr.ready_for_review", input.ticket.id, stored.id, {
         runId: input.runId, pullRequestId: stored.id,
-      });
-      await client.query(
+      }, lease.assertOwned);
+      await lease.run(() => client.query(
         "UPDATE execution_attempts SET validation_status='completed',completed_at=now() WHERE id=$1",
         [input.attempt.id],
-      );
+      ));
+      const completed = await lease.run(() => client.query(
+        `UPDATE execution_publications
+         SET status='published',pull_request_id=$2,error_message=NULL,published_at=now(),updated_at=now()
+         WHERE id=$1 AND status='publishing'`,
+        [publication.id, stored.id],
+      ));
+      if (completed.rowCount !== 1) throw new Error("publication is not publishing");
+      await lease.run(() => client.query(
+        `INSERT INTO audit_events (actor_type,action,entity_type,entity_id,after_json)
+         VALUES ('worker','execution.publication.published','execution_publication',$1,$2)`,
+        [publication.id, { execution_attempt_id: input.attempt.id, pull_request_id: stored.id }],
+      ));
     });
   } catch (error) {
     await lease.assertOwned();
@@ -1015,25 +1044,38 @@ async function publishExecutionAttempt(input: {
     // A commit-time secret/protected-path trip is a validation failure, not a
     // PR-creation failure — the diff was never safe to commit in the first place.
     const blocked = err instanceof WorktreeValidationError;
-    const status = blocked ? "Validation Failed" : "PR Creation Failed";
     // A blocked commit never produced one; a failed *push* must keep its local
     // commit (PRD §28.9) so the retry can resume without re-invoking Claude.
-    await pool.query(
-      blocked
-        ? `UPDATE execution_attempts SET validation_status='failed',completed_at=now(),result_commit=NULL WHERE id=$1`
-        : `UPDATE execution_attempts SET validation_status='pr_creation_failed',completed_at=now() WHERE id=$1`,
-      [input.attempt.id],
-    );
-    await pool.query(
-      blocked
-        ? `UPDATE agent_runs SET status='failed',error_code='validation_failed',error_message=$2 WHERE id=$1`
-        : `UPDATE agent_runs SET status='failed',error_code='pr_creation_failed',error_message=$2 WHERE id=$1`,
-      [input.runId, err.message],
-    );
+    if (blocked) {
+      await lease.run(() => pool.query(
+        `UPDATE execution_attempts SET validation_status='failed',completed_at=now(),result_commit=NULL WHERE id=$1`,
+        [input.attempt.id],
+      ));
+      await lease.run(() => pool.query(
+        `UPDATE agent_runs SET status='failed',error_code='validation_failed',error_message=$2 WHERE id=$1`,
+        [input.runId, err.message],
+      ));
+    }
     await inTransaction(async (client) => {
       const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
-      await client.query("UPDATE tickets SET status=$2,updated_at=now() WHERE id=$1", [input.ticket.id, status]);
-      await client.query(
+      const status = blocked ? "Validation Failed" : "PR Creation Failed";
+      if (!blocked) {
+        await lease.run(() => client.query(
+          "UPDATE execution_attempts SET validation_status='pr_creation_failed',completed_at=now() WHERE id=$1",
+          [input.attempt.id],
+        ));
+        await lease.run(() => client.query(
+          "UPDATE agent_runs SET status='failed',error_code='pr_creation_failed',error_message=$2 WHERE id=$1",
+          [input.runId, err.message],
+        ));
+        await lease.run(() => client.query(
+          `UPDATE execution_publications
+           SET status='failed',error_message=$2,updated_at=now() WHERE execution_attempt_id=$1`,
+          [input.attempt.id, err.message],
+        ));
+      }
+      await lease.run(() => client.query("UPDATE tickets SET status=$2,updated_at=now() WHERE id=$1", [input.ticket.id, status]));
+      await lease.run(() => client.query(
         `INSERT INTO ticket_status_history
          (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
          VALUES ($1,$2,$3,$4,'worker',$5,$6,$7)`,
@@ -1044,8 +1086,17 @@ async function publishExecutionAttempt(input: {
             : `Worker-controlled push or pull-request creation failed: ${err.message}`,
           input.jobId, input.runId, input.attempt.plan_version_id,
         ],
-      );
+      ));
+      if (!blocked) {
+        await lease.run(() => client.query(
+          `INSERT INTO audit_events (actor_type,action,entity_type,entity_id,after_json)
+           SELECT 'worker','execution.publication.failed','execution_publication',id,$2
+           FROM execution_publications WHERE execution_attempt_id=$1`,
+          [input.attempt.id, { error: err.message, job_id: input.jobId }],
+        ));
+      }
     });
+    if (!blocked) throw new PublicationError(err.message);
   }
 }
 
@@ -1053,17 +1104,22 @@ async function retryPublication(job: any, lease: LeaseGuard) {
   const row = (await pool.query(
     `SELECT ea.*,t.ticket_number,t.title,t.description,t.approved_plan_hash,t.id ticket_id,
             p.id project_id,p.name project_name,p.github_owner,p.github_repository,p.default_branch,p.config_json,
-            ar.id run_id,ar.model,ar.reasoning_level,ar.metadata_json,pv.content_markdown
+            ar.id run_id,ar.model,ar.reasoning_level,ar.metadata_json,pv.content_markdown,
+            ep.id publication_id,ep.status publication_status,ep.idempotency_key publication_idempotency_key
      FROM execution_attempts ea
      JOIN tickets t ON t.id=ea.ticket_id
      JOIN projects p ON p.id=t.project_id
      JOIN agent_runs ar ON ar.id=ea.agent_run_id
      JOIN plan_versions pv ON pv.id=ea.plan_version_id
+     JOIN execution_publications ep ON ep.execution_attempt_id=ea.id
      WHERE ea.id=$1`,
     [job.payload_json.execution_attempt_id],
   )).rows[0];
   if (!row?.result_commit || !row.worktree_path || !row.branch_name) {
     throw new Error("publication retry has no preserved local commit");
+  }
+  if (!["pending", "publishing"].includes(row.publication_status)) {
+    throw new Error("publication retry has no pending publication");
   }
   const validation = row.metadata_json?.validation_output ?? {};
   const skillSnapshot = (await pool.query(
