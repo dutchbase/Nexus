@@ -11,7 +11,7 @@ import {
   buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
   globalPromptTypes, enqueueNotification, importGithubPullRequests, promptContentHash, PullRequestMergeError,
   rejectPlanDecision, requestPlanRevisionDecision, requireApprovalPrompt, resolveAiConfiguration, setPullRequestTicketStatus, syncOpenPullRequests,
-  syncPullRequest, validateAiSelection, type AiPhase, type ApprovedInputSnapshot,
+  syncPullRequest, validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import { mergeBranch } from "../../../packages/github-provider/src/index.ts";
@@ -310,7 +310,12 @@ export async function approvalInputsFor(ticket: any, version: any, client: any) 
       { phase: "execution", content: executionContent, provenance: provenance(base, execution, context, projectExecution, testing) },
       { phase: "repair", content: `${phaseContent("repair")}\n## Repair instructions\n\n${rendered(repair)}\n`, provenance: provenance(base, execution, repair, context, projectExecution, testing) },
     ],
-    skills: snapshotted.skills.map((skill) => ({ slug: skill.slug, version: skill.version, contentHash: skill.content_hash, sources: skill.resolution_sources })),
+    skills: snapshotted.skills.map((skill) => ({
+      id: skill.skill_id, slug: skill.slug, version: skill.version, contentHash: skill.content_hash,
+      sources: skill.resolution_sources, filesystemPath: skill.filesystem_path, phase: skill.phase,
+      phases: skill.phases ?? [skill.phase], pluginName: skill.plugin_name ?? null,
+      invocationName: skill.invocation_name ?? null, configuration: (skill.configuration_json ?? {}) as ApprovalInputValue,
+    })),
     policySources,
   };
   return { ...buildApprovedInputSnapshot(approvedInput), approvedInput, snapshottedSkills: snapshotted };

@@ -25,7 +25,12 @@ export function approvedPhaseSkills(
 }
 
 export function assertApprovedSkillSnapshot(
-  approved: readonly { readonly slug: string; readonly version: string | null; readonly contentHash: string; readonly sources: readonly string[] }[],
+  approved: readonly {
+    readonly id: string; readonly slug: string; readonly version: string | null; readonly contentHash: string;
+    readonly sources: readonly string[]; readonly filesystemPath: string; readonly phase: string;
+    readonly phases: readonly string[]; readonly pluginName: string | null; readonly invocationName: string | null;
+    readonly configuration: unknown;
+  }[],
   snapshot: { skills_json?: SnapshottedSkill[]; content_hash?: string } | null,
 ) {
   const fail = () => { throw new Error("approved skill snapshot integrity check failed"); };
@@ -59,11 +64,17 @@ export function assertApprovedSkillSnapshot(
     };
   });
   if (hash(JSON.stringify(rebuilt)) !== snapshot.content_hash) fail();
-  const normalize = (skills: readonly { readonly slug: string; readonly version: string | null; readonly contentHash: string; readonly sources: readonly string[] }[]) => skills
-    .map((skill) => ({ ...skill, sources: [...skill.sources].sort() }))
+  const normalize = (skills: readonly any[]) => skills
+    .map((skill) => {
+      if (!Array.isArray(skill.sources) || !Array.isArray(skill.phases)) fail();
+      return { ...skill, sources: [...skill.sources].sort(), phases: [...skill.phases].sort() };
+    })
     .sort((left, right) => left.slug.localeCompare(right.slug));
   const actual = normalize(stored.map((skill) => ({
-    slug: skill.slug, version: skill.version, contentHash: skill.content_hash, sources: skill.resolution_sources,
+    id: skill.skill_id, slug: skill.slug, version: skill.version, contentHash: skill.content_hash,
+    sources: skill.resolution_sources, filesystemPath: skill.filesystem_path, phase: skill.phase,
+    phases: skill.phases ?? [skill.phase], pluginName: skill.plugin_name ?? null,
+    invocationName: skill.invocation_name ?? null, configuration: skill.configuration_json ?? {},
   })));
   if (JSON.stringify(normalize(approved)) !== JSON.stringify(actual)) {
     fail();

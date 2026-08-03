@@ -108,6 +108,56 @@ integration("migrate", () => {
     }
   });
 
+  it("accepts the Node hash for exponent-form JSON numbers", async () => {
+    await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ($q$exponent$q$,$q$Exponent$q$,$q$/tmp/project$q$) RETURNING id")).rows[0].id;
+      const ticketId = (await client.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$EXP-1$q$,$1,$q$Ticket$q$,$q$Submitted$q$) RETURNING id", [projectId])).rows[0].id;
+      const planId = (await client.query("INSERT INTO plans (ticket_id) VALUES ($1) RETURNING id", [ticketId])).rows[0].id;
+      const planVersionId = (await client.query("INSERT INTO plan_versions (plan_id,version,content_markdown,content_hash) VALUES ($1,1,$q$x$q$,encode(digest($q$x$q$,$q$sha256$q$),$q$hex$q$)) RETURNING id", [planId])).rows[0].id;
+      const built = approvalTransitions.buildApprovedInputSnapshot({
+        plan: { versionId: planVersionId, version: 1, contentHash: "x".repeat(64) },
+        ticket: { threshold: 1e-7 }, project: { configVersion: 1, config: {} },
+        models: {}, prompts: [], skills: [], policySources: [],
+      });
+      await expect(client.query(
+        "INSERT INTO approved_input_snapshots (ticket_id,plan_version_id,material_input_json,input_hash) VALUES ($1,$2,$3,$4)",
+        [ticketId, planVersionId, built.materialInput, built.inputHash],
+      )).resolves.toBeDefined();
+    } finally {
+      await client.end();
+    }
+  });
+
+  it("returns cleared legacy approvals to the existing plan-review state", async () => {
+    await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
+    await rm(join(migrationDirectory, "034_legacy_approval_review_state.sql"));
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ($q$legacy-review$q$,$q$Legacy review$q$,$q$/tmp/project$q$) RETURNING id")).rows[0].id;
+      const ticketId = (await client.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$LEGACY-1$q$,$1,$q$Ticket$q$,$q$Plan Approved$q$) RETURNING id", [projectId])).rows[0].id;
+      const planId = (await client.query("INSERT INTO plans (ticket_id) VALUES ($1) RETURNING id", [ticketId])).rows[0].id;
+      const versionId = (await client.query("INSERT INTO plan_versions (plan_id,version,content_markdown,content_hash) VALUES ($1,1,$q$x$q$,encode(digest($q$x$q$,$q$sha256$q$),$q$hex$q$)) RETURNING id", [planId])).rows[0].id;
+      await client.query("UPDATE plans SET current_version_id=$2 WHERE id=$1", [planId, versionId]);
+    } finally {
+      await client.end();
+    }
+    await cp(new URL("../migrations/034_legacy_approval_review_state.sql", import.meta.url), join(migrationDirectory, "034_legacy_approval_review_state.sql"));
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const verify = new pg.Client({ connectionString: testDatabaseUrl });
+    await verify.connect();
+    try {
+      expect((await verify.query("SELECT status FROM tickets WHERE ticket_number='LEGACY-1'")).rows[0].status).toBe("Plan Ready for Review");
+    } finally {
+      await verify.end();
+    }
+  });
+
   it("invalidates approvals for imported material project changes but not validation updates", async () => {
     await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
     await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });

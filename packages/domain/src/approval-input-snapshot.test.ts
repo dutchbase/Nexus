@@ -32,7 +32,12 @@ const input = {
       { scope: "project", promptType: "execution", versionId: "prompt-project-v2", contentHash: "c".repeat(64) },
     ],
   }],
-  skills: [{ slug: "typescript", version: "1.0.0", contentHash: "d".repeat(64), sources: ["project_required"] }],
+  skills: [{
+    id: "typescript-id", slug: "typescript", version: "1.0.0", contentHash: "d".repeat(64),
+    sources: ["project_required"], filesystemPath: "skills/typescript/SKILL.md", phase: "planning",
+    phases: ["planning", "execution", "repair"], pluginName: null, invocationName: "typescript",
+    configuration: { validation_commands: ["pnpm test"] },
+  }],
   policySources: [{ source: "project", contentHash: "e".repeat(64), decision: "allow" }],
 } as const;
 
@@ -58,6 +63,11 @@ describe("approved input hash", () => {
         { ...prompts[0], provenance: [...prompts[0].provenance].reverse() },
       ],
     }));
+  });
+
+  it("uses PostgreSQL-compatible decimal notation for exponent-form numbers", () => {
+    expect(approvedInputHash({ ...input, ticket: { ...input.ticket, customValues: { threshold: 1e-7 } } }))
+      .toBe("7b94f3f2a1db24a681c7da4d2cf5d424658a7bda4711d6a6c5521b6a94400b32");
   });
 });
 

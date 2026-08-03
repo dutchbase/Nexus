@@ -31,6 +31,13 @@ const snapshotRow = (skills: SnapshottedSkill[]) => ({
   content_hash: createHash("sha256").update(JSON.stringify(skills)).digest("hex"),
 });
 
+const approvedSkill = (stored: SnapshottedSkill) => ({
+  id: stored.skill_id, slug: stored.slug, version: stored.version, contentHash: stored.content_hash,
+  sources: stored.resolution_sources, filesystemPath: stored.filesystem_path, phase: stored.phase,
+  phases: stored.phases ?? [stored.phase], pluginName: stored.plugin_name ?? null,
+  invocationName: stored.invocation_name ?? null, configuration: stored.configuration_json ?? {},
+});
+
 describe("worker orchestration boundary", () => {
   test("places execution worktrees and bundles outside the denied host home", () => {
     expect(executionRoot()).toBe(path.join(tmpdir(), "dcc-execution"));
@@ -100,7 +107,7 @@ describe("worker orchestration boundary", () => {
     const assertApprovedSkillSnapshot = (workerBoundary as any).assertApprovedSkillSnapshot;
     expect(assertApprovedSkillSnapshot).toBeTypeOf("function");
     const stored = [skill("test-driven-development", ["execution", "repair"])];
-    const approved = [{ slug: stored[0].slug, version: stored[0].version, contentHash: stored[0].content_hash, sources: stored[0].resolution_sources }];
+    const approved = [approvedSkill(stored[0])];
     const row = snapshotRow(stored);
     expect(() => assertApprovedSkillSnapshot(approved, row)).not.toThrow();
     stored[0].files[0].content_base64 = Buffer.from("tampered bytes").toString("base64");
@@ -118,7 +125,7 @@ describe("worker orchestration boundary", () => {
     const assertApprovedSkillSnapshot = (workerBoundary as any).assertApprovedSkillSnapshot;
     expect(assertApprovedSkillSnapshot).toBeTypeOf("function");
     const stored = [skill("test-driven-development", ["execution", "repair"])];
-    const approved = [{ slug: stored[0].slug, version: stored[0].version, contentHash: stored[0].content_hash, sources: stored[0].resolution_sources }];
+    const approved = [approvedSkill(stored[0])];
     const row = snapshotRow(stored);
     mutate(stored[0]);
 

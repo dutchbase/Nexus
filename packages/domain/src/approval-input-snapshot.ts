@@ -15,7 +15,19 @@ export type ApprovedInputSnapshot = {
     content: string;
     provenance: readonly { scope: string; promptType: string; versionId: string; contentHash: string }[];
   }[];
-  skills: readonly { slug: string; version: string | null; contentHash: string; sources: readonly string[] }[];
+  skills: readonly {
+    id: string;
+    slug: string;
+    version: string | null;
+    contentHash: string;
+    sources: readonly string[];
+    filesystemPath: string;
+    phase: string;
+    phases: readonly string[];
+    pluginName: string | null;
+    invocationName: string | null;
+    configuration: ApprovalInputValue;
+  }[];
   policySources: readonly ApprovalInputValue[];
 };
 
@@ -35,13 +47,31 @@ export function requireApprovalPrompt<T extends { active_version_id?: string | n
   return prompt;
 }
 
+function canonicalNumber(value: number) {
+  const json = JSON.stringify(value);
+  if (!/[eE]/.test(json)) return json;
+  const [coefficient, exponentText] = json.toLowerCase().split("e");
+  const exponent = Number(exponentText);
+  const negative = coefficient.startsWith("-");
+  const unsigned = negative ? coefficient.slice(1) : coefficient;
+  const [whole, fraction = ""] = unsigned.split(".");
+  const digits = whole + fraction;
+  const point = whole.length + exponent;
+  const expanded = point <= 0
+    ? `0.${"0".repeat(-point)}${digits}`
+    : point >= digits.length
+      ? `${digits}${"0".repeat(point - digits.length)}`
+      : `${digits.slice(0, point)}.${digits.slice(point)}`;
+  return negative ? `-${expanded}` : expanded;
+}
+
 function stableJson(value: ApprovalInputValue): string {
   if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
   if (value && typeof value === "object") {
     const object = value as { readonly [key: string]: ApprovalInputValue };
     return `{${Object.keys(object).sort(utf8Compare).map((key) => `${JSON.stringify(key)}:${stableJson(object[key])}`).join(",")}}`;
   }
-  return JSON.stringify(value);
+  return typeof value === "number" ? canonicalNumber(value) : JSON.stringify(value);
 }
 
 const utf8Compare = (left: string, right: string) => Buffer.from(left).compare(Buffer.from(right));
