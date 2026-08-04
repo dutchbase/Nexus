@@ -126,6 +126,22 @@ test("repair queueing creates a new attempt linked to immutable source history",
   expect(response.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
 });
 
+test("repair queueing rejects a source worktree already reclaimed by cleanup", async () => {
+  transactionClient = { query: vi.fn(async (sql: string) => {
+    if (sql.includes("FROM agent_runs ar")) return { rows: [{
+      id: "run-1", ticket_id: "ticket", execution_attempt_id: "source-attempt",
+      plan_version_id: "plan-version", worktree_lifecycle_status: "reclaimed",
+      ticket_status: "Execution Failed", metadata_json: { approved_input_snapshot_id: "approved-input-1" },
+    }] };
+    return { rows: [], rowCount: 0 };
+  }) };
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await expect(adminApi(request({ feedback: "Repair it." }, "POST"), response,
+    new URL("http://test/api/admin/runs/a111/repair"), { user_id: "admin" })).rejects.toMatchObject({ status: 409 });
+  expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("INSERT INTO execution_attempts"))).toBe(false);
+});
+
 test.each([
   ["ai-review", "review-1", "pr_ai_reviews"],
   ["resolve-conflicts", "resolution-1", "pr_conflict_resolutions"],

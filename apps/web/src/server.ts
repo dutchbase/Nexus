@@ -956,12 +956,13 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       if (!pullRequest.agent_run_id) return json(response, 409, { error: "linked execution run is unavailable" });
       const result = await inTransaction(async (client) => {
         const source = (await client.query(
-          `SELECT ar.*,ea.id execution_attempt_id,ea.plan_version_id,ea.worktree_path,t.status ticket_status
+          `SELECT ar.*,ea.id execution_attempt_id,ea.plan_version_id,ea.worktree_path,ea.worktree_lifecycle_status,t.status ticket_status
            FROM agent_runs ar JOIN execution_attempts ea ON ea.agent_run_id=ar.id
            JOIN tickets t ON t.id=ea.ticket_id WHERE ar.id=$1 FOR UPDATE OF ea,t`,
           [pullRequest.agent_run_id],
         )).rows[0];
         if (!source) throw Object.assign(new Error("linked execution attempt is unavailable"), { status: 409 });
+        if (source.worktree_lifecycle_status === "reclaimed") throw Object.assign(new Error("repair source worktree has been reclaimed"), { status: 409 });
         const approvedSnapshotId = source.metadata_json?.approved_input_snapshot_id;
         if (typeof approvedSnapshotId !== "string") throw Object.assign(new Error("repair run has no approved input snapshot"), { status: 409 });
         const active = (await client.query(
@@ -1995,7 +1996,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const result = await inTransaction(async (client) => {
       const source = (await client.query(
         `SELECT ar.*,ea.id execution_attempt_id,ea.plan_version_id,ea.validation_status,
-                ea.worktree_path,t.status ticket_status
+                ea.worktree_path,ea.worktree_lifecycle_status,t.status ticket_status
          FROM agent_runs ar
          JOIN execution_attempts ea ON ea.agent_run_id=ar.id
          JOIN tickets t ON t.id=ea.ticket_id
@@ -2003,6 +2004,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         [runRepairMatch[1]],
       )).rows[0];
       if (!source) return null;
+      if (source.worktree_lifecycle_status === "reclaimed") throw Object.assign(new Error("repair source worktree has been reclaimed"), { status: 409 });
       const approvedSnapshotId = source.metadata_json?.approved_input_snapshot_id;
       if (typeof approvedSnapshotId !== "string") throw Object.assign(new Error("repair run has no approved input snapshot"), { status: 409 });
       const active = (await client.query(
