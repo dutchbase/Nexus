@@ -112,7 +112,7 @@ test("fetches paginated policy inputs and marks unsupported protection incomplet
     }
     if (url.includes("/pulls/42/reviews") && !url.includes("page=2")) {
       outgoing.setHeader("link", "</repos/acme/widgets/pulls/42/reviews?per_page=100&page=2>; rel=\"next\"");
-      outgoing.end(JSON.stringify([{ id: 1, user: { login: "alice" }, state: "APPROVED", commit_id: "head-sha", submitted_at: "2026-08-04T10:00:00Z" }]));
+      outgoing.end(JSON.stringify([{ id: 1, user: { login: "alice", type: "User" }, state: "APPROVED", commit_id: "head-sha", submitted_at: "2026-08-04T10:00:00Z" }]));
       return;
     }
     if (url.includes("/pulls/42/reviews")) {
@@ -123,8 +123,17 @@ test("fetches paginated policy inputs and marks unsupported protection incomplet
       outgoing.end(JSON.stringify({ check_runs: [{ name: "build", app: { id: 7 }, status: "completed", conclusion: "success", completed_at: "2026-08-04T11:00:00Z" }] }));
       return;
     }
+    if (url.includes("/collaborators/alice/permission")) {
+      outgoing.end(JSON.stringify({ permission: "write" }));
+      return;
+    }
+    if (url.includes("/commits/head-sha/status") && !url.includes("page=2")) {
+      outgoing.setHeader("link", "</repos/acme/widgets/commits/head-sha/status?per_page=100&page=2>; rel=\"next\"");
+      outgoing.end(JSON.stringify({ statuses: [{ context: "legacy-1", state: "pending", updated_at: "2026-08-04T11:00:00Z" }] }));
+      return;
+    }
     if (url.includes("/commits/head-sha/status")) {
-      outgoing.end(JSON.stringify({ statuses: [{ context: "legacy", state: "pending", updated_at: "2026-08-04T11:00:00Z" }] }));
+      outgoing.end(JSON.stringify({ statuses: [{ context: "legacy-2", state: "success", updated_at: "2026-08-04T12:00:00Z" }] }));
       return;
     }
     outgoing.statusCode = 404;
@@ -134,14 +143,19 @@ test("fetches paginated policy inputs and marks unsupported protection incomplet
       protected: true,
       requiredApprovals: 2,
       requestedReviewers: [{ type: "user", name: "bob" }, { type: "team", name: "platform" }],
-      reviews: [{ id: 1 }, { id: 2 }],
+      reviews: [{ id: 1, qualifies: true }, { id: 2, qualifies: false }],
       requiredChecks: [{ context: "build", appId: 7 }],
-      checks: expect.arrayContaining([{ context: "build", appId: 7, state: "success", updatedAt: "2026-08-04T11:00:00Z" }]),
+      checks: expect.arrayContaining([
+        { context: "build", appId: 7, state: "success", updatedAt: "2026-08-04T11:00:00Z" },
+        { context: "legacy-2", appId: null, state: "success", updatedAt: "2026-08-04T12:00:00Z" },
+      ]),
       complete: false,
       incompleteReason: "code_owner_reviews_unsupported",
     });
   });
   expect(urls.filter((url) => url.includes("/pulls/42/reviews"))).toHaveLength(2);
+  expect(urls.filter((url) => url.includes("/commits/head-sha/status"))).toHaveLength(2);
+  expect(urls).toContain("/repos/acme/widgets/collaborators/alice/permission");
 });
 
 test("routes the mark-ready pull-request mutation to configured Enterprise GraphQL", async () => {

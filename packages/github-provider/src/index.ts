@@ -35,7 +35,7 @@ export type ProviderGitHubPolicyInputs = {
   pullRequest: ProviderPullRequest;
   protected: boolean;
   requiredApprovals: number;
-  reviews: Array<{ id: number; reviewer: string; state: string; commitSha: string; submittedAt: string }>;
+  reviews: Array<{ id: number; reviewer: string; state: string; commitSha: string; submittedAt: string; qualifies: boolean }>;
   requestedReviewers: Array<{ type: "user" | "team"; name: string }>;
   requiredChecks: Array<{ context: string; appId: number | null }>;
   checks: Array<{ context: string; appId: number | null; state: "success" | "pending" | "failure"; updatedAt: string }>;
@@ -285,10 +285,17 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
   const protection = protectionResponse.status === 404 ? null : await jsonFor<any>(protectionResponse);
   const reviewsResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/pulls/${number}/reviews?per_page=100`, (page) => page);
   const checkRunsResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(headSha)}/check-runs?per_page=100`, (page) => page.check_runs ?? []);
-  for (const result of [reviewsResult, checkRunsResult]) {
+  const statusesResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(headSha)}/status?per_page=100`, (page) => page.statuses ?? []);
+  for (const result of [reviewsResult, checkRunsResult, statusesResult]) {
     if (!result.complete) throw new GitHubProviderError(result.errorCode ?? "transient", "GitHub policy input fetch failed", undefined, result.retryAt);
   }
-  const combinedStatus = await request<any>(`${repoPath}/commits/${encodeURIComponent(headSha)}/status?per_page=100`);
+  const reviewerPermissions = new Map(await Promise.all([...new Set(reviewsResult.items
+    .filter((review: any) => ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state?.toUpperCase()) && review.user?.login && review.user?.type !== "Bot")
+    .map((review: any) => review.user.login as string))]
+    .map(async (reviewer) => {
+      const permission = await request<{ permission: string }>(`${repoPath}/collaborators/${encodeURIComponent(reviewer)}/permission`);
+      return [reviewer.toLowerCase(), ["admin", "write"].includes(permission.permission)] as const;
+    })));
   const reviewRule = protection?.required_pull_request_reviews;
   const unsupported = [
     ...(reviewRule?.require_code_owner_reviews ? ["code_owner_reviews_unsupported"] : []),
@@ -304,7 +311,7 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
       state: check.status !== "completed" ? "pending" as const : check.conclusion === "success" ? "success" as const : "failure" as const,
       updatedAt: check.completed_at ?? check.started_at ?? check.created_at,
     })),
-    ...(combinedStatus.statuses ?? []).map((status: any) => ({
+    ...statusesResult.items.map((status: any) => ({
       context: status.context,
       appId: null,
       state: status.state === "success" ? "success" as const : status.state === "pending" ? "pending" as const : "failure" as const,
@@ -321,6 +328,7 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
       state: review.state,
       commitSha: review.commit_id,
       submittedAt: review.submitted_at,
+      qualifies: reviewerPermissions.get(review.user?.login?.toLowerCase()) ?? false,
     })).filter((review) => review.reviewer),
     requestedReviewers: [
       ...(pullRequest.requested_reviewers ?? []).flatMap((reviewer) => reviewer.login ? [{ type: "user" as const, name: reviewer.login }] : []),

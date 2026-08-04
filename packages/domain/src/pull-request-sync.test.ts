@@ -35,13 +35,17 @@ const policyInputs = {
   fetchedAt: "2026-08-04T12:00:00Z",
 };
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => {
+  vi.resetAllMocks();
+  database.inTransaction.mockImplementation(async (run: (client: { query: typeof database.pool.query }) => unknown) => run(database.pool));
+});
 
 test("syncs evaluated policy truth and points to its immutable snapshot atomically", async () => {
   database.pool.query
     .mockResolvedValueOnce({ rows: [{ id: "pr-id", github_owner: "acme", github_repository: "widgets", number: 42, ticket_id: null }] })
+    .mockResolvedValueOnce({ rows: [], rowCount: 1 })
     .mockResolvedValueOnce({ rows: [{ id: "snapshot-id" }] })
-    .mockResolvedValueOnce({ rows: [] });
+    .mockResolvedValueOnce({ rows: [], rowCount: 1 });
   github.getPullRequestPolicyInputs.mockResolvedValue({
     ...policyInputs,
     requestedReviewers: [{ type: "team", name: "platform" }],
@@ -50,24 +54,43 @@ test("syncs evaluated policy truth and points to its immutable snapshot atomical
   await syncPullRequest("pr-id");
 
   expect(database.inTransaction).toHaveBeenCalledOnce();
-  expect(database.pool.query.mock.calls[1][0]).toContain("INSERT INTO pull_request_policy_snapshots");
-  expect(database.pool.query.mock.calls[2][0]).toContain("current_policy_snapshot_id");
-  expect(database.pool.query.mock.calls[2][0]).toContain("requested_reviewers");
-  expect(database.pool.query.mock.calls[2][1]).toContain('[{"type":"team","name":"platform"}]');
-  expect(database.pool.query.mock.calls[2][1]).toEqual(expect.arrayContaining(["snapshot-id", "not_required", "not_required", "head-sha"]));
+  expect(database.pool.query.mock.calls[2][0]).toContain("INSERT INTO pull_request_policy_snapshots");
+  expect(database.pool.query.mock.calls[3][0]).toContain("current_policy_snapshot_id");
+  expect(database.pool.query.mock.calls[3][0]).toContain("requested_reviewers");
+  expect(database.pool.query.mock.calls[3][1]).toContain('[{"type":"team","name":"platform"}]');
+  expect(database.pool.query.mock.calls[3][1]).toEqual(expect.arrayContaining(["snapshot-id", "not_required", "not_required", "head-sha"]));
 });
 
 test("retains the last snapshot and marks policy stale on a rate limit", async () => {
   database.pool.query
     .mockResolvedValueOnce({ rows: [{ id: "pr-id", current_policy_snapshot_id: "old-snapshot", github_owner: "acme", github_repository: "widgets", number: 42, ticket_id: null }] })
-    .mockResolvedValueOnce({ rows: [] });
+    .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    .mockResolvedValueOnce({ rows: [], rowCount: 1 });
   github.getPullRequestPolicyInputs.mockRejectedValue(new github.GitHubProviderError("rate_limited", "limited", 429, "2026-08-04T12:01:00Z"));
 
   await expect(syncPullRequest("pr-id")).rejects.toMatchObject({ code: "rate_limited" });
 
-  expect(database.pool.query.mock.calls[1][0]).toContain("policy_stale=true");
-  expect(database.pool.query.mock.calls[1][1]).toEqual(["pr-id", "rate_limited", "2026-08-04T12:01:00Z"]);
+  expect(database.pool.query.mock.calls[2][0]).toContain("policy_stale=true");
+  expect(database.pool.query.mock.calls[2][1]).toEqual(["pr-id", "rate_limited", "2026-08-04T12:01:00Z", expect.any(String)]);
   expect(database.pool.query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO pull_request_policy_snapshots"))).toBe(false);
+});
+
+test("rejects a superseded sync instead of replacing newer freshness", async () => {
+  database.pool.query.mockImplementation(async (sql: string) => {
+    if (sql.includes("FROM pull_requests pr")) return { rows: [{
+      id: "pr-id", github_owner: "acme", github_repository: "widgets", number: 42, ticket_id: null,
+    }] };
+    if (sql.includes("SET policy_sync_token=")) return { rows: [], rowCount: 1 };
+    if (sql.includes("INSERT INTO pull_request_policy_snapshots")) return { rows: [{ id: "old-snapshot" }], rowCount: 1 };
+    if (sql.includes("current_policy_snapshot_id=")) return { rows: [], rowCount: 0 };
+    return { rows: [], rowCount: 1 };
+  });
+  github.getPullRequestPolicyInputs.mockResolvedValue(policyInputs);
+
+  await expect(syncPullRequest("pr-id")).rejects.toThrow("superseded");
+
+  const update = database.pool.query.mock.calls.find(([sql]) => String(sql).includes("current_policy_snapshot_id="));
+  expect(String(update?.[0])).toContain("policy_sync_token");
 });
 
 test("imports each discovered PR once and records a completed repository sync", async () => {
@@ -102,13 +125,14 @@ test("stops open pull-request iteration when lease ownership is lost mid-sync", 
   database.pool.query.mockImplementation(async (sql: string) => {
     if (sql.includes("SELECT pr.id FROM pull_requests")) return { rows: [{ id: "pr-1" }, { id: "pr-2" }] };
     if (sql.includes("WHERE pr.id=$1")) return { rows: [{ id: "pr-1", github_owner: "acme", github_repository: "widgets", number: 42, ticket_id: null }] };
-    return { rows: [] };
+    if (sql.includes("SET policy_sync_token=")) return { rows: [], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
   });
   github.getPullRequestPolicyInputs.mockResolvedValue(policyInputs);
   const assertOwned = vi.fn().mockResolvedValueOnce(undefined).mockRejectedValue(new Error("lease lost"));
 
   await expect(syncOpenPullRequests(assertOwned)).rejects.toThrow("lease lost");
-  expect(github.getPullRequestPolicyInputs).toHaveBeenCalledTimes(1);
+  expect(github.getPullRequestPolicyInputs).not.toHaveBeenCalled();
 });
 
 test("continues open pull-request iteration after an ordinary per-PR sync failure", async () => {
@@ -117,7 +141,7 @@ test("continues open pull-request iteration after an ordinary per-PR sync failur
     if (sql.includes("SELECT pr.id FROM pull_requests")) return { rows: [{ id: "pr-1" }, { id: "pr-2" }] };
     if (sql.includes("WHERE pr.id=$1")) return { rows: [{ id: values?.[0], github_owner: "acme", github_repository: "widgets", number: 42, ticket_id: null }] };
     if (sql.includes("INSERT INTO pull_request_policy_snapshots")) return { rows: [{ id: "snapshot-id" }] };
-    return { rows: [] };
+    return { rows: [], rowCount: 1 };
   });
   github.getPullRequestPolicyInputs.mockRejectedValueOnce(new Error("provider failed")).mockResolvedValueOnce(policyInputs);
 

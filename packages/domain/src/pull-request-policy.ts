@@ -4,7 +4,7 @@ export type GitHubPolicyInputs = {
   pullRequest: ProviderPullRequest;
   protected: boolean;
   requiredApprovals: number;
-  reviews: Array<{ id: number; reviewer: string; state: string; commitSha: string; submittedAt: string }>;
+  reviews: Array<{ id: number; reviewer: string; state: string; commitSha: string; submittedAt: string; qualifies: boolean }>;
   requestedReviewers: Array<{ type: "user" | "team"; name: string }>;
   requiredChecks: Array<{ context: string; appId: number | null }>;
   checks: Array<{ context: string; appId: number | null; state: "success" | "pending" | "failure"; updatedAt: string }>;
@@ -19,7 +19,7 @@ export function evaluatePullRequestPolicy(inputs: GitHubPolicyInputs) {
   const headSha = inputs.pullRequest.head.sha ?? "";
   const latestReviews = new Map<string, GitHubPolicyInputs["reviews"][number]>();
   for (const review of inputs.reviews) {
-    if (!["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state.toUpperCase())) continue;
+    if (!review.qualifies || !["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state.toUpperCase())) continue;
     const prior = latestReviews.get(review.reviewer);
     if (!prior || review.submittedAt > prior.submittedAt || (review.submittedAt === prior.submittedAt && review.id > prior.id)) {
       latestReviews.set(review.reviewer, review);
@@ -59,9 +59,12 @@ export function evaluatePullRequestPolicy(inputs: GitHubPolicyInputs) {
     const prior = latestChecks.get(key);
     if (!prior || check.updatedAt > prior.updatedAt) latestChecks.set(key, check);
   }
-  const requiredResults = requiredChecks.map((required) => [...latestChecks.values()]
-    .filter((check) => check.context === required.context && (required.appId === null || check.appId === required.appId))
-    .sort((left, right) => right.updatedAt.localeCompare(left.updatedAt))[0]?.state ?? "pending");
+  const requiredResults = requiredChecks.map((required) => {
+    const states = [...latestChecks.values()]
+      .filter((check) => check.context === required.context && (required.appId === null || check.appId === required.appId))
+      .map((check) => check.state);
+    return states.includes("failure") ? "failure" : states.length === 0 || states.includes("pending") ? "pending" : "success";
+  });
   const checkState = requiredChecks.length === 0
     ? "not_required" as const
     : requiredResults.includes("failure")

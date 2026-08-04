@@ -27,23 +27,23 @@ test("uses each reviewer's latest current-head review", () => {
   const result = evaluatePullRequestPolicy({
     ...base,
     reviews: [
-      { id: 1, reviewer: "alice", state: "APPROVED", commitSha: "head-sha", submittedAt: "2026-08-04T10:00:00Z" },
-      { id: 2, reviewer: "alice", state: "CHANGES_REQUESTED", commitSha: "head-sha", submittedAt: "2026-08-04T11:00:00Z" },
-      { id: 3, reviewer: "bob", state: "APPROVED", commitSha: "old-sha", submittedAt: "2026-08-04T12:00:00Z" },
+      { id: 1, reviewer: "alice", state: "APPROVED", commitSha: "head-sha", submittedAt: "2026-08-04T10:00:00Z", qualifies: true },
+      { id: 2, reviewer: "alice", state: "CHANGES_REQUESTED", commitSha: "head-sha", submittedAt: "2026-08-04T11:00:00Z", qualifies: true },
+      { id: 3, reviewer: "bob", state: "APPROVED", commitSha: "old-sha", submittedAt: "2026-08-04T12:00:00Z", qualifies: true },
     ],
   });
 
   expect(result.reviewState).toBe("changes_requested");
   expect(result.refusalCodes).toContain("changes_requested");
   expect(result.material.reviews).toEqual([
-    { reviewer: "alice", state: "CHANGES_REQUESTED", commitSha: "head-sha", submittedAt: "2026-08-04T11:00:00Z", id: 2 },
+    { reviewer: "alice", state: "CHANGES_REQUESTED", commitSha: "head-sha", submittedAt: "2026-08-04T11:00:00Z", id: 2, qualifies: true },
   ]);
 });
 
 test("dismisses stale-SHA approvals and waits for requested reviewers", () => {
   const result = evaluatePullRequestPolicy({
     ...base,
-    reviews: [{ id: 1, reviewer: "alice", state: "APPROVED", commitSha: "old-sha", submittedAt: "2026-08-04T10:00:00Z" }],
+    reviews: [{ id: 1, reviewer: "alice", state: "APPROVED", commitSha: "old-sha", submittedAt: "2026-08-04T10:00:00Z", qualifies: true }],
     requestedReviewers: [{ type: "user", name: "bob" }],
   });
 
@@ -63,6 +63,27 @@ test("requires every protected check and reports failures before pending checks"
       { context: "lint", appId: 9, state: "success", updatedAt: "2026-08-04T11:00:00Z" },
     ],
   })).toMatchObject({ checkState: "failure", refusalCodes: expect.arrayContaining(["checks_failed"]) });
+});
+
+test("requires every same-name check and status source to succeed", () => {
+  expect(evaluatePullRequestPolicy({
+    ...base,
+    requiredChecks: [{ context: "build", appId: null }],
+    checks: [
+      { context: "build", appId: 7, state: "failure", updatedAt: "2026-08-04T10:00:00Z" },
+      { context: "build", appId: null, state: "success", updatedAt: "2026-08-04T11:00:00Z" },
+    ],
+  })).toMatchObject({ checkState: "failure", refusalCodes: expect.arrayContaining(["checks_failed"]) });
+});
+
+test("does not count a non-qualifying approval", () => {
+  expect(evaluatePullRequestPolicy({
+    ...base,
+    reviews: [{
+      id: 1, reviewer: "reader", state: "APPROVED", commitSha: "head-sha",
+      submittedAt: "2026-08-04T10:00:00Z", qualifies: false,
+    }],
+  }).reviewState).toBe("pending");
 });
 
 test("does not invent requirements for an unprotected branch", () => {

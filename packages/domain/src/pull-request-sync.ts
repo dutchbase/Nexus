@@ -1,4 +1,5 @@
 import type pg from "pg";
+import { randomUUID } from "node:crypto";
 import { GitHubProviderError, getPullRequestPolicyInputs, listPullRequests } from "../../github-provider/src/index.ts";
 import { inTransaction, pool } from "@dcc/database";
 import { evaluatePullRequestPolicy } from "./pull-request-policy.ts";
@@ -75,6 +76,12 @@ export async function syncPullRequest(
   )).rows[0];
   if (!stored) return null;
   await assertOwned();
+  const syncToken = randomUUID();
+  if ((await pool.query(
+    "UPDATE pull_requests SET policy_sync_token=$2,policy_last_attempted_at=now() WHERE id=$1",
+    [stored.id, syncToken],
+  )).rowCount !== 1) throw new Error("pull-request sync superseded");
+  await assertOwned();
   let inputs;
   try {
     inputs = await getPullRequestPolicyInputs(stored.github_owner, stored.github_repository, stored.number);
@@ -82,9 +89,10 @@ export async function syncPullRequest(
     if (error instanceof GitHubProviderError) {
       await assertOwned();
       await pool.query(
-        `UPDATE pull_requests SET policy_stale=true,policy_last_attempted_at=now(),
-         policy_error_code=$2,policy_retry_after=$3,updated_at=now() WHERE id=$1`,
-        [stored.id, error.code, error.retryAt ?? null],
+        `UPDATE pull_requests SET policy_stale=true,policy_sync_token=NULL,
+         policy_error_code=$2,policy_retry_after=$3,updated_at=now()
+         WHERE id=$1 AND policy_sync_token=$4::uuid`,
+        [stored.id, error.code, error.retryAt ?? null, syncToken],
       );
     }
     throw error;
@@ -104,21 +112,22 @@ export async function syncPullRequest(
        inputs.incompleteReason ?? null, inputs.fetchedAt],
     )).rows[0];
     await assertOwned();
-    await client.query(
+    const updated = await client.query(
       `UPDATE pull_requests SET state=$2,review_state=$3,check_state=$4,is_draft=$5,
          title=$6,author=$7,head_branch=$8,base_branch=$9,updated_at_provider=$10,
          merged_at=$11,closed_at=$12,merge_commit_sha=$13,body=$14,merge_conflicts=$15,
          current_policy_snapshot_id=$16,head_sha=$17,policy_complete=$18,policy_stale=false,
          policy_synced_at=$19,policy_last_attempted_at=$19,policy_error_code=NULL,policy_retry_after=NULL,
-         requested_reviewers=$20::jsonb,
+         requested_reviewers=$20::jsonb,policy_sync_token=NULL,
          last_synced_at=now(),updated_at=now()
-       WHERE id=$1`,
+       WHERE id=$1 AND policy_sync_token=$21::uuid`,
       [stored.id, remote.state, evaluated.reviewState, evaluated.checkState, false,
        remote.title, remote.user?.login ?? null, remote.head.ref, remote.base.ref, remote.updated_at,
        remote.merged_at ?? null, remote.closed_at ?? null, remote.merge_commit_sha ?? null,
        remote.body ?? null, remote.mergeable_state === "dirty", snapshot.id, remote.head.sha,
-       inputs.complete, inputs.fetchedAt, JSON.stringify(inputs.requestedReviewers)],
+       inputs.complete, inputs.fetchedAt, JSON.stringify(inputs.requestedReviewers), syncToken],
     );
+    if (updated.rowCount !== 1) throw new Error("pull-request sync superseded");
   });
   await assertOwned();
   if (!stored.ticket_id || !openPrStatuses.includes(stored.ticket_status)) return remote;

@@ -30,7 +30,7 @@ import {
   type ResolutionSource, type SkillCandidate, type ResolvedSkill, type SnapshottedSkill,
 } from "@dcc/skill-registry";
 import { runPrivateExecution } from "./execution-handoff.ts";
-import { failExecutionPublication, handleExecutionPublicationFailure, prepareExecutionPublication, PublicationError, publishExternalResult } from "./execution-publication.ts";
+import { failExecutionPublication, handleExecutionPublicationFailure, prepareExecutionPublication, PublicationError, publishExternalResult, storePublishedPullRequest } from "./execution-publication.ts";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
 import {
@@ -974,34 +974,17 @@ async function publishExecutionAttempt(input: {
         const relativeWorktree = path.relative(dataRoot, input.attempt.worktree_path);
         if (!relativeWorktree || relativeWorktree === ".." || relativeWorktree.startsWith(`..${path.sep}`) || path.isAbsolute(relativeWorktree)) throw new Error("worktree artifact path escapes controlled root");
         await inTransaction(async (client) => {
-          const stored = (await lease.run(() => client.query(
-        `INSERT INTO pull_requests
-         (project_id,ticket_id,execution_attempt_id,provider,repository,number,url,title,author,state,
-          review_state,check_state,is_draft,head_branch,base_branch,head_sha,merge_commit_sha,
-          created_at_provider,updated_at_provider,merged_at,closed_at,last_synced_at,changed_files)
-         VALUES ($1,$2,$3,'github',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                 $17,$18,$19,$20,now(),$21)
-         ON CONFLICT (project_id,number) DO UPDATE SET
-           ticket_id=COALESCE(pull_requests.ticket_id, EXCLUDED.ticket_id),
-           execution_attempt_id=COALESCE(pull_requests.execution_attempt_id, EXCLUDED.execution_attempt_id),
-           url=EXCLUDED.url,title=EXCLUDED.title,author=EXCLUDED.author,state=EXCLUDED.state,
-           review_state=EXCLUDED.review_state,check_state=EXCLUDED.check_state,is_draft=EXCLUDED.is_draft,
-           head_branch=EXCLUDED.head_branch,base_branch=EXCLUDED.base_branch,head_sha=EXCLUDED.head_sha,
-           merge_commit_sha=EXCLUDED.merge_commit_sha,created_at_provider=EXCLUDED.created_at_provider,
-           updated_at_provider=EXCLUDED.updated_at_provider,merged_at=EXCLUDED.merged_at,
-           closed_at=EXCLUDED.closed_at,last_synced_at=now(),changed_files=EXCLUDED.changed_files,
-           updated_at=now()
-         RETURNING *`,
-        [
-          input.project.id, input.ticket.id, input.attempt.id,
-          `${input.project.github_owner}/${input.project.github_repository}`,
-          providerPr.number, providerPr.html_url, providerPr.title, providerPr.user?.login ?? null,
-          providerPr.state, providerPr.review_state ?? null, providerPr.check_state ?? null,
-          false, providerPr.head.ref, providerPr.base.ref, commit,
-          providerPr.merge_commit_sha ?? null, providerPr.created_at, providerPr.updated_at,
-          providerPr.merged_at ?? null, providerPr.closed_at ?? null, input.changedFiles.length,
-        ],
-          ))).rows[0];
+          const stored = await storePublishedPullRequest({
+            query: (sql, values) => lease.run(() => client.query(sql, values)),
+          }, {
+            projectId: input.project.id,
+            ticketId: input.ticket.id,
+            attemptId: input.attempt.id,
+            repository: `${input.project.github_owner}/${input.project.github_repository}`,
+            pullRequest: providerPr,
+            commit: commit!,
+            changedFiles: input.changedFiles.length,
+          });
           await lease.run(() => client.query(`INSERT INTO artifacts (id,storage_path,artifact_type,status,sha256,finalized_at,agent_run_id,execution_attempt_id) VALUES ($1,$2,'worktree','finalized',$3,now(),$4,$5) ON CONFLICT (storage_path) DO NOTHING`, [randomUUID(), relativeWorktree, hash(commit!), input.runId, input.attempt.id]));
           const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
           await lease.run(() => client.query("UPDATE tickets SET status='PR Ready for Review',updated_at=now() WHERE id=$1", [input.ticket.id]));

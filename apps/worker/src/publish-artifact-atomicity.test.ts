@@ -6,6 +6,7 @@ import {
   prepareExecutionPublication,
   PublicationError,
   publishExternalResult,
+  storePublishedPullRequest,
 } from "./execution-publication.ts";
 
 function publicationClient(initialStatus: "pending" | "publishing" | "published" | "failed") {
@@ -166,4 +167,22 @@ test("repeated failure reconciliation does not duplicate history or audit", asyn
   expect(state.status).toBe("failed");
   expect(state.history).toEqual(["PR Creation Failed"]);
   expect(state.audits).toEqual(["failed"]);
+});
+
+test("publication linking cannot overwrite evaluated GitHub policy state", async () => {
+  const query = vi.fn(async (_sql: string, _values?: unknown[]) => ({ rows: [{ id: "pr-1" }], rowCount: 1 }));
+
+  await storePublishedPullRequest({ query }, {
+    projectId: "project-1", ticketId: "ticket-1", attemptId: "attempt-1", repository: "acme/widgets",
+    commit: "head-sha", changedFiles: 1,
+    pullRequest: {
+      number: 42, html_url: "url", title: "Title", state: "open", draft: false,
+      review_state: "pending", check_state: "failure", head: { ref: "feature" }, base: { ref: "main" },
+      created_at: "2026-08-04T10:00:00Z", updated_at: "2026-08-04T11:00:00Z",
+    },
+  });
+
+  expect(query.mock.calls[0][0]).not.toMatch(/review_state|check_state/);
+  expect(query.mock.calls[0][1]).not.toContain("pending");
+  expect(query.mock.calls[0][1]).not.toContain("failure");
 });

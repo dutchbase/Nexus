@@ -49,7 +49,8 @@ ALTER TABLE pull_requests
   ADD COLUMN policy_complete boolean,
   ADD COLUMN policy_stale boolean NOT NULL DEFAULT true,
   ADD COLUMN policy_error_code text,
-  ADD COLUMN policy_retry_after timestamptz;
+  ADD COLUMN policy_retry_after timestamptz,
+  ADD COLUMN policy_sync_token uuid;
 
 CREATE TABLE github_repository_sync_state (
   project_id uuid PRIMARY KEY REFERENCES projects(id) ON DELETE CASCADE,
