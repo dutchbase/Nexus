@@ -27,6 +27,21 @@ export type ProviderPullRequest = {
   body?: string | null;
   mergeable?: boolean | null;
   mergeable_state?: string;
+  requested_reviewers?: Array<{ login?: string }>;
+  requested_teams?: Array<{ slug?: string }>;
+};
+
+export type ProviderGitHubPolicyInputs = {
+  pullRequest: ProviderPullRequest;
+  protected: boolean;
+  requiredApprovals: number;
+  reviews: Array<{ id: number; reviewer: string; state: string; commitSha: string; submittedAt: string }>;
+  requestedReviewers: Array<{ type: "user" | "team"; name: string }>;
+  requiredChecks: Array<{ context: string; appId: number | null }>;
+  checks: Array<{ context: string; appId: number | null; state: "success" | "pending" | "failure"; updatedAt: string }>;
+  complete: boolean;
+  incompleteReason?: string;
+  fetchedAt: string;
 };
 
 export type GitHubFetchMetadata = {
@@ -225,21 +240,22 @@ function nextLink(response: Response, currentUrl: string) {
   return url.origin === new URL(currentUrl).origin ? url.toString() : null;
 }
 
-export async function listPullRequests(
-  owner: string,
-  repository: string,
-  state: "open" | "closed" | "all" = "all",
-): Promise<GitHubListResult<ProviderPullRequest>> {
-  const items: ProviderPullRequest[] = [];
-  const numbers = new Set<number>();
-  let cursor: string | null = `${apiBaseUrl()}${pullsPath(owner, repository)}?state=${state}&per_page=100`;
+async function listPages<T>(
+  initialUrl: string,
+  itemsFor: (payload: any) => T[],
+  keyFor?: (item: T) => string | number,
+): Promise<GitHubListResult<T>> {
+  const items: T[] = [];
+  const keys = new Set<string | number>();
+  let cursor: string | null = initialUrl;
   const fetchedAt = new Date().toISOString();
   while (cursor) {
     try {
       const response = await responseFor(cursor);
-      const page = await jsonFor<ProviderPullRequest[]>(response);
-      for (const item of page) if (!numbers.has(item.number)) {
-        numbers.add(item.number);
+      for (const item of itemsFor(await jsonFor(response))) {
+        const key = keyFor?.(item);
+        if (key !== undefined && keys.has(key)) continue;
+        if (key !== undefined) keys.add(key);
         items.push(item);
       }
       cursor = nextLink(response, cursor);
@@ -249,6 +265,73 @@ export async function listPullRequests(
     }
   }
   return Object.assign([...items], { items, complete: true, fetchedAt, cursor: null });
+}
+
+export async function listPullRequests(
+  owner: string,
+  repository: string,
+  state: "open" | "closed" | "all" = "all",
+): Promise<GitHubListResult<ProviderPullRequest>> {
+  return listPages(`${apiBaseUrl()}${pullsPath(owner, repository)}?state=${state}&per_page=100`, (page) => page, (item: ProviderPullRequest) => item.number);
+}
+
+export async function getPullRequestPolicyInputs(owner: string, repository: string, number: number): Promise<ProviderGitHubPolicyInputs> {
+  const pullRequest = await getPullRequest(owner, repository, number);
+  const repoPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`;
+  const headSha = pullRequest.head.sha;
+  if (!headSha) throw new GitHubProviderError("invalid_response", "GitHub pull request head SHA is missing");
+
+  const protectionResponse = await responseFor(`${apiBaseUrl()}${repoPath}/branches/${encodeURIComponent(pullRequest.base.ref)}/protection`, {}, [404]);
+  const protection = protectionResponse.status === 404 ? null : await jsonFor<any>(protectionResponse);
+  const reviewsResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/pulls/${number}/reviews?per_page=100`, (page) => page);
+  const checkRunsResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(headSha)}/check-runs?per_page=100`, (page) => page.check_runs ?? []);
+  for (const result of [reviewsResult, checkRunsResult]) {
+    if (!result.complete) throw new GitHubProviderError(result.errorCode ?? "transient", "GitHub policy input fetch failed", undefined, result.retryAt);
+  }
+  const combinedStatus = await request<any>(`${repoPath}/commits/${encodeURIComponent(headSha)}/status?per_page=100`);
+  const reviewRule = protection?.required_pull_request_reviews;
+  const unsupported = [
+    ...(reviewRule?.require_code_owner_reviews ? ["code_owner_reviews_unsupported"] : []),
+    ...(reviewRule?.require_last_push_approval ? ["last_push_approval_unsupported"] : []),
+  ];
+  const requiredChecks = (protection?.required_status_checks?.checks
+    ?? protection?.required_status_checks?.contexts?.map((context: string) => ({ context, app_id: null }))
+    ?? []).map((check: any) => ({ context: check.context, appId: check.app_id ?? null }));
+  const checks: ProviderGitHubPolicyInputs["checks"] = [
+    ...checkRunsResult.items.map((check: any) => ({
+      context: check.name,
+      appId: check.app?.id ?? null,
+      state: check.status !== "completed" ? "pending" as const : check.conclusion === "success" ? "success" as const : "failure" as const,
+      updatedAt: check.completed_at ?? check.started_at ?? check.created_at,
+    })),
+    ...(combinedStatus.statuses ?? []).map((status: any) => ({
+      context: status.context,
+      appId: null,
+      state: status.state === "success" ? "success" as const : status.state === "pending" ? "pending" as const : "failure" as const,
+      updatedAt: status.updated_at ?? status.created_at,
+    })),
+  ];
+  return {
+    pullRequest,
+    protected: protection !== null,
+    requiredApprovals: reviewRule?.required_approving_review_count ?? 0,
+    reviews: reviewsResult.items.map((review: any) => ({
+      id: review.id,
+      reviewer: review.user?.login ?? "",
+      state: review.state,
+      commitSha: review.commit_id,
+      submittedAt: review.submitted_at,
+    })).filter((review) => review.reviewer),
+    requestedReviewers: [
+      ...(pullRequest.requested_reviewers ?? []).flatMap((reviewer) => reviewer.login ? [{ type: "user" as const, name: reviewer.login }] : []),
+      ...(pullRequest.requested_teams ?? []).flatMap((team) => team.slug ? [{ type: "team" as const, name: team.slug }] : []),
+    ],
+    requiredChecks,
+    checks,
+    complete: unsupported.length === 0,
+    ...(unsupported.length ? { incompleteReason: unsupported.join(",") } : {}),
+    fetchedAt: new Date().toISOString(),
+  };
 }
 
 export type BranchMergeResult =

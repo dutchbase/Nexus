@@ -5,6 +5,7 @@ import {
   createPullRequestComment,
   findOpenPullRequestForHead,
   getPullRequest,
+  getPullRequestPolicyInputs,
   listPullRequests,
   markReadyForReview,
   mergeBranch,
@@ -85,6 +86,62 @@ test("lists successful two-page results once", async () => {
     expect(result).toMatchObject({ complete: true, cursor: null });
     expect(result.items.map(({ number }) => number)).toEqual([1, 2, 3]);
   });
+});
+
+test("fetches paginated policy inputs and marks unsupported protection incomplete", async () => {
+  const urls: string[] = [];
+  await withServer((incoming, outgoing) => {
+    const url = incoming.url ?? "";
+    urls.push(url);
+    outgoing.setHeader("content-type", "application/json");
+    if (url === "/repos/acme/widgets/pulls/42") {
+      outgoing.end(JSON.stringify({
+        number: 42, html_url: "url", state: "open", draft: false, title: "Policy",
+        head: { ref: "feature", sha: "head-sha" }, base: { ref: "main", sha: "base-sha" },
+        requested_reviewers: [{ login: "bob" }], requested_teams: [{ slug: "platform" }],
+        created_at: "2026-08-03", updated_at: "2026-08-04",
+      }));
+      return;
+    }
+    if (url.includes("/branches/main/protection")) {
+      outgoing.end(JSON.stringify({
+        required_pull_request_reviews: { required_approving_review_count: 2, require_code_owner_reviews: true },
+        required_status_checks: { checks: [{ context: "build", app_id: 7 }] },
+      }));
+      return;
+    }
+    if (url.includes("/pulls/42/reviews") && !url.includes("page=2")) {
+      outgoing.setHeader("link", "</repos/acme/widgets/pulls/42/reviews?per_page=100&page=2>; rel=\"next\"");
+      outgoing.end(JSON.stringify([{ id: 1, user: { login: "alice" }, state: "APPROVED", commit_id: "head-sha", submitted_at: "2026-08-04T10:00:00Z" }]));
+      return;
+    }
+    if (url.includes("/pulls/42/reviews")) {
+      outgoing.end(JSON.stringify([{ id: 2, user: { login: "bob" }, state: "COMMENTED", commit_id: "head-sha", submitted_at: "2026-08-04T11:00:00Z" }]));
+      return;
+    }
+    if (url.includes("/check-runs")) {
+      outgoing.end(JSON.stringify({ check_runs: [{ name: "build", app: { id: 7 }, status: "completed", conclusion: "success", completed_at: "2026-08-04T11:00:00Z" }] }));
+      return;
+    }
+    if (url.includes("/commits/head-sha/status")) {
+      outgoing.end(JSON.stringify({ statuses: [{ context: "legacy", state: "pending", updated_at: "2026-08-04T11:00:00Z" }] }));
+      return;
+    }
+    outgoing.statusCode = 404;
+    outgoing.end("{}");
+  }, async () => {
+    await expect(getPullRequestPolicyInputs("acme", "widgets", 42)).resolves.toMatchObject({
+      protected: true,
+      requiredApprovals: 2,
+      requestedReviewers: [{ type: "user", name: "bob" }, { type: "team", name: "platform" }],
+      reviews: [{ id: 1 }, { id: 2 }],
+      requiredChecks: [{ context: "build", appId: 7 }],
+      checks: expect.arrayContaining([{ context: "build", appId: 7, state: "success", updatedAt: "2026-08-04T11:00:00Z" }]),
+      complete: false,
+      incompleteReason: "code_owner_reviews_unsupported",
+    });
+  });
+  expect(urls.filter((url) => url.includes("/pulls/42/reviews"))).toHaveLength(2);
 });
 
 test("routes the mark-ready pull-request mutation to configured Enterprise GraphQL", async () => {
