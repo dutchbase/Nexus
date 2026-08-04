@@ -112,6 +112,11 @@ export async function approveAndMergePullRequest(
 
   const prior = (await db.query("SELECT * FROM pull_request_merge_attempts WHERE job_id=$1", [mergeInput.jobId])).rows[0];
   if (prior?.state === "merged") return resultFor(prior);
+  if (prior?.state === "refused") {
+    const code = prior.refusal_code ?? "merge_failed";
+    const reason = prior.provider_response?.message;
+    throw new PullRequestMergeError(typeof reason === "string" ? reason : `merge refused: ${code}`, code);
+  }
 
   const owner = stored.github_owner;
   const repo = stored.github_repository;

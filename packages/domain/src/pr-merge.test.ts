@@ -121,6 +121,22 @@ test("records GitHub's compare-and-swap rejection as a head-race refusal", async
   expect(db.queries.some(({ sql, values }: any) => sql.includes("state='refused'") && values?.includes("provider_head_changed"))).toBe(true);
 });
 
+test.each([
+  ["HTTP", "provider_error", { code: "http_error", status: 422, message: "GitHub rejected the merge" }],
+  ["merged:false", "provider_refused", { merged: false, sha: "", message: "Pull Request is not mergeable" }],
+])("keeps a prior %s refusal terminal on retry", async (_kind, refusalCode, providerResponse) => {
+  const db = database({ attempt: { state: "refused", refusal_code: refusalCode, provider_response: providerResponse } });
+
+  await expect(approveAndMergePullRequest(db, expected)).rejects.toMatchObject({
+    code: refusalCode,
+    message: providerResponse.message,
+  });
+
+  expect(github.getPullRequestPolicyInputs).not.toHaveBeenCalled();
+  expect(github.mergePullRequest).not.toHaveBeenCalled();
+  expect(db.queries.some(({ sql }: { sql: string }) => /(?:INSERT|UPDATE) (?:INTO )?pull_request_merge_attempts/.test(sql))).toBe(false);
+});
+
 test.each(["transient", "invalid_response"])("reconciles a retry after an ambiguous %s merge error", async (code) => {
   const first = database();
   github.mergePullRequest.mockRejectedValueOnce(new GitHubProviderError(code, "ambiguous merge result"));
