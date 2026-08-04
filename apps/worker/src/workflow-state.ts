@@ -197,6 +197,17 @@ export type LeaseGuard = {
   run: <T>(action: () => Promise<T> | T) => Promise<T>;
 };
 
+export async function initializePlanningAttempt<T>(
+  inTransaction: Transaction,
+  lease: LeaseGuard,
+  initialize: (client: Client) => Promise<T>,
+): Promise<T> {
+  return inTransaction(async (client) => {
+    await lease.assertOwned();
+    return initialize(client);
+  });
+}
+
 export async function finalizePlanningSuccess<T>(
   inTransaction: Transaction,
   lease: LeaseGuard,
@@ -212,6 +223,26 @@ export async function finalizePlanningSuccess<T>(
       [input.jobId, input.workerId],
     ));
     if (completed.rowCount !== 1) throw new LeaseLostError();
+    return value;
+  });
+}
+
+export async function finalizePlanningFailure<T>(
+  inTransaction: Transaction,
+  lease: LeaseGuard,
+  input: { jobId: string; workerId: string; message: string },
+  finalize: (client: Client) => Promise<T>,
+): Promise<T> {
+  return inTransaction(async (client) => {
+    const value = await finalize(client);
+    const failed = await lease.run(() => client.query(
+      `UPDATE jobs SET status='failed',completed_at=now(),claimed_by=NULL,lease_expires_at=NULL,
+       error_json=jsonb_build_object('message',$3::text),updated_at=now()
+       WHERE id=$1 AND status='running' AND claimed_by=$2 AND lease_expires_at > now()
+       RETURNING id`,
+      [input.jobId, input.workerId, input.message],
+    ));
+    if (failed.rowCount !== 1) throw new LeaseLostError();
     return value;
   });
 }

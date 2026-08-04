@@ -1,6 +1,8 @@
 import { expect, test } from "vitest";
 
-import { finalizePlanningSuccess, recoverExpiredWorkflowState, type LeaseGuard } from "./workflow-state.ts";
+import {
+  finalizePlanningFailure, finalizePlanningSuccess, initializePlanningAttempt, recoverExpiredWorkflowState, type LeaseGuard,
+} from "./workflow-state.ts";
 
 type State = { job: "running" | "completed" | "failed"; ticket: string; plan: boolean; run: string };
 
@@ -22,6 +24,15 @@ function transaction(state: State) {
         if (sql === "INSERT plan") state.plan = true;
         if (sql === "UPDATE ticket") state.ticket = "Plan Ready for Review";
         if (sql === "UPDATE run") state.run = "completed";
+        if (sql === "START run") state.run = "running";
+        if (sql === "START ticket") state.ticket = "Planning";
+        if (sql === "FAIL run") state.run = "failed";
+        if (sql === "FAIL ticket") state.ticket = "Planning Failed";
+        if (sql.includes("UPDATE jobs SET status='failed'")) {
+          if (state.job !== "running") return { rows: [], rowCount: 0 };
+          state.job = "failed";
+          return { rows: [{ id: "job" }], rowCount: 1 };
+        }
         if (sql.includes("UPDATE notification_deliveries")) return { rows: [], rowCount: 0 };
         if (sql.includes("UPDATE agent_runs")) return { rows: [], rowCount: 0 };
         if (sql.includes("SELECT status FROM tickets")) return { rows: [{ status: state.ticket }], rowCount: 1 };
@@ -60,4 +71,39 @@ test("completed planning finalization cannot be recovered into Planning Failed",
   await expect(recoverExpiredWorkflowState(transaction(state) as any)).resolves.toEqual({ jobs: 0, deliveries: 0 });
 
   expect(state).toEqual({ job: "completed", ticket: "Plan Ready for Review", plan: true, run: "completed" });
+});
+
+test("rolls back planning setup when its transition fails", async () => {
+  const state: State = { job: "running", ticket: "Planning Queued", plan: false, run: "none" };
+
+  await expect(initializePlanningAttempt(transaction(state) as any, lease, async (client) => {
+    await client.query("START run");
+    await client.query("START ticket");
+    throw new Error("planning setup failed");
+  })).rejects.toThrow("planning setup failed");
+
+  expect(state).toEqual({ job: "running", ticket: "Planning Queued", plan: false, run: "none" });
+});
+
+test.each(["planning_failed", "planning_timeout"])("finalizes %s and its job atomically", async () => {
+  const state: State = { job: "running", ticket: "Planning", plan: false, run: "running" };
+
+  await finalizePlanningFailure(transaction(state) as any, lease, { jobId: "job", workerId: "worker", message: "planning failed" }, async (client) => {
+    await client.query("FAIL run");
+    await client.query("FAIL ticket");
+  });
+
+  expect(state).toEqual({ job: "failed", ticket: "Planning Failed", plan: false, run: "failed" });
+});
+
+test("rolls back a failed planning finalization before changing its job", async () => {
+  const state: State = { job: "running", ticket: "Planning", plan: false, run: "running" };
+
+  await expect(finalizePlanningFailure(transaction(state) as any, lease, { jobId: "job", workerId: "worker", message: "planning failed" }, async (client) => {
+    await client.query("FAIL run");
+    await client.query("FAIL ticket");
+    throw new Error("notification failed");
+  })).rejects.toThrow("notification failed");
+
+  expect(state).toEqual({ job: "running", ticket: "Planning", plan: false, run: "running" });
 });

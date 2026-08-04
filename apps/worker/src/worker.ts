@@ -39,7 +39,7 @@ import {
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
 import {
-  finalizePlanningSuccess, LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch,
+  finalizePlanningFailure, finalizePlanningSuccess, initializePlanningAttempt, LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch,
   withContainedLeaseHeartbeat, withLeaseHeartbeat, type LeaseGuard,
 } from "./workflow-state.ts";
 
@@ -301,19 +301,17 @@ async function planningInputs(ticket: any) {
   return { project, ai, skills, skillUnion: unionSkills(skills, executionSkills, repairSkills), promptVersionIds, content };
 }
 
-async function transitionToPlanning(ticketId: string, jobId: string, runId: string, lease: LeaseGuard) {
-  await inTransaction(async (client) => {
-    const ticket = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticketId])).rows[0];
-    if (!ticket) throw new Error("ticket not found");
-    await lease.run(() => client.query("UPDATE tickets SET status='Planning',updated_at=now() WHERE id=$1", [ticketId]));
-    await lease.run(() => client.query(
-      `INSERT INTO ticket_status_history
-       (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
-       VALUES ($1,$2,'Planning','Planning job started','worker',$3,$4)`,
-      [ticketId, ticket.status, jobId, runId],
-    ));
-    await enqueueNotification(client, "planning.started", ticketId, runId, { runId }, lease.assertOwned);
-  });
+async function transitionToPlanning(client: any, ticketId: string, jobId: string, runId: string, lease: LeaseGuard) {
+  const ticket = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticketId])).rows[0];
+  if (!ticket) throw new Error("ticket not found");
+  await lease.run(() => client.query("UPDATE tickets SET status='Planning',updated_at=now() WHERE id=$1", [ticketId]));
+  await lease.run(() => client.query(
+    `INSERT INTO ticket_status_history
+     (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
+     VALUES ($1,$2,'Planning','Planning job started','worker',$3,$4)`,
+    [ticketId, ticket.status, jobId, runId],
+  ));
+  await enqueueNotification(client, "planning.started", ticketId, runId, { runId }, lease.assertOwned);
 }
 
 async function storePlan(input: {
@@ -428,17 +426,19 @@ async function runPlanning(job: any, lease: LeaseGuard) {
   // so a revision doesn't need real CLI session continuity — just a fresh id.
   const sessionId = randomUUID();
   const runType = revising ? "plan_revision" : "planning";
-  await lease.run(() => pool.query(
-    `INSERT INTO agent_runs
-     (id,ticket_id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
-     VALUES ($1,$2,$3,$4,'running',NULL,$5,$6,$7,now(),$8)`,
-    [runId, ticket.id, input.project.id, runType, input.ai.model, input.ai.reasoning_level,
-      planningStartPath, { job_id: job.id, project_config_version: input.project.config_version, planning_start_path: planningStartPath, environment_profile: "planning-minimal" }],
-  ));
-  await transitionToPlanning(ticket.id, job.id, runId, lease);
   let rawMarkdownForDebug: string | undefined;
   let temporary: string | undefined;
   try {
+    await initializePlanningAttempt(inTransaction, lease, async (client) => {
+      await lease.run(() => client.query(
+        `INSERT INTO agent_runs
+         (id,ticket_id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
+         VALUES ($1,$2,$3,$4,'running',NULL,$5,$6,$7,now(),$8)`,
+        [runId, ticket.id, input.project.id, runType, input.ai.model, input.ai.reasoning_level,
+          planningStartPath, { job_id: job.id, project_config_version: input.project.config_version, planning_start_path: planningStartPath, environment_profile: "planning-minimal" }],
+      ));
+      await transitionToPlanning(client, ticket.id, job.id, runId, lease);
+    });
     const copied = await snapshotSkillSet(input.skillUnion, ["planning", "execution", "repair"]);
     const skillSnapshot = (await lease.run(() => pool.query(
       `INSERT INTO skill_snapshots (ticket_id,run_id,skills_json,content_hash) VALUES ($1,$2,$3,$4) RETURNING *`,
@@ -500,7 +500,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
     // from. "Planning Failed" is a valid status the approve/revision
     // endpoints accept — reverting to "Planning Queued" (an active-queue
     // state that no longer exists) stranded tickets and blocked retries.
-    await inTransaction(async (client) => {
+    await finalizePlanningFailure(inTransaction, lease, { jobId: job.id, workerId, message }, async (client) => {
       await lease.run(() => client.query(
         `UPDATE agent_runs SET status='failed',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4,metadata_json=metadata_json || $5::jsonb WHERE id=$1`,
         [runId, (error as any)?.exitCode ?? 1,
@@ -511,13 +511,13 @@ async function runPlanning(job: any, lease: LeaseGuard) {
           JSON.stringify(rawMarkdownForDebug ? { raw_markdown: rawMarkdownForDebug.slice(0, 8000) } : {})],
       ));
       const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
-      if (current?.status !== "Planning") return;
+      if (!current || !["Planning", expectedStatus].includes(current.status)) return;
       await lease.run(() => client.query("UPDATE tickets SET status='Planning Failed',updated_at=now() WHERE id=$1", [ticket.id]));
       await lease.run(() => client.query(
         `INSERT INTO ticket_status_history
          (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
          VALUES ($1,'Planning','Planning Failed',$2,'worker',$3,$4)`,
-        [ticket.id, `Planning job failed: ${message.slice(0, 500)}`, job.id, runId],
+        [ticket.id, current.status, `Planning job failed: ${message.slice(0, 500)}`, job.id, runId],
       ));
       await enqueueNotification(client, "planning.failed", ticket.id, runId, { runId }, lease.assertOwned);
     });
