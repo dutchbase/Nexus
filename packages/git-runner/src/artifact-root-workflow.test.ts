@@ -92,3 +92,42 @@ it("uses the fetched origin default branch and rejects a dirty repository", asyn
     await rm(temporary, { recursive: true, force: true });
   }
 });
+
+it("refreshes the tracked default branch despite a restricted fetch refspec", async () => {
+  const temporary = await mkdtemp(path.join(tmpdir(), "git-runner-restricted-fetch-"));
+  try {
+    const remote = path.join(temporary, "remote.git");
+    const repository = path.join(temporary, "repo");
+    const updater = path.join(temporary, "updater");
+    await git(temporary, ["init", "--bare", remote]);
+    await git(temporary, ["clone", remote, repository]);
+    await git(repository, ["config", "core.hooksPath", "/dev/null"]);
+    await git(repository, ["config", "user.email", "git-runner-test@example.com"]);
+    await git(repository, ["config", "user.name", "git-runner test"]);
+    await writeFile(path.join(repository, "README.md"), "initial\\n");
+    await git(repository, ["add", "."]);
+    await git(repository, ["commit", "-m", "initial"]);
+    await git(repository, ["push", "origin", "HEAD:main"]);
+    await git(repository, ["branch", "-M", "main"]);
+    const stale = (await git(repository, ["rev-parse", "HEAD"])).stdout.trim();
+    await git(temporary, ["clone", "-b", "main", remote, updater]);
+    await git(updater, ["config", "core.hooksPath", "/dev/null"]);
+    await git(updater, ["config", "user.email", "git-runner-test@example.com"]);
+    await git(updater, ["config", "user.name", "git-runner test"]);
+    await writeFile(path.join(updater, "README.md"), "remote update\\n");
+    await git(updater, ["commit", "-am", "remote update"]);
+    await git(updater, ["push"]);
+    const fresh = (await git(updater, ["rev-parse", "HEAD"])).stdout.trim();
+    await git(repository, ["config", "--replace-all", "remote.origin.fetch", "+refs/heads/other:refs/remotes/origin/other"]);
+    await git(repository, ["update-ref", "refs/remotes/origin/main", stale]);
+
+    const worktree = await createExecutionWorktree({
+      repositoryPath: repository, defaultBranch: "main", dataRoot: path.join(temporary, "data"),
+      projectSlug: "acme", ticketNumber: "DCC-4", title: "Restricted fetch", attemptNumber: 1,
+    });
+
+    expect(worktree.baseCommit).toBe(fresh);
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+});

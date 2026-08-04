@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { cp, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { cp, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import pg from "pg";
@@ -15,6 +15,14 @@ describe("validateMigrations", () => {
 
   it("includes the durable workflow-state migration", async () => {
     await expect(readdir(new URL("../migrations/", import.meta.url))).resolves.toContain("037_workflow_state.sql");
+  });
+
+  it("backfills expiry for existing terminal execution worktrees", async () => {
+    const migration = await readFile(new URL("../migrations/038_execution_safety.sql", import.meta.url), "utf8");
+    expect(migration).toContain("UPDATE execution_attempts");
+    expect(migration).toContain("SET worktree_expires_at = now() + interval '1 day'");
+    expect(migration).toContain("worktree_path IS NOT NULL");
+    expect(migration).toContain("validation_status IN ('completed','published','failed','pr_creation_failed','cancelled','timed_out')");
   });
 
   it("rejects invalid filenames", () => {

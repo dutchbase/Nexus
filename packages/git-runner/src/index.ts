@@ -77,7 +77,7 @@ export async function createExecutionWorktree(input: {
   if (dirty.trim()) throw new Error("repository has uncommitted changes");
   await exec("git", ["-C", repository, "remote", "get-url", "origin"]);
   const baseRef = `refs/remotes/origin/${input.defaultBranch}`;
-  await exec("git", ["-C", repository, "fetch", "origin", input.defaultBranch]);
+  await exec("git", ["-C", repository, "fetch", "origin", `+refs/heads/${input.defaultBranch}:${baseRef}`]);
   const baseCommit = (await exec("git", ["-C", repository, "rev-parse", baseRef])).stdout.trim();
   await exec("git", ["-C", repository, "worktree", "add", "-b", branchName, worktreePath, baseCommit]);
   return { worktreePath, branchName, baseCommit };
