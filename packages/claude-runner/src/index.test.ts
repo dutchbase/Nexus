@@ -127,24 +127,44 @@ test("writes fail-closed workspace-only sandbox settings for execution", async (
 
 test("limits a scoped execution sandbox to its canonical conflict file", async () => {
   const settingsDirectory = await mkdtemp(path.join(tmpdir(), "claude-runner-test-"));
-  const configured = { ...executionInvocation, allowedWritePaths: ["src/conflicted.ts"] } satisfies ExecutionInvocation;
+  const worktree = await mkdtemp(path.join(tmpdir(), "claude-runner-worktree-"));
+  const allowed = path.join(worktree, "src", "conflicted.ts");
+  await mkdir(path.dirname(allowed), { recursive: true });
+  await writeFile(allowed, "unresolved\n");
+  const configured = {
+    ...executionInvocation, workingDirectory: worktree, executionDirectory: worktree, allowedWritePaths: ["src/conflicted.ts"],
+  } satisfies ExecutionInvocation;
   const { settingsFile } = await createExecutionSandboxSettings(configured, settingsDirectory);
   try {
     const settings = JSON.parse(await readFile(settingsFile, "utf8"));
-    expect(settings.permissions.allow).toEqual(expect.arrayContaining(["Edit(//work/src/conflicted.ts)"]));
-    expect(settings.permissions.allow).not.toEqual(expect.arrayContaining(["Edit(//work/**)"]));
-    expect(settings.sandbox.filesystem.allowWrite).toEqual(["/work/src/conflicted.ts"]);
-    expect(settings.sandbox.filesystem.allowWrite).not.toEqual(expect.arrayContaining(["/work"]));
+    expect(settings.permissions.allow).toEqual(expect.arrayContaining([`Edit(//${allowed.slice(1)})`]));
+    expect(settings.permissions.allow).not.toEqual(expect.arrayContaining([`Edit(//${worktree.slice(1)}/**)`]));
+    expect(settings.sandbox.filesystem.allowWrite).toEqual([allowed]);
+    expect(settings.sandbox.filesystem.allowWrite).not.toEqual(expect.arrayContaining([worktree]));
 
     const fileHook = settings.hooks.PreToolUse.find((hook: { matcher: string }) => hook.matcher === "Read|Glob|Grep|Edit|Write");
     const command = fileHook.hooks[0].command as string;
-    await expect(runConfiguredHook(command, "Edit", { file_path: "/work/src/conflicted.ts" }))
+    await expect(runConfiguredHook(command, "Edit", { file_path: allowed }, worktree))
       .resolves.toMatchObject({ code: 0, stdout: "" });
-    await expect(runConfiguredHook(command, "Write", { file_path: "/work/unrelated.ts" }))
+    await expect(runConfiguredHook(command, "Write", { file_path: path.join(worktree, "unrelated.ts") }, worktree))
       .resolves.toMatchObject({ code: 2 });
   } finally {
-    await rm(settingsDirectory, { recursive: true, force: true });
+    await Promise.all([rm(settingsDirectory, { recursive: true, force: true }), rm(worktree, { recursive: true, force: true })]);
   }
+});
+
+test("rejects a directory as a scoped execution write target", async () => {
+  const settingsDirectory = await mkdtemp(path.join(tmpdir(), "claude-runner-test-"));
+  const root = await mkdtemp(path.join(tmpdir(), "claude-runner-worktree-"));
+  directories.push(settingsDirectory, root);
+  await mkdir(path.join(root, "src"));
+
+  await expect(createExecutionSandboxSettings({
+    ...executionInvocation,
+    workingDirectory: root,
+    executionDirectory: root,
+    allowedWritePaths: ["src"],
+  }, settingsDirectory)).rejects.toThrow("existing regular file");
 });
 
 test("requires Claude versions that support strict sandbox allowlists", () => {
@@ -431,7 +451,7 @@ test("runs scoped execution in a read-only worktree with only conflict files reb
     mkdir(path.join(worktree, ".git")), mkdir(bin), writeFile(path.join(root, "prompt.md"), "resolve\n"), writeFile(allowed, "unresolved\n"), writeFile(unrelated, "unchanged\n"),
   ]);
   await writeFile(fakeClaude, `#!/bin/sh
-if [ "$1" = "--version" ]; then printf '%s\\n' '2.1.220 (Claude Code)'; exit 0; fi
+if [ "$1" = "--version" ]; then test "$DCC_FAKE_BWRAP" = 1 || exit 97; printf '%s\\n' '2.1.220 (Claude Code)'; exit 0; fi
 printf resolved > ${JSON.stringify(allowed)}
 if printf escaped > ${JSON.stringify(unrelated)}; then exit 98; fi
 printf '%s\\n' '{"type":"result","subtype":"success","result":"resolved"}'
@@ -448,7 +468,8 @@ const allowed = ${JSON.stringify(allowed)};
 const unrelated = ${JSON.stringify(unrelated)};
 if (!ro.some(([source, target]) => source === worktree && target === worktree)) process.exit(91);
 if (JSON.stringify(rw) !== JSON.stringify([[allowed, allowed]])) process.exit(92);
-fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ ro, rw }));
+if (args.includes("--unshare-net")) process.exit(93);
+fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ ro, rw, command: args[args.indexOf("--") + 1] }) + "\\n");
 const mappings = new Map([...ro, ...rw].map(([source, target]) => [target, source]));
 const separator = args.indexOf("--");
 const command = mappings.get(args[separator + 1]) ?? args[separator + 1];
@@ -457,7 +478,7 @@ let exitCode = 1;
 try {
   fs.chmodSync(worktree, 0o555);
   fs.chmodSync(unrelated, 0o444);
-  const result = spawnSync(command, args.slice(separator + 2), { cwd, env: { ...process.env, PATH: ${JSON.stringify(process.env.PATH)} }, stdio: "inherit" });
+  const result = spawnSync(command, args.slice(separator + 2), { cwd, env: { ...process.env, PATH: ${JSON.stringify(process.env.PATH)}, DCC_FAKE_BWRAP: "1" }, stdio: "inherit" });
   exitCode = result.status ?? 1;
 } finally {
   fs.chmodSync(worktree, 0o755);
@@ -487,7 +508,9 @@ process.exit(exitCode);
   }
   expect(await readFile(allowed, "utf8")).toBe("resolved");
   expect(await readFile(unrelated, "utf8")).toBe("unchanged\n");
-  expect(JSON.parse(await readFile(capture, "utf8"))).toMatchObject({ rw: [[allowed, allowed]] });
+  const launches = (await readFile(capture, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  expect(launches).toHaveLength(2);
+  expect(launches).toEqual(expect.arrayContaining([expect.objectContaining({ rw: [[allowed, allowed]] })]));
 });
 
 test("observes a rejected execution event write immediately and still rejects the invocation", async () => {

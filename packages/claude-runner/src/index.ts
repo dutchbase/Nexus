@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { appendFile, chmod, copyFile, mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -188,12 +188,19 @@ function bwrapParentDirectories(target: string) {
     .flatMap((directory) => ["--dir", directory]);
 }
 
+function scopedWritePaths(input: ExecutionInvocation, worktree: string) {
+  if (input.allowedWritePaths === undefined) return undefined;
+  const paths = [...new Set(input.allowedWritePaths.map((target) => canonicalPath(target, worktree)))];
+  if (!paths.length || paths.some((target) => !isWithin(target, worktree) || !statSync(target).isFile())) {
+    throw new Error("allowed execution write paths must be existing regular files inside the worktree");
+  }
+  return paths;
+}
+
 function scopedBwrapLaunch(input: ExecutionInvocation, settingsDirectory: string, guardPath: string) {
   const worktree = canonicalPath(input.workingDirectory, input.workingDirectory);
-  const writePaths = [...new Set((input.allowedWritePaths ?? []).map((target) => canonicalPath(target, worktree)))];
-  if (!writePaths.length || writePaths.some((target) => !isWithin(target, worktree))) {
-    throw new Error("scoped execution requires write paths inside the worktree");
-  }
+  const writePaths = scopedWritePaths(input, worktree);
+  if (!writePaths) throw new Error("scoped execution requires write paths");
   const bwrap = executablePath(process.env.DCC_CLAUDE_BWRAP_PATH ?? "/usr/bin/bwrap");
   const nodeRoot = realpathSync(path.dirname(path.dirname(process.execPath)));
   const executable = executablePath(input.claudeExecutable ?? "claude");
@@ -221,7 +228,7 @@ function scopedBwrapLaunch(input: ExecutionInvocation, settingsDirectory: string
     allowedWritePaths: writePaths,
   };
   const args = [
-    "--die-with-parent", "--new-session", "--unshare-net", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+    "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
     "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
     "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
     "--proc", "/proc", "--dev", "/dev", "--dir", "/opt", "--dir", "/opt/node",
@@ -297,10 +304,7 @@ function executionSettings(input: ExecutionInvocation, guardPath: string) {
     return [`Read(${rulePath})`, `Read(${rulePath}/**)`];
   });
   const worktreeRule = permissionPath(worktree);
-  const writePaths = input.allowedWritePaths?.map((target) => canonicalPath(target, worktree));
-  if (writePaths?.some((target) => !isWithin(target, worktree))) {
-    throw new Error("allowed execution write path must be inside the worktree");
-  }
+  const writePaths = scopedWritePaths(input, worktree);
   const writePermissions = writePaths
     ? [...new Set(writePaths)].map((target) => `Edit(${permissionPath(target)})`)
     : [`Edit(${worktreeRule})`, `Edit(${worktreeRule}/**)`];
@@ -443,8 +447,14 @@ export function isClaudeSandboxVersionSupported(output: string) {
   return major > 2 || (major === 2 && (minor > 1 || (minor === 1 && patch >= 219)));
 }
 
-async function requireClaudeSandboxVersion(env: NodeJS.ProcessEnv, cwd: string, executable?: string) {
-  const result = await runClaude(["--version", "--setting-sources", ""], { cwd, env, executable });
+async function requireClaudeSandboxVersion(
+  env: NodeJS.ProcessEnv, cwd: string, executable?: string,
+  launch?: { bwrap: string; args: string[]; executable: string },
+) {
+  const result = await runClaude(
+    launch ? [...launch.args, launch.executable, "--version", "--setting-sources", ""] : ["--version", "--setting-sources", ""],
+    { cwd, env, executable: launch?.bwrap ?? executable },
+  );
   if (result.exitCode !== 0) throw new Error("could not verify Claude Code sandbox support");
   assertExecutionSandboxVersion(result.stdout);
 }
@@ -470,7 +480,6 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
   const guard = await materializeBashGuard();
   let hiddenGitMetadata: Awaited<ReturnType<typeof hideWorktreeGitMetadata>> = null;
   try {
-    await requireClaudeSandboxVersion(env, input.workingDirectory, input.claudeExecutable);
     await appendFile(input.logPath, "");
     const metadataPaths = input.gitMetadataPaths ?? await gitMetadataPaths(input.workingDirectory);
     hiddenGitMetadata = await hideWorktreeGitMetadata(input.workingDirectory);
@@ -488,6 +497,7 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
       ? [...launch.args, launch.executable, ...buildExecutionArguments(sandboxInput, launch.settingsFile)]
       : buildExecutionArguments(sandboxInput, settingsFile);
     const childEnv = launch ? { ...env, ...launch.env } : env;
+    await requireClaudeSandboxVersion(childEnv, input.workingDirectory, input.claudeExecutable, launch ?? undefined);
     return await new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
     const child = spawn(command, commandArgs, {
       cwd: input.workingDirectory,
