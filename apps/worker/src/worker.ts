@@ -1458,7 +1458,12 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
        (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
        VALUES ($1,$2,'pr_conflict_resolution','running',NULL,$3,$4,$5,now(),$6)`,
       [newRunId, project.id, model, reasoningLevel, worktree.worktreePath,
-        { authority_profile: "conflict-resolution", allowed_write_paths: conflicts }],
+        {
+          job_id: job.id,
+          pr_conflict_resolution_id: payload.pr_conflict_resolution_id,
+          authority_profile: "conflict-resolution",
+          allowed_write_paths: conflicts,
+        }],
     );
     runId = newRunId;
     await pool.query(

@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
-import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, ClaudePlanningError, createExecutionSandboxSettings, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parsePlanMarkdown, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
+import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, ClaudePlanningError, createExecutionSandboxSettings, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parsePlanMarkdown, preflightClaudeAuthentication, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -420,6 +420,31 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan","session_
   expect(environment).toMatchObject({ CLAUDE_CODE_OAUTH_TOKEN: "token", AGENT_CONTROL_DISABLE: "1" });
   expect(environment.GITHUB_TOKEN).toBeUndefined();
   expect(environment.DATABASE_URL).toBeUndefined();
+});
+
+test("preflight excludes parent credentials from Claude auth status", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-preflight-env-"));
+  directories.push(root);
+  const bin = path.join(root, "bin");
+  const executable = path.join(bin, "claude");
+  const capture = path.join(root, "environment.json");
+  await mkdir(bin);
+  await writeFile(executable, `#!/bin/sh
+${JSON.stringify(process.execPath)} -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify(process.env))' ${JSON.stringify(capture)}
+printf '%s\\n' '{"loggedIn":true,"authMethod":"oauth_token"}'
+`);
+  await chmod(executable, 0o755);
+
+  await expect(preflightClaudeAuthentication({
+    PATH: `${bin}:${process.env.PATH}`, LANG: "C", LC_ALL: "C", CLAUDE_CODE_OAUTH_TOKEN: "subscription-token",
+    GITHUB_TOKEN: "github-canary", DATABASE_URL: "database-canary", DEPLOY_TOKEN: "deploy-canary",
+  })).resolves.toMatchObject({ loggedIn: true, authMethod: "oauth_token" });
+
+  const environment = JSON.parse(await readFile(capture, "utf8"));
+  expect(environment).toMatchObject({ CLAUDE_CODE_OAUTH_TOKEN: "subscription-token", AGENT_CONTROL_DISABLE: "1" });
+  expect(environment.GITHUB_TOKEN).toBeUndefined();
+  expect(environment.DATABASE_URL).toBeUndefined();
+  expect(environment.DEPLOY_TOKEN).toBeUndefined();
 });
 
 test("invokes execution with a materialized guard outside the worktree", async () => {

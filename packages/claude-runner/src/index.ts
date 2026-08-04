@@ -83,9 +83,21 @@ export class ClaudePlanningError extends Error {
   }
 }
 
+function minimalClaudeEnvironment(env: NodeJS.ProcessEnv, oauthToken: string): NodeJS.ProcessEnv {
+  return {
+    PATH: env.PATH,
+    LANG: env.LANG,
+    LC_ALL: env.LC_ALL,
+    CLAUDE_CODE_OAUTH_TOKEN: oauthToken,
+    AGENT_CONTROL_DISABLE: "1",
+  };
+}
+
 export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = process.env) {
   assertSubscriptionOnlyEnvironment(env);
-  const result = await runClaude(["auth", "status"], { env });
+  const result = await runClaude(["auth", "status"], {
+    env: minimalClaudeEnvironment(env, env.CLAUDE_CODE_OAUTH_TOKEN ?? ""),
+  });
   let status: any = null;
   try { status = JSON.parse(result.stdout.trim()); } catch { /* handled below */ }
   // ponytail: `claude auth status` reports loggedIn/authMethod, not the
@@ -418,13 +430,7 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   assertSubscriptionOnlyEnvironment();
   // Planning receives only locale/PATH, its subscription token, and runner
   // switches. Worker credentials must never cross this process boundary.
-  const env: NodeJS.ProcessEnv = {
-    PATH: process.env.PATH,
-    LANG: process.env.LANG,
-    LC_ALL: process.env.LC_ALL,
-    CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken,
-    AGENT_CONTROL_DISABLE: "1",
-  };
+  const env = minimalClaudeEnvironment(process.env, input.oauthToken);
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
   const result = await runClaude(buildPlanningArguments(input), {
     cwd: input.workingDirectory, env, executable: input.claudeExecutable, signal: input.signal, timeoutMs: input.timeoutMs,

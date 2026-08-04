@@ -74,6 +74,42 @@ test("recovers a stranded planning run once and leaves its final state idempoten
   expect(query.mock.calls.filter(([sql]) => (sql as string).includes("UPDATE agent_runs"))).toHaveLength(1);
 });
 
+test("recovers an expired conflict job by its recorded job identifier", async () => {
+  let runStatus = "running";
+  let resolutionStatus = "running";
+  const query = vi.fn(async (sql: string, values?: unknown[]): Promise<Result> => {
+    if (sql.includes("UPDATE jobs j") && sql.includes("lease_expires_at <= now()")) {
+      return { rows: [{
+        id: "job-conflict", type: "pr.conflict_resolution", status: "failed",
+        payload_json: { pr_conflict_resolution_id: "resolution-1" },
+      }], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE notification_deliveries nd")) return { rows: [], rowCount: 0 };
+    if (sql.includes("UPDATE agent_runs")) {
+      if (values?.[0] !== "job-conflict") return { rows: [], rowCount: 0 };
+      runStatus = "failed";
+      return { rows: [{ id: "run-conflict" }], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE pr_conflict_resolutions")) {
+      if (values?.[0] !== "resolution-1") return { rows: [], rowCount: 0 };
+      resolutionStatus = "error";
+    }
+    return { rows: [], rowCount: 1 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+
+  await expect(recoverExpiredWorkflowState(inTransaction)).resolves.toEqual({ jobs: 1, deliveries: 0 });
+
+  expect(runStatus).toBe("failed");
+  expect(resolutionStatus).toBe("error");
+  expect(query).toHaveBeenCalledWith(expect.stringContaining("metadata_json->>'job_id'=$1"), [
+    "job-conflict", "worker_lease_expired", "Worker lease expired",
+  ]);
+  expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE pr_conflict_resolutions"), [
+    "resolution-1", "Worker lease expired",
+  ]);
+});
+
 test("shares the 100-row recovery budget across jobs and deliveries", async () => {
   const jobs = Array.from({ length: 37 }, (_, index) => ({
     id: `job-${index}`, type: "project.validate", status: "queued", payload_json: {},
