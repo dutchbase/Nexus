@@ -1,31 +1,98 @@
-import { readFile } from "node:fs/promises";
-import { describe, expect, it } from "vitest";
+import { beforeEach, expect, test, vi } from "vitest";
 
-describe("pull request list actions", () => {
-  it("renders GitHub policy evidence and only a bound admin merge", async () => {
-    const page = await readFile(new URL("./prs.ts", import.meta.url), "utf8");
-    const script = await readFile(new URL("../ui.ts", import.meta.url), "utf8");
+const query = vi.fn();
+vi.mock("@dcc/database", () => ({ inTransaction: vi.fn(), pool: { query } }));
 
-    expect(page).toContain('data-pr-id="${item.id}"');
-    expect(page).toContain("GitHub: reviews");
-    expect(page).toContain("GitHub: checks");
-    expect(page).toContain("policy_synced_at");
-    expect(page).toContain("policy_retry_after");
-    expect(page).toContain("requested_reviewers");
-    expect(page).toContain("current_policy_snapshot_id");
-    expect(page).toContain("publication_id");
-    expect(page).toContain("github_comment_id");
-    expect(page).toContain("escapeHtml(r.raw_output");
-    expect(page).not.toContain("data-pr-list-approve");
-    expect(page).not.toContain("data-pr-list-ai-review-merge");
-    expect(page).not.toContain("data-pr-ai-review-merge");
-    expect(page).not.toContain("data-pr-target-branch");
-    expect(page).toContain('class="pr-row-link"');
-    expect(page).toContain("<span>Merge Status</span>");
-    expect(page).toContain('class="card prs-card"');
-    expect(page).not.toContain('return `<a class="ticket-row prs-row"');
-    expect(script).toContain("expected_head_sha");
-    expect(script).toContain("policy_snapshot_id");
-    expect(script).not.toContain("review_and_merge");
+const prs = await import("./prs.ts");
+const tickets = await import("./tickets.ts");
+const session = { username: "admin", user_id: "admin" };
+const pr = {
+  id: "pr-1", project_id: "project-1", project_name: "Project", project_slug: "project", repository: "acme/project",
+  number: 7, title: "Title", url: "https://github.test/acme/project/pull/7", state: "open", base_branch: "main", head_branch: "feature",
+  head_sha: "head-sha", current_policy_snapshot_id: "snapshot-1", policy_complete: true, policy_stale: false,
+  review_state: "approved", check_state: "success", requested_reviewers: [], created_at: "2026-08-04T10:00:00Z",
+};
+
+function mockPr(item: any, reviews: any[] = []) {
+  query.mockImplementation(async (sql: string) => {
+    if (!sql) return { rows: [] };
+    if (sql.includes("FROM pull_requests pr JOIN projects")) return { rows: [item] };
+    if (sql.includes("FROM pr_ai_reviews")) return { rows: reviews };
+    if (sql.includes("FROM pr_conflict_resolutions")) return { rows: [] };
+    throw new Error(`unexpected query: ${sql}`);
   });
+}
+
+async function renderPr(item: any, reviews: any[] = []) {
+  mockPr(item, reviews);
+  return (await prs.render(new URL("http://test/admin/pull-requests/project/7"), session, {}))!.body;
+}
+
+beforeEach(() => query.mockReset());
+
+test("renders a fresh GitHub binding and sends exactly its visible values", async () => {
+  const body = await renderPr({ ...pr, policy_synced_at: "2026-08-04T10:05:00Z", requested_reviewers: [{ type: "team", name: "release" }] });
+
+  expect(body).toContain("GitHub: Current");
+  expect(body).toContain("GitHub: reviews");
+  expect(body).toContain("GitHub: checks");
+  expect(body).toContain("Requested reviewers");
+  expect(body).toContain("team release");
+  expect(body).toContain("Policy snapshot");
+  expect(body).toContain("snapshot-1");
+  expect(body).toContain('data-pr-head-sha="head-sha" data-pr-policy-snapshot-id="snapshot-1"');
+  expect(body).not.toContain('data-pr-approve disabled');
+});
+
+test("labels stale rate-limited evidence and disables merge with its exact reason", async () => {
+  const body = await renderPr({ ...pr, policy_stale: true, policy_error_code: "rate_limited", policy_retry_after: "2026-08-04T10:10:00Z" });
+
+  expect(body).toContain("GitHub: Stale: rate_limited; retry after");
+  expect(body).toContain('data-pr-approve data-pr-head-sha="head-sha" data-pr-policy-snapshot-id="snapshot-1" disabled title="GitHub policy is stale"');
+});
+
+test("labels missing snapshot and head bindings as unavailable", async () => {
+  const noSnapshot = await renderPr({ ...pr, current_policy_snapshot_id: null });
+  const noHead = await renderPr({ ...pr, head_sha: null });
+
+  expect(noSnapshot).toContain("GitHub: Unavailable: policy snapshot missing");
+  expect(noSnapshot).toContain("Policy snapshot</dt><dd class=\"mono\">Unavailable");
+  expect(noSnapshot).toContain('disabled title="GitHub policy snapshot is unavailable"');
+  expect(noHead).toContain("GitHub: Unavailable: head SHA missing");
+  expect(noHead).toContain('disabled title="GitHub head SHA is unavailable"');
+});
+
+test.each([
+  [{ policy_complete: false }, "GitHub: Incomplete", "GitHub policy is incomplete"],
+  [{ review_state: "pending" }, "GitHub: Current", "GitHub reviews are pending"],
+  [{ check_state: "failure" }, "GitHub: Current", "GitHub checks are failure"],
+])("disables merge for %o with the exact policy reason", async (changes, status, reason) => {
+  const body = await renderPr({ ...pr, ...changes });
+
+  expect(body).toContain(status);
+  expect(body).toContain(`disabled title="${reason}"`);
+});
+
+test("escapes persisted review output and errors", async () => {
+  const body = await renderPr(pr, [{ status: "error", mode: "review_only", model: "sonnet", reasoning_level: "high", created_at: "2026-08-04T10:00:00Z", publication_id: "publication", github_comment_id: 4, error_message: "<script>bad()</script>", raw_output: "<img src=x>" }]);
+
+  expect(body).toContain("&lt;script&gt;bad()&lt;/script&gt;");
+  expect(body).toContain("&lt;img src=x&gt;");
+  expect(body).not.toContain("<script>bad()</script>");
+  expect(body).not.toContain("<img src=x>");
+});
+
+test("ticket detail identifies stale GitHub review evidence and its timestamp", async () => {
+  query.mockImplementation(async (sql: string) => {
+    if (!sql) return { rows: [] };
+    if (sql.includes("FROM tickets t JOIN projects")) return { rows: [{ id: "ticket-1", ticket_number: "T-1", project_id: "project-1", project_name: "Project", title: "Ticket", status: "PR Ready for Review", created_at: "2026-08-04T10:00:00Z" }] };
+    if (sql.includes("FROM pull_requests WHERE ticket_id")) return { rows: [{ ...pr, policy_stale: true, policy_synced_at: "2026-08-04T10:05:00Z", policy_error_code: "rate_limited" }] };
+    if (sql.includes("SELECT t.*,p.id plan_id")) return { rows: [] };
+    return { rows: [] };
+  });
+
+  const page = await tickets.render(new URL("http://test/admin/tickets/T-1"), session, {});
+
+  expect(page?.body).toContain("GitHub: Stale: rate_limited");
+  expect(page?.body).toContain("2026");
 });

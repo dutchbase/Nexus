@@ -25,14 +25,29 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[]): 
   const canStartRepair = Boolean(item.run_id);
   const button = (attr: string, label: string, allowed: boolean, deniedReason: string, extraClass = "") =>
     `<button class="button${extraClass}" type="button" ${attr}${allowed ? "" : " disabled"} title="${allowed ? "" : escapeHtml(deniedReason)}">${label}</button>`;
-  const policyFresh = item.policy_complete && !item.policy_stale && item.current_policy_snapshot_id && item.head_sha;
-  const policyAllowsMerge = policyFresh && ["approved", "not_required"].includes(item.review_state)
-    && ["success", "not_required"].includes(item.check_state);
-  const policyIssue = item.policy_stale
+  const policyIssue = !item.current_policy_snapshot_id
+    ? "Unavailable: policy snapshot missing"
+    : !item.head_sha
+    ? "Unavailable: head SHA missing"
+    : item.policy_stale
     ? `Stale${item.policy_error_code ? `: ${item.policy_error_code}` : ""}${item.policy_retry_after ? `; retry after ${new Date(item.policy_retry_after).toLocaleString("nl-NL")}` : ""}`
     : !item.policy_complete
     ? `Incomplete${item.policy_error_code ? `: ${item.policy_error_code}` : ""}`
     : "Current";
+  const mergeBlocker = !item.current_policy_snapshot_id
+    ? "GitHub policy snapshot is unavailable"
+    : !item.head_sha
+    ? "GitHub head SHA is unavailable"
+    : item.policy_stale
+    ? "GitHub policy is stale"
+    : !item.policy_complete
+    ? "GitHub policy is incomplete"
+    : !["approved", "not_required"].includes(item.review_state)
+    ? `GitHub reviews are ${item.review_state ?? "unknown"}`
+    : !["success", "not_required"].includes(item.check_state)
+    ? `GitHub checks are ${item.check_state ?? "unknown"}`
+    : "";
+  const policyAllowsMerge = !mergeBlocker;
   const requestedReviewers = Array.isArray(item.requested_reviewers)
     ? item.requested_reviewers.map((reviewer: any) => `${reviewer.type === "team" ? "team " : ""}${reviewer.name ?? "unknown"}`).join(", ") || "None"
     : "Unknown";
@@ -77,7 +92,7 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[]): 
       ${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}
       ${conflictResolutionBadge ? `<span class="status ${conflictResolutionBadge.cls}" data-conflict-resolution-status="${escapeHtml(latestConflictResolution.status)}">${escapeHtml(conflictResolutionBadge.label)}</span>` : ""}
       ${item.merge_conflicts ? button("data-pr-resolve-conflicts", "Resolve conflicts (AI)", true, "") : ""}
-      ${button(`data-pr-approve data-pr-head-sha="${escapeHtml(item.head_sha ?? "")}" data-pr-policy-snapshot-id="${escapeHtml(item.current_policy_snapshot_id ?? "")}"`, "Approve & merge", policyAllowsMerge, "GitHub policy must be current, complete, approved, and passing", " primary")}
+      ${button(`data-pr-approve data-pr-head-sha="${escapeHtml(item.head_sha ?? "")}" data-pr-policy-snapshot-id="${escapeHtml(item.current_policy_snapshot_id ?? "")}"`, "Approve & merge", policyAllowsMerge, mergeBlocker, " primary")}
       ${button("data-pr-ai-review", "AI review", true, "")}
       <a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a>
       <details class="menu">
@@ -97,7 +112,7 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[]): 
     <div class="grid two"><section class="card"><div class="card-head">Metadata</div><div class="card-body"><dl>
     <dt>Ticket</dt><dd>${item.ticket_number ? `<a href="/admin/tickets/${escapeHtml(item.ticket_number)}">${escapeHtml(item.ticket_number)} · ${escapeHtml(item.ticket_title)}</a> (${escapeHtml(item.ticket_status)})` : `<span style="color:var(--text3)">Not linked</span>`}</dd>
     <dt>Author</dt><dd>${escapeHtml(item.author)}</dd><dt>Branches</dt><dd>${escapeHtml(item.head_branch)} → ${escapeHtml(item.base_branch)}</dd>
-    <dt>Head SHA</dt><dd class="mono">${escapeHtml(item.head_sha ?? "Unknown")}</dd><dt>GitHub: reviews</dt><dd>${escapeHtml(item.review_state ?? "Unknown")}</dd>
+    <dt>Head SHA</dt><dd class="mono">${escapeHtml(item.head_sha ?? "Unknown")}</dd><dt>Policy snapshot</dt><dd class="mono">${escapeHtml(item.current_policy_snapshot_id ?? "Unavailable")}</dd><dt>GitHub: reviews</dt><dd>${escapeHtml(item.review_state ?? "Unknown")}</dd>
     <dt>GitHub: checks</dt><dd>${escapeHtml(item.check_state ?? "Unknown")}</dd><dt>Requested reviewers</dt><dd>${escapeHtml(requestedReviewers)}</dd>
     <dt>GitHub policy</dt><dd>${escapeHtml(policyIssue)}${item.policy_synced_at ? ` · ${new Date(item.policy_synced_at).toLocaleString("nl-NL")}` : ""}</dd><dt>Internal review</dt><dd>${escapeHtml(item.internal_review_state ?? "Not reviewed")}</dd>
     <dt>Changes</dt><dd class="mono">${escapeHtml(changes)}</dd>
