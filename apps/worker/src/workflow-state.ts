@@ -197,6 +197,25 @@ export type LeaseGuard = {
   run: <T>(action: () => Promise<T> | T) => Promise<T>;
 };
 
+export async function finalizePlanningSuccess<T>(
+  inTransaction: Transaction,
+  lease: LeaseGuard,
+  input: { jobId: string; workerId: string },
+  finalize: (client: Client) => Promise<T>,
+): Promise<T> {
+  return inTransaction(async (client) => {
+    const value = await finalize(client);
+    const completed = await lease.run(() => client.query(
+      `UPDATE jobs SET status='completed',completed_at=now(),claimed_by=NULL,lease_expires_at=NULL,updated_at=now()
+       WHERE id=$1 AND status='running' AND claimed_by=$2 AND lease_expires_at > now()
+       RETURNING id`,
+      [input.jobId, input.workerId],
+    ));
+    if (completed.rowCount !== 1) throw new LeaseLostError();
+    return value;
+  });
+}
+
 export async function withLeaseHeartbeat<T>(
   renew: () => Promise<boolean>,
   work: (lease: LeaseGuard) => Promise<T>,

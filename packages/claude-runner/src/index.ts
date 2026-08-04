@@ -18,13 +18,25 @@ async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.P
     const outcome = await new Promise<{ exitCode: number | null; timedOut: boolean }>((resolve, reject) => {
       const child = spawn(options.executable ?? "claude", args, {
         cwd: options.cwd, env: options.env, stdio: ["ignore", stdoutFile.fd, stderrFile.fd], signal: options.signal,
+        detached: process.platform !== "win32",
       });
       let timedOut = false;
       let killTimer: NodeJS.Timeout | undefined;
+      const terminate = (signal: NodeJS.Signals) => {
+        if (!child.pid) return child.kill(signal);
+        if (process.platform === "win32") {
+          const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+          killer.on("error", () => child.kill(signal));
+          killer.unref();
+          return true;
+        }
+        try { return process.kill(-child.pid, signal); }
+        catch { return child.kill(signal); }
+      };
       const timeout = options.timeoutMs === undefined ? undefined : setTimeout(() => {
         timedOut = true;
-        child.kill("SIGTERM");
-        killTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+        terminate("SIGTERM");
+        killTimer = setTimeout(() => terminate("SIGKILL"), 5_000);
       }, options.timeoutMs);
       child.on("error", (error) => {
         if (timeout) clearTimeout(timeout);

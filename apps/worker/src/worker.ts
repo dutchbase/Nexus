@@ -39,7 +39,7 @@ import {
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
 import {
-  LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch,
+  finalizePlanningSuccess, LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch,
   withContainedLeaseHeartbeat, withLeaseHeartbeat, type LeaseGuard,
 } from "./workflow-state.ts";
 
@@ -320,7 +320,7 @@ async function storePlan(input: {
   ticket: any; jobId: string; runId: string; sessionId: string; promptSnapshotId: string; markdown: string;
   exitCode: number; raw: unknown;
 }, lease: LeaseGuard) {
-  return inTransaction(async (client) => {
+  return finalizePlanningSuccess(inTransaction, lease, { jobId: input.jobId, workerId }, async (client) => {
     const plan = (await lease.run(() => client.query(
       `INSERT INTO plans (ticket_id,planning_session_id) VALUES ($1,$2) RETURNING *`,
       [input.ticket.id, input.sessionId],
@@ -354,7 +354,7 @@ async function storeRevisedPlan(input: {
   sessionId: string; promptSnapshotId: string; markdown: string; exitCode: number; raw: unknown;
 }, lease: LeaseGuard) {
   const versionNumber = Number(input.previousVersion.version) + 1;
-  return inTransaction(async (client) => {
+  return finalizePlanningSuccess(inTransaction, lease, { jobId: input.jobId, workerId }, async (client) => {
     const locked = (await client.query("SELECT * FROM plans WHERE id=$1 FOR UPDATE", [input.plan.id])).rows[0];
     if (!locked || locked.current_version_id !== input.previousVersion.id) {
       throw new Error("plan changed while revision was running");

@@ -376,6 +376,24 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan"}'
   });
 });
 
+test("planning timeout terminates descendants with the Claude process", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-timeout-tree-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const marker = path.join(root, "descendant-ran");
+  await writeFile(executable, `#!/bin/sh
+(sleep 0.2; printf descendant > ${JSON.stringify(marker)}) &
+sleep 1
+`);
+  await chmod(executable, 0o755);
+
+  await expect(invokePlanningClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root, timeoutMs: 10,
+  })).rejects.toMatchObject({ code: "planning_timeout" });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await expect(access(marker)).rejects.toThrow();
+});
+
 test("invokes planning with only its documented minimal environment", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "claude-planning-env-"));
   directories.push(root);
