@@ -1,10 +1,13 @@
 import { expect, it, vi } from "vitest";
 import { reclaimExpiredWorktrees } from "./cleanup-worktrees.ts";
 
-function database(rows: any[]) {
+function database(rows: any[], liveSourceAttemptId?: string) {
   const query = vi.fn(async (sql: string) => {
     if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
-    if (sql.includes("FOR UPDATE SKIP LOCKED")) return { rows: rows.splice(0, 1), rowCount: 1 };
+    if (sql.includes("FOR UPDATE SKIP LOCKED")) {
+      const sourceReferenceIsFiltered = sql.includes("source_execution_attempt_id");
+      return { rows: liveSourceAttemptId && sourceReferenceIsFiltered ? [] : rows.splice(0, 1), rowCount: 1 };
+    }
     if (sql.includes("UPDATE execution_attempts")) return { rows: [], rowCount: 1 };
     throw new Error(`unexpected query: ${sql}`);
   });
@@ -12,12 +15,11 @@ function database(rows: any[]) {
 }
 
 it("does not reclaim a source attempt referenced by a live repair", async () => {
-  const db = database([]);
+  const db = database([{ id: "attempt", worktree_path: "/data/worktrees/acme/DCC-1/1", repository_path: "/repo" }], "attempt");
   const remove = vi.fn();
   await expect(reclaimExpiredWorktrees({ db, dataRoot: "/data", remove })).resolves.toBe(0);
-  const selection = db.query.mock.calls.find(([sql]) => sql.includes("FOR UPDATE SKIP LOCKED"))?.[0] as string;
-  expect(selection).toContain("source_execution_attempt_id");
   expect(remove).not.toHaveBeenCalled();
+  expect(db.query.mock.calls.some(([sql]) => sql.includes("UPDATE execution_attempts"))).toBe(false);
 });
 
 it("claims an expired non-live worktree before removing and reclaiming it", async () => {
