@@ -227,6 +227,14 @@ export async function createPullRequestComment(
   });
 }
 
+export async function listPullRequestComments(owner: string, repo: string, number: number) {
+  return listPages(
+    `${apiBaseUrl()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/issues/${number}/comments?per_page=100`,
+    (page) => page as Array<{ id: number; html_url: string; body?: string | null }>,
+    (comment) => comment.id,
+  );
+}
+
 export async function getPullRequestDiff(owner: string, repo: string, number: number): Promise<string> {
   return requestRaw(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}/pulls/${number}`, {
     headers: { accept: "application/vnd.github.v3.diff" },

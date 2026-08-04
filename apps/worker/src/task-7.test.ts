@@ -8,7 +8,7 @@ import { createPullRequestReviewWorktree } from "../../../packages/git-runner/sr
 import type { SnapshottedSkill } from "@dcc/skill-registry";
 import { buildApprovedInputSnapshot, type ApprovedInputSnapshot } from "@dcc/domain";
 import {
-  approvedPhaseSkills, assertExecutionPublicationGate, executionRoot, prReviewSnapshotInput, reviewedMergeBinding,
+  approvedPhaseSkills, assertExecutionPublicationGate, executionRoot, prReviewSnapshotInput,
 } from "./worker-boundary.ts";
 import * as workerBoundary from "./worker-boundary.ts";
 
@@ -132,11 +132,7 @@ describe("worker orchestration boundary", () => {
     expect(() => assertApprovedSkillSnapshot(approved, row)).toThrow("approved skill snapshot integrity check failed");
   });
 
-  test("never schedules an unsafe automated merge", () => {
-    expect(reviewedMergeBinding("review_and_merge", "approved", "head-sha", "main", "base-sha")).toBeNull();
-    expect(reviewedMergeBinding("review_only", "approved", "head-sha", "main", "base-sha")).toBeNull();
-    expect(reviewedMergeBinding("review_and_merge", "rejected", "head-sha", "main", "base-sha")).toBeNull();
-
+  test("binds PR review prompts to immutable refs", () => {
     expect(prReviewSnapshotInput({
       projectId: "project-1", content: "exact prompt", model: "sonnet", reasoningLevel: "high",
       promptVersionIds: { "global.pr-review": "prompt-1", "global.code-reviewer": "rubric-2" },

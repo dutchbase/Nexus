@@ -6,6 +6,7 @@ import {
   findOpenPullRequestForHead,
   getPullRequest,
   getPullRequestPolicyInputs,
+  listPullRequestComments,
   listPullRequests,
   markReadyForReview,
   mergeBranch,
@@ -343,6 +344,22 @@ test("posts the complete Markdown review as a pull-request comment", async () =>
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+});
+
+test("finds review publication markers across every comment page", async () => {
+  await withServer((incoming, outgoing) => {
+    outgoing.setHeader("content-type", "application/json");
+    if (incoming.url?.includes("page=2")) {
+      outgoing.end(JSON.stringify([{ id: 2, html_url: "comment-2", body: "<!-- dcc-review-publication:publication-1 -->" }]));
+      return;
+    }
+    outgoing.setHeader("link", "</repos/acme/widgets/issues/42/comments?per_page=100&page=2>; rel=\"next\"");
+    outgoing.end(JSON.stringify([{ id: 1, html_url: "comment-1", body: "older comment" }]));
+  }, async () => {
+    const comments = await listPullRequestComments("acme", "widgets", 42);
+    expect(comments).toMatchObject({ complete: true, cursor: null });
+    expect(comments.items.map(({ id }) => id)).toEqual([1, 2]);
+  });
 });
 
 test("creates system pull requests ready for review", async () => {

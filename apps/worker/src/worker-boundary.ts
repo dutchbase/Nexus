@@ -1,4 +1,3 @@
-import { reviewedHeadShaForMerge } from "@dcc/domain";
 import { skillsForPhase, type SkillPhase, type SnapshottedSkill } from "@dcc/skill-registry";
 import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
@@ -132,17 +131,6 @@ export function approvedExecutionInput(snapshot: {
 
 export function assertExecutionPublicationGate(repairing: boolean, usedAgent: boolean) {
   if (!repairing && !usedAgent) throw new Error("execution did not invoke Agent tool");
-}
-
-export function reviewedMergeBinding(
-  mode: "review_only" | "review_and_merge",
-  verdict: "approved" | "rejected",
-  reviewedHeadSha: string,
-  reviewedBaseBranch: string,
-  reviewedBaseSha: string,
-) {
-  const expectedHeadSha = reviewedHeadShaForMerge(mode, verdict, reviewedHeadSha);
-  return expectedHeadSha ? { expectedHeadSha, expectedBaseBranch: reviewedBaseBranch, expectedBaseSha: reviewedBaseSha } : null;
 }
 
 export function prReviewSnapshotInput(input: {

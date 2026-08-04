@@ -88,9 +88,9 @@ async function reconcileJob(client: Client, job: Job, errorCode: string, message
     const reviewId = job.payload_json.pr_ai_review_id;
     if (typeof reviewId === "string") {
       await client.query(
-        `UPDATE pr_ai_reviews SET status='error',error_message=$2,completed_at=now()
+        `UPDATE pr_ai_reviews SET status='error',error_code=$2,error_message=$3,completed_at=now()
          WHERE id=$1 AND status='running'`,
-        [reviewId, message],
+        [reviewId, errorCode, message],
       );
     }
     return;

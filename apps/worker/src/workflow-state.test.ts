@@ -160,6 +160,23 @@ test("fails an exhausted recovered job and reconciles its run, attempt, ticket, 
   ]);
 });
 
+test("records a stable terminal code when an AI review exhausts recovery", async () => {
+  const query = vi.fn(async (sql: string): Promise<Result> => {
+    if (sql.includes("UPDATE jobs j") && sql.includes("lease_expires_at <= now()")) return { rows: [{
+      id: "job-1", type: "pr.ai_review", status: "failed", payload_json: { pr_ai_review_id: "review-1" },
+    }], rowCount: 1 };
+    if (sql.includes("UPDATE notification_deliveries nd")) return { rows: [], rowCount: 0 };
+    return { rows: [], rowCount: 1 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+
+  await recoverExpiredWorkflowState(inTransaction);
+
+  expect(query).toHaveBeenCalledWith(expect.stringContaining("error_code=$2"), [
+    "review-1", "worker_lease_expired", "Worker lease expired",
+  ]);
+});
+
 test.each(["execution.run", "execution.repair", "pull-request.retry"])("recovers a stranded %s publication as retryable once", async (type) => {
   let publicationStatus = "publishing";
   let ticketStatus = "Validating";
@@ -402,7 +419,7 @@ test("authentication refusal applies the terminal state matrix without duplicate
     "blocked_auth", "Authentication unavailable", jobs.map((job) => job.type),
   ]);
   expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE execution_attempts"), ["attempt", "failed"]);
-  expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE pr_ai_reviews"), ["review-row", "Authentication unavailable"]);
+  expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE pr_ai_reviews"), ["review-row", "blocked_auth", "Authentication unavailable"]);
   expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE pr_conflict_resolutions"), ["conflict-row", "Authentication unavailable"]);
   expect(query.mock.calls.filter(([sql]) => (sql as string).includes("INSERT INTO ticket_status_history"))).toHaveLength(1);
 });

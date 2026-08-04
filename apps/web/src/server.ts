@@ -1062,7 +1062,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
             target_branch: targetBranch,
           },
           idempotencyKey: `pr-ai-review:${row.id}`,
-          maxAttempts: 1,
+          maxAttempts: 3,
           rerunOf: previous?.job_id,
         }, client);
         return row;

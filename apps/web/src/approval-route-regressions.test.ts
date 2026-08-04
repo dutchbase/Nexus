@@ -247,9 +247,9 @@ test.each([
 });
 
 test.each([
-  ["ai-review", "pr_ai_reviews", "pr_ai_review_id", "pr.ai_review"],
-  ["resolve-conflicts", "pr_conflict_resolutions", "pr_conflict_resolution_id", "pr.conflict_resolution"],
-])("%s creates a linked single-attempt rerun after terminal history", async (action, table, payloadKey, jobType) => {
+  ["ai-review", "pr_ai_reviews", "pr_ai_review_id", "pr.ai_review", 3],
+  ["resolve-conflicts", "pr_conflict_resolutions", "pr_conflict_resolution_id", "pr.conflict_resolution", 1],
+])("%s creates a linked rerun after terminal history", async (action, table, payloadKey, jobType, maxAttempts) => {
   pool.query.mockImplementation(async (sql: string) => {
     if (sql.includes("FROM pull_requests pr")) return { rows: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa" }] };
     if (sql.includes("ai_review_settings")) return { rows: [{ default_model: "sonnet", default_reasoning_level: "high" }] };
@@ -270,7 +270,7 @@ test.each([
 
   const queued = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO jobs"));
   expect(queued[1][2]).toMatchObject({ [payloadKey]: "new-attempt" });
-  expect(queued[1][4]).toBe(1);
+  expect(queued[1][4]).toBe(maxAttempts);
   expect(queued[1][6]).toBe("old-job");
   expect(response.end).toHaveBeenCalledWith(JSON.stringify({ id: "new-attempt" }));
 });
