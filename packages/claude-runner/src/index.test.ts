@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
-import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, createExecutionSandboxSettings, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parsePlanMarkdown, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
+import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, ClaudePlanningError, createExecutionSandboxSettings, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parsePlanMarkdown, preflightClaudeAuthentication, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -123,6 +123,48 @@ test("writes fail-closed workspace-only sandbox settings for execution", async (
   } finally {
     await rm(settingsDirectory, { recursive: true, force: true });
   }
+});
+
+test("limits a scoped execution sandbox to its canonical conflict file", async () => {
+  const settingsDirectory = await mkdtemp(path.join(tmpdir(), "claude-runner-test-"));
+  const worktree = await mkdtemp(path.join(tmpdir(), "claude-runner-worktree-"));
+  const allowed = path.join(worktree, "src", "conflicted.ts");
+  await mkdir(path.dirname(allowed), { recursive: true });
+  await writeFile(allowed, "unresolved\n");
+  const configured = {
+    ...executionInvocation, workingDirectory: worktree, executionDirectory: worktree, allowedWritePaths: ["src/conflicted.ts"],
+  } satisfies ExecutionInvocation;
+  const { settingsFile } = await createExecutionSandboxSettings(configured, settingsDirectory);
+  try {
+    const settings = JSON.parse(await readFile(settingsFile, "utf8"));
+    expect(settings.permissions.allow).toEqual(expect.arrayContaining([`Edit(//${allowed.slice(1)})`]));
+    expect(settings.permissions.allow).not.toEqual(expect.arrayContaining([`Edit(//${worktree.slice(1)}/**)`]));
+    expect(settings.sandbox.filesystem.allowWrite).toEqual([allowed]);
+    expect(settings.sandbox.filesystem.allowWrite).not.toEqual(expect.arrayContaining([worktree]));
+
+    const fileHook = settings.hooks.PreToolUse.find((hook: { matcher: string }) => hook.matcher === "Read|Glob|Grep|Edit|Write");
+    const command = fileHook.hooks[0].command as string;
+    await expect(runConfiguredHook(command, "Edit", { file_path: allowed }, worktree))
+      .resolves.toMatchObject({ code: 0, stdout: "" });
+    await expect(runConfiguredHook(command, "Write", { file_path: path.join(worktree, "unrelated.ts") }, worktree))
+      .resolves.toMatchObject({ code: 2 });
+  } finally {
+    await Promise.all([rm(settingsDirectory, { recursive: true, force: true }), rm(worktree, { recursive: true, force: true })]);
+  }
+});
+
+test("rejects a directory as a scoped execution write target", async () => {
+  const settingsDirectory = await mkdtemp(path.join(tmpdir(), "claude-runner-test-"));
+  const root = await mkdtemp(path.join(tmpdir(), "claude-runner-worktree-"));
+  directories.push(settingsDirectory, root);
+  await mkdir(path.join(root, "src"));
+
+  await expect(createExecutionSandboxSettings({
+    ...executionInvocation,
+    workingDirectory: root,
+    executionDirectory: root,
+    allowedWritePaths: ["src"],
+  }, settingsDirectory)).rejects.toThrow("existing regular file");
 });
 
 test("requires Claude versions that support strict sandbox allowlists", () => {
@@ -315,6 +357,96 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan"}'
   await expect(running).rejects.toMatchObject({ name: "AbortError" });
 });
 
+test("returns a typed timeout when planning exceeds its deadline", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-timeout-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  await writeFile(executable, `#!/bin/sh
+sleep 1
+printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan"}'
+`);
+  await chmod(executable, 0o755);
+
+  await expect(invokePlanningClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root, timeoutMs: 10,
+  })).rejects.toMatchObject({
+    constructor: ClaudePlanningError,
+    code: "planning_timeout",
+    exitCode: 124,
+  });
+});
+
+test("planning timeout terminates descendants with the Claude process", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-timeout-tree-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const marker = path.join(root, "descendant-ran");
+  await writeFile(executable, `#!/bin/sh
+(sleep 0.2; printf descendant > ${JSON.stringify(marker)}) &
+sleep 1
+`);
+  await chmod(executable, 0o755);
+
+  await expect(invokePlanningClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root, timeoutMs: 10,
+  })).rejects.toMatchObject({ code: "planning_timeout" });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await expect(access(marker)).rejects.toThrow();
+});
+
+test("invokes planning with only its documented minimal environment", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-env-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const capture = path.join(root, "environment.json");
+  await writeFile(executable, `#!/bin/sh
+node -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify(process.env))' ${JSON.stringify(capture)}
+printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan","session_id":"session"}'
+`);
+  await chmod(executable, 0o755);
+  const previousGithubToken = process.env.GITHUB_TOKEN;
+  const previousDatabaseUrl = process.env.DATABASE_URL;
+  process.env.GITHUB_TOKEN = "publication-token";
+  process.env.DATABASE_URL = "postgres://secret";
+  try {
+    await invokePlanningClaude({ ...invocation, claudeExecutable: executable, workingDirectory: root });
+  } finally {
+    if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previousGithubToken;
+    if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousDatabaseUrl;
+  }
+  const environment = JSON.parse(await readFile(capture, "utf8"));
+  expect(environment).toMatchObject({ CLAUDE_CODE_OAUTH_TOKEN: "token", AGENT_CONTROL_DISABLE: "1" });
+  expect(environment.GITHUB_TOKEN).toBeUndefined();
+  expect(environment.DATABASE_URL).toBeUndefined();
+});
+
+test("preflight excludes parent credentials from Claude auth status", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-preflight-env-"));
+  directories.push(root);
+  const bin = path.join(root, "bin");
+  const executable = path.join(bin, "claude");
+  const capture = path.join(root, "environment.json");
+  await mkdir(bin);
+  await writeFile(executable, `#!/bin/sh
+${JSON.stringify(process.execPath)} -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify(process.env))' ${JSON.stringify(capture)}
+printf '%s\\n' '{"loggedIn":true,"authMethod":"oauth_token"}'
+`);
+  await chmod(executable, 0o755);
+
+  await expect(preflightClaudeAuthentication({
+    PATH: `${bin}:${process.env.PATH}`, LANG: "C", LC_ALL: "C", CLAUDE_CODE_OAUTH_TOKEN: "subscription-token",
+    GITHUB_TOKEN: "github-canary", DATABASE_URL: "database-canary", DEPLOY_TOKEN: "deploy-canary",
+  })).resolves.toMatchObject({ loggedIn: true, authMethod: "oauth_token" });
+
+  const environment = JSON.parse(await readFile(capture, "utf8"));
+  expect(environment).toMatchObject({ CLAUDE_CODE_OAUTH_TOKEN: "subscription-token", AGENT_CONTROL_DISABLE: "1" });
+  expect(environment.GITHUB_TOKEN).toBeUndefined();
+  expect(environment.DATABASE_URL).toBeUndefined();
+  expect(environment.DEPLOY_TOKEN).toBeUndefined();
+});
+
 test("invokes execution with a materialized guard outside the worktree", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "claude-execution-"));
   directories.push(root);
@@ -364,6 +496,83 @@ node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1], JSON.str
   expect(settings.sandbox).toMatchObject({
     enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false,
   });
+});
+
+test("runs scoped execution in a read-only worktree with only conflict files rebound writable", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-scoped-bwrap-"));
+  directories.push(root);
+  const worktree = path.join(root, "worktree");
+  const allowed = path.join(worktree, "src", "conflicted.ts");
+  const unrelated = path.join(worktree, "unrelated.ts");
+  const bin = path.join(root, "bin");
+  const fakeBwrap = path.join(bin, "bwrap");
+  const fakeClaude = path.join(bin, "claude");
+  const capture = path.join(root, "bwrap.json");
+  await mkdir(path.dirname(allowed), { recursive: true });
+  await Promise.all([
+    mkdir(path.join(worktree, ".git")), mkdir(bin), writeFile(path.join(root, "prompt.md"), "resolve\n"), writeFile(allowed, "unresolved\n"), writeFile(unrelated, "unchanged\n"),
+  ]);
+  await writeFile(fakeClaude, `#!/bin/sh
+if [ "$1" = "--version" ]; then test "$DCC_FAKE_BWRAP" = 1 || exit 97; printf '%s\\n' '2.1.220 (Claude Code)'; exit 0; fi
+printf resolved > ${JSON.stringify(allowed)}
+if printf escaped > ${JSON.stringify(unrelated)}; then exit 98; fi
+printf '%s\\n' '{"type":"result","subtype":"success","result":"resolved"}'
+`);
+  await writeFile(fakeBwrap, `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+const pairs = (flag) => args.flatMap((value, index) => value === flag ? [[args[index + 1], args[index + 2]]] : []);
+const ro = pairs("--ro-bind");
+const rw = pairs("--bind");
+const worktree = ${JSON.stringify(worktree)};
+const allowed = ${JSON.stringify(allowed)};
+const unrelated = ${JSON.stringify(unrelated)};
+if (!ro.some(([source, target]) => source === worktree && target === worktree)) process.exit(91);
+if (JSON.stringify(rw) !== JSON.stringify([[allowed, allowed]])) process.exit(92);
+if (args.includes("--unshare-net")) process.exit(93);
+fs.appendFileSync(${JSON.stringify(capture)}, JSON.stringify({ ro, rw, command: args[args.indexOf("--") + 1] }) + "\\n");
+const mappings = new Map([...ro, ...rw].map(([source, target]) => [target, source]));
+const separator = args.indexOf("--");
+const command = mappings.get(args[separator + 1]) ?? args[separator + 1];
+const cwd = args[args.indexOf("--chdir") + 1];
+let exitCode = 1;
+try {
+  fs.chmodSync(worktree, 0o555);
+  fs.chmodSync(unrelated, 0o444);
+  const result = spawnSync(command, args.slice(separator + 2), { cwd, env: { ...process.env, PATH: ${JSON.stringify(process.env.PATH)}, DCC_FAKE_BWRAP: "1" }, stdio: "inherit" });
+  exitCode = result.status ?? 1;
+} finally {
+  fs.chmodSync(worktree, 0o755);
+  fs.chmodSync(unrelated, 0o644);
+}
+process.exit(exitCode);
+`);
+  await Promise.all([chmod(fakeClaude, 0o755), chmod(fakeBwrap, 0o755)]);
+  const previousBwrap = process.env.DCC_CLAUDE_BWRAP_PATH;
+  process.env.DCC_CLAUDE_BWRAP_PATH = fakeBwrap;
+  try {
+    await expect(invokeExecutionClaude({
+      ...invocation,
+      claudeExecutable: fakeClaude,
+      workingDirectory: worktree,
+      executionDirectory: worktree,
+      promptFile: path.join(root, "prompt.md"),
+      gitMetadataPaths: [path.join(worktree, ".git")],
+      logPath: path.join(root, "run.log"),
+      timeoutMs: 1_000,
+      allowedWritePaths: ["src/conflicted.ts"],
+      onEvent: async () => undefined,
+    })).resolves.toMatchObject({ exitCode: 0 });
+  } finally {
+    if (previousBwrap === undefined) delete process.env.DCC_CLAUDE_BWRAP_PATH;
+    else process.env.DCC_CLAUDE_BWRAP_PATH = previousBwrap;
+  }
+  expect(await readFile(allowed, "utf8")).toBe("resolved");
+  expect(await readFile(unrelated, "utf8")).toBe("unchanged\n");
+  const launches = (await readFile(capture, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+  expect(launches).toHaveLength(2);
+  expect(launches).toEqual(expect.arrayContaining([expect.objectContaining({ rw: [[allowed, allowed]] })]));
 });
 
 test("observes a rejected execution event write immediately and still rejects the invocation", async () => {

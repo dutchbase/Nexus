@@ -956,31 +956,42 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       if (!pullRequest.agent_run_id) return json(response, 409, { error: "linked execution run is unavailable" });
       const result = await inTransaction(async (client) => {
         const source = (await client.query(
-          `SELECT ar.*,ea.id execution_attempt_id,ea.plan_version_id,ea.worktree_path,t.status ticket_status
+          `SELECT ar.*,ea.id execution_attempt_id,ea.plan_version_id,ea.worktree_path,ea.worktree_lifecycle_status,t.status ticket_status
            FROM agent_runs ar JOIN execution_attempts ea ON ea.agent_run_id=ar.id
            JOIN tickets t ON t.id=ea.ticket_id WHERE ar.id=$1 FOR UPDATE OF ea,t`,
           [pullRequest.agent_run_id],
         )).rows[0];
-        if (!source?.worktree_path) throw Object.assign(new Error("repair worktree is unavailable"), { status: 409 });
+        if (!source) throw Object.assign(new Error("linked execution attempt is unavailable"), { status: 409 });
+        if (source.worktree_lifecycle_status === "reclaimed") throw Object.assign(new Error("repair source worktree has been reclaimed"), { status: 409 });
         const approvedSnapshotId = source.metadata_json?.approved_input_snapshot_id;
         if (typeof approvedSnapshotId !== "string") throw Object.assign(new Error("repair run has no approved input snapshot"), { status: 409 });
         const active = (await client.query(
           `SELECT 1 FROM jobs WHERE status IN ('queued','running') AND type='execution.repair'
-           AND payload_json->>'execution_attempt_id'=$1`,
+          AND payload_json->>'source_execution_attempt_id'=$1`,
           [source.execution_attempt_id],
         )).rowCount;
         if (active) throw Object.assign(new Error("a repair is already active"), { status: 409 });
         const rerunOf = await terminalRerunSource(client, source.metadata_json);
+        const attemptNumber = (await client.query(
+          "SELECT COALESCE(max(attempt_number),0)+1 next FROM execution_attempts WHERE ticket_id=$1",
+          [source.ticket_id],
+        )).rows[0].next;
+        const attempt = (await client.query(
+          `INSERT INTO execution_attempts (ticket_id,plan_version_id,attempt_number,validation_status,source_execution_attempt_id)
+           VALUES ($1,$2,$3,'queued',$4) RETURNING *`,
+          [source.ticket_id, source.plan_version_id, attemptNumber, source.execution_attempt_id],
+        )).rows[0];
         const job = await enqueueJob({
           type: "execution.repair",
           payload: {
-            ticket_id: source.ticket_id, execution_attempt_id: source.execution_attempt_id,
+            ticket_id: source.ticket_id, execution_attempt_id: attempt.id,
+            source_execution_attempt_id: source.execution_attempt_id,
             plan_version_id: source.plan_version_id,
             approved_input_snapshot_id: approvedSnapshotId,
             feedback,
             validation_output: source.metadata_json?.validation_output ?? {},
           },
-          idempotencyKey: `execution.repair:${source.execution_attempt_id}:${randomUUID()}`,
+          idempotencyKey: `execution.repair:${attempt.id}`,
           maxAttempts: 1,
           rerunOf,
         }, client);
@@ -1985,7 +1996,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const result = await inTransaction(async (client) => {
       const source = (await client.query(
         `SELECT ar.*,ea.id execution_attempt_id,ea.plan_version_id,ea.validation_status,
-                ea.worktree_path,t.status ticket_status
+                ea.worktree_path,ea.worktree_lifecycle_status,t.status ticket_status
          FROM agent_runs ar
          JOIN execution_attempts ea ON ea.agent_run_id=ar.id
          JOIN tickets t ON t.id=ea.ticket_id
@@ -1993,28 +2004,38 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         [runRepairMatch[1]],
       )).rows[0];
       if (!source) return null;
-      if (!source.worktree_path) throw Object.assign(new Error("repair worktree is unavailable"), { status: 409 });
+      if (source.worktree_lifecycle_status === "reclaimed") throw Object.assign(new Error("repair source worktree has been reclaimed"), { status: 409 });
       const approvedSnapshotId = source.metadata_json?.approved_input_snapshot_id;
       if (typeof approvedSnapshotId !== "string") throw Object.assign(new Error("repair run has no approved input snapshot"), { status: 409 });
       const active = (await client.query(
         `SELECT 1 FROM jobs WHERE status IN ('queued','running')
-         AND type='execution.repair' AND payload_json->>'execution_attempt_id'=$1`,
+         AND type='execution.repair' AND payload_json->>'source_execution_attempt_id'=$1`,
         [source.execution_attempt_id],
       )).rowCount;
       if (active) throw Object.assign(new Error("a repair is already active"), { status: 409 });
       const rerunOf = await terminalRerunSource(client, source.metadata_json);
+      const attemptNumber = (await client.query(
+        "SELECT COALESCE(max(attempt_number),0)+1 next FROM execution_attempts WHERE ticket_id=$1",
+        [source.ticket_id],
+      )).rows[0].next;
+      const attempt = (await client.query(
+        `INSERT INTO execution_attempts (ticket_id,plan_version_id,attempt_number,validation_status,source_execution_attempt_id)
+         VALUES ($1,$2,$3,'queued',$4) RETURNING *`,
+        [source.ticket_id, source.plan_version_id, attemptNumber, source.execution_attempt_id],
+      )).rows[0];
       const job = await enqueueJob({
         type: "execution.repair",
         payload: {
           ticket_id: source.ticket_id,
-          execution_attempt_id: source.execution_attempt_id,
+          execution_attempt_id: attempt.id,
+          source_execution_attempt_id: source.execution_attempt_id,
           plan_version_id: source.plan_version_id,
           approved_input_snapshot_id: approvedSnapshotId,
           feedback: body.feedback.trim(),
           validation_output: source.metadata_json?.validation_output ?? {},
           ...(typeof body.mock_scenario_path === "string" ? { mock_scenario_path: body.mock_scenario_path } : {}),
         },
-        idempotencyKey: `execution.repair:${source.execution_attempt_id}:${randomUUID()}`,
+        idempotencyKey: `execution.repair:${attempt.id}`,
         maxAttempts: 1,
         rerunOf,
       }, client);
@@ -2028,7 +2049,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
          VALUES ($1,$2,'Execution Queued','Repair execution queued','admin',$3,$4,$5,$6)`,
         [source.ticket_id, source.ticket_status, session.user_id, job.id, source.id, source.plan_version_id],
       );
-      return { job, execution_attempt_id: source.execution_attempt_id };
+      return { job, execution_attempt_id: attempt.id };
     });
     return result ? json(response, 202, result) : json(response, 404, { error: "run not found" });
   }
@@ -2047,7 +2068,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         [runRetryMatch[1]],
       )).rows[0];
       if (!source) return null;
-      if (source.publication_status !== "failed" || source.ticket_status !== "PR Creation Failed" || !source.result_commit) {
+      if (source.publication_status !== "failed" || source.ticket_status !== "PR Creation Failed" || !source.result_commit || source.validation_status !== "pr_creation_failed") {
         throw Object.assign(new Error("run has no failed publication to retry"), { status: 409 });
       }
       const rerunOf = await terminalRerunSource(client, source.metadata_json);

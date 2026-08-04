@@ -47,6 +47,69 @@ test("recovers each expired job and delivery once in a bounded locked transactio
   expect(transaction).toHaveBeenCalledTimes(2);
 });
 
+test("recovers a stranded planning run once and leaves its final state idempotent", async () => {
+  let recovered = false;
+  let ticketStatus = "Planning";
+  const history: string[] = [];
+  const query = vi.fn(async (sql: string, values?: unknown[]): Promise<Result> => {
+    if (sql.includes("UPDATE jobs j") && sql.includes("lease_expires_at <= now()")) {
+      if (recovered) return { rows: [], rowCount: 0 };
+      recovered = true;
+      return { rows: [{ id: "planning", type: "planning.generate", status: "failed", payload_json: { ticket_id: "ticket-planning" } }], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE notification_deliveries nd")) return { rows: [], rowCount: 0 };
+    if (sql.includes("UPDATE agent_runs")) return { rows: [{ id: "run-planning" }], rowCount: 1 };
+    if (sql.includes("SELECT status FROM tickets")) return { rows: [{ status: ticketStatus }], rowCount: 1 };
+    if (sql.includes("UPDATE tickets SET status=$2")) ticketStatus = values?.[1] as string;
+    if (sql.includes("INSERT INTO ticket_status_history")) history.push(ticketStatus);
+    return { rows: [], rowCount: 1 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+
+  await expect(recoverExpiredWorkflowState(inTransaction)).resolves.toEqual({ jobs: 1, deliveries: 0 });
+  await expect(recoverExpiredWorkflowState(inTransaction)).resolves.toEqual({ jobs: 0, deliveries: 0 });
+
+  expect(ticketStatus).toBe("Planning Failed");
+  expect(history).toEqual(["Planning Failed"]);
+  expect(query.mock.calls.filter(([sql]) => (sql as string).includes("UPDATE agent_runs"))).toHaveLength(1);
+});
+
+test("recovers an expired conflict job by its recorded job identifier", async () => {
+  let runStatus = "running";
+  let resolutionStatus = "running";
+  const query = vi.fn(async (sql: string, values?: unknown[]): Promise<Result> => {
+    if (sql.includes("UPDATE jobs j") && sql.includes("lease_expires_at <= now()")) {
+      return { rows: [{
+        id: "job-conflict", type: "pr.conflict_resolution", status: "failed",
+        payload_json: { pr_conflict_resolution_id: "resolution-1" },
+      }], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE notification_deliveries nd")) return { rows: [], rowCount: 0 };
+    if (sql.includes("UPDATE agent_runs")) {
+      if (values?.[0] !== "job-conflict") return { rows: [], rowCount: 0 };
+      runStatus = "failed";
+      return { rows: [{ id: "run-conflict" }], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE pr_conflict_resolutions")) {
+      if (values?.[0] !== "resolution-1") return { rows: [], rowCount: 0 };
+      resolutionStatus = "error";
+    }
+    return { rows: [], rowCount: 1 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+
+  await expect(recoverExpiredWorkflowState(inTransaction)).resolves.toEqual({ jobs: 1, deliveries: 0 });
+
+  expect(runStatus).toBe("failed");
+  expect(resolutionStatus).toBe("error");
+  expect(query).toHaveBeenCalledWith(expect.stringContaining("metadata_json->>'job_id'=$1"), [
+    "job-conflict", "worker_lease_expired", "Worker lease expired",
+  ]);
+  expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE pr_conflict_resolutions"), [
+    "resolution-1", "Worker lease expired",
+  ]);
+});
+
 test("shares the 100-row recovery budget across jobs and deliveries", async () => {
   const jobs = Array.from({ length: 37 }, (_, index) => ({
     id: `job-${index}`, type: "project.validate", status: "queued", payload_json: {},

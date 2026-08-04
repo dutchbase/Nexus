@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  assertSubscriptionOnlyEnvironment, ClaudeAuthError, invokePlanningClaude,
+  assertSubscriptionOnlyEnvironment, ClaudeAuthError, ClaudePlanningError, invokePlanningClaude,
   ClaudeExecutionError, invokeExecutionClaude, parsePlanMarkdown, preflightClaudeAuthentication,
 } from "@dcc/claude-runner";
 import { artifactDataRoot, finalizeArtifact, inTransaction, legacyArtifactDataRoot, pool, reconcileArtifacts, stageArtifact, type StagedArtifact } from "@dcc/database";
@@ -17,9 +17,9 @@ import {
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
-  abortMerge, commitExecutionChanges, conflictedFiles, createConflictResolutionWorktree, createExecutionWorktree,
+  abortMerge, assertAttemptResultCommit, assertNoConflictMarkers, commitExecutionChanges, conflictedFiles, createConflictResolutionWorktree, createExecutionWorktree,
   createPullRequestReviewWorktree, mergeBaseIntoWorktree, pushExecutionBranch, validateEffectiveWorktree,
-  validateExecutionWorktree, WorktreeValidationError, worktreeDiff,
+  stageConflictResolutionPaths, validateExecutionWorktree, WorktreeValidationError, worktreeDiff,
 } from "../../../packages/git-runner/src/index.ts";
 import {
   createPullRequest, createPullRequestComment, findOpenPullRequestForHead, getPullRequest, updatePullRequestBase,
@@ -29,7 +29,7 @@ import {
   materializeSkillBundle, resolveSkills, skillsForPhase, snapshotSkillSet,
   type ResolutionSource, type SkillCandidate, type ResolvedSkill, type SnapshottedSkill,
 } from "@dcc/skill-registry";
-import { resultCommitAfterSuccessfulExecution, runPrivateExecution } from "./execution-handoff.ts";
+import { runPrivateExecution } from "./execution-handoff.ts";
 import { failExecutionPublication, handleExecutionPublicationFailure, prepareExecutionPublication, PublicationError, publishExternalResult } from "./execution-publication.ts";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
@@ -39,7 +39,7 @@ import {
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
 import {
-  LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch,
+  finalizePlanningFailure, finalizePlanningSuccess, initializePlanningAttempt, LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch,
   withContainedLeaseHeartbeat, withLeaseHeartbeat, type LeaseGuard,
 } from "./workflow-state.ts";
 
@@ -301,25 +301,24 @@ async function planningInputs(ticket: any) {
   return { project, ai, skills, skillUnion: unionSkills(skills, executionSkills, repairSkills), promptVersionIds, content };
 }
 
-async function transitionToPlanning(ticketId: string, jobId: string, runId: string, lease: LeaseGuard) {
-  await inTransaction(async (client) => {
-    const ticket = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticketId])).rows[0];
-    if (!ticket) throw new Error("ticket not found");
-    await lease.run(() => client.query("UPDATE tickets SET status='Planning',updated_at=now() WHERE id=$1", [ticketId]));
-    await lease.run(() => client.query(
-      `INSERT INTO ticket_status_history
-       (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
-       VALUES ($1,$2,'Planning','Planning job started','worker',$3,$4)`,
-      [ticketId, ticket.status, jobId, runId],
-    ));
-    await enqueueNotification(client, "planning.started", ticketId, runId, { runId }, lease.assertOwned);
-  });
+async function transitionToPlanning(client: any, ticketId: string, jobId: string, runId: string, lease: LeaseGuard) {
+  const ticket = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticketId])).rows[0];
+  if (!ticket) throw new Error("ticket not found");
+  await lease.run(() => client.query("UPDATE tickets SET status='Planning',updated_at=now() WHERE id=$1", [ticketId]));
+  await lease.run(() => client.query(
+    `INSERT INTO ticket_status_history
+     (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
+     VALUES ($1,$2,'Planning','Planning job started','worker',$3,$4)`,
+    [ticketId, ticket.status, jobId, runId],
+  ));
+  await enqueueNotification(client, "planning.started", ticketId, runId, { runId }, lease.assertOwned);
 }
 
 async function storePlan(input: {
   ticket: any; jobId: string; runId: string; sessionId: string; promptSnapshotId: string; markdown: string;
+  exitCode: number; raw: unknown;
 }, lease: LeaseGuard) {
-  return inTransaction(async (client) => {
+  return finalizePlanningSuccess(inTransaction, lease, { jobId: input.jobId, workerId }, async (client) => {
     const plan = (await lease.run(() => client.query(
       `INSERT INTO plans (ticket_id,planning_session_id) VALUES ($1,$2) RETURNING *`,
       [input.ticket.id, input.sessionId],
@@ -340,16 +339,20 @@ async function storePlan(input: {
       [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
     ));
     await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId }, lease.assertOwned);
+    await lease.run(() => client.query(
+      "UPDATE agent_runs SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3,metadata_json=metadata_json || $4::jsonb WHERE id=$1",
+      [input.runId, input.sessionId, input.exitCode, JSON.stringify({ response: input.raw })],
+    ));
     return { plan, version };
   });
 }
 
 async function storeRevisedPlan(input: {
   ticket: any; plan: any; previousVersion: any; jobId: string; runId: string;
-  promptSnapshotId: string; markdown: string;
+  sessionId: string; promptSnapshotId: string; markdown: string; exitCode: number; raw: unknown;
 }, lease: LeaseGuard) {
   const versionNumber = Number(input.previousVersion.version) + 1;
-  return inTransaction(async (client) => {
+  return finalizePlanningSuccess(inTransaction, lease, { jobId: input.jobId, workerId }, async (client) => {
     const locked = (await client.query("SELECT * FROM plans WHERE id=$1 FOR UPDATE", [input.plan.id])).rows[0];
     if (!locked || locked.current_version_id !== input.previousVersion.id) {
       throw new Error("plan changed while revision was running");
@@ -380,6 +383,10 @@ async function storeRevisedPlan(input: {
       [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
     ));
     await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId }, lease.assertOwned);
+    await lease.run(() => client.query(
+      "UPDATE agent_runs SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3,metadata_json=metadata_json || $4::jsonb WHERE id=$1",
+      [input.runId, input.sessionId, input.exitCode, JSON.stringify({ response: input.raw })],
+    ));
     return { version };
   });
 }
@@ -419,39 +426,40 @@ async function runPlanning(job: any, lease: LeaseGuard) {
   // so a revision doesn't need real CLI session continuity — just a fresh id.
   const sessionId = randomUUID();
   const runType = revising ? "plan_revision" : "planning";
-  await lease.run(() => pool.query(
-    `INSERT INTO agent_runs
-     (id,ticket_id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
-     VALUES ($1,$2,$3,$4,'running',NULL,$5,$6,$7,now(),$8)`,
-    [runId, ticket.id, input.project.id, runType, input.ai.model, input.ai.reasoning_level,
-      planningStartPath, { job_id: job.id, project_config_version: input.project.config_version, planning_start_path: planningStartPath }],
-  ));
-  await transitionToPlanning(ticket.id, job.id, runId, lease);
-
-  const copied = await snapshotSkillSet(input.skillUnion, ["planning", "execution", "repair"]);
-  const skillSnapshot = (await lease.run(() => pool.query(
-    `INSERT INTO skill_snapshots (ticket_id,run_id,skills_json,content_hash) VALUES ($1,$2,$3,$4) RETURNING *`,
-    [ticket.id, runId, JSON.stringify(copied.skills), copied.contentHash],
-  ))).rows[0];
-  const completePrompt = revising
-    ? `${input.content}\n\n## Plan revision instructions\n\n${revisionInstructions?.content ?? ""}\n\n## Previous approved-for-review plan\n\n${revision.previous_markdown}\n\n## Administrator feedback\n\n${revision.feedback}\n`
-    : input.content;
-  const promptSnapshot = await lease.run(() => snapshotPrompt({
-    ticketId: ticket.id, projectId: input.project.id, phase: "planning", content: completePrompt,
-    model: input.ai.model, reasoningLevel: input.ai.reasoning_level, skillSnapshotId: skillSnapshot.id,
-    metadata: {
-      promptVersionIds: input.promptVersionIds, projectConfigVersion: input.project.config_version,
-      ticketVersion: ticket.updated_at, runType, planningStartPath,
-    },
-  }));
-  await lease.run(() => pool.query(
-    "UPDATE agent_runs SET prompt_snapshot_id=$2,skill_snapshot_id=$3 WHERE id=$1",
-    [runId, promptSnapshot.id, skillSnapshot.id],
-  ));
-
-  const temporary = await mkdtemp(path.join(tmpdir(), "dcc-planning-"));
   let rawMarkdownForDebug: string | undefined;
+  let temporary: string | undefined;
   try {
+    await initializePlanningAttempt(inTransaction, lease, async (client) => {
+      await lease.run(() => client.query(
+        `INSERT INTO agent_runs
+         (id,ticket_id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
+         VALUES ($1,$2,$3,$4,'running',NULL,$5,$6,$7,now(),$8)`,
+        [runId, ticket.id, input.project.id, runType, input.ai.model, input.ai.reasoning_level,
+          planningStartPath, { job_id: job.id, project_config_version: input.project.config_version, planning_start_path: planningStartPath, environment_profile: "planning-minimal" }],
+      ));
+      await transitionToPlanning(client, ticket.id, job.id, runId, lease);
+    });
+    const copied = await snapshotSkillSet(input.skillUnion, ["planning", "execution", "repair"]);
+    const skillSnapshot = (await lease.run(() => pool.query(
+      `INSERT INTO skill_snapshots (ticket_id,run_id,skills_json,content_hash) VALUES ($1,$2,$3,$4) RETURNING *`,
+      [ticket.id, runId, JSON.stringify(copied.skills), copied.contentHash],
+    ))).rows[0];
+    const completePrompt = revising
+      ? `${input.content}\n\n## Plan revision instructions\n\n${revisionInstructions?.content ?? ""}\n\n## Previous approved-for-review plan\n\n${revision.previous_markdown}\n\n## Administrator feedback\n\n${revision.feedback}\n`
+      : input.content;
+    const promptSnapshot = await lease.run(() => snapshotPrompt({
+      ticketId: ticket.id, projectId: input.project.id, phase: "planning", content: completePrompt,
+      model: input.ai.model, reasoningLevel: input.ai.reasoning_level, skillSnapshotId: skillSnapshot.id,
+      metadata: {
+        promptVersionIds: input.promptVersionIds, projectConfigVersion: input.project.config_version,
+        ticketVersion: ticket.updated_at, runType, planningStartPath,
+      },
+    }));
+    await lease.run(() => pool.query(
+      "UPDATE agent_runs SET prompt_snapshot_id=$2,skill_snapshot_id=$3 WHERE id=$1",
+      [runId, promptSnapshot.id, skillSnapshot.id],
+    ));
+    temporary = await mkdtemp(path.join(tmpdir(), "dcc-planning-"));
     const promptFile = path.join(temporary, "planning-prompt.md");
     await writeFile(promptFile, completePrompt, { flag: "wx" });
     const skillBundle = await materializeSkillBundle(runId, skillsForPhase(copied.skills, "planning"), temporary);
@@ -467,11 +475,9 @@ async function runPlanning(job: any, lease: LeaseGuard) {
       oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
       scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
       signal: lease.signal,
+      timeoutMs: Number(input.project.config_json?.planning_timeout_ms ?? 30 * 60 * 1000),
     });
     await lease.assertOwned();
-    // Publish the correlation id only after the CLI has logged/completed,
-    // so observers cannot see a run before its matching invocation exists.
-    await lease.run(() => pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]));
     rawMarkdownForDebug = result.markdown;
     const markdown = parsePlanMarkdown(result.markdown);
     const store = revising
@@ -481,48 +487,43 @@ async function runPlanning(job: any, lease: LeaseGuard) {
           id: job.payload_json.plan_version_id,
           version: revision.previous_version,
         },
-        jobId: job.id, runId, promptSnapshotId: promptSnapshot.id, markdown,
+        jobId: job.id, runId, sessionId, promptSnapshotId: promptSnapshot.id, markdown,
+        exitCode: result.exitCode, raw: result.raw,
       }, lease)
-      : () => storePlan({ ticket, jobId: job.id, runId, sessionId, promptSnapshotId: promptSnapshot.id, markdown }, lease);
-    await runLeaseFencedBatch(lease, [
-      store,
-      () => pool.query(
-        `UPDATE agent_runs SET status='completed',finished_at=now(),exit_code=$2,metadata_json=metadata_json || $3::jsonb WHERE id=$1`,
-        [runId, result.exitCode, JSON.stringify({ response: result.raw })],
-      ),
-    ]);
+      : () => storePlan({ ticket, jobId: job.id, runId, sessionId, promptSnapshotId: promptSnapshot.id, markdown, exitCode: result.exitCode, raw: result.raw }, lease);
+    await store();
   } catch (error) {
     await lease.assertOwned();
     const message = error instanceof Error ? error.message : "planning failed";
-    await lease.run(() => pool.query(
-      `UPDATE agent_runs SET status='failed',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4,metadata_json=metadata_json || $5::jsonb WHERE id=$1`,
-      [runId, (error as any)?.exitCode ?? 1,
-        error instanceof Error && error.message.startsWith("invalid_plan_structure") ? "invalid_plan_structure" : "planning_failed",
-        message,
-        // ponytail: capture the raw markdown so an invalid_plan_structure
-        // failure is diagnosable without re-running the costly CLI call.
-        JSON.stringify(rawMarkdownForDebug ? { raw_markdown: rawMarkdownForDebug.slice(0, 8000) } : {})],
-    ));
     // ponytail: transitionToPlanning() moves the ticket to Planning before
     // invocation; on failure it must land on a state the admin can recover
     // from. "Planning Failed" is a valid status the approve/revision
     // endpoints accept — reverting to "Planning Queued" (an active-queue
     // state that no longer exists) stranded tickets and blocked retries.
-    await inTransaction(async (client) => {
+    await finalizePlanningFailure(inTransaction, lease, { jobId: job.id, workerId, message }, async (client) => {
+      await lease.run(() => client.query(
+        `UPDATE agent_runs SET status='failed',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4,metadata_json=metadata_json || $5::jsonb WHERE id=$1`,
+        [runId, (error as any)?.exitCode ?? 1,
+          error instanceof ClaudePlanningError ? error.code : error instanceof Error && error.message.startsWith("invalid_plan_structure") ? "invalid_plan_structure" : "planning_failed",
+          message,
+          // ponytail: capture the raw markdown so an invalid_plan_structure
+          // failure is diagnosable without re-running the costly CLI call.
+          JSON.stringify(rawMarkdownForDebug ? { raw_markdown: rawMarkdownForDebug.slice(0, 8000) } : {})],
+      ));
       const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
-      if (current?.status !== "Planning") return;
+      if (!current || !["Planning", expectedStatus].includes(current.status)) return;
       await lease.run(() => client.query("UPDATE tickets SET status='Planning Failed',updated_at=now() WHERE id=$1", [ticket.id]));
       await lease.run(() => client.query(
         `INSERT INTO ticket_status_history
          (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
-         VALUES ($1,'Planning','Planning Failed',$2,'worker',$3,$4)`,
-        [ticket.id, `Planning job failed: ${message.slice(0, 500)}`, job.id, runId],
+         VALUES ($1,$2,'Planning Failed',$3,'worker',$4,$5)`,
+        [ticket.id, current.status, `Planning job failed: ${message.slice(0, 500)}`, job.id, runId],
       ));
       await enqueueNotification(client, "planning.failed", ticket.id, runId, { runId }, lease.assertOwned);
     });
     throw error;
   } finally {
-    await rm(temporary, { recursive: true, force: true });
+    if (temporary) await rm(temporary, { recursive: true, force: true });
   }
 }
 
@@ -556,18 +557,17 @@ async function runExecution(job: any, lease: LeaseGuard) {
   )).rowCount;
   if (competing) throw new Error("another execution is already active");
 
-  let worktree = {
-    worktreePath: attempt.worktree_path as string,
-    branchName: attempt.branch_name as string,
-    baseCommit: attempt.base_commit as string | null,
-  };
-  if (!repairing) {
+  const sourceAttempt = repairing && attempt.source_execution_attempt_id
+    ? (await pool.query("SELECT worktree_path,base_commit FROM execution_attempts WHERE id=$1", [attempt.source_execution_attempt_id])).rows[0]
+    : null;
+  let worktree: { worktreePath: string; branchName: string; baseCommit: string | null };
+  {
     try {
       const approvedProject = gate.approvedInputSnapshot.materialInput.project.config as any;
       const repository = await validateProject({
         repositoryPath: approvedProject.repositoryPath,
         defaultBranch: approvedProject.defaultBranch,
-        requireRemote: false,
+        requireRemote: true,
       });
       if (!repository.valid) throw new Error(`repository is not available for execution: ${repository.errors.join("; ")}`);
       worktree = await createExecutionWorktree({
@@ -605,8 +605,6 @@ async function runExecution(job: any, lease: LeaseGuard) {
       });
       throw error;
     }
-  } else if (!worktree.worktreePath) {
-    throw new Error("repair worktree is unavailable");
   }
 
   const runId = randomUUID();
@@ -615,7 +613,8 @@ async function runExecution(job: any, lease: LeaseGuard) {
   const stagedLog = await stageArtifact({ root: dataRoot, id: logArtifactId, storagePath: `logs/${runId}.log`, content: Buffer.alloc(0) });
   const details = {
     ...worktree,
-    currentDiff: repairing ? await worktreeDiff(worktree.worktreePath, worktree.baseCommit ?? attempt.base_commit) : undefined,
+    currentDiff: repairing && sourceAttempt?.worktree_path
+      ? await worktreeDiff(sourceAttempt.worktree_path, sourceAttempt.base_commit).catch(() => "") : undefined,
     validationOutput: repairing ? job.payload_json.validation_output : undefined,
     administratorFeedback: repairing ? job.payload_json.feedback : undefined,
   };
@@ -724,11 +723,6 @@ async function runExecution(job: any, lease: LeaseGuard) {
     });
     await lease.assertOwned();
     assertExecutionPublicationGate(repairing, usedAgent);
-    const resultCommit = resultCommitAfterSuccessfulExecution(repairing, attempt.result_commit);
-    if (resultCommit !== attempt.result_commit) {
-      await pool.query("UPDATE execution_attempts SET result_commit=$2 WHERE id=$1", [attempt.id, resultCommit]);
-      attempt.result_commit = resultCommit;
-    }
     await pool.query(
       `UPDATE agent_runs
        SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3 WHERE id=$1`,
@@ -885,6 +879,11 @@ async function publishExecutionAttempt(input: {
     await lease.assertOwned();
     let commit = input.attempt.result_commit as string | null;
     const committedNow = !commit;
+    if (commit) await assertAttemptResultCommit({
+      worktreePath: input.attempt.worktree_path,
+      baseCommit: input.attempt.base_commit,
+      resultCommit: commit,
+    });
     if (!commit) {
       await lease.assertOwned();
       commit = await commitExecutionChanges({
@@ -1088,7 +1087,7 @@ async function retryPublication(job: any, lease: LeaseGuard) {
      WHERE ea.id=$1`,
     [job.payload_json.execution_attempt_id],
   )).rows[0];
-  if (!row?.result_commit || !row.worktree_path || !row.branch_name) {
+  if (!row?.result_commit || !row.worktree_path || !row.branch_name || row.validation_status !== "pr_creation_failed") {
     throw new Error("publication retry has no preserved local commit");
   }
   if (!["pending", "publishing"].includes(row.publication_status)) {
@@ -1459,7 +1458,12 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
        (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
        VALUES ($1,$2,'pr_conflict_resolution','running',NULL,$3,$4,$5,now(),$6)`,
       [newRunId, project.id, model, reasoningLevel, worktree.worktreePath,
-        { job_id: job.id, pr_conflict_resolution_id: payload.pr_conflict_resolution_id }],
+        {
+          job_id: job.id,
+          pr_conflict_resolution_id: payload.pr_conflict_resolution_id,
+          authority_profile: "conflict-resolution",
+          allowed_write_paths: conflicts,
+        }],
     );
     runId = newRunId;
     await pool.query(
@@ -1473,7 +1477,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
       await writeFile(promptFile, prompt, { flag: "wx" });
 
       await lease.assertOwned();
-      const result = await invokePlanningClaude({
+      const result = await invokeExecutionClaude({
         task: `Resolve the merge conflicts in PR #${pullRequest.number} in ${pullRequest.repository}.`,
         sessionId,
         model,
@@ -1481,6 +1485,11 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
         promptFile,
         skillBundleDir: temporary,
         workingDirectory: worktree.worktreePath,
+        executionDirectory: worktree.worktreePath,
+        logPath: path.join(temporary, "conflict-resolution.log"),
+        timeoutMs: 30 * 60 * 1000,
+        onEvent: async () => undefined,
+        allowedWritePaths: conflicts,
         maxTurns: 10,
         oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
         signal: lease.signal,
@@ -1488,10 +1497,17 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
       await lease.assertOwned();
       await pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]);
 
+      await stageConflictResolutionPaths(worktree.worktreePath, conflicts);
       const remaining = await conflictedFiles(worktree.worktreePath);
       if (remaining.length) {
         await abortMerge(worktree.worktreePath);
         throw new Error(`Claude left ${remaining.length} unresolved conflict(s): ${remaining.join(", ")}`);
+      }
+      try {
+        await assertNoConflictMarkers(worktree.worktreePath, conflicts);
+      } catch (error) {
+        await abortMerge(worktree.worktreePath);
+        throw error;
       }
 
       let validation;
@@ -1523,6 +1539,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
         worktreePath: worktree.worktreePath,
         message: `Merge ${pullRequest.base_branch} into ${pullRequest.head_branch}`,
         protectedPaths: project.config_json?.protected_paths,
+        stagePaths: conflicts,
       });
       await lease.assertOwned();
       await pushExecutionBranch(worktree.worktreePath, worktree.branchName, "HEAD");

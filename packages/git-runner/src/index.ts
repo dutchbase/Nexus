@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -73,10 +73,13 @@ export async function createExecutionWorktree(input: {
     safeSegment(input.projectSlug, "project"), safeSegment(input.ticketNumber, "ticket"),
   ], String(input.attemptNumber));
   const branchName = executionBranchName(input.ticketNumber, input.title, input.attemptNumber);
-  const baseRef = `refs/heads/${input.defaultBranch}`;
-  await exec("git", ["-C", repository, "show-ref", "--verify", baseRef]);
+  const dirty = (await exec("git", ["-C", repository, "status", "--porcelain"])).stdout;
+  if (dirty.trim()) throw new Error("repository has uncommitted changes");
+  await exec("git", ["-C", repository, "remote", "get-url", "origin"]);
+  const baseRef = `refs/remotes/origin/${input.defaultBranch}`;
+  await exec("git", ["-C", repository, "fetch", "origin", `+refs/heads/${input.defaultBranch}:${baseRef}`]);
   const baseCommit = (await exec("git", ["-C", repository, "rev-parse", baseRef])).stdout.trim();
-  await exec("git", ["-C", repository, "worktree", "add", "-b", branchName, worktreePath, baseRef]);
+  await exec("git", ["-C", repository, "worktree", "add", "-b", branchName, worktreePath, baseCommit]);
   return { worktreePath, branchName, baseCommit };
 }
 
@@ -93,6 +96,20 @@ export async function worktreeDiff(worktreePath: string, baseCommit?: string | n
     }
   }));
   return [tracked.stdout, ...additions].filter(Boolean).join("\n");
+}
+
+export async function assertAttemptResultCommit(input: {
+  worktreePath: string;
+  baseCommit: string;
+  resultCommit: string;
+}) {
+  const head = (await git(input.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+  if (head !== input.resultCommit) throw new Error("attempt result commit is not the current worktree HEAD");
+  try {
+    await git(input.worktreePath, ["merge-base", "--is-ancestor", input.baseCommit, input.resultCommit]);
+  } catch {
+    throw new Error("attempt result commit does not descend from its recorded base");
+  }
 }
 
 export const DEFAULT_PROTECTED_PATHS = [".env", ".env.*", "secrets/**", "production-data/**", ".git/**"];
@@ -214,9 +231,22 @@ export async function removeContainedWorktreePath(dataRoot: string, worktreePath
 }
 
 export async function removeManagedWorktree(repositoryPath: string, dataRoot: string, worktreePath: string) {
-  await assertManagedWorktreePath(dataRoot, worktreePath);
+  try {
+    await assertManagedWorktreePath(dataRoot, worktreePath);
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+    await removeContainedWorktreePath(dataRoot, worktreePath);
+    const repository = await realpath(repositoryPath);
+    await exec("git", ["-C", repository, "worktree", "prune"]);
+    return;
+  }
   const repository = await realpath(repositoryPath);
-  await exec("git", ["-C", repository, "worktree", "remove", "--force", worktreePath]);
+  try {
+    await exec("git", ["-C", repository, "worktree", "remove", "--force", worktreePath]);
+  } catch (error) {
+    try { await access(worktreePath); } catch { await exec("git", ["-C", repository, "worktree", "prune"]); return; }
+    throw error;
+  }
   await exec("git", ["-C", repository, "worktree", "prune"]);
 }
 
@@ -313,6 +343,31 @@ export async function mergeBaseIntoWorktree(worktreePath: string, baseBranch: st
 export async function conflictedFiles(worktreePath: string) {
   const result = await git(worktreePath, ["diff", "--name-only", "--diff-filter=U", "-z"]);
   return result.stdout.split("\0").filter(Boolean);
+}
+
+function conflictPath(file: string) {
+  if (!file || path.isAbsolute(file) || file.split(/[\\/]/).includes("..")) {
+    throw new Error("conflict path escapes worktree");
+  }
+  return file;
+}
+
+export async function stageConflictResolutionPaths(worktreePath: string, files: readonly string[]) {
+  const paths = files.map(conflictPath);
+  if (!paths.length) throw new Error("no conflict paths to stage");
+  await git(worktreePath, ["add", "--", ...paths]);
+}
+
+export async function assertNoConflictMarkers(worktreePath: string, files: readonly string[]) {
+  for (const file of files.map(conflictPath)) {
+    const content = await readFile(path.join(worktreePath, file), "utf8").catch((error: any) => {
+      if (error?.code === "ENOENT") return "";
+      throw error;
+    });
+    if (/(^|\r?\n)(?:<{7}|={7}|>{7})/.test(content)) {
+      throw new Error(`textual conflict marker remains in ${file}`);
+    }
+  }
 }
 
 export async function abortMerge(worktreePath: string) {
@@ -518,6 +573,7 @@ export async function commitExecutionChanges(input: {
   message: string;
   baseCommit?: string;
   protectedPaths?: string[];
+  stagePaths?: readonly string[];
 }) {
   if (input.baseCommit) {
     await validateEffectiveWorktree({
@@ -525,15 +581,21 @@ export async function commitExecutionChanges(input: {
     });
     await git(input.worktreePath, ["reset", "--soft", input.baseCommit]);
   }
-  await git(input.worktreePath, ["add", "--all"]);
+  if (input.stagePaths) await stageConflictResolutionPaths(input.worktreePath, input.stagePaths);
+  else await git(input.worktreePath, ["add", "--all"]);
   // Re-scan the final index, including agent commits back to the recorded base,
   // so the secret/protected-path gates cover exactly what will be published.
-  const stagedForCommit = (await git(input.worktreePath, ["diff", "--cached", "--name-only", "-z"]))
-    .stdout.split("\0").filter(Boolean);
-  const staged = (await git(input.worktreePath, [
-    "diff", "--cached", "--name-only", "-z", ...(input.baseCommit ? [input.baseCommit] : []),
+  const nameStatus = (await git(input.worktreePath, [
+    "diff", "--cached", "--name-status", "-z", "--find-renames", ...(input.baseCommit ? [input.baseCommit] : []),
   ])).stdout.split("\0").filter(Boolean);
-  const protectedMatches = staged.filter((file) =>
+  const staged = [] as Array<{ status: string; paths: string[] }>;
+  for (let index = 0; index < nameStatus.length;) {
+    const status = nameStatus[index++];
+    const paths = [nameStatus[index++]];
+    if (status[0] === "C" || status[0] === "R") paths.push(nameStatus[index++]);
+    staged.push({ status, paths });
+  }
+  const protectedMatches = staged.flatMap(({ paths }) => paths).filter((file) =>
     matchesProtectedPath(file, input.protectedPaths?.length ? input.protectedPaths : DEFAULT_PROTECTED_PATHS));
   if (protectedMatches.length) {
     throw new WorktreeValidationError(
@@ -543,9 +605,8 @@ export async function commitExecutionChanges(input: {
     );
   }
   let secretCount = 0;
-  const stagedBlobs = (await git(input.worktreePath, [
-    "diff", "--cached", "--name-only", "-z", "--diff-filter=d", ...(input.baseCommit ? [input.baseCommit] : []),
-  ])).stdout.split("\0").filter(Boolean);
+  const stagedBlobs = staged.flatMap(({ status, paths }) =>
+    ["A", "M"].includes(status[0]) ? paths : ["C", "R"].includes(status[0]) ? [paths[1]] : []);
   for (const file of stagedBlobs) {
     const content = (await git(input.worktreePath, ["show", `:${file}`])).stdout;
     secretCount += countCredentialShapes(content);
@@ -555,7 +616,7 @@ export async function commitExecutionChanges(input: {
       "secret scan", `secret scan found ${secretCount} credential-shaped pattern(s) in the staged commit`, [],
     );
   }
-  if (!stagedForCommit.length) {
+  if (!staged.length) {
     throw new WorktreeValidationError(
       "commit verification",
       "no changes were staged for commit — Claude execution produced no file modifications",

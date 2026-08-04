@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
   abortMerge,
+  assertNoConflictMarkers,
   commitExecutionChanges,
   conflictedFiles,
   countCredentialShapes,
@@ -17,6 +18,7 @@ import {
   importPrivateExecutionClone,
   matchesProtectedPath,
   mergeBaseIntoWorktree,
+  stageConflictResolutionPaths,
   sanitizeValidationOutput,
   validateExecutionWorktree,
   worktreeDiff,
@@ -160,6 +162,39 @@ describe("createConflictResolutionWorktree / mergeBaseIntoWorktree", () => {
       expect(merge.headCommit).toBe((await git(worktreePath, ["rev-parse", "HEAD"])).stdout.trim());
       expect(await conflictedFiles(worktreePath)).toEqual([]);
       expect((await git(worktreePath, ["log", "-1", "--pretty=%s"])).stdout.trim()).toBe("main advances");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("conflict resolution staging", () => {
+  it("stages only the original conflicted paths", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-conflict-stage-"));
+    try {
+      await initRepo(tmp);
+      await writeAndCommit(tmp, "conflicted.ts", "base\n", "initial commit");
+      await writeAndCommit(tmp, "unrelated.ts", "base\n", "initial commit");
+      await writeFile(path.join(tmp, "conflicted.ts"), "resolved\n");
+      await writeFile(path.join(tmp, "unrelated.ts"), "unexpected\n");
+
+      await stageConflictResolutionPaths(tmp, ["conflicted.ts"]);
+
+      expect((await git(tmp, ["diff", "--cached", "--name-only"])).stdout.trim()).toBe("conflicted.ts");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects textual conflict markers after staging", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-conflict-markers-"));
+    try {
+      await initRepo(tmp);
+      await writeAndCommit(tmp, "conflicted.ts", "base\n", "initial commit");
+      await writeFile(path.join(tmp, "conflicted.ts"), "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> main\n");
+
+      await stageConflictResolutionPaths(tmp, ["conflicted.ts"]);
+      await expect(assertNoConflictMarkers(tmp, ["conflicted.ts"])).rejects.toThrow("textual conflict marker");
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
@@ -456,6 +491,112 @@ describe("execution effective diff", () => {
         baseCommit,
         message: "worker commit",
       })).rejects.toMatchObject({ check: "secret scan" });
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("does not inspect a deleted staged blob", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-delete-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await writeAndCommit(repo, "removed.txt", "AKIAIOSFODNN7EXAMPLE\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await git(repo, ["rm", "removed.txt"]);
+
+      await commitExecutionChanges({ worktreePath: repo, baseCommit, message: "worker commit" });
+
+      expect((await git(repo, ["show", "--format=", "--name-status", "HEAD"])).stdout.trim()).toBe("D\tremoved.txt");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["added.txt", "modified.txt"])("rejects a secret in an %s staged blob", async (file) => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-secret-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await writeAndCommit(repo, "modified.txt", "safe\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeFile(path.join(repo, ".gitattributes"), `${file} filter=inject\n`);
+      await git(repo, ["config", "filter.inject.clean", "sed 's/safe/AKIAIOSFODNN7EXAMPLE/'"]);
+      await writeFile(path.join(repo, file), "safe\n");
+
+      await expect(commitExecutionChanges({ worktreePath: repo, baseCommit, message: "worker commit" }))
+        .rejects.toMatchObject({ check: "secret scan" });
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("scans only the destination of a staged rename", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-rename-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await writeAndCommit(repo, "before.txt", "safe\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await git(repo, ["mv", "before.txt", "after.txt"]);
+
+      await commitExecutionChanges({ worktreePath: repo, baseCommit, message: "worker commit" });
+
+      expect((await git(repo, ["show", "--format=", "--name-status", "HEAD"])).stdout.trim()).toBe("R100\tbefore.txt\tafter.txt");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("does not scan a secret from the source of a staged rename", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-rename-source-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      const safeContent = "shared\n".repeat(20);
+      await writeAndCommit(repo, "before.txt", "AKIAIOSFODNN7EXAMPLE\n" + safeContent, "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await git(repo, ["mv", "before.txt", "after.txt"]);
+      await writeFile(path.join(repo, "after.txt"), safeContent);
+
+      await commitExecutionChanges({ worktreePath: repo, baseCommit, message: "worker commit" });
+
+      expect((await git(repo, ["show", "HEAD:after.txt"])).stdout).toBe(safeContent);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a staged rename from a protected path", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-protected-rename-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await mkdir(path.join(repo, "secrets"));
+      await writeAndCommit(repo, "secrets/old.txt", "safe\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await mkdir(path.join(repo, "public"));
+      await git(repo, ["mv", "secrets/old.txt", "public/new.txt"]);
+
+      await expect(commitExecutionChanges({ worktreePath: repo, baseCommit, message: "worker commit" }))
+        .rejects.toMatchObject({ check: "protected-path inspection" });
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a binary staged blob", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-binary-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await writeAndCommit(repo, "base.txt", "base\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeFile(path.join(repo, "image.bin"), Buffer.from([0, 255, 1, 2]));
+
+      await commitExecutionChanges({ worktreePath: repo, baseCommit, message: "worker commit" });
+
+      expect((await git(repo, ["show", "HEAD:image.bin"])).stdout).toBe("\0�\u0001\u0002");
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }

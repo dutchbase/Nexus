@@ -20,12 +20,17 @@ it("unregisters and removes a managed worktree", async () => {
     await writeFile(path.join(repository, "README.md"), "test\n");
     await exec("git", ["add", "README.md"], { cwd: repository });
     await exec("git", ["commit", "-m", "initial"], { cwd: repository });
+    const remote = path.join(temporary, "remote.git");
+    await exec("git", ["init", "--bare", remote]);
+    await exec("git", ["remote", "add", "origin", remote], { cwd: repository });
+    await exec("git", ["push", "origin", "main"], { cwd: repository });
     const worktree = await createExecutionWorktree({
       repositoryPath: repository, defaultBranch: "main", dataRoot: path.join(temporary, "data"),
       projectSlug: "acme", ticketNumber: "DCC-1", title: "Cleanup", attemptNumber: 1,
     });
 
     await removeManagedWorktree(repository, path.join(temporary, "data"), worktree.worktreePath);
+    await expect(removeManagedWorktree(repository, path.join(temporary, "data"), worktree.worktreePath)).resolves.toBeUndefined();
 
     await expect(access(worktree.worktreePath)).rejects.toThrow();
     await expect(exec("git", ["worktree", "list", "--porcelain"], { cwd: repository })).resolves.not.toMatchObject({ stdout: expect.stringContaining(worktree.worktreePath) });

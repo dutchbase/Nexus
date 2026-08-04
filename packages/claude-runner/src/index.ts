@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { realpathSync, statSync } from "node:fs";
 import { appendFile, chmod, copyFile, mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -8,26 +8,53 @@ import { fileURLToPath } from "node:url";
 import { assertSubscriptionOnlyEnvironment, ClaudeAuthError } from "./auth-guard.ts";
 export { assertSubscriptionOnlyEnvironment, ClaudeAuthError, forbiddenClaudeAuthVariables } from "./auth-guard.ts";
 
-async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; executable?: string; signal?: AbortSignal } = {}) {
+async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; executable?: string; signal?: AbortSignal; timeoutMs?: number } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "dcc-claude-output-"));
   const stdoutPath = path.join(directory, "stdout");
   const stderrPath = path.join(directory, "stderr");
   const stdoutFile = await open(stdoutPath, "wx");
   const stderrFile = await open(stderrPath, "wx");
   try {
-    const exitCode = await new Promise<number | null>((resolve, reject) => {
+    const outcome = await new Promise<{ exitCode: number | null; timedOut: boolean }>((resolve, reject) => {
       const child = spawn(options.executable ?? "claude", args, {
         cwd: options.cwd, env: options.env, stdio: ["ignore", stdoutFile.fd, stderrFile.fd], signal: options.signal,
+        detached: process.platform !== "win32",
       });
-      child.on("error", reject);
-      child.on("close", resolve);
+      let timedOut = false;
+      let killTimer: NodeJS.Timeout | undefined;
+      const terminate = (signal: NodeJS.Signals) => {
+        if (!child.pid) return child.kill(signal);
+        if (process.platform === "win32") {
+          const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+          killer.on("error", () => child.kill(signal));
+          killer.unref();
+          return true;
+        }
+        try { return process.kill(-child.pid, signal); }
+        catch { return child.kill(signal); }
+      };
+      const timeout = options.timeoutMs === undefined ? undefined : setTimeout(() => {
+        timedOut = true;
+        terminate("SIGTERM");
+        killTimer = setTimeout(() => terminate("SIGKILL"), 5_000);
+      }, options.timeoutMs);
+      child.on("error", (error) => {
+        if (timeout) clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
+        reject(error);
+      });
+      child.on("close", (exitCode) => {
+        if (timeout) clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
+        resolve({ exitCode, timedOut });
+      });
     });
     await stdoutFile.close();
     await stderrFile.close();
     return {
       stdout: await readFile(stdoutPath, "utf8"),
       stderr: await readFile(stderrPath, "utf8"),
-      exitCode,
+      ...outcome,
     };
   } finally {
     await stdoutFile.close().catch(() => undefined);
@@ -46,9 +73,31 @@ export class ClaudeExecutionError extends Error {
   }
 }
 
+export class ClaudePlanningError extends Error {
+  constructor(
+    message: string,
+    public exitCode: number,
+    public code: "planning_timeout",
+  ) {
+    super(message);
+  }
+}
+
+function minimalClaudeEnvironment(env: NodeJS.ProcessEnv, oauthToken: string): NodeJS.ProcessEnv {
+  return {
+    PATH: env.PATH,
+    LANG: env.LANG,
+    LC_ALL: env.LC_ALL,
+    CLAUDE_CODE_OAUTH_TOKEN: oauthToken,
+    AGENT_CONTROL_DISABLE: "1",
+  };
+}
+
 export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = process.env) {
   assertSubscriptionOnlyEnvironment(env);
-  const result = await runClaude(["auth", "status"], { env });
+  const result = await runClaude(["auth", "status"], {
+    env: minimalClaudeEnvironment(env, env.CLAUDE_CODE_OAUTH_TOKEN ?? ""),
+  });
   let status: any = null;
   try { status = JSON.parse(result.stdout.trim()); } catch { /* handled below */ }
   // ponytail: `claude auth status` reports loggedIn/authMethod, not the
@@ -64,7 +113,7 @@ export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = pro
 export type PlanningInvocation = {
   task: string; sessionId: string; model: string; effort: string; promptFile: string;
   skillBundleDir?: string; pluginDirectories?: readonly string[]; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string; tools?: string[]; claudeExecutable?: string; guardPath?: string;
-  gitMetadataPaths?: string[]; sensitiveEnvironmentVariables?: string[]; signal?: AbortSignal;
+  gitMetadataPaths?: string[]; sensitiveEnvironmentVariables?: string[]; signal?: AbortSignal; timeoutMs?: number;
 };
 
 const trustedBashGuard = fileURLToPath(new URL("./bash-guard.mjs", import.meta.url));
@@ -101,8 +150,8 @@ function hookCommand(guardPath: string) {
   return `node ${JSON.stringify(guardPath)}`;
 }
 
-function fileHookCommand(guardPath: string, readRoots: string[], writeRoot: string) {
-  const policy = Buffer.from(JSON.stringify({ readRoots, writeRoot })).toString("base64url");
+function fileHookCommand(guardPath: string, readRoots: string[], writeRoot: string, writePaths?: readonly string[]) {
+  const policy = Buffer.from(JSON.stringify(writePaths ? { readRoots, writePaths } : { readRoots, writeRoot })).toString("base64url");
   return `${hookCommand(guardPath)} ${policy}`;
 }
 
@@ -151,6 +200,105 @@ function permissionPath(target: string) {
   return `//${path.resolve(target).slice(1)}`;
 }
 
+function canonicalPath(target: string, cwd: string) {
+  let current = path.resolve(cwd, target);
+  const missing: string[] = [];
+  while (true) {
+    try { return path.join(realpathSync(current), ...missing); } catch {
+      const parent = path.dirname(current);
+      if (parent === current) throw new Error(`could not resolve execution path: ${target}`);
+      missing.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+function isWithin(target: string, root: string) {
+  const relative = path.relative(root, target);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
+function executablePath(command: string) {
+  const candidates = path.isAbsolute(command)
+    ? [command]
+    : (process.env.PATH ?? "").split(path.delimiter).map((directory) => path.join(directory, command));
+  for (const candidate of candidates) {
+    try { return realpathSync(candidate); } catch { /* try the next PATH entry */ }
+  }
+  throw new Error(`could not resolve executable: ${command}`);
+}
+
+function bwrapParentDirectories(target: string) {
+  const directories: string[] = [];
+  for (let current = path.dirname(target); current !== path.dirname(current); current = path.dirname(current)) {
+    directories.unshift(current);
+  }
+  return directories.filter((directory) => !["/tmp", "/opt", "/usr", "/proc", "/dev"].includes(directory))
+    .flatMap((directory) => ["--dir", directory]);
+}
+
+function scopedWritePaths(input: ExecutionInvocation, worktree: string) {
+  if (input.allowedWritePaths === undefined) return undefined;
+  const paths = [...new Set(input.allowedWritePaths.map((target) => canonicalPath(target, worktree)))];
+  if (!paths.length || paths.some((target) => !isWithin(target, worktree) || !statSync(target).isFile())) {
+    throw new Error("allowed execution write paths must be existing regular files inside the worktree");
+  }
+  return paths;
+}
+
+function scopedBwrapLaunch(input: ExecutionInvocation, settingsDirectory: string, guardPath: string) {
+  const worktree = canonicalPath(input.workingDirectory, input.workingDirectory);
+  const writePaths = scopedWritePaths(input, worktree);
+  if (!writePaths) throw new Error("scoped execution requires write paths");
+  const bwrap = executablePath(process.env.DCC_CLAUDE_BWRAP_PATH ?? "/usr/bin/bwrap");
+  const nodeRoot = realpathSync(path.dirname(path.dirname(process.execPath)));
+  const executable = executablePath(input.claudeExecutable ?? "claude");
+  const executableInNodeRoot = isWithin(executable, nodeRoot);
+  const promptFile = canonicalPath(input.promptFile, worktree);
+  const skillBundleDir = input.skillBundleDir ? canonicalPath(input.skillBundleDir, worktree) : undefined;
+  const plugins = (input.pluginDirectories ?? []).map((directory) => canonicalPath(directory, worktree));
+  const virtual = {
+    settingsDirectory: "/opt/dcc-settings",
+    settingsFile: "/opt/dcc-settings/settings.json",
+    guardPath: "/opt/dcc-guard.mjs",
+    promptFile: "/opt/dcc-prompt.md",
+    skillBundleDir: "/opt/dcc-skills",
+    pluginDirectories: plugins.map((_, index) => `/opt/dcc-plugin-${index}`),
+    executable: executableInNodeRoot
+      ? path.join("/opt/node", path.relative(nodeRoot, executable))
+      : "/opt/dcc-claude",
+  };
+  const configuredInput: ExecutionInvocation = {
+    ...input,
+    promptFile: virtual.promptFile,
+    skillBundleDir: skillBundleDir ? virtual.skillBundleDir : undefined,
+    pluginDirectories: virtual.pluginDirectories,
+    guardPath: virtual.guardPath,
+    allowedWritePaths: writePaths,
+  };
+  const args = [
+    "--die-with-parent", "--new-session", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+    "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
+    "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
+    "--proc", "/proc", "--dev", "/dev", "--dir", "/opt", "--dir", "/opt/node",
+    "--ro-bind", nodeRoot, "/opt/node", "--tmpfs", "/tmp", "--dir", "/tmp/claude",
+    ...bwrapParentDirectories(worktree), "--ro-bind", worktree, worktree,
+    ...writePaths.flatMap((target) => ["--bind", target, target]),
+    "--ro-bind", settingsDirectory, virtual.settingsDirectory,
+    "--ro-bind", guardPath, virtual.guardPath,
+    "--ro-bind", promptFile, virtual.promptFile,
+    ...(skillBundleDir ? ["--ro-bind", skillBundleDir, virtual.skillBundleDir] : []),
+    ...plugins.flatMap((directory, index) => ["--ro-bind", directory, virtual.pluginDirectories[index]]),
+    ...(executableInNodeRoot ? [] : ["--ro-bind", executable, virtual.executable]),
+    "--setenv", "CLAUDE_CONFIG_DIR", "/tmp/claude", "--setenv", "PATH", "/opt/node/bin:/usr/bin:/bin",
+    "--chdir", worktree, "--",
+  ];
+  return {
+    bwrap, args, configuredInput, executable: virtual.executable, settingsFile: virtual.settingsFile,
+    env: { PATH: process.env.PATH },
+  };
+}
+
 async function gitMetadataPaths(workingDirectory: string) {
   const dotGit = path.join(workingDirectory, ".git");
   let gitDirectory = dotGit;
@@ -176,7 +324,7 @@ async function hideWorktreeGitMetadata(workingDirectory: string) {
   };
 }
 
-function executionSettings(input: PlanningInvocation, guardPath: string) {
+function executionSettings(input: ExecutionInvocation, guardPath: string) {
   const gitMetadataPaths = [...new Set(input.gitMetadataPaths ?? [path.join(input.workingDirectory, ".git")])];
   const deniedGitPaths = gitMetadataPaths.flatMap((target) => {
     const rulePath = permissionPath(target);
@@ -205,9 +353,13 @@ function executionSettings(input: PlanningInvocation, guardPath: string) {
     return [`Read(${rulePath})`, `Read(${rulePath}/**)`];
   });
   const worktreeRule = permissionPath(worktree);
+  const writePaths = scopedWritePaths(input, worktree);
+  const writePermissions = writePaths
+    ? [...new Set(writePaths)].map((target) => `Edit(${permissionPath(target)})`)
+    : [`Edit(${worktreeRule})`, `Edit(${worktreeRule}/**)`];
   return JSON.stringify({
     permissions: {
-      allow: [...allowedPermissions, `Edit(${worktreeRule})`, `Edit(${worktreeRule}/**)`],
+      allow: [...allowedPermissions, ...writePermissions],
       deny: [...deniedHostHome, ...deniedGitPaths, ...deniedCredentialReads, "WebFetch"],
     },
     sandbox: {
@@ -217,6 +369,7 @@ function executionSettings(input: PlanningInvocation, guardPath: string) {
       filesystem: {
         denyRead: [...new Set([homedir(), ...gitMetadataPaths])],
         allowRead: [...new Set(allowRead)],
+        ...(writePaths ? { allowWrite: [...new Set(writePaths)] } : {}),
         denyWrite: gitMetadataPaths,
       },
       credentials: {
@@ -232,7 +385,7 @@ function executionSettings(input: PlanningInvocation, guardPath: string) {
       PreToolUse: [
         {
           matcher: "Read|Glob|Grep|Edit|Write",
-          hooks: [{ type: "command", command: fileHookCommand(guardPath, [...new Set(allowRead)], worktree) }],
+          hooks: [{ type: "command", command: fileHookCommand(guardPath, [...new Set(allowRead)], worktree, writePaths) }],
         },
         {
           matcher: "Agent",
@@ -275,11 +428,14 @@ export function summarizeClaudeFailure(stdout: string, stderr: string) {
 
 export async function invokePlanningClaude(input: PlanningInvocation) {
   assertSubscriptionOnlyEnvironment();
-  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken, AGENT_CONTROL_DISABLE: "1" };
+  // Planning receives only locale/PATH, its subscription token, and runner
+  // switches. Worker credentials must never cross this process boundary.
+  const env = minimalClaudeEnvironment(process.env, input.oauthToken);
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
   const result = await runClaude(buildPlanningArguments(input), {
-    cwd: input.workingDirectory, env, executable: input.claudeExecutable, signal: input.signal,
+    cwd: input.workingDirectory, env, executable: input.claudeExecutable, signal: input.signal, timeoutMs: input.timeoutMs,
   });
+  if (result.timedOut) throw new ClaudePlanningError("Claude planning timed out", 124, "planning_timeout");
   if (result.exitCode !== 0) {
     throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), { exitCode: result.exitCode });
   }
@@ -302,6 +458,7 @@ export type ExecutionInvocation = PlanningInvocation & {
   timeoutMs: number;
   signal?: AbortSignal;
   onEvent: (event: { eventType: string; event: unknown; raw: string }) => Promise<void>;
+  allowedWritePaths?: readonly string[];
 };
 
 export function assertExecutionSandboxVersion(value: string) {
@@ -334,8 +491,14 @@ export function isClaudeSandboxVersionSupported(output: string) {
   return major > 2 || (major === 2 && (minor > 1 || (minor === 1 && patch >= 219)));
 }
 
-async function requireClaudeSandboxVersion(env: NodeJS.ProcessEnv, cwd: string, executable?: string) {
-  const result = await runClaude(["--version", "--setting-sources", ""], { cwd, env, executable });
+async function requireClaudeSandboxVersion(
+  env: NodeJS.ProcessEnv, cwd: string, executable?: string,
+  launch?: { bwrap: string; args: string[]; executable: string },
+) {
+  const result = await runClaude(
+    launch ? [...launch.args, launch.executable, "--version", "--setting-sources", ""] : ["--version", "--setting-sources", ""],
+    { cwd, env, executable: launch?.bwrap ?? executable },
+  );
   if (result.exitCode !== 0) throw new Error("could not verify Claude Code sandbox support");
   assertExecutionSandboxVersion(result.stdout);
 }
@@ -361,7 +524,6 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
   const guard = await materializeBashGuard();
   let hiddenGitMetadata: Awaited<ReturnType<typeof hideWorktreeGitMetadata>> = null;
   try {
-    await requireClaudeSandboxVersion(env, input.workingDirectory, input.claudeExecutable);
     await appendFile(input.logPath, "");
     const metadataPaths = input.gitMetadataPaths ?? await gitMetadataPaths(input.workingDirectory);
     hiddenGitMetadata = await hideWorktreeGitMetadata(input.workingDirectory);
@@ -370,11 +532,20 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
       guardPath: guard.path,
       gitMetadataPaths: [...metadataPaths, ...(hiddenGitMetadata ? [hiddenGitMetadata.hidden] : [])],
     };
-    const { settingsFile } = await createExecutionSandboxSettings(configuredInput, settingsDirectory);
+    const scoped = input.allowedWritePaths !== undefined;
+    const launch = scoped ? scopedBwrapLaunch(configuredInput, settingsDirectory, guard.path) : null;
+    const sandboxInput = launch?.configuredInput ?? configuredInput;
+    const { settingsFile } = await createExecutionSandboxSettings(sandboxInput, settingsDirectory);
+    const command = launch?.bwrap ?? (input.claudeExecutable ?? "claude");
+    const commandArgs = launch
+      ? [...launch.args, launch.executable, ...buildExecutionArguments(sandboxInput, launch.settingsFile)]
+      : buildExecutionArguments(sandboxInput, settingsFile);
+    const childEnv = launch ? { ...env, ...launch.env } : env;
+    await requireClaudeSandboxVersion(childEnv, input.workingDirectory, input.claudeExecutable, launch ?? undefined);
     return await new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
-    const child = spawn(input.claudeExecutable ?? "claude", buildExecutionArguments(configuredInput, settingsFile), {
+    const child = spawn(command, commandArgs, {
       cwd: input.workingDirectory,
-      env,
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let pending = "";
