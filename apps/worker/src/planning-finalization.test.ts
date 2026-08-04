@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { expect, test } from "vitest";
 
 import {
@@ -106,4 +107,11 @@ test("rolls back a failed planning finalization before changing its job", async 
   })).rejects.toThrow("notification failed");
 
   expect(state).toEqual({ job: "running", ticket: "Planning", plan: false, run: "running" });
+});
+
+test("binds planning failure history's previous status and terminal references", async () => {
+  const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
+
+  expect(worker).toContain("VALUES ($1,$2,'Planning Failed',$3,'worker',$4,$5)");
+  expect(worker).toContain("[ticket.id, current.status, `Planning job failed: ${message.slice(0, 500)}`, job.id, runId]");
 });

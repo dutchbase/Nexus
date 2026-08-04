@@ -516,7 +516,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
       await lease.run(() => client.query(
         `INSERT INTO ticket_status_history
          (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
-         VALUES ($1,'Planning','Planning Failed',$2,'worker',$3,$4)`,
+         VALUES ($1,$2,'Planning Failed',$3,'worker',$4,$5)`,
         [ticket.id, current.status, `Planning job failed: ${message.slice(0, 500)}`, job.id, runId],
       ));
       await enqueueNotification(client, "planning.failed", ticket.id, runId, { runId }, lease.assertOwned);
