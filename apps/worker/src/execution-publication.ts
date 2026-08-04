@@ -1,7 +1,43 @@
+import type { ProviderPullRequest } from "@dcc/github-provider";
+
 export class PublicationError extends Error {}
 
 export type FailureState = "failed" | "published" | "published_by_other_job" | "missing" | "retryable";
 type Client = { query: (sql: string, values?: any[]) => Promise<{ rows: any[]; rowCount?: number | null }> };
+
+export async function storePublishedPullRequest(client: Client, input: {
+  projectId: string;
+  ticketId: string;
+  attemptId: string;
+  repository: string;
+  pullRequest: ProviderPullRequest;
+  commit: string;
+  changedFiles: number;
+}) {
+  const pullRequest = input.pullRequest;
+  return (await client.query(
+    `INSERT INTO pull_requests
+     (project_id,ticket_id,execution_attempt_id,provider,repository,number,url,title,author,state,
+      is_draft,head_branch,base_branch,head_sha,merge_commit_sha,created_at_provider,
+      updated_at_provider,merged_at,closed_at,last_synced_at,changed_files)
+     VALUES ($1,$2,$3,'github',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,now(),$19)
+     ON CONFLICT (project_id,number) DO UPDATE SET
+       ticket_id=COALESCE(pull_requests.ticket_id, EXCLUDED.ticket_id),
+       execution_attempt_id=COALESCE(pull_requests.execution_attempt_id, EXCLUDED.execution_attempt_id),
+       url=EXCLUDED.url,title=EXCLUDED.title,author=EXCLUDED.author,state=EXCLUDED.state,
+       is_draft=EXCLUDED.is_draft,head_branch=EXCLUDED.head_branch,base_branch=EXCLUDED.base_branch,
+       head_sha=EXCLUDED.head_sha,merge_commit_sha=EXCLUDED.merge_commit_sha,
+       created_at_provider=EXCLUDED.created_at_provider,updated_at_provider=EXCLUDED.updated_at_provider,
+       merged_at=EXCLUDED.merged_at,closed_at=EXCLUDED.closed_at,last_synced_at=now(),
+       changed_files=EXCLUDED.changed_files,updated_at=now()
+     RETURNING *`,
+    [input.projectId, input.ticketId, input.attemptId, input.repository,
+     pullRequest.number, pullRequest.html_url, pullRequest.title, pullRequest.user?.login ?? null,
+     pullRequest.state, false, pullRequest.head.ref, pullRequest.base.ref, input.commit,
+     pullRequest.merge_commit_sha ?? null, pullRequest.created_at, pullRequest.updated_at,
+     pullRequest.merged_at ?? null, pullRequest.closed_at ?? null, input.changedFiles],
+  )).rows[0];
+}
 
 export async function prepareExecutionPublication(
   client: Client,

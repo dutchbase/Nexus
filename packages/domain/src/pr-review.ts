@@ -33,36 +33,39 @@ export function renderPrReviewPrompt(template: string, vars: PrReviewPromptVars)
     : `${rendered}\n\n## Required immutable review rubric\n\n${vars.superpowersCodeReviewer}`;
 }
 
-export class PrReviewVerdictError extends Error {}
+export type PrReviewVerdictErrorCode =
+  | "missing_verdict"
+  | "ambiguous_verdict"
+  | "invalid_verdict_json"
+  | "invalid_verdict_value"
+  | "invalid_verdict_summary";
 
-export function reviewedHeadShaForMerge(
-  mode: "review_only" | "review_and_merge",
-  verdict: "approved" | "rejected",
-  reviewedHeadSha: string,
-) {
-  return null;
+export class PrReviewVerdictError extends Error {
+  constructor(message: string, readonly code: PrReviewVerdictErrorCode) {
+    super(message);
+  }
 }
 
 export function parsePrReviewVerdict(markdown: string): { verdict: "approved" | "rejected"; summary: string } {
   const matches = [...markdown.matchAll(/```json\s*([\s\S]*?)```/g)];
   if (!matches.length) {
-    throw new PrReviewVerdictError("No JSON verdict block found in review output");
+    throw new PrReviewVerdictError("No JSON verdict block found in review output", "missing_verdict");
   }
   if (matches.length !== 1) {
-    throw new PrReviewVerdictError("Review output must contain exactly one JSON verdict block");
+    throw new PrReviewVerdictError("Review output must contain exactly one JSON verdict block", "ambiguous_verdict");
   }
   let parsed: unknown;
   try {
     parsed = JSON.parse(matches[0][1]);
   } catch {
-    throw new PrReviewVerdictError("Verdict JSON block is not valid JSON");
+    throw new PrReviewVerdictError("Verdict JSON block is not valid JSON", "invalid_verdict_json");
   }
-  const obj = parsed as { verdict?: unknown; summary?: unknown };
+  const obj = parsed && typeof parsed === "object" ? parsed as { verdict?: unknown; summary?: unknown } : {};
   if (obj.verdict !== "approved" && obj.verdict !== "rejected") {
-    throw new PrReviewVerdictError(`Verdict must be "approved" or "rejected", got: ${String(obj.verdict)}`);
+    throw new PrReviewVerdictError(`Verdict must be "approved" or "rejected", got: ${String(obj.verdict)}`, "invalid_verdict_value");
   }
   if (typeof obj.summary !== "string" || obj.summary.trim() === "") {
-    throw new PrReviewVerdictError("Verdict summary must be a non-empty string");
+    throw new PrReviewVerdictError("Verdict summary must be a non-empty string", "invalid_verdict_summary");
   }
   return { verdict: obj.verdict, summary: obj.summary.trim() };
 }

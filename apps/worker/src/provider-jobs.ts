@@ -90,18 +90,21 @@ export async function runProviderJob(
 
   if (job.type === "github.merge_pull_request") {
     const pullRequestId = required(job.payload_json, "pull_request_id");
-    const pullRequest = (await db.query("SELECT * FROM pull_requests WHERE id=$1", [pullRequestId])).rows[0];
-    if (!pullRequest) throw new Error("pull request not found");
-    const targetBranch = typeof job.payload_json.target_branch === "string" && job.payload_json.target_branch.trim()
-      ? job.payload_json.target_branch.trim() : undefined;
+    const expectedHeadSha = required(job.payload_json, "expected_head_sha");
+    const expectedPolicySnapshotId = required(job.payload_json, "policy_snapshot_id");
     await assertOwned();
     await approveAndMergePullRequest(
-      db as pg.Pool, pullRequest, targetBranch, { type: "admin", id: actorId },
-      undefined, undefined, undefined, assertOwned,
+      db as pg.Pool,
+      {
+        pullRequestId, jobId: job.id, actor: { type: "admin", id: actorId },
+        expectedHeadSha, expectedPolicySnapshotId,
+      },
+      assertOwned,
     );
     await assertOwned();
     await audit(db, job, actorId, "github.merge_pull_request", "pull_request", pullRequestId, {
-      ...(targetBranch ? { target_branch: targetBranch } : {}),
+      expected_head_sha: expectedHeadSha,
+      policy_snapshot_id: expectedPolicySnapshotId,
     });
     return;
   }

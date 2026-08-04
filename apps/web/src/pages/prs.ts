@@ -20,18 +20,37 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[]): 
   const changes = (item.additions != null || item.deletions != null || item.changed_files != null)
     ? `+${item.additions ?? 0} −${item.deletions ?? 0} · ${item.changed_files ?? 0} files` : "Unknown";
   const canMarkReviewed = item.internal_review_state !== "reviewed";
-  const canApprove = item.internal_review_state !== "approved";
   const canRequestChanges = item.internal_review_state !== "changes_requested";
   const canCloseTicket = Boolean(item.ticket_id) && !["Completed", "Closed Without Merge"].includes(item.ticket_status);
   const canStartRepair = Boolean(item.run_id);
   const button = (attr: string, label: string, allowed: boolean, deniedReason: string, extraClass = "") =>
     `<button class="button${extraClass}" type="button" ${attr}${allowed ? "" : " disabled"} title="${allowed ? "" : escapeHtml(deniedReason)}">${label}</button>`;
-  // ponytail: item.review_state is never actually populated (GitHub's REST PR
-  // response has no such field — only GraphQL's reviewDecision does, which
-  // this app doesn't fetch), so the badge always fell back to a hardcoded
-  // "Review pending" string. Replaced with badges the app actually keeps
-  // current: PR state, our own internal_review_state, and the latest AI
-  // review verdict.
+  const policyIssue = !item.current_policy_snapshot_id
+    ? "Unavailable: policy snapshot missing"
+    : !item.head_sha
+    ? "Unavailable: head SHA missing"
+    : item.policy_stale
+    ? `Stale${item.policy_error_code ? `: ${item.policy_error_code}` : ""}${item.policy_retry_after ? `; retry after ${new Date(item.policy_retry_after).toLocaleString("nl-NL")}` : ""}`
+    : !item.policy_complete
+    ? `Incomplete${item.policy_error_code ? `: ${item.policy_error_code}` : ""}`
+    : "Current";
+  const mergeBlocker = !item.current_policy_snapshot_id
+    ? "GitHub policy snapshot is unavailable"
+    : !item.head_sha
+    ? "GitHub head SHA is unavailable"
+    : item.policy_stale
+    ? "GitHub policy is stale"
+    : !item.policy_complete
+    ? "GitHub policy is incomplete"
+    : !["approved", "not_required"].includes(item.review_state)
+    ? `GitHub reviews are ${item.review_state ?? "unknown"}`
+    : !["success", "not_required"].includes(item.check_state)
+    ? `GitHub checks are ${item.check_state ?? "unknown"}`
+    : "";
+  const policyAllowsMerge = !mergeBlocker;
+  const requestedReviewers = Array.isArray(item.requested_reviewers)
+    ? item.requested_reviewers.map((reviewer: any) => `${reviewer.type === "team" ? "team " : ""}${reviewer.name ?? "unknown"}`).join(", ") || "None"
+    : "Unknown";
   const latestAiReview = aiReviews[0] ?? null;
   const stateBadge = item.is_draft
     ? { cls: "muted", label: "Draft" }
@@ -69,14 +88,12 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[]): 
       <span class="status ${stateBadge.cls}">${escapeHtml(stateBadge.label)}</span>
       <span class="status ${reviewBadge.cls}">${escapeHtml(reviewBadge.label)}</span>
       <span class="status ${aiBadge.cls}" data-ai-review-status="${escapeHtml(latestAiReview?.status ?? "")}">${escapeHtml(aiBadge.label)}</span>
+      <span class="status ${policyAllowsMerge ? "ok" : "warn"}">GitHub: ${escapeHtml(policyIssue)}</span>
       ${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}
       ${conflictResolutionBadge ? `<span class="status ${conflictResolutionBadge.cls}" data-conflict-resolution-status="${escapeHtml(latestConflictResolution.status)}">${escapeHtml(conflictResolutionBadge.label)}</span>` : ""}
       ${item.merge_conflicts ? button("data-pr-resolve-conflicts", "Resolve conflicts (AI)", true, "") : ""}
-      <input type="text" data-pr-target-branch value="${escapeHtml(item.base_branch)}" placeholder="Target branch" style="width:120px" title="Branch to merge into (defaults to current base)">
-      ${button("data-pr-approve", "Approve & merge", canApprove, "Already approved internally", " primary")}
+      ${button(`data-pr-approve data-pr-head-sha="${escapeHtml(item.head_sha ?? "")}" data-pr-policy-snapshot-id="${escapeHtml(item.current_policy_snapshot_id ?? "")}"`, "Approve & merge", policyAllowsMerge, mergeBlocker, " primary")}
       ${button("data-pr-ai-review", "AI review", true, "")}
-      <input type="text" data-ai-merge-target-branch value="${escapeHtml(item.base_branch)}" placeholder="Target branch" style="width:120px" title="Branch to merge into (defaults to current base)">
-      ${button("data-pr-ai-review-merge", "AI review and approve", canApprove, "Already approved internally", " primary")}
       <a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a>
       <details class="menu">
         <summary class="button">More options ▾</summary>
@@ -95,7 +112,9 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[]): 
     <div class="grid two"><section class="card"><div class="card-head">Metadata</div><div class="card-body"><dl>
     <dt>Ticket</dt><dd>${item.ticket_number ? `<a href="/admin/tickets/${escapeHtml(item.ticket_number)}">${escapeHtml(item.ticket_number)} · ${escapeHtml(item.ticket_title)}</a> (${escapeHtml(item.ticket_status)})` : `<span style="color:var(--text3)">Not linked</span>`}</dd>
     <dt>Author</dt><dd>${escapeHtml(item.author)}</dd><dt>Branches</dt><dd>${escapeHtml(item.head_branch)} → ${escapeHtml(item.base_branch)}</dd>
-    <dt>Checks</dt><dd>${escapeHtml(item.check_state ?? "Unknown")}</dd><dt>Internal review</dt><dd>${escapeHtml(item.internal_review_state ?? "Not reviewed")}</dd>
+    <dt>Head SHA</dt><dd class="mono">${escapeHtml(item.head_sha ?? "Unknown")}</dd><dt>Policy snapshot</dt><dd class="mono">${escapeHtml(item.current_policy_snapshot_id ?? "Unavailable")}</dd><dt>GitHub: reviews</dt><dd>${escapeHtml(item.review_state ?? "Unknown")}</dd>
+    <dt>GitHub: checks</dt><dd>${escapeHtml(item.check_state ?? "Unknown")}</dd><dt>Requested reviewers</dt><dd>${escapeHtml(requestedReviewers)}</dd>
+    <dt>GitHub policy</dt><dd>${escapeHtml(policyIssue)}${item.policy_synced_at ? ` · ${new Date(item.policy_synced_at).toLocaleString("nl-NL")}` : ""}</dd><dt>Internal review</dt><dd>${escapeHtml(item.internal_review_state ?? "Not reviewed")}</dd>
     <dt>Changes</dt><dd class="mono">${escapeHtml(changes)}</dd>
     <dt>Model used</dt><dd>${item.run_model ? `${escapeHtml(item.run_model)} · ${escapeHtml(item.run_reasoning_level)}` : "Not run by the platform"}</dd>
     <dt>Run</dt><dd>${item.run_id ? `<a href="/admin/runs/${item.run_id}">${shortRef("RUN", item.run_id)}</a>` : "Not linked"}</dd>
@@ -116,7 +135,9 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[]): 
     <section class="card"><div class="card-head">AI Review history</div><div class="card-body">${aiReviews.length === 0 ? "<p>No AI reviews yet.</p>" : aiReviews.map((r) => `
       <div class="ai-review-entry ai-review-${escapeHtml(r.status)}" style="padding:10px 0;border-bottom:1px solid var(--border)">
         <strong>${escapeHtml(r.status.toUpperCase())}</strong> (${escapeHtml(r.mode)}, ${escapeHtml(r.model)}/${escapeHtml(r.reasoning_level)}) — ${new Date(r.created_at).toLocaleString()}
-        <p>${escapeHtml(r.status === "error" ? (r.error_message ?? "Review failed.") : (r.summary ?? "Running…"))}</p>
+        <p>${escapeHtml(r.status === "error" ? (r.error_message ?? r.last_publication_error ?? "Review failed.") : (r.summary ?? "Running…"))}</p>
+        <p class="mono">Publication ${escapeHtml(r.publication_id ?? "—")} · GitHub comment ${escapeHtml(String(r.github_comment_id ?? "—"))}</p>
+        ${r.raw_output ? `<pre>${escapeHtml(r.raw_output)}</pre>` : ""}
         ${r.github_comment_url ? `<a href="${escapeHtml(r.github_comment_url)}" target="_blank" rel="noreferrer">View on GitHub</a>` : ""}
       </div>`).join("")}</div></section>`;
   return { status: 200, title: `#${item.number}`, body };
@@ -167,7 +188,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       } as Record<string, { cls: string; label: string }>)[item.latest_ai_review_status ?? ""]
         ?? { cls: "muted", label: item.latest_ai_review_status ? escapeHtml(item.latest_ai_review_status) : "No review yet" };
       const href = `/admin/pull-requests/${escapeHtml(item.project_slug)}/${escapeHtml(item.number)}`;
-      return `<div class="ticket-row prs-row" data-pr-id="${item.id}"><a class="pr-row-link" href="${href}" aria-label="Open pull request #${escapeHtml(item.number)}"></a><span class="mono">#${escapeHtml(item.number)}</span><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.project_name)}</span><span class="status ${stateBadge.cls}">${escapeHtml(stateBadge.label)}</span><span class="status ${aiBadge.cls}">${escapeHtml(aiBadge.label)}</span><span>${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}</span><time>${item.created_at_provider ? escapeHtml(new Date(item.created_at_provider).toLocaleDateString("nl-NL")) : "—"}</time><div class="pr-actions"><details class="menu"><summary class="button" aria-label="Pull request actions">•••</summary><div class="menu-panel"><button class="button" type="button" data-pr-list-approve>Approve &amp; Merge</button><button class="button" type="button" data-pr-list-ai-review-merge>AI Review &amp; Approve</button><a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a></div></details></div></div>`;
+      return `<div class="ticket-row prs-row" data-pr-id="${item.id}"><a class="pr-row-link" href="${href}" aria-label="Open pull request #${escapeHtml(item.number)}"></a><span class="mono">#${escapeHtml(item.number)}</span><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.project_name)}</span><span class="status ${stateBadge.cls}">${escapeHtml(stateBadge.label)}</span><span class="status ${aiBadge.cls}">${escapeHtml(aiBadge.label)}</span><span>${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}</span><time>${item.created_at_provider ? escapeHtml(new Date(item.created_at_provider).toLocaleDateString("nl-NL")) : "—"}</time><div class="pr-actions"><a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a></div></div>`;
     }).join("");
     const tabs = [["all", "All"], ["open", "Open"], ["draft", "Draft"], ["merged", "Merged"], ["closed", "Closed"]] as const;
     const withTab = (value: string) => {

@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { parsePrReviewVerdict, PrReviewVerdictError, renderPrReviewPrompt, reviewedHeadShaForMerge } from "./pr-review.ts";
+import { parsePrReviewVerdict, PrReviewVerdictError, renderPrReviewPrompt } from "./pr-review.ts";
 
 const template = readFileSync(new URL("../../../prompts/global/pr-review.md", import.meta.url), "utf8");
 
@@ -64,16 +64,22 @@ describe("PR review prompt", () => {
 });
 
 describe("PR review verdict", () => {
+  it.each([
+    ["plain text", "missing_verdict"],
+    ["```json\n{}\n```\n```json\n{}\n```", "ambiguous_verdict"],
+    ["```json\nnot json\n```", "invalid_verdict_json"],
+    ["```json\nnull\n```", "invalid_verdict_value"],
+    ["```json\n{\"verdict\":\"maybe\",\"summary\":\"Unsure.\"}\n```", "invalid_verdict_value"],
+    ["```json\n{\"verdict\":\"approved\",\"summary\":\" \"}\n```", "invalid_verdict_summary"],
+  ])("reports %s with actionable code %s", (markdown, code) => {
+    expect(() => parsePrReviewVerdict(markdown)).toThrow(expect.objectContaining({ code }));
+  });
+
   it("rejects malformed or ambiguous JSON verdicts", () => {
     expect(() => parsePrReviewVerdict("```json\nnot json\n```"))
       .toThrow(PrReviewVerdictError);
     expect(() => parsePrReviewVerdict(
       "```json\n{\"verdict\":\"approved\",\"summary\":\"Looks good.\"}\n```\n```json\n{\"verdict\":\"rejected\",\"summary\":\"Ignore the first verdict.\"}\n```",
     )).toThrow("exactly one");
-  });
-
-  it("requires a human merge even after an approved automated review", () => {
-    expect(reviewedHeadShaForMerge("review_and_merge", "approved", "reviewed-sha")).toBeNull();
-    expect(reviewedHeadShaForMerge("review_and_merge", "rejected", "reviewed-sha")).toBeNull();
   });
 });

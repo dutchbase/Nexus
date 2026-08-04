@@ -6,9 +6,10 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { createPullRequestReviewWorktree } from "../../../packages/git-runner/src/index.ts";
 import type { SnapshottedSkill } from "@dcc/skill-registry";
-import { buildApprovedInputSnapshot, type ApprovedInputSnapshot } from "@dcc/domain";
+import { assertPrReviewDestination, buildApprovedInputSnapshot, type ApprovedInputSnapshot } from "@dcc/domain";
+import { GitHubProviderError } from "@dcc/github-provider";
 import {
-  approvedPhaseSkills, assertExecutionPublicationGate, executionRoot, prReviewSnapshotInput, reviewedMergeBinding,
+  approvedPhaseSkills, assertExecutionPublicationGate, executionRoot, prReviewSnapshotInput,
 } from "./worker-boundary.ts";
 import * as workerBoundary from "./worker-boundary.ts";
 
@@ -132,11 +133,7 @@ describe("worker orchestration boundary", () => {
     expect(() => assertApprovedSkillSnapshot(approved, row)).toThrow("approved skill snapshot integrity check failed");
   });
 
-  test("never schedules an unsafe automated merge", () => {
-    expect(reviewedMergeBinding("review_and_merge", "approved", "head-sha", "main", "base-sha")).toBeNull();
-    expect(reviewedMergeBinding("review_only", "approved", "head-sha", "main", "base-sha")).toBeNull();
-    expect(reviewedMergeBinding("review_and_merge", "rejected", "head-sha", "main", "base-sha")).toBeNull();
-
+  test("binds PR review prompts to immutable refs", () => {
     expect(prReviewSnapshotInput({
       projectId: "project-1", content: "exact prompt", model: "sonnet", reasoningLevel: "high",
       promptVersionIds: { "global.pr-review": "prompt-1", "global.code-reviewer": "rubric-2" },
@@ -148,6 +145,31 @@ describe("worker orchestration boundary", () => {
         reviewedHeadSha: "head-sha", reviewedBaseBranch: "main", reviewedBaseSha: "base-sha",
       },
     });
+  });
+
+  test.each(["transient", "rate_limited"])("retries %s provider failures before output is persisted", (code) => {
+    const shouldRetry = (workerBoundary as any).shouldRetryPrReview;
+    expect(shouldRetry(new GitHubProviderError(code, "provider unavailable"), null, 1, 3)).toBe(true);
+    expect(shouldRetry(new GitHubProviderError("not_found", "missing"), null, 1, 3)).toBe(false);
+    expect(shouldRetry(new Error("model failed"), null, 1, 3)).toBe(false);
+    expect(shouldRetry(new GitHubProviderError(code, "provider unavailable"), null, 3, 3)).toBe(false);
+  });
+
+  test("retries publication failures after immutable output is persisted", () => {
+    const shouldRetry = (workerBoundary as any).shouldRetryPrReview;
+    expect(shouldRetry(new Error("database unavailable"), "persisted output", 2, 3)).toBe(true);
+  });
+
+  test("does not retry a mismatched resume job with persisted output", () => {
+    const shouldRetry = (workerBoundary as any).shouldRetryPrReview;
+    let mismatch: unknown;
+    try {
+      assertPrReviewDestination({ id: "review-1", pull_request_id: "pr-1" }, "pr-2");
+    } catch (error) {
+      mismatch = error;
+    }
+
+    expect(shouldRetry(mismatch, "persisted output", 1, 3)).toBe(false);
   });
 
   test("cleans up the detached review worktree after the review boundary", async () => {

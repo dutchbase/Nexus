@@ -1,5 +1,6 @@
-import { reviewedHeadShaForMerge } from "@dcc/domain";
 import { skillsForPhase, type SkillPhase, type SnapshottedSkill } from "@dcc/skill-registry";
+import { GitHubProviderError } from "@dcc/github-provider";
+import { PrReviewDestinationError } from "@dcc/domain";
 import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -134,15 +135,10 @@ export function assertExecutionPublicationGate(repairing: boolean, usedAgent: bo
   if (!repairing && !usedAgent) throw new Error("execution did not invoke Agent tool");
 }
 
-export function reviewedMergeBinding(
-  mode: "review_only" | "review_and_merge",
-  verdict: "approved" | "rejected",
-  reviewedHeadSha: string,
-  reviewedBaseBranch: string,
-  reviewedBaseSha: string,
-) {
-  const expectedHeadSha = reviewedHeadShaForMerge(mode, verdict, reviewedHeadSha);
-  return expectedHeadSha ? { expectedHeadSha, expectedBaseBranch: reviewedBaseBranch, expectedBaseSha: reviewedBaseSha } : null;
+export function shouldRetryPrReview(error: unknown, rawOutput: string | null, attempt: number, maxAttempts: number) {
+  if (error instanceof PrReviewDestinationError) return false;
+  return attempt < maxAttempts && (Boolean(rawOutput)
+    || error instanceof GitHubProviderError && ["transient", "rate_limited"].includes(error.code));
 }
 
 export function prReviewSnapshotInput(input: {

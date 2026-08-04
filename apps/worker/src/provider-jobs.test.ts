@@ -36,18 +36,26 @@ test("records the source job and initiating admin after a pull-request merge", a
     id: "job-1",
     type: "github.merge_pull_request",
     idempotency_key: "g07:github.merge_pull_request:pr-1:once",
-    payload_json: { actor_id: "admin-1", pull_request_id: "pr-1", target_branch: "release" },
+    payload_json: {
+      actor_id: "admin-1", pull_request_id: "pr-1",
+      expected_head_sha: "head-sha", policy_snapshot_id: "snapshot-1",
+    },
   }, database as any);
 
   expect(approveAndMergePullRequest).toHaveBeenCalledWith(
-    database, expect.objectContaining({ id: "pr-1" }), "release", { type: "admin", id: "admin-1" },
-    undefined, undefined, undefined, expect.any(Function),
+    database,
+    {
+      pullRequestId: "pr-1", jobId: "job-1", actor: { type: "admin", id: "admin-1" },
+      expectedHeadSha: "head-sha", expectedPolicySnapshotId: "snapshot-1",
+    },
+    expect.any(Function),
   );
   expect(database.queries.at(-1)).toEqual(expect.objectContaining({
     values: ["admin", "admin-1", "github.merge_pull_request", "pull_request", "pr-1", {
       job_id: "job-1",
       idempotency_key: "g07:github.merge_pull_request:pr-1:once",
-      target_branch: "release",
+      expected_head_sha: "head-sha",
+      policy_snapshot_id: "snapshot-1",
     }],
   }));
 });
@@ -129,8 +137,23 @@ test("fences provider side effects before dispatch", async () => {
     id: "job-6",
     type: "github.merge_pull_request",
     idempotency_key: "g07:github.merge_pull_request:pr-1:once",
-    payload_json: { actor_id: "admin-1", pull_request_id: "pr-1" },
+    payload_json: { actor_id: "admin-1", pull_request_id: "pr-1", expected_head_sha: "head-sha", policy_snapshot_id: "snapshot-1" },
   }, database as any, fence)).rejects.toThrow("lease lost");
+
+  expect(approveAndMergePullRequest).not.toHaveBeenCalled();
+});
+
+test.each(["expected_head_sha", "policy_snapshot_id"])("requires merge job %s binding", async (missing) => {
+  const database = db([{ id: "pr-1" }]);
+  const payload: Record<string, unknown> = {
+    actor_id: "admin-1", pull_request_id: "pr-1", expected_head_sha: "head-sha", policy_snapshot_id: "snapshot-1",
+  };
+  delete payload[missing];
+
+  await expect(runProviderJob({
+    id: "job-7", type: "github.merge_pull_request",
+    idempotency_key: "g07:github.merge_pull_request:pr-1:once", payload_json: payload,
+  }, database as any)).rejects.toThrow(`${missing} is required`);
 
   expect(approveAndMergePullRequest).not.toHaveBeenCalled();
 });

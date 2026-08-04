@@ -420,9 +420,17 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
     const validationPanel = `<section class="card"><div class="card-head">Validation</div><div class="card-body">${execRuns.map((run) =>
       `<p><span class="status">${escapeHtml(run.status)}</span> ${run.error_code === "validation_failed" ? "<strong>Validation failed</strong> — " : ""}${escapeHtml(run.error_message ?? "")}</p>`,
     ).join("") || "<p>Greyed out until an execution attempt exists.</p>"}</div></section>`;
-    const prPanel = `<section class="card"><div class="card-head">Pull request</div>${prsResult.rows.map((item) =>
-      `<a class="ticket-row" href="/admin/pull-requests/${item.id}"><span class="mono">#${item.number}</span><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.head_branch)}</span><span class="status">${escapeHtml(item.review_state ?? item.state)}</span><time>${new Date(item.created_at).toLocaleDateString("nl-NL")}</time></a>`,
-    ).join("") || '<div class="card-body"><p>No pull request yet — the worker opens a draft PR after a validated execution.</p></div>'}</section>`;
+    const prPanel = `<section class="card"><div class="card-head">Pull request</div>${prsResult.rows.map((item) => {
+      const policy = !item.current_policy_snapshot_id || !item.head_sha
+        ? "Unavailable"
+        : item.policy_stale
+        ? `Stale${item.policy_error_code ? `: ${item.policy_error_code}` : ""}`
+        : !item.policy_complete
+        ? "Incomplete"
+        : item.review_state ?? "Unknown";
+      const synced = item.policy_synced_at ? ` · ${new Date(item.policy_synced_at).toLocaleString("nl-NL")}` : "";
+      return `<a class="ticket-row" href="/admin/pull-requests/${item.id}"><span class="mono">#${item.number}</span><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.head_branch)}</span><span class="status">GitHub: ${escapeHtml(policy)}${synced}</span><time>${new Date(item.created_at).toLocaleDateString("nl-NL")}</time></a>`;
+    }).join("") || '<div class="card-body"><p>No pull request yet — the worker opens a draft PR after a validated execution.</p></div>'}</section>`;
     const activityPanel = `<section class="card"><div class="card-head">Status history</div><div class="card-body">${history.map((item) => `<p><span class="mono">${new Date(item.created_at).toLocaleString("nl-NL")}</span> ${escapeHtml(item.previous_status ?? "New")} → <strong>${escapeHtml(item.new_status)}</strong>${item.reason ? `<br><span style="color:var(--text2)">${escapeHtml(item.reason)}</span>` : ""}</p>`).join("") || "<p>No recorded transitions.</p>"}</div></section>
       <section class="card"><div class="card-head">Notification history</div><div class="card-body">${notificationsResult.rows.map((item) =>
         `<p><strong>${escapeHtml(item.event_type)}</strong> · ${escapeHtml(item.provider ?? "Unknown provider")} · ${escapeHtml(item.recipient ?? "default recipient")} · ${escapeHtml(item.status)} · attempts ${item.attempt_count ?? 0}${item.response_status ? ` · HTTP ${item.response_status}` : ""}${item.sent_at ? ` · ${new Date(item.sent_at).toLocaleString("nl-NL")}` : ""}${item.error_message ? `<br><span class="error">${escapeHtml(item.error_message)}</span>` : ""}</p>`,

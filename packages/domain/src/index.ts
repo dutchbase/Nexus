@@ -5,9 +5,11 @@ export * from "./approval-input-snapshot.ts";
 export * from "./plan-approval.ts";
 export * from "./pull-request.ts";
 export * from "./pull-request-sync.ts";
+export * from "./pull-request-policy.ts";
 export * from "./pr-merge.ts";
 export * from "./notifications.ts";
 export * from "./pr-review.ts";
+export * from "./pr-review-publication.ts";
 export * from "./pr-conflict-resolution.ts";
 export * from "./follow-up-ticket.ts";
 

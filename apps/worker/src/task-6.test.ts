@@ -28,3 +28,18 @@ test("gives the read-only PR review an immutable-diff-first ten-turn budget", as
   expect(invocation).toContain('tools: ["Read", "Glob", "Grep"]');
   expect(invocation).toContain("maxTurns: 10");
 });
+
+test("publishes reviews through the resumable outbox without automatic merge", async () => {
+  const source = await worker();
+  const start = source.indexOf("async function runPrAiReview");
+  const invocation = source.slice(start, source.indexOf("async function runFollowUpDescription", start));
+
+  expect(invocation).toContain("resumePrReviewPublication");
+  const destinationGuard = invocation.indexOf("assertPrReviewDestination(existingReview, payload.pull_request_id)");
+  expect(destinationGuard).toBeGreaterThan(invocation.indexOf("try {"));
+  expect(destinationGuard).toBeLessThan(invocation.indexOf("const pullRequest"));
+  expect(invocation).toContain("terminalizePrReview");
+  expect(invocation).toContain("shouldRetryPrReview(error, storedReview?.raw_output, job.attempt, job.max_attempts)");
+  expect(invocation).not.toContain("approveAndMergePullRequest");
+  expect(invocation).not.toContain("reviewedMergeBinding");
+});

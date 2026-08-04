@@ -9,8 +9,8 @@ import {
 } from "@dcc/claude-runner";
 import { artifactDataRoot, finalizeArtifact, inTransaction, legacyArtifactDataRoot, pool, reconcileArtifacts, stageArtifact, type StagedArtifact } from "@dcc/database";
 import {
-  approveAndMergePullRequest, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
-  claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, parsePrReviewVerdict,
+  assertPrReviewDestination, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
+  claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, resumePrReviewPublication,
   claimNotificationDelivery, completeNotificationDelivery, failNotificationDelivery, renewJobLease,
   renewNotificationDeliveryLease,
   renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
@@ -22,7 +22,7 @@ import {
   stageConflictResolutionPaths, validateExecutionWorktree, WorktreeValidationError, worktreeDiff,
 } from "../../../packages/git-runner/src/index.ts";
 import {
-  createPullRequest, createPullRequestComment, findOpenPullRequestForHead, getPullRequest, updatePullRequestBase,
+  createPullRequest, createPullRequestComment, findOpenPullRequestForHead, getPullRequest, listPullRequestComments, updatePullRequestBase,
 } from "@dcc/github-provider";
 import { validateProject } from "@dcc/project-config";
 import {
@@ -30,16 +30,16 @@ import {
   type ResolutionSource, type SkillCandidate, type ResolvedSkill, type SnapshottedSkill,
 } from "@dcc/skill-registry";
 import { runPrivateExecution } from "./execution-handoff.ts";
-import { failExecutionPublication, handleExecutionPublicationFailure, prepareExecutionPublication, PublicationError, publishExternalResult } from "./execution-publication.ts";
+import { failExecutionPublication, handleExecutionPublicationFailure, prepareExecutionPublication, PublicationError, publishExternalResult, storePublishedPullRequest } from "./execution-publication.ts";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
 import {
-  approvedExecutionInput, approvedPhaseSkills, assertApprovedSkillSnapshot, assertExecutionPublicationGate, prReviewSnapshotInput, reviewedMergeBinding,
+  approvedExecutionInput, approvedPhaseSkills, assertApprovedSkillSnapshot, assertExecutionPublicationGate, prReviewSnapshotInput, shouldRetryPrReview,
 } from "./worker-boundary.ts";
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
 import {
-  finalizePlanningFailure, finalizePlanningSuccess, initializePlanningAttempt, LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch,
+  finalizePlanningFailure, finalizePlanningSuccess, initializePlanningAttempt, LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch, terminalizePrReview,
   withContainedLeaseHeartbeat, withLeaseHeartbeat, type LeaseGuard,
 } from "./workflow-state.ts";
 
@@ -974,34 +974,17 @@ async function publishExecutionAttempt(input: {
         const relativeWorktree = path.relative(dataRoot, input.attempt.worktree_path);
         if (!relativeWorktree || relativeWorktree === ".." || relativeWorktree.startsWith(`..${path.sep}`) || path.isAbsolute(relativeWorktree)) throw new Error("worktree artifact path escapes controlled root");
         await inTransaction(async (client) => {
-          const stored = (await lease.run(() => client.query(
-        `INSERT INTO pull_requests
-         (project_id,ticket_id,execution_attempt_id,provider,repository,number,url,title,author,state,
-          review_state,check_state,is_draft,head_branch,base_branch,head_sha,merge_commit_sha,
-          created_at_provider,updated_at_provider,merged_at,closed_at,last_synced_at,changed_files)
-         VALUES ($1,$2,$3,'github',$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-                 $17,$18,$19,$20,now(),$21)
-         ON CONFLICT (project_id,number) DO UPDATE SET
-           ticket_id=COALESCE(pull_requests.ticket_id, EXCLUDED.ticket_id),
-           execution_attempt_id=COALESCE(pull_requests.execution_attempt_id, EXCLUDED.execution_attempt_id),
-           url=EXCLUDED.url,title=EXCLUDED.title,author=EXCLUDED.author,state=EXCLUDED.state,
-           review_state=EXCLUDED.review_state,check_state=EXCLUDED.check_state,is_draft=EXCLUDED.is_draft,
-           head_branch=EXCLUDED.head_branch,base_branch=EXCLUDED.base_branch,head_sha=EXCLUDED.head_sha,
-           merge_commit_sha=EXCLUDED.merge_commit_sha,created_at_provider=EXCLUDED.created_at_provider,
-           updated_at_provider=EXCLUDED.updated_at_provider,merged_at=EXCLUDED.merged_at,
-           closed_at=EXCLUDED.closed_at,last_synced_at=now(),changed_files=EXCLUDED.changed_files,
-           updated_at=now()
-         RETURNING *`,
-        [
-          input.project.id, input.ticket.id, input.attempt.id,
-          `${input.project.github_owner}/${input.project.github_repository}`,
-          providerPr.number, providerPr.html_url, providerPr.title, providerPr.user?.login ?? null,
-          providerPr.state, providerPr.review_state ?? null, providerPr.check_state ?? null,
-          false, providerPr.head.ref, providerPr.base.ref, commit,
-          providerPr.merge_commit_sha ?? null, providerPr.created_at, providerPr.updated_at,
-          providerPr.merged_at ?? null, providerPr.closed_at ?? null, input.changedFiles.length,
-        ],
-          ))).rows[0];
+          const stored = await storePublishedPullRequest({
+            query: (sql, values) => lease.run(() => client.query(sql, values)),
+          }, {
+            projectId: input.project.id,
+            ticketId: input.ticket.id,
+            attemptId: input.attempt.id,
+            repository: `${input.project.github_owner}/${input.project.github_repository}`,
+            pullRequest: providerPr,
+            commit: commit!,
+            changedFiles: input.changedFiles.length,
+          });
           await lease.run(() => client.query(`INSERT INTO artifacts (id,storage_path,artifact_type,status,sha256,finalized_at,agent_run_id,execution_attempt_id) VALUES ($1,$2,'worktree','finalized',$3,now(),$4,$5) ON CONFLICT (storage_path) DO NOTHING`, [randomUUID(), relativeWorktree, hash(commit!), input.runId, input.attempt.id]));
           const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
           await lease.run(() => client.query("UPDATE tickets SET status='PR Ready for Review',updated_at=now() WHERE id=$1", [input.ticket.id]));
@@ -1127,14 +1110,8 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     target_branch?: string;
   };
 
-  // ponytail: idempotency guard. A retry after a late failure (e.g. between
-  // posting the GitHub comment and the final pr_ai_reviews UPDATE) must not
-  // re-invoke Claude or post a second, duplicate comment. Once a prior
-  // attempt has moved this review out of 'running' — completed or recorded
-  // its own error — treat the job as already handled instead of redoing the
-  // side effects.
   const existingReview = (
-    await pool.query("SELECT status FROM pr_ai_reviews WHERE id=$1", [payload.pr_ai_review_id])
+    await pool.query("SELECT * FROM pr_ai_reviews WHERE id=$1", [payload.pr_ai_review_id])
   ).rows[0];
   if (!existingReview) throw new Error("pr_ai_reviews row not found");
   if (existingReview.status !== "running") return;
@@ -1149,26 +1126,37 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
   // catch block's agent_runs UPDATE must tolerate failures that happen
   // before that INSERT runs.
   let runId: string | null = null;
+  let agentRunCompleted = false;
   let reviewWorktree: Awaited<ReturnType<typeof createPullRequestReviewWorktree>> | null = null;
   try {
+    assertPrReviewDestination(existingReview, payload.pull_request_id);
     await lease.assertOwned();
-    await preflightClaudeAuthentication();
-
     const pullRequest = (
       await pool.query("SELECT * FROM pull_requests WHERE id=$1", [payload.pull_request_id])
     ).rows[0];
     if (!pullRequest) throw new Error("pull request not found");
     const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [pullRequest.project_id])).rows[0];
     if (!project) throw new Error("project not found");
+    const [owner, repo] = pullRequest.repository.split("/");
+    if (existingReview.raw_output) {
+      await resumePrReviewPublication(pool, {
+        reviewId: payload.pr_ai_review_id,
+        invoke: async () => { throw new Error("persisted review output unexpectedly missing"); },
+        listComments: () => listPullRequestComments(owner, repo, pullRequest.number),
+        createComment: (body) => createPullRequestComment(owner, repo, pullRequest.number, body),
+        assertOwned: lease.assertOwned,
+      });
+      return;
+    }
+
+    await preflightClaudeAuthentication();
     if (payload.mode === "review_and_merge" && payload.target_branch && payload.target_branch !== pullRequest.base_branch) {
-      const [owner, repo] = pullRequest.repository.split("/");
       await lease.assertOwned();
       await updatePullRequestBase(owner, repo, pullRequest.number, payload.target_branch);
       await lease.assertOwned();
       pullRequest.base_branch = payload.target_branch;
       await lease.run(() => pool.query("UPDATE pull_requests SET base_branch=$2,updated_at=now() WHERE id=$1", [pullRequest.id, pullRequest.base_branch]));
     }
-    const [owner, repo] = pullRequest.repository.split("/");
     await lease.assertOwned();
     const providerPullRequest = await getPullRequest(owner, repo, pullRequest.number);
     await lease.assertOwned();
@@ -1273,52 +1261,43 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
       // until the invocation this run actually used has finished).
       await lease.run(() => pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]));
 
-      const verdict = parsePrReviewVerdict(result.markdown);
-
       await lease.run(() => pool.query(
         "UPDATE agent_runs SET status='completed',finished_at=now(),exit_code=$2 WHERE id=$1",
         [runId, result.exitCode],
       ));
+      agentRunCompleted = true;
 
-      const comment = await lease.run(() => createPullRequestComment(owner, repo, pullRequest.number, result.markdown));
-
-      await lease.run(() => pool.query(
-        `UPDATE pr_ai_reviews SET status=$2,summary=$3,github_comment_url=$4,completed_at=now() WHERE id=$1`,
-        [payload.pr_ai_review_id, verdict.verdict === "approved" ? "approved" : "rejected", verdict.summary, comment.html_url],
-      ));
-
-      const mergeBinding = reviewedMergeBinding(
-        payload.mode, verdict.verdict, immutableReview.headCommit, pullRequest.base_branch, reviewedBaseSha,
-      );
-      if (mergeBinding) {
-        await lease.assertOwned();
-        await approveAndMergePullRequest(
-          pool, pullRequest, undefined, { type: "worker", id: payload.pr_ai_review_id },
-          mergeBinding.expectedHeadSha, mergeBinding.expectedBaseBranch,
-          mergeBinding.expectedBaseSha,
-          lease.assertOwned,
-        );
-      }
+      await resumePrReviewPublication(pool, {
+        reviewId: payload.pr_ai_review_id,
+        invoke: async () => ({
+          markdown: result.markdown,
+          reviewedHeadSha: immutableReview.headCommit,
+          reviewedBaseBranch: pullRequest.base_branch,
+          reviewedBaseSha,
+        }),
+        listComments: () => listPullRequestComments(owner, repo, pullRequest.number),
+        createComment: (body) => createPullRequestComment(owner, repo, pullRequest.number, body),
+        assertOwned: lease.assertOwned,
+      });
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }
   } catch (error: any) {
     await lease.assertOwned();
+    const storedReview = (await pool.query("SELECT * FROM pr_ai_reviews WHERE id=$1", [payload.pr_ai_review_id])).rows[0];
+    if (storedReview?.status !== "running") return;
+    const retryablePublication = Boolean(storedReview?.raw_output && storedReview.publication_status === "pending");
+    if (shouldRetryPrReview(error, storedReview?.raw_output, job.attempt, job.max_attempts)) throw error;
+    const errorCode = retryablePublication
+      ? "review_publication_failed"
+      : typeof error?.code === "string" ? error.code : "review_failed";
     await runLeaseFencedBatch(lease, [
-      ...(runId ? [() => pool.query(
+      ...(runId && !agentRunCompleted ? [() => pool.query(
         "UPDATE agent_runs SET status='failed',finished_at=now(),error_message=$2 WHERE id=$1",
         [runId, error.message],
       )] : []),
-      () => pool.query(
-      "UPDATE pr_ai_reviews SET status='error',error_message=$2,completed_at=now() WHERE id=$1",
-      [payload.pr_ai_review_id, error.message],
-      ),
+      () => terminalizePrReview(pool, payload.pr_ai_review_id, errorCode, error.message),
     ]);
-    // ponytail: rethrow so the main loop's failJob()/completeJob() dispatch
-    // (which every other job handler relies on) retries or hard-fails this
-    // job through the normal jobs-table lifecycle instead of silently
-    // completing a job whose review actually errored out.
-    throw error;
   } finally {
     if (reviewWorktree) await reviewWorktree.cleanup();
   }

@@ -8,11 +8,11 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
 import {
-  AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approveAndMergePullRequest, approvePlanDecision, buildApprovedInputSnapshot,
+  AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
   buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
-  globalPromptTypes, enqueueNotification, importGithubPullRequests, promptContentHash, PullRequestMergeError,
-  rejectPlanDecision, requestPlanRevisionDecision, requireApprovalPrompt, resolveAiConfiguration, setPullRequestTicketStatus, syncOpenPullRequests,
-  syncPullRequest, validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
+  globalPromptTypes, enqueueNotification, promptContentHash, PullRequestMergeError,
+  rejectPlanDecision, requestPlanRevisionDecision, requireApprovalPrompt, resolveAiConfiguration, setPullRequestTicketStatus,
+  validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
 import {
   mergeNotificationConfiguration, parseNotificationConfiguration, parseNotificationConfigurationPatch,
@@ -938,8 +938,20 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     } else if (action === "mark-reviewed") {
       await pool.query("UPDATE pull_requests SET internal_review_state='reviewed',updated_at=now() WHERE id=$1", [pullRequest.id]);
     } else if (action === "approve") {
-      const targetBranch = typeof body.target_branch === "string" && body.target_branch.trim() ? body.target_branch.trim() : undefined;
-      const job = await enqueueJob({ type: "github.merge_pull_request", payload: { actor_id: session.user_id, pull_request_id: pullRequest.id, ...(targetBranch ? { target_branch: targetBranch } : {}) }, idempotencyKey: `g07:github.merge_pull_request:${pullRequest.id}:${randomUUID()}` });
+      const expectedHeadSha = typeof body.expected_head_sha === "string" ? body.expected_head_sha.trim() : "";
+      const policySnapshotId = typeof body.policy_snapshot_id === "string" ? body.policy_snapshot_id.trim() : "";
+      if (!expectedHeadSha || !policySnapshotId || pullRequest.policy_stale
+        || expectedHeadSha !== pullRequest.head_sha || policySnapshotId !== pullRequest.current_policy_snapshot_id) {
+        return json(response, 409, { error: "pull request policy binding is missing or stale" });
+      }
+      const job = await enqueueJob({
+        type: "github.merge_pull_request",
+        payload: {
+          actor_id: session.user_id, pull_request_id: pullRequest.id,
+          expected_head_sha: expectedHeadSha, policy_snapshot_id: policySnapshotId,
+        },
+        idempotencyKey: `g07:github.merge_pull_request:${pullRequest.id}:${randomUUID()}`,
+      });
       return json(response, 202, { job });
     } else if (action === "request-changes") {
       await pool.query("UPDATE pull_requests SET internal_review_state='changes_requested',updated_at=now() WHERE id=$1", [pullRequest.id]);
@@ -1050,7 +1062,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
             target_branch: targetBranch,
           },
           idempotencyKey: `pr-ai-review:${row.id}`,
-          maxAttempts: 1,
+          maxAttempts: 3,
           rerunOf: previous?.job_id,
         }, client);
         return row;

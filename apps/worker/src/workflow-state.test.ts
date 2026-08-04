@@ -10,6 +10,24 @@ import {
 type Result = { rows: any[]; rowCount?: number };
 type Transaction = Parameters<typeof recoverExpiredWorkflowState>[0];
 
+test("terminalizes a mismatched durable PR review with its stable error", async () => {
+  let review = { status: "running", error_code: null as string | null, error_message: null as string | null };
+  const client = { query: vi.fn(async (_sql: string, values?: unknown[]) => {
+    review = { status: "error", error_code: values?.[1] as string, error_message: values?.[2] as string };
+    return { rows: [{ ...review }], rowCount: 1 };
+  }) };
+  const workflow = await import("./workflow-state.ts") as any;
+
+  await workflow.terminalizePrReview(client, "review-1", "review_destination_mismatch", "does not match payload pull request");
+
+  expect(review).toEqual({
+    status: "error", error_code: "review_destination_mismatch", error_message: "does not match payload pull request",
+  });
+  expect(client.query).toHaveBeenCalledWith(expect.stringContaining("UPDATE pr_ai_reviews"), [
+    "review-1", "review_destination_mismatch", "does not match payload pull request",
+  ]);
+});
+
 function transactionClient(recoveredJobs: any[], recoveredDeliveries: any[] = []) {
   let recoveryPass = 0;
   const query = vi.fn(async (sql: string, values?: unknown[]): Promise<Result> => {
@@ -157,6 +175,23 @@ test("fails an exhausted recovered job and reconciles its run, attempt, ticket, 
   expect(client.query).toHaveBeenCalledWith(expect.stringContaining("UPDATE tickets SET status=$2"), ["ticket-1", "Execution Failed"]);
   expect(client.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO ticket_status_history"), [
     "ticket-1", "Executing", "Execution Failed", "Worker lease expired", "job-1", "run-1",
+  ]);
+});
+
+test("records a stable terminal code when an AI review exhausts recovery", async () => {
+  const query = vi.fn(async (sql: string): Promise<Result> => {
+    if (sql.includes("UPDATE jobs j") && sql.includes("lease_expires_at <= now()")) return { rows: [{
+      id: "job-1", type: "pr.ai_review", status: "failed", payload_json: { pr_ai_review_id: "review-1" },
+    }], rowCount: 1 };
+    if (sql.includes("UPDATE notification_deliveries nd")) return { rows: [], rowCount: 0 };
+    return { rows: [], rowCount: 1 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+
+  await recoverExpiredWorkflowState(inTransaction);
+
+  expect(query).toHaveBeenCalledWith(expect.stringContaining("error_code=$2"), [
+    "review-1", "worker_lease_expired", "Worker lease expired",
   ]);
 });
 
@@ -402,7 +437,7 @@ test("authentication refusal applies the terminal state matrix without duplicate
     "blocked_auth", "Authentication unavailable", jobs.map((job) => job.type),
   ]);
   expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE execution_attempts"), ["attempt", "failed"]);
-  expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE pr_ai_reviews"), ["review-row", "Authentication unavailable"]);
+  expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE pr_ai_reviews"), ["review-row", "blocked_auth", "Authentication unavailable"]);
   expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE pr_conflict_resolutions"), ["conflict-row", "Authentication unavailable"]);
   expect(query.mock.calls.filter(([sql]) => (sql as string).includes("INSERT INTO ticket_status_history"))).toHaveLength(1);
 });

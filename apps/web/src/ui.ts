@@ -493,22 +493,6 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           }finally{button.disabled=false}
         });
         document.querySelector("select[name=repository]")?.addEventListener("change",function(){this.form.submit()});
-        async function listPrAction(button,action,payload){
-          const prId=button.closest("[data-pr-id]")?.dataset.prId;
-          if(!prId)return;
-          button.disabled=true;
-          try{
-            const response=await fetch("/api/admin/pull-requests/"+prId+"/"+action,{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
-            if(response.ok)return location.reload();
-            const result=await response.json();alert(result.error);
-          }catch(error){alert(error.message)}finally{button.disabled=false}
-        }
-        document.querySelectorAll("[data-pr-list-approve]").forEach(button=>button.addEventListener("click",()=>{
-          if(confirm("Approve and merge this pull request on GitHub? This cannot be undone from here."))listPrAction(button,"approve",{});
-        }));
-        document.querySelectorAll("[data-pr-list-ai-review-merge]").forEach(button=>button.addEventListener("click",()=>{
-          if(confirm("Run AI review and, if approved, merge this pull request on GitHub? This cannot be undone from here."))listPrAction(button,"ai-review",{mode:"review_and_merge"});
-        }));
       `:""}
       ${/^\/admin\/pull-requests\/[^/]+(\/\d+)?$/.test(path)?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";
@@ -519,9 +503,9 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         }
         document.querySelector("[data-pr-refresh]")?.addEventListener("click",()=>prAction("refresh"));
         document.querySelector("[data-pr-mark-reviewed]")?.addEventListener("click",()=>prAction("mark-reviewed"));
-        document.querySelector("[data-pr-approve]")?.addEventListener("click",()=>{
-          const targetBranch=document.querySelector("[data-pr-target-branch]")?.value.trim();
-          if(confirm("Approve and merge this pull request on GitHub? This cannot be undone from here."))prAction("approve",targetBranch?{target_branch:targetBranch}:{});
+        document.querySelector("[data-pr-approve]")?.addEventListener("click",event=>{
+          const button=event.currentTarget;
+          if(confirm("Approve and merge this pull request on GitHub? This cannot be undone from here."))prAction("approve",{expected_head_sha:button.dataset.prHeadSha,policy_snapshot_id:button.dataset.policySnapshotId});
         });
         document.querySelector("[data-pr-request-changes]")?.addEventListener("click",()=>prAction("request-changes"));
         document.querySelector("[data-pr-resolve-conflicts]")?.addEventListener("click",(event)=>{
@@ -539,20 +523,14 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const feedback=document.querySelector("[data-pr-repair-text]").value.trim();
           prAction("start-repair",feedback?{feedback}:{});
         });
-        function runAiReview(mode,targetBranch){
+        function runAiReview(){
           const model=document.querySelector("[data-ai-review-model]").value||undefined;
           const reasoning_level=document.querySelector("[data-ai-review-reasoning]").value||undefined;
-          prAction("ai-review",{mode,model,reasoning_level,target_branch:targetBranch});
+          prAction("ai-review",{mode:"review_only",model,reasoning_level});
         }
         document.querySelector("[data-pr-ai-review]")?.addEventListener("click",(event)=>{
           event.currentTarget.disabled=true;event.currentTarget.textContent="Starting…";
-          runAiReview("review_only");
-        });
-        document.querySelector("[data-pr-ai-review-merge]")?.addEventListener("click",(event)=>{
-          if(!confirm("Run AI review and, if approved, merge this pull request on GitHub? This cannot be undone from here."))return;
-          event.currentTarget.disabled=true;event.currentTarget.textContent="Starting…";
-          const targetBranch=document.querySelector("[data-ai-merge-target-branch]")?.value.trim();
-          runAiReview("review_and_merge",targetBranch||undefined);
+          runAiReview();
         });
         const aiStatusBadge=document.querySelector("[data-ai-review-status]");
         if(aiStatusBadge&&aiStatusBadge.dataset.aiReviewStatus==="running"){

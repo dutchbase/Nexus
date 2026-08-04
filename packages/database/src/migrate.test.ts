@@ -89,6 +89,31 @@ integration("migrate", () => {
     if (migrationDirectory) await rm(migrationDirectory, { recursive: true, force: true });
   });
 
+  it("stores immutable GitHub policy snapshots and repository freshness", async () => {
+    await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ($q$github-policy$q$,$q$GitHub policy$q$,$q$/tmp/project$q$) RETURNING id")).rows[0].id;
+      const pullRequestId = (await client.query("INSERT INTO pull_requests (project_id) VALUES ($1) RETURNING id", [projectId])).rows[0].id;
+      const snapshot = (await client.query(
+        `INSERT INTO pull_request_policy_snapshots
+         (pull_request_id,material_json,material_hash,head_sha,base_ref,review_state,check_state,refusal_codes,complete,source,fetched_at)
+         VALUES ($1,$2,encode(digest(canonical_jsonb($2::jsonb),'sha256'),'hex'),'head','main','approved','success','[]',true,'github',now()) RETURNING id`,
+        [pullRequestId, { protected: true }],
+      )).rows[0];
+      await client.query("UPDATE pull_requests SET current_policy_snapshot_id=$2,policy_complete=true,policy_stale=false WHERE id=$1", [pullRequestId, snapshot.id]);
+      await client.query("INSERT INTO github_repository_sync_state (project_id,complete,last_attempted_at,last_completed_at) VALUES ($1,true,now(),now())", [projectId]);
+
+      await expect(client.query("UPDATE pull_request_policy_snapshots SET review_state='pending' WHERE id=$1", [snapshot.id])).rejects.toThrow("immutable");
+      expect((await client.query("SELECT current_policy_snapshot_id,policy_complete,policy_stale FROM pull_requests WHERE id=$1", [pullRequestId])).rows[0])
+        .toEqual({ current_policy_snapshot_id: snapshot.id, policy_complete: true, policy_stale: false });
+    } finally {
+      await client.end();
+    }
+  });
+
   it("serializes concurrent runners", async () => {
     await writeFile(join(migrationDirectory, "001_serialized.sql"), "SELECT pg_sleep(0.05); CREATE TABLE migration_lock_test (id integer);");
     await Promise.all([
