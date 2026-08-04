@@ -12,13 +12,17 @@ export class PrReviewPublicationError extends Error {
   }
 }
 
+export class PrReviewDestinationError extends Error {
+  readonly code = "review_destination_mismatch";
+}
+
 export function prReviewPublicationMarker(publicationId: string) {
   return `<!-- dcc-review-publication:${publicationId} -->`;
 }
 
 export function assertPrReviewDestination(review: { id: string; pull_request_id: string }, pullRequestId: string) {
   if (review.pull_request_id !== pullRequestId) {
-    throw new Error(`PR review ${review.id} does not match payload pull request`);
+    throw new PrReviewDestinationError(`PR review ${review.id} does not match payload pull request`);
   }
 }
 

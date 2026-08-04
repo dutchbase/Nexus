@@ -112,7 +112,10 @@ test("rejects a durable job whose review belongs to another pull request", () =>
   expect(() => (domain as any).assertPrReviewDestination(
     { id: "review-1", pull_request_id: "pr-1" },
     "pr-2",
-  )).toThrow("does not match payload pull request");
+  )).toThrow(expect.objectContaining({
+    code: "review_destination_mismatch",
+    message: expect.stringContaining("does not match payload pull request"),
+  }));
 });
 
 test("retries one review identity without invoking Claude or posting twice", async () => {

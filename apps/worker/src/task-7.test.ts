@@ -6,7 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
 import { createPullRequestReviewWorktree } from "../../../packages/git-runner/src/index.ts";
 import type { SnapshottedSkill } from "@dcc/skill-registry";
-import { buildApprovedInputSnapshot, type ApprovedInputSnapshot } from "@dcc/domain";
+import { assertPrReviewDestination, buildApprovedInputSnapshot, type ApprovedInputSnapshot } from "@dcc/domain";
 import { GitHubProviderError } from "@dcc/github-provider";
 import {
   approvedPhaseSkills, assertExecutionPublicationGate, executionRoot, prReviewSnapshotInput,
@@ -158,6 +158,18 @@ describe("worker orchestration boundary", () => {
   test("retries publication failures after immutable output is persisted", () => {
     const shouldRetry = (workerBoundary as any).shouldRetryPrReview;
     expect(shouldRetry(new Error("database unavailable"), "persisted output", 2, 3)).toBe(true);
+  });
+
+  test("does not retry a mismatched resume job with persisted output", () => {
+    const shouldRetry = (workerBoundary as any).shouldRetryPrReview;
+    let mismatch: unknown;
+    try {
+      assertPrReviewDestination({ id: "review-1", pull_request_id: "pr-1" }, "pr-2");
+    } catch (error) {
+      mismatch = error;
+    }
+
+    expect(shouldRetry(mismatch, "persisted output", 1, 3)).toBe(false);
   });
 
   test("cleans up the detached review worktree after the review boundary", async () => {

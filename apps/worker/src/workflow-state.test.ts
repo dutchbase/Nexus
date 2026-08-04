@@ -18,13 +18,13 @@ test("terminalizes a mismatched durable PR review with its stable error", async 
   }) };
   const workflow = await import("./workflow-state.ts") as any;
 
-  await workflow.terminalizePrReview(client, "review-1", "review_failed", "does not match payload pull request");
+  await workflow.terminalizePrReview(client, "review-1", "review_destination_mismatch", "does not match payload pull request");
 
   expect(review).toEqual({
-    status: "error", error_code: "review_failed", error_message: "does not match payload pull request",
+    status: "error", error_code: "review_destination_mismatch", error_message: "does not match payload pull request",
   });
   expect(client.query).toHaveBeenCalledWith(expect.stringContaining("UPDATE pr_ai_reviews"), [
-    "review-1", "review_failed", "does not match payload pull request",
+    "review-1", "review_destination_mismatch", "does not match payload pull request",
   ]);
 });
 
