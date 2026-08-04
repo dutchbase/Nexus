@@ -86,6 +86,20 @@ describe("execution Bash guard", () => {
     ]) expect(allowsFileTool(input, policy)).toBe(false);
   });
 
+  test("permits edits only to explicit conflict paths when supplied", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "claude-conflict-file-guard-"));
+    directories.push(root);
+    const worktree = path.join(root, "worktree");
+    const conflicted = path.join(worktree, "src", "conflicted.ts");
+    await mkdir(path.dirname(conflicted), { recursive: true });
+    await writeFile(conflicted, "resolved\n");
+    const policy = { readRoots: [worktree], writePaths: [conflicted] };
+
+    expect(allowsFileTool({ tool_name: "Edit", tool_input: { file_path: conflicted }, cwd: worktree }, policy)).toBe(true);
+    expect(allowsFileTool({ tool_name: "Write", tool_input: { file_path: path.join(worktree, "unrelated.ts") }, cwd: worktree }, policy)).toBe(false);
+    expect(allowsFileTool({ tool_name: "Write", tool_input: { file_path: path.join(root, "outside.ts") }, cwd: worktree }, policy)).toBe(false);
+  });
+
   test("uses a read-only materialized guard after the checkout copy changes", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "claude-guard-source-"));
     directories.push(root);

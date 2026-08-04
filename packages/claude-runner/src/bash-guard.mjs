@@ -40,7 +40,8 @@ function within(target, root) {
 export function allowsFileTool(input, policy) {
   const cwd = canonicalPath(input?.cwd, process.cwd());
   const toolInput = input?.tool_input;
-  if (!cwd || !toolInput || !Array.isArray(policy?.readRoots) || typeof policy?.writeRoot !== "string") return false;
+  if (!cwd || !toolInput || !Array.isArray(policy?.readRoots)
+    || (typeof policy?.writeRoot !== "string" && !Array.isArray(policy?.writePaths))) return false;
   if ((input.tool_name === "Glob" && (path.isAbsolute(toolInput.pattern ?? "") || String(toolInput.pattern ?? "").split(/[\\/]/).includes("..")))
     || (input.tool_name === "Grep" && String(toolInput.glob ?? "").split(/[\\/]/).includes(".."))) return false;
   const requested = canonicalPath(
@@ -50,6 +51,12 @@ export function allowsFileTool(input, policy) {
   if (!requested) return false;
   const roots = policy.readRoots.map((root) => canonicalPath(root, cwd)).filter(Boolean);
   if (["Edit", "Write"].includes(input.tool_name)) {
+    if (Array.isArray(policy.writePaths)) {
+      return policy.writePaths
+        .map((writePath) => canonicalPath(writePath, cwd))
+        .filter(Boolean)
+        .some((writePath) => requested === writePath);
+    }
     const writeRoot = canonicalPath(policy.writeRoot, cwd);
     return Boolean(writeRoot && within(requested, writeRoot));
   }

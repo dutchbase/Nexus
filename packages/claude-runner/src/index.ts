@@ -101,8 +101,8 @@ function hookCommand(guardPath: string) {
   return `node ${JSON.stringify(guardPath)}`;
 }
 
-function fileHookCommand(guardPath: string, readRoots: string[], writeRoot: string) {
-  const policy = Buffer.from(JSON.stringify({ readRoots, writeRoot })).toString("base64url");
+function fileHookCommand(guardPath: string, readRoots: string[], writeRoot: string, writePaths?: readonly string[]) {
+  const policy = Buffer.from(JSON.stringify(writePaths ? { readRoots, writePaths } : { readRoots, writeRoot })).toString("base64url");
   return `${hookCommand(guardPath)} ${policy}`;
 }
 
@@ -151,6 +151,24 @@ function permissionPath(target: string) {
   return `//${path.resolve(target).slice(1)}`;
 }
 
+function canonicalPath(target: string, cwd: string) {
+  let current = path.resolve(cwd, target);
+  const missing: string[] = [];
+  while (true) {
+    try { return path.join(realpathSync(current), ...missing); } catch {
+      const parent = path.dirname(current);
+      if (parent === current) throw new Error(`could not resolve execution path: ${target}`);
+      missing.unshift(path.basename(current));
+      current = parent;
+    }
+  }
+}
+
+function isWithin(target: string, root: string) {
+  const relative = path.relative(root, target);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
+}
+
 async function gitMetadataPaths(workingDirectory: string) {
   const dotGit = path.join(workingDirectory, ".git");
   let gitDirectory = dotGit;
@@ -176,7 +194,7 @@ async function hideWorktreeGitMetadata(workingDirectory: string) {
   };
 }
 
-function executionSettings(input: PlanningInvocation, guardPath: string) {
+function executionSettings(input: ExecutionInvocation, guardPath: string) {
   const gitMetadataPaths = [...new Set(input.gitMetadataPaths ?? [path.join(input.workingDirectory, ".git")])];
   const deniedGitPaths = gitMetadataPaths.flatMap((target) => {
     const rulePath = permissionPath(target);
@@ -205,9 +223,16 @@ function executionSettings(input: PlanningInvocation, guardPath: string) {
     return [`Read(${rulePath})`, `Read(${rulePath}/**)`];
   });
   const worktreeRule = permissionPath(worktree);
+  const writePaths = input.allowedWritePaths?.map((target) => canonicalPath(target, worktree));
+  if (writePaths?.some((target) => !isWithin(target, worktree))) {
+    throw new Error("allowed execution write path must be inside the worktree");
+  }
+  const writePermissions = writePaths
+    ? [...new Set(writePaths)].map((target) => `Edit(${permissionPath(target)})`)
+    : [`Edit(${worktreeRule})`, `Edit(${worktreeRule}/**)`];
   return JSON.stringify({
     permissions: {
-      allow: [...allowedPermissions, `Edit(${worktreeRule})`, `Edit(${worktreeRule}/**)`],
+      allow: [...allowedPermissions, ...writePermissions],
       deny: [...deniedHostHome, ...deniedGitPaths, ...deniedCredentialReads, "WebFetch"],
     },
     sandbox: {
@@ -232,7 +257,7 @@ function executionSettings(input: PlanningInvocation, guardPath: string) {
       PreToolUse: [
         {
           matcher: "Read|Glob|Grep|Edit|Write",
-          hooks: [{ type: "command", command: fileHookCommand(guardPath, [...new Set(allowRead)], worktree) }],
+          hooks: [{ type: "command", command: fileHookCommand(guardPath, [...new Set(allowRead)], worktree, writePaths) }],
         },
         {
           matcher: "Agent",
@@ -275,7 +300,15 @@ export function summarizeClaudeFailure(stdout: string, stderr: string) {
 
 export async function invokePlanningClaude(input: PlanningInvocation) {
   assertSubscriptionOnlyEnvironment();
-  const env: NodeJS.ProcessEnv = { ...process.env, CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken, AGENT_CONTROL_DISABLE: "1" };
+  // Planning receives only locale/PATH, its subscription token, and runner
+  // switches. Worker credentials must never cross this process boundary.
+  const env: NodeJS.ProcessEnv = {
+    PATH: process.env.PATH,
+    LANG: process.env.LANG,
+    LC_ALL: process.env.LC_ALL,
+    CLAUDE_CODE_OAUTH_TOKEN: input.oauthToken,
+    AGENT_CONTROL_DISABLE: "1",
+  };
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
   const result = await runClaude(buildPlanningArguments(input), {
     cwd: input.workingDirectory, env, executable: input.claudeExecutable, signal: input.signal,
@@ -302,6 +335,7 @@ export type ExecutionInvocation = PlanningInvocation & {
   timeoutMs: number;
   signal?: AbortSignal;
   onEvent: (event: { eventType: string; event: unknown; raw: string }) => Promise<void>;
+  allowedWritePaths?: readonly string[];
 };
 
 export function assertExecutionSandboxVersion(value: string) {

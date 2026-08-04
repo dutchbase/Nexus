@@ -17,9 +17,9 @@ import {
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
-  abortMerge, assertAttemptResultCommit, commitExecutionChanges, conflictedFiles, createConflictResolutionWorktree, createExecutionWorktree,
+  abortMerge, assertAttemptResultCommit, assertNoConflictMarkers, commitExecutionChanges, conflictedFiles, createConflictResolutionWorktree, createExecutionWorktree,
   createPullRequestReviewWorktree, mergeBaseIntoWorktree, pushExecutionBranch, validateEffectiveWorktree,
-  validateExecutionWorktree, WorktreeValidationError, worktreeDiff,
+  stageConflictResolutionPaths, validateExecutionWorktree, WorktreeValidationError, worktreeDiff,
 } from "../../../packages/git-runner/src/index.ts";
 import {
   createPullRequest, createPullRequestComment, findOpenPullRequestForHead, getPullRequest, updatePullRequestBase,
@@ -424,7 +424,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
      (id,ticket_id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
      VALUES ($1,$2,$3,$4,'running',NULL,$5,$6,$7,now(),$8)`,
     [runId, ticket.id, input.project.id, runType, input.ai.model, input.ai.reasoning_level,
-      planningStartPath, { job_id: job.id, project_config_version: input.project.config_version, planning_start_path: planningStartPath }],
+      planningStartPath, { job_id: job.id, project_config_version: input.project.config_version, planning_start_path: planningStartPath, environment_profile: "planning-minimal" }],
   ));
   await transitionToPlanning(ticket.id, job.id, runId, lease);
 
@@ -1457,7 +1457,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
        (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
        VALUES ($1,$2,'pr_conflict_resolution','running',NULL,$3,$4,$5,now(),$6)`,
       [newRunId, project.id, model, reasoningLevel, worktree.worktreePath,
-        { job_id: job.id, pr_conflict_resolution_id: payload.pr_conflict_resolution_id }],
+        { authority_profile: "conflict-resolution", allowed_write_paths: conflicts }],
     );
     runId = newRunId;
     await pool.query(
@@ -1471,7 +1471,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
       await writeFile(promptFile, prompt, { flag: "wx" });
 
       await lease.assertOwned();
-      const result = await invokePlanningClaude({
+      const result = await invokeExecutionClaude({
         task: `Resolve the merge conflicts in PR #${pullRequest.number} in ${pullRequest.repository}.`,
         sessionId,
         model,
@@ -1479,6 +1479,11 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
         promptFile,
         skillBundleDir: temporary,
         workingDirectory: worktree.worktreePath,
+        executionDirectory: worktree.worktreePath,
+        logPath: path.join(temporary, "conflict-resolution.log"),
+        timeoutMs: 30 * 60 * 1000,
+        onEvent: async () => undefined,
+        allowedWritePaths: conflicts,
         maxTurns: 10,
         oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
         signal: lease.signal,
@@ -1486,10 +1491,17 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
       await lease.assertOwned();
       await pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]);
 
+      await stageConflictResolutionPaths(worktree.worktreePath, conflicts);
       const remaining = await conflictedFiles(worktree.worktreePath);
       if (remaining.length) {
         await abortMerge(worktree.worktreePath);
         throw new Error(`Claude left ${remaining.length} unresolved conflict(s): ${remaining.join(", ")}`);
+      }
+      try {
+        await assertNoConflictMarkers(worktree.worktreePath, conflicts);
+      } catch (error) {
+        await abortMerge(worktree.worktreePath);
+        throw error;
       }
 
       let validation;
@@ -1521,6 +1533,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
         worktreePath: worktree.worktreePath,
         message: `Merge ${pullRequest.base_branch} into ${pullRequest.head_branch}`,
         protectedPaths: project.config_json?.protected_paths,
+        stagePaths: conflicts,
       });
       await lease.assertOwned();
       await pushExecutionBranch(worktree.worktreePath, worktree.branchName, "HEAD");

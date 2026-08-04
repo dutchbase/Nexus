@@ -7,6 +7,7 @@ import { promisify } from "node:util";
 import { describe, expect, it } from "vitest";
 import {
   abortMerge,
+  assertNoConflictMarkers,
   commitExecutionChanges,
   conflictedFiles,
   countCredentialShapes,
@@ -17,6 +18,7 @@ import {
   importPrivateExecutionClone,
   matchesProtectedPath,
   mergeBaseIntoWorktree,
+  stageConflictResolutionPaths,
   sanitizeValidationOutput,
   validateExecutionWorktree,
   worktreeDiff,
@@ -160,6 +162,39 @@ describe("createConflictResolutionWorktree / mergeBaseIntoWorktree", () => {
       expect(merge.headCommit).toBe((await git(worktreePath, ["rev-parse", "HEAD"])).stdout.trim());
       expect(await conflictedFiles(worktreePath)).toEqual([]);
       expect((await git(worktreePath, ["log", "-1", "--pretty=%s"])).stdout.trim()).toBe("main advances");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("conflict resolution staging", () => {
+  it("stages only the original conflicted paths", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-conflict-stage-"));
+    try {
+      await initRepo(tmp);
+      await writeAndCommit(tmp, "conflicted.ts", "base\n", "initial commit");
+      await writeAndCommit(tmp, "unrelated.ts", "base\n", "initial commit");
+      await writeFile(path.join(tmp, "conflicted.ts"), "resolved\n");
+      await writeFile(path.join(tmp, "unrelated.ts"), "unexpected\n");
+
+      await stageConflictResolutionPaths(tmp, ["conflicted.ts"]);
+
+      expect((await git(tmp, ["diff", "--cached", "--name-only"])).stdout.trim()).toBe("conflicted.ts");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects textual conflict markers after staging", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-conflict-markers-"));
+    try {
+      await initRepo(tmp);
+      await writeAndCommit(tmp, "conflicted.ts", "base\n", "initial commit");
+      await writeFile(path.join(tmp, "conflicted.ts"), "<<<<<<< HEAD\nours\n=======\ntheirs\n>>>>>>> main\n");
+
+      await stageConflictResolutionPaths(tmp, ["conflicted.ts"]);
+      await expect(assertNoConflictMarkers(tmp, ["conflicted.ts"])).rejects.toThrow("textual conflict marker");
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }

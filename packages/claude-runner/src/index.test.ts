@@ -125,6 +125,26 @@ test("writes fail-closed workspace-only sandbox settings for execution", async (
   }
 });
 
+test("limits a scoped execution sandbox to its canonical conflict file", async () => {
+  const settingsDirectory = await mkdtemp(path.join(tmpdir(), "claude-runner-test-"));
+  const configured = { ...executionInvocation, allowedWritePaths: ["src/conflicted.ts"] } satisfies ExecutionInvocation;
+  const { settingsFile } = await createExecutionSandboxSettings(configured, settingsDirectory);
+  try {
+    const settings = JSON.parse(await readFile(settingsFile, "utf8"));
+    expect(settings.permissions.allow).toEqual(expect.arrayContaining(["Edit(//work/src/conflicted.ts)"]));
+    expect(settings.permissions.allow).not.toEqual(expect.arrayContaining(["Edit(//work/**)"]));
+
+    const fileHook = settings.hooks.PreToolUse.find((hook: { matcher: string }) => hook.matcher === "Read|Glob|Grep|Edit|Write");
+    const command = fileHook.hooks[0].command as string;
+    await expect(runConfiguredHook(command, "Edit", { file_path: "/work/src/conflicted.ts" }))
+      .resolves.toMatchObject({ code: 0, stdout: "" });
+    await expect(runConfiguredHook(command, "Write", { file_path: "/work/unrelated.ts" }))
+      .resolves.toMatchObject({ code: 2 });
+  } finally {
+    await rm(settingsDirectory, { recursive: true, force: true });
+  }
+});
+
 test("requires Claude versions that support strict sandbox allowlists", () => {
   expect(isClaudeSandboxVersionSupported("2.1.218")).toBe(false);
   expect(isClaudeSandboxVersionSupported("2.1.219")).toBe(true);
@@ -313,6 +333,34 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan"}'
   controller.abort();
 
   await expect(running).rejects.toMatchObject({ name: "AbortError" });
+});
+
+test("invokes planning with only its documented minimal environment", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-env-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const capture = path.join(root, "environment.json");
+  await writeFile(executable, `#!/bin/sh
+node -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify(process.env))' ${JSON.stringify(capture)}
+printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan","session_id":"session"}'
+`);
+  await chmod(executable, 0o755);
+  const previousGithubToken = process.env.GITHUB_TOKEN;
+  const previousDatabaseUrl = process.env.DATABASE_URL;
+  process.env.GITHUB_TOKEN = "publication-token";
+  process.env.DATABASE_URL = "postgres://secret";
+  try {
+    await invokePlanningClaude({ ...invocation, claudeExecutable: executable, workingDirectory: root });
+  } finally {
+    if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
+    else process.env.GITHUB_TOKEN = previousGithubToken;
+    if (previousDatabaseUrl === undefined) delete process.env.DATABASE_URL;
+    else process.env.DATABASE_URL = previousDatabaseUrl;
+  }
+  const environment = JSON.parse(await readFile(capture, "utf8"));
+  expect(environment).toMatchObject({ CLAUDE_CODE_OAUTH_TOKEN: "token", AGENT_CONTROL_DISABLE: "1" });
+  expect(environment.GITHUB_TOKEN).toBeUndefined();
+  expect(environment.DATABASE_URL).toBeUndefined();
 });
 
 test("invokes execution with a materialized guard outside the worktree", async () => {

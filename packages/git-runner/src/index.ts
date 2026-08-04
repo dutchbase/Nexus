@@ -345,6 +345,31 @@ export async function conflictedFiles(worktreePath: string) {
   return result.stdout.split("\0").filter(Boolean);
 }
 
+function conflictPath(file: string) {
+  if (!file || path.isAbsolute(file) || file.split(/[\\/]/).includes("..")) {
+    throw new Error("conflict path escapes worktree");
+  }
+  return file;
+}
+
+export async function stageConflictResolutionPaths(worktreePath: string, files: readonly string[]) {
+  const paths = files.map(conflictPath);
+  if (!paths.length) throw new Error("no conflict paths to stage");
+  await git(worktreePath, ["add", "--", ...paths]);
+}
+
+export async function assertNoConflictMarkers(worktreePath: string, files: readonly string[]) {
+  for (const file of files.map(conflictPath)) {
+    const content = await readFile(path.join(worktreePath, file), "utf8").catch((error: any) => {
+      if (error?.code === "ENOENT") return "";
+      throw error;
+    });
+    if (/(^|\r?\n)(?:<{7}|={7}|>{7})/.test(content)) {
+      throw new Error(`textual conflict marker remains in ${file}`);
+    }
+  }
+}
+
 export async function abortMerge(worktreePath: string) {
   await git(worktreePath, ["merge", "--abort"]);
 }
@@ -548,6 +573,7 @@ export async function commitExecutionChanges(input: {
   message: string;
   baseCommit?: string;
   protectedPaths?: string[];
+  stagePaths?: readonly string[];
 }) {
   if (input.baseCommit) {
     await validateEffectiveWorktree({
@@ -555,7 +581,8 @@ export async function commitExecutionChanges(input: {
     });
     await git(input.worktreePath, ["reset", "--soft", input.baseCommit]);
   }
-  await git(input.worktreePath, ["add", "--all"]);
+  if (input.stagePaths) await stageConflictResolutionPaths(input.worktreePath, input.stagePaths);
+  else await git(input.worktreePath, ["add", "--all"]);
   // Re-scan the final index, including agent commits back to the recorded base,
   // so the secret/protected-path gates cover exactly what will be published.
   const nameStatus = (await git(input.worktreePath, [
