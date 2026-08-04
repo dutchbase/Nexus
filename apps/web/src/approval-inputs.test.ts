@@ -1,5 +1,7 @@
 import { expect, test, vi } from "vitest";
 
+process.env.DCC_PROCESS_ROLE = "web";
+
 vi.mock("@dcc/database", () => ({
   artifactDataRoot: () => "/primary", legacyArtifactDataRoot: () => "/legacy",
   finalizeArtifact: vi.fn(), inTransaction: vi.fn(),

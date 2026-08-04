@@ -8,11 +8,11 @@ import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
 import {
-  AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approveAndMergePullRequest, approvePlanDecision, buildApprovedInputSnapshot,
+  AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
   buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
-  globalPromptTypes, enqueueNotification, importGithubPullRequests, promptContentHash, PullRequestMergeError,
-  rejectPlanDecision, requestPlanRevisionDecision, requireApprovalPrompt, resolveAiConfiguration, setPullRequestTicketStatus, syncOpenPullRequests,
-  syncPullRequest, validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
+  globalPromptTypes, enqueueNotification, promptContentHash, PullRequestMergeError,
+  rejectPlanDecision, requestPlanRevisionDecision, requireApprovalPrompt, resolveAiConfiguration, setPullRequestTicketStatus,
+  validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
 import {
   mergeNotificationConfiguration, parseNotificationConfiguration, parseNotificationConfigurationPatch,
