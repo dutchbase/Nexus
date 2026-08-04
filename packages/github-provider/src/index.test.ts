@@ -4,8 +4,10 @@ import {
   createPullRequest,
   createPullRequestComment,
   findOpenPullRequestForHead,
+  getPullRequest,
   listPullRequests,
   markReadyForReview,
+  mergeBranch,
   mergePullRequest,
 } from "./index.ts";
 
@@ -69,7 +71,23 @@ test("lists all same-origin pages once and retains partial recovery metadata", a
   expect(requests).toBe(4);
 });
 
-test("uses the configured Enterprise GraphQL endpoint", async () => {
+test("lists successful two-page results once", async () => {
+  await withServer((incoming, outgoing) => {
+    outgoing.setHeader("content-type", "application/json");
+    if (incoming.url?.includes("page=2")) {
+      outgoing.end(JSON.stringify([{ number: 2 }, { number: 3 }]));
+      return;
+    }
+    outgoing.setHeader("link", `</repos/acme/widgets/pulls?state=all&per_page=100&page=2>; rel="next"`);
+    outgoing.end(JSON.stringify([{ number: 1 }, { number: 2 }]));
+  }, async () => {
+    const result = await listPullRequests("acme", "widgets");
+    expect(result).toMatchObject({ complete: true, cursor: null });
+    expect(result.items.map(({ number }) => number)).toEqual([1, 2, 3]);
+  });
+});
+
+test("routes the mark-ready pull-request mutation to configured Enterprise GraphQL", async () => {
   const urls: string[] = [];
   await withServer((incoming, outgoing) => {
     urls.push(incoming.url ?? "");
@@ -82,8 +100,9 @@ test("uses the configured Enterprise GraphQL endpoint", async () => {
   expect(urls).toContain("/api/graphql");
 });
 
-test("applies abort and safe error policy", async () => {
+test("applies a ten-second abort and safe error policy", async () => {
   const realFetch = globalThis.fetch;
+  const abortTimeout = vi.spyOn(AbortSignal, "timeout");
   let signal: AbortSignal | undefined;
   vi.stubGlobal("fetch", async (_input: RequestInfo | URL, init?: RequestInit) => {
     signal = init?.signal ?? undefined;
@@ -95,11 +114,60 @@ test("applies abort and safe error policy", async () => {
     await expect(createPullRequest({ owner: "acme", repository: "widgets", title: "x", body: "", head: "f", base: "main" }))
       .rejects.toThrow(/status 500/);
     expect(signal).toBeInstanceOf(AbortSignal);
+    expect(abortTimeout).toHaveBeenCalledWith(10_000);
     await expect(createPullRequest({ owner: "acme", repository: "widgets", title: "test-token", body: "secret body", head: "f", base: "main" }))
       .rejects.toThrow("status 500");
   } finally {
     vi.stubGlobal("fetch", realFetch);
+    abortTimeout.mockRestore();
   }
+});
+
+test("uses 250 then 500 millisecond GET retry backoff", async () => {
+  vi.useFakeTimers();
+  const realFetch = globalThis.fetch;
+  const fetchSpy = vi.fn(async () => new Response("unavailable", { status: 503 }));
+  vi.stubGlobal("fetch", fetchSpy);
+  process.env.GITHUB_API_BASE_URL = "https://github.example/api/v3";
+  process.env.GITHUB_TOKEN = "test-token";
+  try {
+    const result = findOpenPullRequestForHead("acme", "widgets", "feature").then(() => null, (error) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(249);
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(499);
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(1);
+    expect(await result).toMatchObject({ message: "GitHub provider request failed with status 503" });
+    expect(fetchSpy).toHaveBeenCalledTimes(3);
+  } finally {
+    vi.stubGlobal("fetch", realFetch);
+    vi.useRealTimers();
+  }
+});
+
+test("redacts malformed successful response bodies", async () => {
+  await withServer((_incoming, outgoing) => {
+    outgoing.setHeader("content-type", "application/json");
+    outgoing.end("test-token malformed provider body");
+  }, async () => {
+    await expect(getPullRequest("acme", "widgets", 1)).rejects.toThrow("GitHub provider response decoding failed");
+    await expect(getPullRequest("acme", "widgets", 1)).rejects.not.toThrow(/test-token|malformed provider body/);
+  });
+});
+
+test("redacts malformed successful branch-merge bodies", async () => {
+  await withServer((_incoming, outgoing) => {
+    outgoing.statusCode = 201;
+    outgoing.setHeader("content-type", "application/json");
+    outgoing.end("test-token malformed merge body");
+  }, async () => {
+    await expect(mergeBranch("acme", "widgets", "main", "feature"))
+      .rejects.toThrow("GitHub provider response decoding failed");
+  });
 });
 
 test("returns rate-limit recovery metadata without exposing the response body", async () => {
@@ -111,6 +179,34 @@ test("returns rate-limit recovery metadata without exposing the response body", 
   }, async () => {
     const result = await listPullRequests("acme", "widgets");
     expect(result).toMatchObject({ complete: false, items: [], errorCode: "rate_limited", retryAt: "2026-05-28T20:26:40.000Z" });
+  });
+});
+
+test("classifies 429 limits with Retry-After recovery metadata", async () => {
+  await withServer((_incoming, outgoing) => {
+    outgoing.statusCode = 429;
+    outgoing.setHeader("retry-after", "60");
+    outgoing.end("secondary rate limit");
+  }, async () => {
+    await expect(listPullRequests("acme", "widgets"))
+      .resolves.toMatchObject({ complete: false, errorCode: "rate_limited", retryAt: expect.any(String) });
+  });
+});
+
+test("classifies secondary and GraphQL rate limits with recovery times", async () => {
+  let graphql = false;
+  await withServer((incoming, outgoing) => {
+    graphql = incoming.url?.endsWith("/graphql") ?? false;
+    outgoing.setHeader("content-type", "application/json");
+    outgoing.setHeader("retry-after", "60");
+    if (graphql) outgoing.end(JSON.stringify({ errors: [{ type: "RATE_LIMITED", message: "secondary rate limit" }] }));
+    else if (incoming.url?.startsWith("/api/v3/")) outgoing.end(JSON.stringify({ node_id: "PR_node" }));
+    else outgoing.statusCode = 403, outgoing.end("secondary rate limit");
+  }, async (baseUrl) => {
+    const rest = await listPullRequests("acme", "widgets");
+    expect(rest).toMatchObject({ complete: false, errorCode: "rate_limited", retryAt: expect.any(String) });
+    process.env.GITHUB_API_BASE_URL = `${baseUrl}/api/v3`;
+    await expect(markReadyForReview("acme", "widgets", 1)).rejects.toMatchObject({ code: "rate_limited", retryAt: expect.any(String) });
   });
 });
 

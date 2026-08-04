@@ -78,10 +78,20 @@ function retryAt(response: Response) {
   return reset && Number.isFinite(Number(reset)) ? new Date(Number(reset) * 1000).toISOString() : undefined;
 }
 
-function errorFor(response: Response) {
-  const limited = response.status === 429 || (response.status === 403 && response.headers.get("x-ratelimit-remaining") === "0");
+async function errorFor(response: Response) {
+  const detail = response.status === 403 ? await response.clone().text().catch(() => "") : "";
+  const limited = response.status === 429
+    || (response.status === 403 && (response.headers.get("x-ratelimit-remaining") === "0" || !!response.headers.get("retry-after") || /rate limit/i.test(detail)));
   const code = limited ? "rate_limited" : response.status >= 500 || response.status === 408 ? "transient" : "http_error";
   return new GitHubProviderError(code, `GitHub provider request failed with status ${response.status}`, response.status, limited ? retryAt(response) : undefined);
+}
+
+async function jsonFor<T>(response: Response): Promise<T> {
+  try {
+    return await response.json() as T;
+  } catch {
+    throw new GitHubProviderError("invalid_response", "GitHub provider response decoding failed", response.status);
+  }
 }
 
 async function responseFor(url: string, init: RequestInit = {}, allowStatuses: number[] = []): Promise<Response> {
@@ -103,7 +113,7 @@ async function responseFor(url: string, init: RequestInit = {}, allowStatuses: n
         },
       });
       if (response.ok || allowStatuses.includes(response.status)) return response;
-      const error = errorFor(response);
+      const error = await errorFor(response);
       if (error.code !== "transient") throw error;
       lastError = error;
     } catch (error) {
@@ -117,7 +127,7 @@ async function responseFor(url: string, init: RequestInit = {}, allowStatuses: n
 }
 
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
-  return (await responseFor(`${apiBaseUrl()}${path}`, init)).json() as Promise<T>;
+  return jsonFor<T>(await responseFor(`${apiBaseUrl()}${path}`, init));
 }
 
 async function requestRaw(path: string, init?: RequestInit): Promise<string> {
@@ -152,8 +162,11 @@ async function graphqlRequest<T>(query: string, variables: Record<string, unknow
     method: "POST",
     body: JSON.stringify({ query, variables }),
   });
-  const payload = await response.json() as { data: T; errors?: unknown };
-  if (payload.errors) throw new GitHubProviderError("graphql_error", "GitHub GraphQL request failed");
+  const payload = await jsonFor<{ data: T; errors?: unknown }>(response);
+  if (payload.errors) {
+    const limited = /rate limit/i.test(JSON.stringify(payload.errors));
+    throw new GitHubProviderError(limited ? "rate_limited" : "graphql_error", "GitHub GraphQL request failed", response.status, limited ? retryAt(response) : undefined);
+  }
   return payload.data as T;
 }
 
@@ -224,7 +237,7 @@ export async function listPullRequests(
   while (cursor) {
     try {
       const response = await responseFor(cursor);
-      const page = await response.json() as ProviderPullRequest[];
+      const page = await jsonFor<ProviderPullRequest[]>(response);
       for (const item of page) if (!numbers.has(item.number)) {
         numbers.add(item.number);
         items.push(item);
@@ -248,8 +261,8 @@ export async function mergeBranch(owner: string, repository: string, base: strin
     method: "POST",
     body: JSON.stringify({ base, head }),
   }, [204, 409]);
-  if (response.status === 201) { const b = await response.json() as { sha: string }; return { outcome: "merged", sha: b.sha }; }
+  if (response.status === 201) { const b = await jsonFor<{ sha: string }>(response); return { outcome: "merged", sha: b.sha }; }
   if (response.status === 204) return { outcome: "already_up_to_date" };
   if (response.status === 409) return { outcome: "conflict" };
-  throw errorFor(response);
+  throw await errorFor(response);
 }
