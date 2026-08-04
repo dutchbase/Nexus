@@ -513,6 +513,25 @@ describe("execution effective diff", () => {
     }
   });
 
+  it("does not scan a secret from the source of a staged rename", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-rename-source-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      const safeContent = "shared\n".repeat(20);
+      await writeAndCommit(repo, "before.txt", "AKIAIOSFODNN7EXAMPLE\n" + safeContent, "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await git(repo, ["mv", "before.txt", "after.txt"]);
+      await writeFile(path.join(repo, "after.txt"), safeContent);
+
+      await commitExecutionChanges({ worktreePath: repo, baseCommit, message: "worker commit" });
+
+      expect((await git(repo, ["show", "HEAD:after.txt"])).stdout).toBe(safeContent);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a staged rename from a protected path", async () => {
     const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-protected-rename-"));
     try {
