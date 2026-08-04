@@ -5,8 +5,9 @@ function database(rows: any[], liveSourceAttemptId?: string) {
   const query = vi.fn(async (sql: string) => {
     if (sql === "BEGIN" || sql === "COMMIT" || sql === "ROLLBACK") return { rows: [], rowCount: 0 };
     if (sql.includes("FOR UPDATE SKIP LOCKED")) {
-      const sourceReferenceIsFiltered = sql.includes("source_execution_attempt_id");
-      return { rows: liveSourceAttemptId && sourceReferenceIsFiltered ? [] : rows.splice(0, 1), rowCount: 1 };
+      const sourceReferenceIsLive = sql.includes("source_execution_attempt_id")
+        && sql.includes("j.status IN ('queued','running')");
+      return { rows: liveSourceAttemptId && sourceReferenceIsLive ? [] : rows.splice(0, 1), rowCount: 1 };
     }
     if (sql.includes("UPDATE execution_attempts")) return { rows: [], rowCount: 1 };
     throw new Error(`unexpected query: ${sql}`);
