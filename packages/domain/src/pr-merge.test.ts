@@ -121,6 +121,28 @@ test("records GitHub's compare-and-swap rejection as a head-race refusal", async
   expect(db.queries.some(({ sql, values }: any) => sql.includes("state='refused'") && values?.includes("provider_head_changed"))).toBe(true);
 });
 
+test.each(["transient", "invalid_response"])("reconciles a retry after an ambiguous %s merge error", async (code) => {
+  const first = database();
+  github.mergePullRequest.mockRejectedValueOnce(new GitHubProviderError(code, "ambiguous merge result"));
+
+  await expect(approveAndMergePullRequest(first, expected)).rejects.toMatchObject({ code: "provider_error" });
+
+  expect(first.queries.some(({ sql, values }: any) => sql.includes("INSERT INTO pull_request_merge_attempts")
+    && values?.includes("verified"))).toBe(true);
+  expect(first.queries.some(({ sql }: { sql: string }) => sql.includes("state='refused'"))).toBe(false);
+  const retry = database({ attempt: {
+    state: "verified", expected_head_sha: "head-sha", verified_policy_snapshot_id: "verified-snapshot",
+  } });
+  github.getPullRequest.mockResolvedValue({ merged: true, head: { sha: "head-sha" }, merge_commit_sha: "merge-sha" });
+
+  await expect(approveAndMergePullRequest(retry, expected)).resolves.toEqual({
+    mergedSha: "merge-sha", mergedHeadSha: "head-sha", policySnapshotId: "verified-snapshot",
+  });
+  expect(github.mergePullRequest).toHaveBeenCalledTimes(1);
+  expect(retry.queries.some(({ sql, values }: any) => sql.includes("state='merged'")
+    && values?.includes("verified-snapshot") && values?.includes("head-sha") && values?.includes("merge-sha"))).toBe(true);
+});
+
 test("reconciles a retry after GitHub merged but the first worker missed durable completion", async () => {
   const db = database({ attempt: {
     state: "verified", expected_head_sha: "head-sha", verified_policy_snapshot_id: "verified-snapshot",

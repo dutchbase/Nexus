@@ -186,9 +186,8 @@ export async function importGithubPullRequests(
 
 export async function syncOpenPullRequests(assertOwned: () => Promise<void> = async () => {}) {
   const rows = (await pool.query(
-    `SELECT pr.id FROM pull_requests pr JOIN tickets t ON t.id=pr.ticket_id
-     WHERE t.status=ANY($1::text[]) ORDER BY pr.last_synced_at NULLS FIRST`,
-    [openPrStatuses],
+    `SELECT pr.id FROM pull_requests pr
+     WHERE pr.provider='github' AND pr.state='open' ORDER BY pr.last_synced_at NULLS FIRST`,
   )).rows;
   for (const row of rows) {
     try {

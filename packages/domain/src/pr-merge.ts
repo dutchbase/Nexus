@@ -179,12 +179,13 @@ export async function approveAndMergePullRequest(
   try {
     providerResponse = await mergePullRequest(owner, repo, stored.number, "squash", mergeInput.expectedHeadSha);
   } catch (error) {
+    const refused = error instanceof GitHubProviderError && error.code === "http_error";
     const code = error instanceof GitHubProviderError && error.status === 409 ? "provider_head_changed" : "provider_error";
     const response = error instanceof GitHubProviderError
       ? { code: error.code, status: error.status ?? null, message: error.message }
       : { message: error instanceof Error ? error.message : "merge failed" };
-    await recordProviderRefusal(db, mergeInput, code, response);
-    throw new PullRequestMergeError(`merge refused: ${code}`, code);
+    if (refused) await recordProviderRefusal(db, mergeInput, code, response);
+    throw new PullRequestMergeError(`${refused ? "merge refused" : "merge outcome unknown"}: ${code}`, code);
   }
   if (!providerResponse.merged || !providerResponse.sha) {
     await recordProviderRefusal(db, mergeInput, "provider_refused", providerResponse);

@@ -121,6 +121,30 @@ test("imports partial pages and records the failed cursor without claiming compl
   ]);
 });
 
+test("syncs policy inputs for an open imported pull request without a ticket", async () => {
+  database.pool.query.mockImplementation(async (sql: string) => {
+    if (sql.includes("SELECT pr.id FROM pull_requests")) {
+      expect(sql).toContain("pr.state='open'");
+      expect(sql).not.toContain("JOIN tickets");
+      return { rows: [{ id: "unlinked-pr" }] };
+    }
+    if (sql.includes("WHERE pr.id=$1")) return { rows: [{
+      id: "unlinked-pr", github_owner: "acme", github_repository: "widgets", number: 42, ticket_id: null,
+    }] };
+    if (sql.includes("INSERT INTO pull_request_policy_snapshots")) return { rows: [{ id: "snapshot-id" }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  });
+  github.getPullRequestPolicyInputs.mockResolvedValue({
+    ...policyInputs,
+    requestedReviewers: [{ type: "user", name: "octocat" }],
+  });
+
+  await syncOpenPullRequests();
+
+  const update = database.pool.query.mock.calls.find(([sql]) => String(sql).includes("current_policy_snapshot_id="));
+  expect(update?.[1]).toEqual(expect.arrayContaining(["head-sha", '[{"type":"user","name":"octocat"}]']));
+});
+
 test("stops open pull-request iteration when lease ownership is lost mid-sync", async () => {
   database.pool.query.mockImplementation(async (sql: string) => {
     if (sql.includes("SELECT pr.id FROM pull_requests")) return { rows: [{ id: "pr-1" }, { id: "pr-2" }] };
