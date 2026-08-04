@@ -1,4 +1,5 @@
 import { skillsForPhase, type SkillPhase, type SnapshottedSkill } from "@dcc/skill-registry";
+import { GitHubProviderError } from "@dcc/github-provider";
 import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -131,6 +132,11 @@ export function approvedExecutionInput(snapshot: {
 
 export function assertExecutionPublicationGate(repairing: boolean, usedAgent: boolean) {
   if (!repairing && !usedAgent) throw new Error("execution did not invoke Agent tool");
+}
+
+export function shouldRetryPrReview(error: unknown, rawOutput: string | null, attempt: number, maxAttempts: number) {
+  return attempt < maxAttempts && (Boolean(rawOutput)
+    || error instanceof GitHubProviderError && ["transient", "rate_limited"].includes(error.code));
 }
 
 export function prReviewSnapshotInput(input: {

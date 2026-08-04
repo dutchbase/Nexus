@@ -87,6 +87,34 @@ test("fails closed when comment lookup is incomplete", async () => {
   expect(db.row).toMatchObject({ status: "running", publication_status: "pending", publication_attempt_count: 1 });
 });
 
+test("does not trust an unrelated comment that only copies the publication marker", async () => {
+  const db = database();
+  const createComment = vi.fn(async () => ({ id: 8, html_url: "https://github.test/comment/8" }));
+  const args = input({
+    listComments: vi.fn(async () => ({
+      complete: true,
+      items: [{
+        id: 7,
+        html_url: "https://github.test/comment/7",
+        body: "Spoofed content.\n\n<!-- dcc-review-publication:publication-1 -->",
+      }],
+    })),
+    createComment,
+  });
+
+  await (domain as any).resumePrReviewPublication(db, args);
+
+  expect(createComment).toHaveBeenCalledWith(`${markdown}\n\n<!-- dcc-review-publication:publication-1 -->`);
+  expect(db.row.github_comment_id).toBe(8);
+});
+
+test("rejects a durable job whose review belongs to another pull request", () => {
+  expect(() => (domain as any).assertPrReviewDestination(
+    { id: "review-1", pull_request_id: "pr-1" },
+    "pr-2",
+  )).toThrow("does not match payload pull request");
+});
+
 test("retries one review identity without invoking Claude or posting twice", async () => {
   const db = database({ finalUpdateFailsOnce: true });
   let posted: { id: number; html_url: string; body: string } | null = null;

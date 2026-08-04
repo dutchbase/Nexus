@@ -16,6 +16,12 @@ export function prReviewPublicationMarker(publicationId: string) {
   return `<!-- dcc-review-publication:${publicationId} -->`;
 }
 
+export function assertPrReviewDestination(review: { id: string; pull_request_id: string }, pullRequestId: string) {
+  if (review.pull_request_id !== pullRequestId) {
+    throw new Error(`PR review ${review.id} does not match payload pull request`);
+  }
+}
+
 export async function resumePrReviewPublication(db: Database, input: {
   reviewId: string;
   invoke: () => Promise<{
@@ -59,6 +65,7 @@ export async function resumePrReviewPublication(db: Database, input: {
   }
 
   const marker = prReviewPublicationMarker(review.publication_id);
+  const body = `${review.raw_output.trimEnd()}\n\n${marker}`;
   try {
     review = (await db.query(
       `UPDATE pr_ai_reviews
@@ -71,10 +78,10 @@ export async function resumePrReviewPublication(db: Database, input: {
     if (!comments.complete) {
       throw new PrReviewPublicationError("GitHub comment search was incomplete; refusing duplicate publication", "incomplete_comment_search");
     }
-    let comment = comments.items.find((item) => item.body?.includes(marker));
+    let comment = comments.items.find((item) => item.body === body);
     if (!comment) {
       await assertOwned();
-      comment = await input.createComment(`${review.raw_output.trimEnd()}\n\n${marker}`);
+      comment = await input.createComment(body);
     }
     await assertOwned();
     const published = (await db.query(

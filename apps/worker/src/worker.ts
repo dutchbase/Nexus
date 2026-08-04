@@ -9,7 +9,7 @@ import {
 } from "@dcc/claude-runner";
 import { artifactDataRoot, finalizeArtifact, inTransaction, legacyArtifactDataRoot, pool, reconcileArtifacts, stageArtifact, type StagedArtifact } from "@dcc/database";
 import {
-  buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
+  assertPrReviewDestination, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
   claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, resumePrReviewPublication,
   claimNotificationDelivery, completeNotificationDelivery, failNotificationDelivery, renewJobLease,
   renewNotificationDeliveryLease,
@@ -34,7 +34,7 @@ import { failExecutionPublication, handleExecutionPublicationFailure, prepareExe
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
 import {
-  approvedExecutionInput, approvedPhaseSkills, assertApprovedSkillSnapshot, assertExecutionPublicationGate, prReviewSnapshotInput,
+  approvedExecutionInput, approvedPhaseSkills, assertApprovedSkillSnapshot, assertExecutionPublicationGate, prReviewSnapshotInput, shouldRetryPrReview,
 } from "./worker-boundary.ts";
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
@@ -1114,6 +1114,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     await pool.query("SELECT * FROM pr_ai_reviews WHERE id=$1", [payload.pr_ai_review_id])
   ).rows[0];
   if (!existingReview) throw new Error("pr_ai_reviews row not found");
+  assertPrReviewDestination(existingReview, payload.pull_request_id);
   if (existingReview.status !== "running") return;
 
   // ponytail: everything below — including the preflight check, the row
@@ -1286,7 +1287,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     const storedReview = (await pool.query("SELECT * FROM pr_ai_reviews WHERE id=$1", [payload.pr_ai_review_id])).rows[0];
     if (storedReview?.status !== "running") return;
     const retryablePublication = Boolean(storedReview?.raw_output && storedReview.publication_status === "pending");
-    if (retryablePublication && job.attempt < job.max_attempts) throw error;
+    if (shouldRetryPrReview(error, storedReview?.raw_output, job.attempt, job.max_attempts)) throw error;
     const errorCode = retryablePublication
       ? "review_publication_failed"
       : typeof error?.code === "string" ? error.code : "review_failed";

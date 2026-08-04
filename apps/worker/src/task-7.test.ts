@@ -7,6 +7,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { createPullRequestReviewWorktree } from "../../../packages/git-runner/src/index.ts";
 import type { SnapshottedSkill } from "@dcc/skill-registry";
 import { buildApprovedInputSnapshot, type ApprovedInputSnapshot } from "@dcc/domain";
+import { GitHubProviderError } from "@dcc/github-provider";
 import {
   approvedPhaseSkills, assertExecutionPublicationGate, executionRoot, prReviewSnapshotInput,
 } from "./worker-boundary.ts";
@@ -144,6 +145,19 @@ describe("worker orchestration boundary", () => {
         reviewedHeadSha: "head-sha", reviewedBaseBranch: "main", reviewedBaseSha: "base-sha",
       },
     });
+  });
+
+  test.each(["transient", "rate_limited"])("retries %s provider failures before output is persisted", (code) => {
+    const shouldRetry = (workerBoundary as any).shouldRetryPrReview;
+    expect(shouldRetry(new GitHubProviderError(code, "provider unavailable"), null, 1, 3)).toBe(true);
+    expect(shouldRetry(new GitHubProviderError("not_found", "missing"), null, 1, 3)).toBe(false);
+    expect(shouldRetry(new Error("model failed"), null, 1, 3)).toBe(false);
+    expect(shouldRetry(new GitHubProviderError(code, "provider unavailable"), null, 3, 3)).toBe(false);
+  });
+
+  test("retries publication failures after immutable output is persisted", () => {
+    const shouldRetry = (workerBoundary as any).shouldRetryPrReview;
+    expect(shouldRetry(new Error("database unavailable"), "persisted output", 2, 3)).toBe(true);
   });
 
   test("cleans up the detached review worktree after the review boundary", async () => {
