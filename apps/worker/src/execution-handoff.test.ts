@@ -5,7 +5,7 @@ import path from "node:path";
 import { promisify } from "node:util";
 import { expect, it } from "vitest";
 import { invokeExecutionClaude } from "../../../packages/claude-runner/src/index.ts";
-import { commitExecutionChanges } from "../../../packages/git-runner/src/index.ts";
+import { assertAttemptResultCommit, commitExecutionChanges } from "../../../packages/git-runner/src/index.ts";
 import { resultCommitAfterSuccessfulExecution, runPrivateExecution } from "./execution-handoff.ts";
 
 const exec = promisify(execFile);
@@ -188,6 +188,22 @@ it("replaces a prior repair commit with the imported result squashed from the sa
     expect(resultCommit).not.toBe(priorResultCommit);
     expect((await git(worktreePath, ["rev-list", "--count", `${baseCommit}..HEAD`])).stdout.trim()).toBe("1");
     expect((await git(worktreePath, ["show", "HEAD:result.txt"])).stdout).toBe("repaired result\n");
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+it("rejects a stored result that is no longer the attempt worktree head", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "worker-stale-result-"));
+  try {
+    const { baseCommit, worktreePath } = await createWorkerWorktree(root);
+    await writeFile(path.join(worktreePath, "result.txt"), "first result\n");
+    const resultCommit = await commitExecutionChanges({ worktreePath, baseCommit, message: "first" });
+    await writeFile(path.join(worktreePath, "result.txt"), "different result\n");
+    await commitExecutionChanges({ worktreePath, baseCommit, message: "second" });
+
+    await expect(assertAttemptResultCommit({ worktreePath, baseCommit, resultCommit }))
+      .rejects.toThrow("attempt result commit is not the current worktree HEAD");
   } finally {
     await rm(root, { recursive: true, force: true });
   }

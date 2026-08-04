@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -73,10 +73,13 @@ export async function createExecutionWorktree(input: {
     safeSegment(input.projectSlug, "project"), safeSegment(input.ticketNumber, "ticket"),
   ], String(input.attemptNumber));
   const branchName = executionBranchName(input.ticketNumber, input.title, input.attemptNumber);
-  const baseRef = `refs/heads/${input.defaultBranch}`;
-  await exec("git", ["-C", repository, "show-ref", "--verify", baseRef]);
+  const dirty = (await exec("git", ["-C", repository, "status", "--porcelain"])).stdout;
+  if (dirty.trim()) throw new Error("repository has uncommitted changes");
+  await exec("git", ["-C", repository, "remote", "get-url", "origin"]);
+  const baseRef = `refs/remotes/origin/${input.defaultBranch}`;
+  await exec("git", ["-C", repository, "fetch", "origin", input.defaultBranch]);
   const baseCommit = (await exec("git", ["-C", repository, "rev-parse", baseRef])).stdout.trim();
-  await exec("git", ["-C", repository, "worktree", "add", "-b", branchName, worktreePath, baseRef]);
+  await exec("git", ["-C", repository, "worktree", "add", "-b", branchName, worktreePath, baseCommit]);
   return { worktreePath, branchName, baseCommit };
 }
 
@@ -93,6 +96,20 @@ export async function worktreeDiff(worktreePath: string, baseCommit?: string | n
     }
   }));
   return [tracked.stdout, ...additions].filter(Boolean).join("\n");
+}
+
+export async function assertAttemptResultCommit(input: {
+  worktreePath: string;
+  baseCommit: string;
+  resultCommit: string;
+}) {
+  const head = (await git(input.worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
+  if (head !== input.resultCommit) throw new Error("attempt result commit is not the current worktree HEAD");
+  try {
+    await git(input.worktreePath, ["merge-base", "--is-ancestor", input.baseCommit, input.resultCommit]);
+  } catch {
+    throw new Error("attempt result commit does not descend from its recorded base");
+  }
 }
 
 export const DEFAULT_PROTECTED_PATHS = [".env", ".env.*", "secrets/**", "production-data/**", ".git/**"];
@@ -214,9 +231,22 @@ export async function removeContainedWorktreePath(dataRoot: string, worktreePath
 }
 
 export async function removeManagedWorktree(repositoryPath: string, dataRoot: string, worktreePath: string) {
-  await assertManagedWorktreePath(dataRoot, worktreePath);
+  try {
+    await assertManagedWorktreePath(dataRoot, worktreePath);
+  } catch (error: any) {
+    if (error?.code !== "ENOENT") throw error;
+    await removeContainedWorktreePath(dataRoot, worktreePath);
+    const repository = await realpath(repositoryPath);
+    await exec("git", ["-C", repository, "worktree", "prune"]);
+    return;
+  }
   const repository = await realpath(repositoryPath);
-  await exec("git", ["-C", repository, "worktree", "remove", "--force", worktreePath]);
+  try {
+    await exec("git", ["-C", repository, "worktree", "remove", "--force", worktreePath]);
+  } catch (error) {
+    try { await access(worktreePath); } catch { await exec("git", ["-C", repository, "worktree", "prune"]); return; }
+    throw error;
+  }
   await exec("git", ["-C", repository, "worktree", "prune"]);
 }
 

@@ -17,7 +17,7 @@ import {
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
-  abortMerge, commitExecutionChanges, conflictedFiles, createConflictResolutionWorktree, createExecutionWorktree,
+  abortMerge, assertAttemptResultCommit, commitExecutionChanges, conflictedFiles, createConflictResolutionWorktree, createExecutionWorktree,
   createPullRequestReviewWorktree, mergeBaseIntoWorktree, pushExecutionBranch, validateEffectiveWorktree,
   validateExecutionWorktree, WorktreeValidationError, worktreeDiff,
 } from "../../../packages/git-runner/src/index.ts";
@@ -29,7 +29,7 @@ import {
   materializeSkillBundle, resolveSkills, skillsForPhase, snapshotSkillSet,
   type ResolutionSource, type SkillCandidate, type ResolvedSkill, type SnapshottedSkill,
 } from "@dcc/skill-registry";
-import { resultCommitAfterSuccessfulExecution, runPrivateExecution } from "./execution-handoff.ts";
+import { runPrivateExecution } from "./execution-handoff.ts";
 import { failExecutionPublication, handleExecutionPublicationFailure, prepareExecutionPublication, PublicationError, publishExternalResult } from "./execution-publication.ts";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
@@ -556,18 +556,17 @@ async function runExecution(job: any, lease: LeaseGuard) {
   )).rowCount;
   if (competing) throw new Error("another execution is already active");
 
-  let worktree = {
-    worktreePath: attempt.worktree_path as string,
-    branchName: attempt.branch_name as string,
-    baseCommit: attempt.base_commit as string | null,
-  };
-  if (!repairing) {
+  const sourceAttempt = repairing && attempt.source_execution_attempt_id
+    ? (await pool.query("SELECT worktree_path,base_commit FROM execution_attempts WHERE id=$1", [attempt.source_execution_attempt_id])).rows[0]
+    : null;
+  let worktree: { worktreePath: string; branchName: string; baseCommit: string | null };
+  {
     try {
       const approvedProject = gate.approvedInputSnapshot.materialInput.project.config as any;
       const repository = await validateProject({
         repositoryPath: approvedProject.repositoryPath,
         defaultBranch: approvedProject.defaultBranch,
-        requireRemote: false,
+        requireRemote: true,
       });
       if (!repository.valid) throw new Error(`repository is not available for execution: ${repository.errors.join("; ")}`);
       worktree = await createExecutionWorktree({
@@ -605,8 +604,6 @@ async function runExecution(job: any, lease: LeaseGuard) {
       });
       throw error;
     }
-  } else if (!worktree.worktreePath) {
-    throw new Error("repair worktree is unavailable");
   }
 
   const runId = randomUUID();
@@ -615,7 +612,8 @@ async function runExecution(job: any, lease: LeaseGuard) {
   const stagedLog = await stageArtifact({ root: dataRoot, id: logArtifactId, storagePath: `logs/${runId}.log`, content: Buffer.alloc(0) });
   const details = {
     ...worktree,
-    currentDiff: repairing ? await worktreeDiff(worktree.worktreePath, worktree.baseCommit ?? attempt.base_commit) : undefined,
+    currentDiff: repairing && sourceAttempt?.worktree_path
+      ? await worktreeDiff(sourceAttempt.worktree_path, sourceAttempt.base_commit).catch(() => "") : undefined,
     validationOutput: repairing ? job.payload_json.validation_output : undefined,
     administratorFeedback: repairing ? job.payload_json.feedback : undefined,
   };
@@ -724,11 +722,6 @@ async function runExecution(job: any, lease: LeaseGuard) {
     });
     await lease.assertOwned();
     assertExecutionPublicationGate(repairing, usedAgent);
-    const resultCommit = resultCommitAfterSuccessfulExecution(repairing, attempt.result_commit);
-    if (resultCommit !== attempt.result_commit) {
-      await pool.query("UPDATE execution_attempts SET result_commit=$2 WHERE id=$1", [attempt.id, resultCommit]);
-      attempt.result_commit = resultCommit;
-    }
     await pool.query(
       `UPDATE agent_runs
        SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3 WHERE id=$1`,
@@ -885,6 +878,11 @@ async function publishExecutionAttempt(input: {
     await lease.assertOwned();
     let commit = input.attempt.result_commit as string | null;
     const committedNow = !commit;
+    if (commit) await assertAttemptResultCommit({
+      worktreePath: input.attempt.worktree_path,
+      baseCommit: input.attempt.base_commit,
+      resultCommit: commit,
+    });
     if (!commit) {
       await lease.assertOwned();
       commit = await commitExecutionChanges({
@@ -1088,7 +1086,7 @@ async function retryPublication(job: any, lease: LeaseGuard) {
      WHERE ea.id=$1`,
     [job.payload_json.execution_attempt_id],
   )).rows[0];
-  if (!row?.result_commit || !row.worktree_path || !row.branch_name) {
+  if (!row?.result_commit || !row.worktree_path || !row.branch_name || row.validation_status !== "pr_creation_failed") {
     throw new Error("publication retry has no preserved local commit");
   }
   if (!["pending", "publishing"].includes(row.publication_status)) {

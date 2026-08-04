@@ -81,7 +81,10 @@ test("repair queueing keeps the originating execution snapshot binding", async (
       plan_version_id: "plan-version", validation_status: "failed", worktree_path: "/worktree",
       ticket_status: "Execution Failed", metadata_json: { approved_input_snapshot_id: "approved-input-1" },
     }] };
+    if (sql.includes("max(attempt_number)")) return { rows: [{ next: 2 }] };
+    if (sql.includes("SELECT status FROM jobs")) return { rows: [{ status: "failed" }] };
     if (sql.includes("FROM jobs")) return { rows: [], rowCount: 0 };
+    if (sql.includes("INSERT INTO execution_attempts")) return { rows: [{ id: "repair-attempt" }] };
     if (sql.includes("INSERT INTO jobs")) return { rows: [{ id: "repair-job", payload_json: values?.[2] }] };
     return { rows: [], rowCount: 1 };
   }) };
@@ -92,6 +95,34 @@ test("repair queueing keeps the originating execution snapshot binding", async (
 
   const queued = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO jobs"));
   expect(queued[1][2]).toMatchObject({ approved_input_snapshot_id: "approved-input-1" });
+  expect(response.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
+});
+
+test("repair queueing creates a new attempt linked to immutable source history", async () => {
+  transactionClient = { query: vi.fn(async (sql: string, values?: unknown[]) => {
+    if (sql.includes("FROM agent_runs ar")) return { rows: [{
+      id: "run-1", ticket_id: "ticket", execution_attempt_id: "source-attempt",
+      plan_version_id: "plan-version", validation_status: "failed", worktree_path: "/source-worktree",
+      ticket_status: "Execution Failed", attempt_number: 1,
+      metadata_json: { approved_input_snapshot_id: "approved-input-1", job_id: "source-job" },
+    }] };
+    if (sql.includes("max(attempt_number)")) return { rows: [{ next: 2 }] };
+    if (sql.includes("SELECT status FROM jobs")) return { rows: [{ status: "failed" }] };
+    if (sql.includes("SELECT 1 FROM jobs WHERE id")) return { rows: [{}], rowCount: 1 };
+    if (sql.includes("FROM jobs")) return { rows: [], rowCount: 0 };
+    if (sql.includes("INSERT INTO execution_attempts")) return { rows: [{ id: "repair-attempt", attempt_number: 2 }] };
+    if (sql.includes("INSERT INTO jobs")) return { rows: [{ id: "repair-job", payload_json: values?.[2] }] };
+    return { rows: [], rowCount: 1 };
+  }) };
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await adminApi(request({ feedback: "Repair the failed validation." }, "POST"), response,
+    new URL("http://test/api/admin/runs/a111/repair"), { user_id: "admin" });
+
+  const inserted = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO execution_attempts"));
+  expect(inserted[1]).toEqual(["ticket", "plan-version", 2, "source-attempt"]);
+  const queued = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO jobs"));
+  expect(queued[1][2]).toMatchObject({ execution_attempt_id: "repair-attempt", source_execution_attempt_id: "source-attempt" });
   expect(response.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
 });
 
@@ -184,7 +215,7 @@ test.each([
   transactionClient = { query: vi.fn(async (sql: string, values?: unknown[]) => {
     if (sql.includes("FROM agent_runs ar")) return { rows: [{
       id: "attempt-1", run_id: "a1", ticket_id: "ticket", execution_attempt_id: "attempt-1",
-      plan_version_id: "plan-version", validation_status: "failed", worktree_path: "/worktree",
+      plan_version_id: "plan-version", validation_status: path.endsWith("/retry") ? "pr_creation_failed" : "failed", worktree_path: "/worktree",
       result_commit: "commit", ticket_status: path.endsWith("/retry") ? "PR Creation Failed" : "Execution Failed",
       publication_id: path.endsWith("/retry") ? "publication-1" : undefined,
       publication_status: path.endsWith("/retry") ? "failed" : undefined,
@@ -193,6 +224,8 @@ test.each([
     }] };
     if (sql.includes("FROM jobs WHERE status IN")) return { rows: [], rowCount: 0 };
     if (sql.includes("SELECT status FROM jobs")) return { rows: [{ status: "failed" }], rowCount: 1 };
+    if (sql.includes("max(attempt_number)")) return { rows: [{ next: 2 }], rowCount: 1 };
+    if (sql.includes("INSERT INTO execution_attempts")) return { rows: [{ id: "repair-attempt" }], rowCount: 1 };
     if (sql.includes("SELECT 1 FROM jobs")) return { rows: [{}], rowCount: 1 };
     if (sql.includes("INSERT INTO jobs")) return { rows: [{ id: "new-job", type: jobType, rerun_of: values?.[6] }], rowCount: 1 };
     return { rows: [], rowCount: 1 };
@@ -234,7 +267,7 @@ test("publication retry requires a failed durable publication", async () => {
   transactionClient = { query: vi.fn(async (sql: string) => {
     if (sql.includes("FROM agent_runs ar")) return { rows: [{
       id: "attempt-1", run_id: "a1", ticket_id: "ticket", plan_version_id: "plan-version",
-      result_commit: "commit", ticket_status: "PR Creation Failed", metadata_json: { job_id: "source-job" },
+      result_commit: "commit", validation_status: "pr_creation_failed", ticket_status: "PR Creation Failed", metadata_json: { job_id: "source-job" },
       publication_id: "publication-1", publication_status: "pending",
       publication_idempotency_key: "execution-publication:attempt-1",
     }] };
@@ -251,7 +284,7 @@ test("publication retry resets the same intent without changing its external key
   transactionClient = { query: vi.fn(async (sql: string, values?: unknown[]) => {
     if (sql.includes("FROM agent_runs ar")) return { rows: [{
       id: "attempt-1", run_id: "a1", ticket_id: "ticket", plan_version_id: "plan-version",
-      result_commit: "commit", ticket_status: "PR Creation Failed", metadata_json: { job_id: "source-job" },
+      result_commit: "commit", validation_status: "pr_creation_failed", ticket_status: "PR Creation Failed", metadata_json: { job_id: "source-job" },
       publication_id: "publication-1", publication_status: "failed",
       publication_idempotency_key: "execution-publication:attempt-1",
     }] };
