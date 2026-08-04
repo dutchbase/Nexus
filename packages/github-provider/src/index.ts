@@ -200,11 +200,11 @@ export async function mergePullRequest(
   repository: string,
   number: number,
   mergeMethod: "merge" | "squash" | "rebase" = "squash",
-  expectedHeadSha?: string,
+  expectedHeadSha: string,
 ) {
   return request<MergeResult>(`${pullsPath(owner, repository)}/${number}/merge`, {
     method: "PUT",
-    body: JSON.stringify({ merge_method: mergeMethod, ...(expectedHeadSha ? { sha: expectedHeadSha } : {}) }),
+    body: JSON.stringify({ merge_method: mergeMethod, sha: expectedHeadSha }),
   });
 }
 

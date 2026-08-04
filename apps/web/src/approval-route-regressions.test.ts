@@ -25,6 +25,57 @@ beforeEach(() => {
   inTransaction.mockClear();
 });
 
+const pullRequestApprovalPath = "http://test/api/admin/pull-requests/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/approve";
+
+test("pull-request approval rejects a browser request without a head and policy binding", async () => {
+  pool.query.mockResolvedValueOnce({ rows: [{
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", head_sha: "head-sha",
+    current_policy_snapshot_id: "snapshot-1", policy_stale: false,
+  }] });
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await adminApi(request({}, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin" });
+
+  expect(response.writeHead).toHaveBeenCalledWith(409, expect.any(Object));
+  expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(false);
+});
+
+test("pull-request approval rejects a stale browser policy binding", async () => {
+  pool.query.mockResolvedValueOnce({ rows: [{
+    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", head_sha: "new-head",
+    current_policy_snapshot_id: "snapshot-2", policy_stale: false,
+  }] });
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await adminApi(request({ expected_head_sha: "old-head", policy_snapshot_id: "snapshot-1" }, "POST"),
+    response, new URL(pullRequestApprovalPath), { user_id: "admin" });
+
+  expect(response.writeHead).toHaveBeenCalledWith(409, expect.any(Object));
+  expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(false);
+});
+
+test("pull-request approval queues the exact current head and policy binding", async () => {
+  pool.query.mockImplementation(async (sql: string, values?: unknown[]) => {
+    if (sql.includes("FROM pull_requests pr")) return { rows: [{
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", head_sha: "head-sha",
+      current_policy_snapshot_id: "snapshot-1", policy_stale: false,
+    }] };
+    if (sql.includes("INSERT INTO jobs")) return { rows: [{ id: "job-1", payload_json: values?.[2] }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  });
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await adminApi(request({ expected_head_sha: "head-sha", policy_snapshot_id: "snapshot-1" }, "POST"),
+    response, new URL(pullRequestApprovalPath), { user_id: "admin" });
+
+  const queued = pool.query.mock.calls.find(([sql]) => sql.includes("INSERT INTO jobs"));
+  expect(queued?.[1]?.[2]).toEqual({
+    actor_id: "admin", pull_request_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa",
+    expected_head_sha: "head-sha", policy_snapshot_id: "snapshot-1",
+  });
+  expect(response.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
+});
+
 test.each(["Rejected", "Plan Approved"])("generic ticket PATCH rejects raw %s transitions", async (status) => {
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
   await adminApi(request({ status }), response, new URL("http://test/api/admin/tickets/ticket"), { user_id: "admin" });
