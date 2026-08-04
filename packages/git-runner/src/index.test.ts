@@ -461,6 +461,93 @@ describe("execution effective diff", () => {
     }
   });
 
+  it("does not inspect a deleted staged blob", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-delete-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await writeAndCommit(repo, "removed.txt", "AKIAIOSFODNN7EXAMPLE\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await git(repo, ["rm", "removed.txt"]);
+
+      await commitExecutionChanges({ worktreePath: repo, baseCommit, message: "worker commit" });
+
+      expect((await git(repo, ["show", "--format=", "--name-status", "HEAD"])).stdout.trim()).toBe("D\tremoved.txt");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it.each(["added.txt", "modified.txt"])("rejects a secret in an %s staged blob", async (file) => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-secret-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await writeAndCommit(repo, "modified.txt", "safe\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeFile(path.join(repo, ".gitattributes"), `${file} filter=inject\n`);
+      await git(repo, ["config", "filter.inject.clean", "sed 's/safe/AKIAIOSFODNN7EXAMPLE/'"]);
+      await writeFile(path.join(repo, file), "safe\n");
+
+      await expect(commitExecutionChanges({ worktreePath: repo, baseCommit, message: "worker commit" }))
+        .rejects.toMatchObject({ check: "secret scan" });
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("scans only the destination of a staged rename", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-rename-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await writeAndCommit(repo, "before.txt", "safe\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await git(repo, ["mv", "before.txt", "after.txt"]);
+
+      await commitExecutionChanges({ worktreePath: repo, baseCommit, message: "worker commit" });
+
+      expect((await git(repo, ["show", "--format=", "--name-status", "HEAD"])).stdout.trim()).toBe("R100\tbefore.txt\tafter.txt");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a staged rename from a protected path", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-protected-rename-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await mkdir(path.join(repo, "secrets"));
+      await writeAndCommit(repo, "secrets/old.txt", "safe\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await mkdir(path.join(repo, "public"));
+      await git(repo, ["mv", "secrets/old.txt", "public/new.txt"]);
+
+      await expect(commitExecutionChanges({ worktreePath: repo, baseCommit, message: "worker commit" }))
+        .rejects.toMatchObject({ check: "protected-path inspection" });
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a binary staged blob", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-staged-binary-"));
+    try {
+      const repo = path.join(tmp, "repo");
+      await initRepo(repo);
+      await writeAndCommit(repo, "base.txt", "base\n", "initial commit");
+      const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeFile(path.join(repo, "image.bin"), Buffer.from([0, 255, 1, 2]));
+
+      await commitExecutionChanges({ worktreePath: repo, baseCommit, message: "worker commit" });
+
+      expect((await git(repo, ["show", "HEAD:image.bin"])).stdout).toBe("\0�\u0001\u0002");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("rejects a merge commit in an agent execution history", async () => {
     const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-nonlinear-history-"));
     try {

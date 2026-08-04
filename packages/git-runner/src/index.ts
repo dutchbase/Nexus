@@ -528,12 +528,17 @@ export async function commitExecutionChanges(input: {
   await git(input.worktreePath, ["add", "--all"]);
   // Re-scan the final index, including agent commits back to the recorded base,
   // so the secret/protected-path gates cover exactly what will be published.
-  const stagedForCommit = (await git(input.worktreePath, ["diff", "--cached", "--name-only", "-z"]))
-    .stdout.split("\0").filter(Boolean);
-  const staged = (await git(input.worktreePath, [
-    "diff", "--cached", "--name-only", "-z", ...(input.baseCommit ? [input.baseCommit] : []),
+  const nameStatus = (await git(input.worktreePath, [
+    "diff", "--cached", "--name-status", "-z", "--find-renames", ...(input.baseCommit ? [input.baseCommit] : []),
   ])).stdout.split("\0").filter(Boolean);
-  const protectedMatches = staged.filter((file) =>
+  const staged = [] as Array<{ status: string; paths: string[] }>;
+  for (let index = 0; index < nameStatus.length;) {
+    const status = nameStatus[index++];
+    const paths = [nameStatus[index++]];
+    if (status[0] === "C" || status[0] === "R") paths.push(nameStatus[index++]);
+    staged.push({ status, paths });
+  }
+  const protectedMatches = staged.flatMap(({ paths }) => paths).filter((file) =>
     matchesProtectedPath(file, input.protectedPaths?.length ? input.protectedPaths : DEFAULT_PROTECTED_PATHS));
   if (protectedMatches.length) {
     throw new WorktreeValidationError(
@@ -543,9 +548,8 @@ export async function commitExecutionChanges(input: {
     );
   }
   let secretCount = 0;
-  const stagedBlobs = (await git(input.worktreePath, [
-    "diff", "--cached", "--name-only", "-z", "--diff-filter=d", ...(input.baseCommit ? [input.baseCommit] : []),
-  ])).stdout.split("\0").filter(Boolean);
+  const stagedBlobs = staged.flatMap(({ status, paths }) =>
+    ["A", "M"].includes(status[0]) ? paths : ["C", "R"].includes(status[0]) ? [paths[1]] : []);
   for (const file of stagedBlobs) {
     const content = (await git(input.worktreePath, ["show", `:${file}`])).stdout;
     secretCount += countCredentialShapes(content);
@@ -555,7 +559,7 @@ export async function commitExecutionChanges(input: {
       "secret scan", `secret scan found ${secretCount} credential-shaped pattern(s) in the staged commit`, [],
     );
   }
-  if (!stagedForCommit.length) {
+  if (!staged.length) {
     throw new WorktreeValidationError(
       "commit verification",
       "no changes were staged for commit — Claude execution produced no file modifications",
