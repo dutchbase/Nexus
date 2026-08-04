@@ -133,6 +133,8 @@ test("limits a scoped execution sandbox to its canonical conflict file", async (
     const settings = JSON.parse(await readFile(settingsFile, "utf8"));
     expect(settings.permissions.allow).toEqual(expect.arrayContaining(["Edit(//work/src/conflicted.ts)"]));
     expect(settings.permissions.allow).not.toEqual(expect.arrayContaining(["Edit(//work/**)"]));
+    expect(settings.sandbox.filesystem.allowWrite).toEqual(["/work/src/conflicted.ts"]);
+    expect(settings.sandbox.filesystem.allowWrite).not.toEqual(expect.arrayContaining(["/work"]));
 
     const fileHook = settings.hooks.PreToolUse.find((hook: { matcher: string }) => hook.matcher === "Read|Glob|Grep|Edit|Write");
     const command = fileHook.hooks[0].command as string;

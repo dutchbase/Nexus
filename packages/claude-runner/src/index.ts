@@ -242,6 +242,7 @@ function executionSettings(input: ExecutionInvocation, guardPath: string) {
       filesystem: {
         denyRead: [...new Set([homedir(), ...gitMetadataPaths])],
         allowRead: [...new Set(allowRead)],
+        ...(writePaths ? { allowWrite: [...new Set(writePaths)] } : {}),
         denyWrite: gitMetadataPaths,
       },
       credentials: {
