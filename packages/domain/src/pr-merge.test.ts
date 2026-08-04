@@ -89,14 +89,10 @@ test("readies a remotely draft pull request before merging", async () => {
     requests.push({ method: incoming.method, url: incoming.url });
     outgoing.setHeader("content-type", "application/json");
     if (incoming.method === "GET") outgoing.end(JSON.stringify({ draft: true, node_id: "pr-node", base: { ref: "main" } }));
+    else if (incoming.url === "/graphql") outgoing.end(JSON.stringify({ data: {} }));
     else { outgoing.statusCode = 409; outgoing.end("merge rejected"); }
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-  const originalFetch = globalThis.fetch;
-  vi.spyOn(globalThis, "fetch").mockImplementation(async (input, init) => {
-    if (input === "https://api.github.com/graphql") return new Response(JSON.stringify({ data: {} }), { status: 200 });
-    return originalFetch(input, init);
-  });
   try {
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("test server has no TCP port");
@@ -113,10 +109,10 @@ test("readies a remotely draft pull request before merging", async () => {
     expect(requests).toEqual([
       { method: "GET", url: "/repos/acme/widgets/pulls/42" },
       { method: "GET", url: "/repos/acme/widgets/pulls/42" },
+      { method: "POST", url: "/graphql" },
       { method: "PUT", url: "/repos/acme/widgets/pulls/42/merge" },
     ]);
   } finally {
-    vi.restoreAllMocks();
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
 });

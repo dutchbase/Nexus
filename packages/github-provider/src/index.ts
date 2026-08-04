@@ -75,7 +75,7 @@ function retryAt(response: Response) {
   const seconds = response.headers.get("retry-after");
   if (seconds && Number.isFinite(Number(seconds))) return new Date(Date.now() + Number(seconds) * 1000).toISOString();
   const reset = response.headers.get("x-ratelimit-reset");
-  return reset && Number.isFinite(Number(reset)) ? new Date(Number(reset) * 1000).toISOString() : undefined;
+  return reset && Number.isFinite(Number(reset)) ? new Date(Number(reset) * 1000).toISOString() : new Date(Date.now() + 60_000).toISOString();
 }
 
 async function errorFor(response: Response) {
@@ -164,7 +164,7 @@ async function graphqlRequest<T>(query: string, variables: Record<string, unknow
   });
   const payload = await jsonFor<{ data: T; errors?: unknown }>(response);
   if (payload.errors) {
-    const limited = /rate limit/i.test(JSON.stringify(payload.errors));
+    const limited = /rate[_ ]?limit/i.test(JSON.stringify(payload.errors));
     throw new GitHubProviderError(limited ? "rate_limited" : "graphql_error", "GitHub GraphQL request failed", response.status, limited ? retryAt(response) : undefined);
   }
   return payload.data as T;

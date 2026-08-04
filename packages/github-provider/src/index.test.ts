@@ -210,6 +210,35 @@ test("classifies secondary and GraphQL rate limits with recovery times", async (
   });
 });
 
+test("classifies headerless and type-only secondary rate limits with fallback recovery", async () => {
+  let graphql = false;
+  await withServer((incoming, outgoing) => {
+    graphql = incoming.url?.endsWith("/graphql") ?? false;
+    outgoing.setHeader("content-type", "application/json");
+    if (graphql) outgoing.end(JSON.stringify({ errors: [{ type: "RATE_LIMITED" }] }));
+    else if (incoming.url?.startsWith("/api/v3/")) outgoing.end(JSON.stringify({ node_id: "PR_node" }));
+    else outgoing.statusCode = 403, outgoing.end("secondary rate limit");
+  }, async (baseUrl) => {
+    await expect(listPullRequests("acme", "widgets"))
+      .resolves.toMatchObject({ complete: false, errorCode: "rate_limited", retryAt: expect.any(String) });
+    process.env.GITHUB_API_BASE_URL = `${baseUrl}/api/v3`;
+    await expect(markReadyForReview("acme", "widgets", 1))
+      .rejects.toMatchObject({ code: "rate_limited", retryAt: expect.any(String) });
+  });
+});
+
+test("redacts non-2xx response bodies", async () => {
+  await withServer((_incoming, outgoing) => {
+    outgoing.statusCode = 500;
+    outgoing.end("test-token private provider diagnostic");
+  }, async () => {
+    const error = await createPullRequest({ owner: "acme", repository: "widgets", title: "x", body: "", head: "f", base: "main" })
+      .then(() => null, (reason) => reason as Error);
+    expect(error).toMatchObject({ message: "GitHub provider request failed with status 500" });
+    expect(error?.message).not.toMatch(/test-token|private provider diagnostic/);
+  });
+});
+
 test("posts the complete Markdown review as a pull-request comment", async () => {
   let request: { method?: string; url?: string; authorization?: string; body?: string } = {};
   const server = createServer(async (incoming, outgoing) => {
