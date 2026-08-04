@@ -47,6 +47,33 @@ test("recovers each expired job and delivery once in a bounded locked transactio
   expect(transaction).toHaveBeenCalledTimes(2);
 });
 
+test("recovers a stranded planning run once and leaves its final state idempotent", async () => {
+  let recovered = false;
+  let ticketStatus = "Planning";
+  const history: string[] = [];
+  const query = vi.fn(async (sql: string, values?: unknown[]): Promise<Result> => {
+    if (sql.includes("UPDATE jobs j") && sql.includes("lease_expires_at <= now()")) {
+      if (recovered) return { rows: [], rowCount: 0 };
+      recovered = true;
+      return { rows: [{ id: "planning", type: "planning.generate", status: "failed", payload_json: { ticket_id: "ticket-planning" } }], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE notification_deliveries nd")) return { rows: [], rowCount: 0 };
+    if (sql.includes("UPDATE agent_runs")) return { rows: [{ id: "run-planning" }], rowCount: 1 };
+    if (sql.includes("SELECT status FROM tickets")) return { rows: [{ status: ticketStatus }], rowCount: 1 };
+    if (sql.includes("UPDATE tickets SET status=$2")) ticketStatus = values?.[1] as string;
+    if (sql.includes("INSERT INTO ticket_status_history")) history.push(ticketStatus);
+    return { rows: [], rowCount: 1 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+
+  await expect(recoverExpiredWorkflowState(inTransaction)).resolves.toEqual({ jobs: 1, deliveries: 0 });
+  await expect(recoverExpiredWorkflowState(inTransaction)).resolves.toEqual({ jobs: 0, deliveries: 0 });
+
+  expect(ticketStatus).toBe("Planning Failed");
+  expect(history).toEqual(["Planning Failed"]);
+  expect(query.mock.calls.filter(([sql]) => (sql as string).includes("UPDATE agent_runs"))).toHaveLength(1);
+});
+
 test("shares the 100-row recovery budget across jobs and deliveries", async () => {
   const jobs = Array.from({ length: 37 }, (_, index) => ({
     id: `job-${index}`, type: "project.validate", status: "queued", payload_json: {},

@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
-import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, createExecutionSandboxSettings, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parsePlanMarkdown, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
+import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, ClaudePlanningError, createExecutionSandboxSettings, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parsePlanMarkdown, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -355,6 +355,25 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan"}'
   controller.abort();
 
   await expect(running).rejects.toMatchObject({ name: "AbortError" });
+});
+
+test("returns a typed timeout when planning exceeds its deadline", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-timeout-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  await writeFile(executable, `#!/bin/sh
+sleep 1
+printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan"}'
+`);
+  await chmod(executable, 0o755);
+
+  await expect(invokePlanningClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root, timeoutMs: 10,
+  })).rejects.toMatchObject({
+    constructor: ClaudePlanningError,
+    code: "planning_timeout",
+    exitCode: 124,
+  });
 });
 
 test("invokes planning with only its documented minimal environment", async () => {

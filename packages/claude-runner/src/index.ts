@@ -8,26 +8,41 @@ import { fileURLToPath } from "node:url";
 import { assertSubscriptionOnlyEnvironment, ClaudeAuthError } from "./auth-guard.ts";
 export { assertSubscriptionOnlyEnvironment, ClaudeAuthError, forbiddenClaudeAuthVariables } from "./auth-guard.ts";
 
-async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; executable?: string; signal?: AbortSignal } = {}) {
+async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; executable?: string; signal?: AbortSignal; timeoutMs?: number } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "dcc-claude-output-"));
   const stdoutPath = path.join(directory, "stdout");
   const stderrPath = path.join(directory, "stderr");
   const stdoutFile = await open(stdoutPath, "wx");
   const stderrFile = await open(stderrPath, "wx");
   try {
-    const exitCode = await new Promise<number | null>((resolve, reject) => {
+    const outcome = await new Promise<{ exitCode: number | null; timedOut: boolean }>((resolve, reject) => {
       const child = spawn(options.executable ?? "claude", args, {
         cwd: options.cwd, env: options.env, stdio: ["ignore", stdoutFile.fd, stderrFile.fd], signal: options.signal,
       });
-      child.on("error", reject);
-      child.on("close", resolve);
+      let timedOut = false;
+      let killTimer: NodeJS.Timeout | undefined;
+      const timeout = options.timeoutMs === undefined ? undefined : setTimeout(() => {
+        timedOut = true;
+        child.kill("SIGTERM");
+        killTimer = setTimeout(() => child.kill("SIGKILL"), 5_000);
+      }, options.timeoutMs);
+      child.on("error", (error) => {
+        if (timeout) clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
+        reject(error);
+      });
+      child.on("close", (exitCode) => {
+        if (timeout) clearTimeout(timeout);
+        if (killTimer) clearTimeout(killTimer);
+        resolve({ exitCode, timedOut });
+      });
     });
     await stdoutFile.close();
     await stderrFile.close();
     return {
       stdout: await readFile(stdoutPath, "utf8"),
       stderr: await readFile(stderrPath, "utf8"),
-      exitCode,
+      ...outcome,
     };
   } finally {
     await stdoutFile.close().catch(() => undefined);
@@ -41,6 +56,16 @@ export class ClaudeExecutionError extends Error {
     message: string,
     public exitCode: number,
     public code: "execution_failed" | "execution_timeout" | "execution_cancelled",
+  ) {
+    super(message);
+  }
+}
+
+export class ClaudePlanningError extends Error {
+  constructor(
+    message: string,
+    public exitCode: number,
+    public code: "planning_timeout",
   ) {
     super(message);
   }
@@ -64,7 +89,7 @@ export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = pro
 export type PlanningInvocation = {
   task: string; sessionId: string; model: string; effort: string; promptFile: string;
   skillBundleDir?: string; pluginDirectories?: readonly string[]; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string; tools?: string[]; claudeExecutable?: string; guardPath?: string;
-  gitMetadataPaths?: string[]; sensitiveEnvironmentVariables?: string[]; signal?: AbortSignal;
+  gitMetadataPaths?: string[]; sensitiveEnvironmentVariables?: string[]; signal?: AbortSignal; timeoutMs?: number;
 };
 
 const trustedBashGuard = fileURLToPath(new URL("./bash-guard.mjs", import.meta.url));
@@ -390,8 +415,9 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   };
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
   const result = await runClaude(buildPlanningArguments(input), {
-    cwd: input.workingDirectory, env, executable: input.claudeExecutable, signal: input.signal,
+    cwd: input.workingDirectory, env, executable: input.claudeExecutable, signal: input.signal, timeoutMs: input.timeoutMs,
   });
+  if (result.timedOut) throw new ClaudePlanningError("Claude planning timed out", 124, "planning_timeout");
   if (result.exitCode !== 0) {
     throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), { exitCode: result.exitCode });
   }
