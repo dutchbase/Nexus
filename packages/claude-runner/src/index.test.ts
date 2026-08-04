@@ -416,6 +416,80 @@ node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1], JSON.str
   });
 });
 
+test("runs scoped execution in a read-only worktree with only conflict files rebound writable", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-scoped-bwrap-"));
+  directories.push(root);
+  const worktree = path.join(root, "worktree");
+  const allowed = path.join(worktree, "src", "conflicted.ts");
+  const unrelated = path.join(worktree, "unrelated.ts");
+  const bin = path.join(root, "bin");
+  const fakeBwrap = path.join(bin, "bwrap");
+  const fakeClaude = path.join(bin, "claude");
+  const capture = path.join(root, "bwrap.json");
+  await mkdir(path.dirname(allowed), { recursive: true });
+  await Promise.all([
+    mkdir(path.join(worktree, ".git")), mkdir(bin), writeFile(path.join(root, "prompt.md"), "resolve\n"), writeFile(allowed, "unresolved\n"), writeFile(unrelated, "unchanged\n"),
+  ]);
+  await writeFile(fakeClaude, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '%s\\n' '2.1.220 (Claude Code)'; exit 0; fi
+printf resolved > ${JSON.stringify(allowed)}
+if printf escaped > ${JSON.stringify(unrelated)}; then exit 98; fi
+printf '%s\\n' '{"type":"result","subtype":"success","result":"resolved"}'
+`);
+  await writeFile(fakeBwrap, `#!/usr/bin/env node
+const fs = require("node:fs");
+const { spawnSync } = require("node:child_process");
+const args = process.argv.slice(2);
+const pairs = (flag) => args.flatMap((value, index) => value === flag ? [[args[index + 1], args[index + 2]]] : []);
+const ro = pairs("--ro-bind");
+const rw = pairs("--bind");
+const worktree = ${JSON.stringify(worktree)};
+const allowed = ${JSON.stringify(allowed)};
+const unrelated = ${JSON.stringify(unrelated)};
+if (!ro.some(([source, target]) => source === worktree && target === worktree)) process.exit(91);
+if (JSON.stringify(rw) !== JSON.stringify([[allowed, allowed]])) process.exit(92);
+fs.writeFileSync(${JSON.stringify(capture)}, JSON.stringify({ ro, rw }));
+const mappings = new Map([...ro, ...rw].map(([source, target]) => [target, source]));
+const separator = args.indexOf("--");
+const command = mappings.get(args[separator + 1]) ?? args[separator + 1];
+const cwd = args[args.indexOf("--chdir") + 1];
+let exitCode = 1;
+try {
+  fs.chmodSync(worktree, 0o555);
+  fs.chmodSync(unrelated, 0o444);
+  const result = spawnSync(command, args.slice(separator + 2), { cwd, env: { ...process.env, PATH: ${JSON.stringify(process.env.PATH)} }, stdio: "inherit" });
+  exitCode = result.status ?? 1;
+} finally {
+  fs.chmodSync(worktree, 0o755);
+  fs.chmodSync(unrelated, 0o644);
+}
+process.exit(exitCode);
+`);
+  await Promise.all([chmod(fakeClaude, 0o755), chmod(fakeBwrap, 0o755)]);
+  const previousBwrap = process.env.DCC_CLAUDE_BWRAP_PATH;
+  process.env.DCC_CLAUDE_BWRAP_PATH = fakeBwrap;
+  try {
+    await expect(invokeExecutionClaude({
+      ...invocation,
+      claudeExecutable: fakeClaude,
+      workingDirectory: worktree,
+      executionDirectory: worktree,
+      promptFile: path.join(root, "prompt.md"),
+      gitMetadataPaths: [path.join(worktree, ".git")],
+      logPath: path.join(root, "run.log"),
+      timeoutMs: 1_000,
+      allowedWritePaths: ["src/conflicted.ts"],
+      onEvent: async () => undefined,
+    })).resolves.toMatchObject({ exitCode: 0 });
+  } finally {
+    if (previousBwrap === undefined) delete process.env.DCC_CLAUDE_BWRAP_PATH;
+    else process.env.DCC_CLAUDE_BWRAP_PATH = previousBwrap;
+  }
+  expect(await readFile(allowed, "utf8")).toBe("resolved");
+  expect(await readFile(unrelated, "utf8")).toBe("unchanged\n");
+  expect(JSON.parse(await readFile(capture, "utf8"))).toMatchObject({ rw: [[allowed, allowed]] });
+});
+
 test("observes a rejected execution event write immediately and still rejects the invocation", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "claude-event-rejection-"));
   directories.push(root);

@@ -169,6 +169,80 @@ function isWithin(target: string, root: string) {
   return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
+function executablePath(command: string) {
+  const candidates = path.isAbsolute(command)
+    ? [command]
+    : (process.env.PATH ?? "").split(path.delimiter).map((directory) => path.join(directory, command));
+  for (const candidate of candidates) {
+    try { return realpathSync(candidate); } catch { /* try the next PATH entry */ }
+  }
+  throw new Error(`could not resolve executable: ${command}`);
+}
+
+function bwrapParentDirectories(target: string) {
+  const directories: string[] = [];
+  for (let current = path.dirname(target); current !== path.dirname(current); current = path.dirname(current)) {
+    directories.unshift(current);
+  }
+  return directories.filter((directory) => !["/tmp", "/opt", "/usr", "/proc", "/dev"].includes(directory))
+    .flatMap((directory) => ["--dir", directory]);
+}
+
+function scopedBwrapLaunch(input: ExecutionInvocation, settingsDirectory: string, guardPath: string) {
+  const worktree = canonicalPath(input.workingDirectory, input.workingDirectory);
+  const writePaths = [...new Set((input.allowedWritePaths ?? []).map((target) => canonicalPath(target, worktree)))];
+  if (!writePaths.length || writePaths.some((target) => !isWithin(target, worktree))) {
+    throw new Error("scoped execution requires write paths inside the worktree");
+  }
+  const bwrap = executablePath(process.env.DCC_CLAUDE_BWRAP_PATH ?? "/usr/bin/bwrap");
+  const nodeRoot = realpathSync(path.dirname(path.dirname(process.execPath)));
+  const executable = executablePath(input.claudeExecutable ?? "claude");
+  const executableInNodeRoot = isWithin(executable, nodeRoot);
+  const promptFile = canonicalPath(input.promptFile, worktree);
+  const skillBundleDir = input.skillBundleDir ? canonicalPath(input.skillBundleDir, worktree) : undefined;
+  const plugins = (input.pluginDirectories ?? []).map((directory) => canonicalPath(directory, worktree));
+  const virtual = {
+    settingsDirectory: "/opt/dcc-settings",
+    settingsFile: "/opt/dcc-settings/settings.json",
+    guardPath: "/opt/dcc-guard.mjs",
+    promptFile: "/opt/dcc-prompt.md",
+    skillBundleDir: "/opt/dcc-skills",
+    pluginDirectories: plugins.map((_, index) => `/opt/dcc-plugin-${index}`),
+    executable: executableInNodeRoot
+      ? path.join("/opt/node", path.relative(nodeRoot, executable))
+      : "/opt/dcc-claude",
+  };
+  const configuredInput: ExecutionInvocation = {
+    ...input,
+    promptFile: virtual.promptFile,
+    skillBundleDir: skillBundleDir ? virtual.skillBundleDir : undefined,
+    pluginDirectories: virtual.pluginDirectories,
+    guardPath: virtual.guardPath,
+    allowedWritePaths: writePaths,
+  };
+  const args = [
+    "--die-with-parent", "--new-session", "--unshare-net", "--unshare-pid", "--unshare-ipc", "--unshare-uts",
+    "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
+    "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
+    "--proc", "/proc", "--dev", "/dev", "--dir", "/opt", "--dir", "/opt/node",
+    "--ro-bind", nodeRoot, "/opt/node", "--tmpfs", "/tmp", "--dir", "/tmp/claude",
+    ...bwrapParentDirectories(worktree), "--ro-bind", worktree, worktree,
+    ...writePaths.flatMap((target) => ["--bind", target, target]),
+    "--ro-bind", settingsDirectory, virtual.settingsDirectory,
+    "--ro-bind", guardPath, virtual.guardPath,
+    "--ro-bind", promptFile, virtual.promptFile,
+    ...(skillBundleDir ? ["--ro-bind", skillBundleDir, virtual.skillBundleDir] : []),
+    ...plugins.flatMap((directory, index) => ["--ro-bind", directory, virtual.pluginDirectories[index]]),
+    ...(executableInNodeRoot ? [] : ["--ro-bind", executable, virtual.executable]),
+    "--setenv", "CLAUDE_CONFIG_DIR", "/tmp/claude", "--setenv", "PATH", "/opt/node/bin:/usr/bin:/bin",
+    "--chdir", worktree, "--",
+  ];
+  return {
+    bwrap, args, configuredInput, executable: virtual.executable, settingsFile: virtual.settingsFile,
+    env: { PATH: process.env.PATH },
+  };
+}
+
 async function gitMetadataPaths(workingDirectory: string) {
   const dotGit = path.join(workingDirectory, ".git");
   let gitDirectory = dotGit;
@@ -405,11 +479,19 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
       guardPath: guard.path,
       gitMetadataPaths: [...metadataPaths, ...(hiddenGitMetadata ? [hiddenGitMetadata.hidden] : [])],
     };
-    const { settingsFile } = await createExecutionSandboxSettings(configuredInput, settingsDirectory);
+    const scoped = input.allowedWritePaths !== undefined;
+    const launch = scoped ? scopedBwrapLaunch(configuredInput, settingsDirectory, guard.path) : null;
+    const sandboxInput = launch?.configuredInput ?? configuredInput;
+    const { settingsFile } = await createExecutionSandboxSettings(sandboxInput, settingsDirectory);
+    const command = launch?.bwrap ?? (input.claudeExecutable ?? "claude");
+    const commandArgs = launch
+      ? [...launch.args, launch.executable, ...buildExecutionArguments(sandboxInput, launch.settingsFile)]
+      : buildExecutionArguments(sandboxInput, settingsFile);
+    const childEnv = launch ? { ...env, ...launch.env } : env;
     return await new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
-    const child = spawn(input.claudeExecutable ?? "claude", buildExecutionArguments(configuredInput, settingsFile), {
+    const child = spawn(command, commandArgs, {
       cwd: input.workingDirectory,
-      env,
+      env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
     });
     let pending = "";
