@@ -39,7 +39,7 @@ import {
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
 import {
-  finalizePlanningFailure, finalizePlanningSuccess, initializePlanningAttempt, LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch,
+  finalizePlanningFailure, finalizePlanningSuccess, initializePlanningAttempt, LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch, terminalizePrReview,
   withContainedLeaseHeartbeat, withLeaseHeartbeat, type LeaseGuard,
 } from "./workflow-state.ts";
 
@@ -1114,7 +1114,6 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     await pool.query("SELECT * FROM pr_ai_reviews WHERE id=$1", [payload.pr_ai_review_id])
   ).rows[0];
   if (!existingReview) throw new Error("pr_ai_reviews row not found");
-  assertPrReviewDestination(existingReview, payload.pull_request_id);
   if (existingReview.status !== "running") return;
 
   // ponytail: everything below — including the preflight check, the row
@@ -1130,6 +1129,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
   let agentRunCompleted = false;
   let reviewWorktree: Awaited<ReturnType<typeof createPullRequestReviewWorktree>> | null = null;
   try {
+    assertPrReviewDestination(existingReview, payload.pull_request_id);
     await lease.assertOwned();
     const pullRequest = (
       await pool.query("SELECT * FROM pull_requests WHERE id=$1", [payload.pull_request_id])
@@ -1296,10 +1296,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
         "UPDATE agent_runs SET status='failed',finished_at=now(),error_message=$2 WHERE id=$1",
         [runId, error.message],
       )] : []),
-      () => pool.query(
-      "UPDATE pr_ai_reviews SET status='error',error_code=$2,error_message=$3,completed_at=now() WHERE id=$1 AND status='running'",
-      [payload.pr_ai_review_id, errorCode, error.message],
-      ),
+      () => terminalizePrReview(pool, payload.pr_ai_review_id, errorCode, error.message),
     ]);
   } finally {
     if (reviewWorktree) await reviewWorktree.cleanup();

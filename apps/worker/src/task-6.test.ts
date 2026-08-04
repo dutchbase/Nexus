@@ -35,7 +35,10 @@ test("publishes reviews through the resumable outbox without automatic merge", a
   const invocation = source.slice(start, source.indexOf("async function runFollowUpDescription", start));
 
   expect(invocation).toContain("resumePrReviewPublication");
-  expect(invocation).toContain("assertPrReviewDestination(existingReview, payload.pull_request_id)");
+  const destinationGuard = invocation.indexOf("assertPrReviewDestination(existingReview, payload.pull_request_id)");
+  expect(destinationGuard).toBeGreaterThan(invocation.indexOf("try {"));
+  expect(destinationGuard).toBeLessThan(invocation.indexOf("const pullRequest"));
+  expect(invocation).toContain("terminalizePrReview");
   expect(invocation).toContain("shouldRetryPrReview(error, storedReview?.raw_output, job.attempt, job.max_attempts)");
   expect(invocation).not.toContain("approveAndMergePullRequest");
   expect(invocation).not.toContain("reviewedMergeBinding");

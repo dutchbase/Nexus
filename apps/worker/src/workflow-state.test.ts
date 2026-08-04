@@ -10,6 +10,24 @@ import {
 type Result = { rows: any[]; rowCount?: number };
 type Transaction = Parameters<typeof recoverExpiredWorkflowState>[0];
 
+test("terminalizes a mismatched durable PR review with its stable error", async () => {
+  let review = { status: "running", error_code: null as string | null, error_message: null as string | null };
+  const client = { query: vi.fn(async (_sql: string, values?: unknown[]) => {
+    review = { status: "error", error_code: values?.[1] as string, error_message: values?.[2] as string };
+    return { rows: [{ ...review }], rowCount: 1 };
+  }) };
+  const workflow = await import("./workflow-state.ts") as any;
+
+  await workflow.terminalizePrReview(client, "review-1", "review_failed", "does not match payload pull request");
+
+  expect(review).toEqual({
+    status: "error", error_code: "review_failed", error_message: "does not match payload pull request",
+  });
+  expect(client.query).toHaveBeenCalledWith(expect.stringContaining("UPDATE pr_ai_reviews"), [
+    "review-1", "review_failed", "does not match payload pull request",
+  ]);
+});
+
 function transactionClient(recoveredJobs: any[], recoveredDeliveries: any[] = []) {
   let recoveryPass = 0;
   const query = vi.fn(async (sql: string, values?: unknown[]): Promise<Result> => {

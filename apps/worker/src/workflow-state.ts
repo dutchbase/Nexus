@@ -11,6 +11,14 @@ type Job = {
   payload_json: Record<string, unknown>;
 };
 
+export async function terminalizePrReview(client: Client, reviewId: string, errorCode: string, message: string) {
+  return client.query(
+    `UPDATE pr_ai_reviews SET status='error',error_code=$2,error_message=$3,completed_at=now()
+     WHERE id=$1 AND status='running'`,
+    [reviewId, errorCode, message],
+  );
+}
+
 async function transitionTicket(
   client: Client,
   job: Job,
@@ -87,11 +95,7 @@ async function reconcileJob(client: Client, job: Job, errorCode: string, message
   if (job.type === "pr.ai_review" && terminal) {
     const reviewId = job.payload_json.pr_ai_review_id;
     if (typeof reviewId === "string") {
-      await client.query(
-        `UPDATE pr_ai_reviews SET status='error',error_code=$2,error_message=$3,completed_at=now()
-         WHERE id=$1 AND status='running'`,
-        [reviewId, errorCode, message],
-      );
+      await terminalizePrReview(client, reviewId, errorCode, message);
     }
     return;
   }
