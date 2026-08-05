@@ -37,18 +37,24 @@ write_marker() {
 
 record_event() {
   local stage="$1"
-  psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=attempt_id="$ATTEMPT_ID" --set=event_key="deploy:$stage" --set=event_type=stage --set=stage="$stage" --command "INSERT INTO deployment_events (attempt_id,event_key,event_type,metadata) VALUES (:'attempt_id'::uuid, :'event_key', :'event_type', jsonb_build_object('stage', :'stage')) ON CONFLICT (attempt_id,event_key) DO NOTHING"
+  psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=attempt_id="$ATTEMPT_ID" --set=event_key="deploy:$stage" --set=event_type=stage --set=stage="$stage" <<'SQL'
+INSERT INTO deployment_events (attempt_id,event_key,event_type,metadata) VALUES (:'attempt_id'::uuid, :'event_key', :'event_type', jsonb_build_object('stage', :'stage')) ON CONFLICT (attempt_id,event_key) DO NOTHING
+SQL
 }
 
 record_rollback() {
   local outcome="$1"
   local recovery_health="$2"
   local reason="$3"
-  psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=attempt_id="$ATTEMPT_ID" --set=event_key=deploy:rollback --set=prior_release="$PRIOR_RELEASE" --set=rollback_outcome="$outcome" --set=recovery_health="$recovery_health" --set=reason="$reason" --command "INSERT INTO deployment_events (attempt_id,event_key,event_type,metadata) VALUES (:'attempt_id'::uuid, :'event_key', 'rollback', jsonb_strip_nulls(jsonb_build_object('stage','rollback','prior_release_path',NULLIF(:'prior_release',''),'rollback_outcome',:'rollback_outcome','recovery_health',:'recovery_health','reason',:'reason'))) ON CONFLICT (attempt_id,event_key) DO NOTHING"
+  psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=attempt_id="$ATTEMPT_ID" --set=event_key=deploy:rollback --set=prior_release="$PRIOR_RELEASE" --set=rollback_outcome="$outcome" --set=recovery_health="$recovery_health" --set=reason="$reason" <<'SQL'
+INSERT INTO deployment_events (attempt_id,event_key,event_type,metadata) VALUES (:'attempt_id'::uuid, :'event_key', 'rollback', jsonb_strip_nulls(jsonb_build_object('stage','rollback','prior_release_path',NULLIF(:'prior_release',''),'rollback_outcome',:'rollback_outcome','recovery_health',:'recovery_health','reason',:'reason'))) ON CONFLICT (attempt_id,event_key) DO NOTHING
+SQL
 }
 
 record_cutover_target() {
-  psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=attempt_id="$ATTEMPT_ID" --set=event_key=deploy:cutover_prepared --set=event_type=cutover_prepared --set=prior_release="$PRIOR_RELEASE" --set=target_release="$RELEASE" --command "WITH updated AS (UPDATE deployment_attempts SET prior_release_path=NULLIF(:'prior_release',''),updated_at=now() WHERE id=:'attempt_id'::uuid AND state='running' RETURNING id), recorded AS (INSERT INTO deployment_events (attempt_id,event_key,event_type,metadata) SELECT id,:'event_key',:'event_type',jsonb_strip_nulls(jsonb_build_object('prior_release_path',NULLIF(:'prior_release',''),'target_release_path',:'target_release')) FROM updated RETURNING 1) SELECT 1 / count(*)::integer FROM recorded"
+  psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=attempt_id="$ATTEMPT_ID" --set=event_key=deploy:cutover_prepared --set=event_type=cutover_prepared --set=prior_release="$PRIOR_RELEASE" --set=target_release="$RELEASE" <<'SQL'
+WITH updated AS (UPDATE deployment_attempts SET prior_release_path=NULLIF(:'prior_release',''),updated_at=now() WHERE id=:'attempt_id'::uuid AND state='running' RETURNING id), recorded AS (INSERT INTO deployment_events (attempt_id,event_key,event_type,metadata) SELECT id,:'event_key',:'event_type',jsonb_strip_nulls(jsonb_build_object('prior_release_path',NULLIF(:'prior_release',''),'target_release_path',:'target_release')) FROM updated RETURNING 1) SELECT 1 / count(*)::integer FROM recorded
+SQL
 }
 
 switch_current() {
