@@ -1,8 +1,10 @@
 import { inTransaction, pool } from "@dcc/database";
 
-export type NotificationEvent =
-  | "ticket.created" | "planning.started" | "planning.failed" | "plan.ready_for_review"
-  | "execution.started" | "execution.completed" | "pr.ready_for_review";
+export const NOTIFICATION_EVENTS = [
+  "ticket.created", "planning.started", "planning.failed", "plan.ready_for_review",
+  "execution.started", "execution.completed", "pr.ready_for_review",
+] as const;
+export type NotificationEvent = (typeof NOTIFICATION_EVENTS)[number];
 
 export function buildNotificationPayload(input: {
   event: NotificationEvent;
