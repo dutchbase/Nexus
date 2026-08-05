@@ -20,6 +20,10 @@ function assertLease(leaseMs) {
   if (!Number.isSafeInteger(leaseMs) || leaseMs <= 0) throw new Error('leaseMs must be a positive integer');
 }
 
+function assertPid(pid) {
+  if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error('childPid must be a positive integer');
+}
+
 function assertSafeMetadata(metadata) {
   if (!metadata || Array.isArray(metadata) || typeof metadata !== 'object') throw new Error('event metadata must be an object');
   for (const [key, value] of Object.entries(metadata)) {
@@ -139,18 +143,33 @@ async function renewDeploymentLease(pool, { attemptId, owner, leaseMs }) {
   });
 }
 
-async function completeDeploymentAttempt(pool, { attemptId, owner, state, markerPath = null, priorReleasePath = null, notificationStatus = null, notificationErrorCode = null }) {
+async function recordDeploymentLaunch(pool, { attemptId, owner, markerPath, childPid }) {
+  assertString(attemptId, 'attemptId');
+  assertString(owner, 'owner');
+  assertString(markerPath, 'markerPath');
+  assertPid(childPid);
+  return inTransaction(pool, async (client) => {
+    const launched = (await client.query(
+      "UPDATE deployment_attempts SET marker_path=$3,child_pid=$4,updated_at=now() WHERE id=$1 AND state='running' AND owner=$2 AND lease_expires_at > now() RETURNING *",
+      [attemptId, owner, markerPath, childPid],
+    )).rows[0] ?? null;
+    if (launched) await insertEvent(client, { attemptId, eventKey: `launched:${randomUUID()}`, eventType: 'launched', metadata: { child_pid: childPid } });
+    return launched;
+  });
+}
+
+async function completeDeploymentAttempt(pool, { attemptId, owner, state, markerPath = null, priorReleasePath = null, notificationStatus = null, notificationErrorCode = null, recoveryReason = null }) {
   assertString(attemptId, 'attemptId');
   assertString(owner, 'owner');
   if (!TERMINAL_STATES.has(state)) throw new Error('state must be terminal');
   return inTransaction(pool, async (client) => {
     const completed = (await client.query(
       `UPDATE deployment_attempts
-       SET state=$3,owner=NULL,lease_expires_at=NULL,marker_path=$4,prior_release_path=$5,notification_status=$6,notification_error_code=$7,completed_at=now(),updated_at=now()
+       SET state=$3,owner=NULL,lease_expires_at=NULL,marker_path=$4,prior_release_path=$5,notification_status=$6,notification_error_code=$7,recovery_reason=COALESCE($8,recovery_reason),completed_at=now(),updated_at=now()
        WHERE id=$1 AND state='running' AND owner=$2 AND lease_expires_at > now() RETURNING *`,
-      [attemptId, owner, state, markerPath, priorReleasePath, notificationStatus, notificationErrorCode],
+      [attemptId, owner, state, markerPath, priorReleasePath, notificationStatus, notificationErrorCode, recoveryReason],
     )).rows[0] ?? null;
-    if (completed) await insertEvent(client, { attemptId, eventKey: `completed:${randomUUID()}`, eventType: state, metadata: { state, notification_status: notificationStatus } });
+    if (completed) await insertEvent(client, { attemptId, eventKey: `completed:${randomUUID()}`, eventType: state, metadata: { state, notification_status: notificationStatus, recovery_reason: recoveryReason } });
     return completed;
   });
 }
@@ -161,5 +180,6 @@ module.exports = {
   completeDeploymentAttempt,
   createDeploymentPool,
   enqueueDeploymentAttempt,
+  recordDeploymentLaunch,
   renewDeploymentLease,
 };

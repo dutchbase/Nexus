@@ -44,6 +44,8 @@ function fakeStore(overrides: Record<string, unknown> = {}) {
   return {
     enqueueDeploymentAttempt: vi.fn(async () => ({ created: true, attempt: { id: "attempt-1" } })),
     claimDeploymentAttempt: vi.fn(async () => ({ kind: "busy", attempt: null })),
+    recordDeploymentLaunch: vi.fn(async () => ({})),
+    renewDeploymentLease: vi.fn(async () => ({})),
     completeDeploymentAttempt: vi.fn(async () => ({})),
     appendDeploymentEvent: vi.fn(async () => ({})),
     ...overrides,
@@ -63,7 +65,7 @@ async function webhook(overrides: Record<string, unknown> = {}) {
   const fetchFn = overrides.fetchFn ?? githubFetch(overrides.head as string | undefined);
   const spawnFn = overrides.spawnFn ?? vi.fn(() => ({ pid: 42, unref() {} }));
   const logs: string[] = [];
-  const app = api.createWebhook({ config: config(dir, overrides.config as Record<string, unknown>), store, fetchFn, spawnFn, logger: { info: (line: string) => logs.push(line), warn: (line: string) => logs.push(line), error: (line: string) => logs.push(line) } });
+  const app = api.createWebhook({ config: config(dir, overrides.config as Record<string, unknown>), store, fetchFn, spawnFn, isAliveFn: overrides.isAliveFn, logger: { info: (line: string) => logs.push(line), warn: (line: string) => logs.push(line), error: (line: string) => logs.push(line) } });
   return { app, dir, store, fetchFn, spawnFn, logs };
 }
 
@@ -128,17 +130,47 @@ describe("deployment webhook", () => {
     expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ state: "blocked", attemptId: "attempt-1" }));
   });
 
-  it("launches one recovered attempt and leaves the second recovery blocked", async () => {
+  it("finalizes a recovered marker before considering another launch", async () => {
     const recovered = { id: "attempt-recovered", target_sha: protectedSha, protected_branch: "master", owner: "webhook" };
-    const claimDeploymentAttempt = vi.fn()
-      .mockResolvedValueOnce({ kind: "recovered", attempt: recovered })
-      .mockResolvedValueOnce({ kind: "blocked", attempt: recovered });
-    const ctx = await webhook({ store: { claimDeploymentAttempt } }); dirs.push(ctx.dir);
+    const ctx = await webhook({ store: { claimDeploymentAttempt: vi.fn(async () => ({ kind: "recovered", attempt: recovered })) } }); dirs.push(ctx.dir);
+    const marker = join(ctx.dir, "completions", "attempt-recovered.done");
+    await writeFile(marker, JSON.stringify({ attemptId: "attempt-recovered", sha: protectedSha, exitCode: 0 }));
 
     await ctx.app.recoverOnBoot();
+
+    expect(ctx.spawnFn).not.toHaveBeenCalled();
+    expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ state: "succeeded", markerPath: marker }));
+  });
+
+  it("reclaims and polls a recovered live child without spawning a second deploy", async () => {
+    const recovered = { id: "attempt-recovered", target_sha: protectedSha, protected_branch: "master", owner: "webhook", child_pid: 12345, marker_path: join(tmpdir(), "not-yet.done") };
+    const isAliveFn = vi.fn(() => true);
+    const ctx = await webhook({ isAliveFn, store: { claimDeploymentAttempt: vi.fn(async () => ({ kind: "recovered", attempt: recovered })) } }); dirs.push(ctx.dir);
+
     await ctx.app.recoverOnBoot();
 
-    expect(ctx.spawnFn).toHaveBeenCalledTimes(1);
+    expect(isAliveFn).toHaveBeenCalledWith(12345);
+    expect(ctx.store.renewDeploymentLease).toHaveBeenCalledWith(null, expect.objectContaining({ attemptId: "attempt-recovered", owner: "webhook" }));
+    expect(ctx.spawnFn).not.toHaveBeenCalled();
+    expect(ctx.store.completeDeploymentAttempt).not.toHaveBeenCalled();
+  });
+
+  it("leaves a completion marker when the fenced terminal write fails", async () => {
+    const ctx = await webhook({ store: { completeDeploymentAttempt: vi.fn(async () => { throw new Error("database unavailable"); }) } }); dirs.push(ctx.dir);
+    const marker = join(ctx.dir, "completion.done");
+    await writeFile(marker, JSON.stringify({ attemptId: "attempt-1", sha: protectedSha, exitCode: 0 }));
+
+    await expect(ctx.app.finalizeAttempt({ id: "attempt-1", target_sha: protectedSha, owner: "webhook" }, marker)).rejects.toThrow("database unavailable");
+    await expect(require("node:fs/promises").access(marker)).resolves.toBeUndefined();
+  });
+
+  it("blocks a claimed attempt when process spawn fails", async () => {
+    const attempt = { id: "attempt-spawn", target_sha: protectedSha, protected_branch: "master", owner: "webhook" };
+    const ctx = await webhook({ spawnFn: vi.fn(() => { throw Object.assign(new Error("missing deploy script"), { code: "ENOENT" }); }), store: { claimDeploymentAttempt: vi.fn(async () => ({ kind: "claimed", attempt })) } }); dirs.push(ctx.dir);
+
+    await expect(ctx.app.processNext()).resolves.toBe(false);
+
+    expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ attemptId: "attempt-spawn", state: "blocked" }));
   });
 
   it("passes metacharacter paths as argv with no shell", async () => {

@@ -39,6 +39,15 @@ function fakePool(reply: (text: string, values: unknown[], queries: Array<{ text
 }
 
 describe("webhook deployment store query semantics", () => {
+  it("persists a spawned child PID with its marker under the owner lease", async () => {
+    const db = fakePool((text) => text.startsWith("UPDATE deployment_attempts SET marker_path")
+      ? { rows: [{ id: "attempt", child_pid: 42 }] }
+      : { rows: [] });
+
+    await expect(deployments.recordDeploymentLaunch(db.pool, { attemptId: "attempt", owner: "webhook", markerPath: "/safe/attempt.done", childPid: 42 }))
+      .resolves.toMatchObject({ id: "attempt", child_pid: 42 });
+  });
+
   it("uses PostgreSQL time to retain a lease that appears expired to the host", async () => {
     const db = fakePool((text) => text.includes("lease_expires_at > now() AS lease_active")
       ? { rows: [{ id: "attempt", lease_expires_at: "1970-01-01T00:00:00.000Z", lease_active: true, recovery_count: 0 }] }

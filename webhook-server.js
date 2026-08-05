@@ -30,7 +30,7 @@ function readConfig(env = process.env) {
   };
 }
 
-function createWebhook({ config = readConfig(), store = deployments, pool = null, fetchFn = fetch, spawnFn = spawn, fsModule = fs, logger = console } = {}) {
+function createWebhook({ config = readConfig(), store = deployments, pool = null, fetchFn = fetch, spawnFn = spawn, fsModule = fs, isAliveFn = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } }, logger = console } = {}) {
   if (!config.secret || !config.protectedBranch) throw new Error('WEBHOOK_SECRET and DEPLOY_PROTECTED_BRANCH are required');
   fsModule.mkdirSync(config.completionsDir, { recursive: true });
   fsModule.mkdirSync(config.logsDir, { recursive: true });
@@ -87,17 +87,23 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
         detached: true, shell: false, stdio: ['ignore', logFd, logFd],
       });
       child.unref();
-      return { markerPath, childPid: child.pid };
+      return { child, markerPath, childPid: child.pid };
     } finally {
       fsModule.closeSync(logFd);
     }
   }
 
-  async function complete(attempt, state, markerPath) {
-    const notificationStatus = await sendNotification(`dev-control deploy ${state}: ${attempt.target_sha.slice(0, 8)}`);
-    await store.completeDeploymentAttempt(pool, {
-      attemptId: attempt.id, owner: attempt.owner || config.owner, state, markerPath, notificationStatus,
+  async function complete(attempt, state, markerPath, recoveryReason = null) {
+    const completed = await store.completeDeploymentAttempt(pool, {
+      attemptId: attempt.id, owner: attempt.owner || config.owner, state, markerPath, recoveryReason,
     });
+    if (!completed) throw new Error('deployment terminal transition was not accepted');
+    if (markerPath) {
+      try { fsModule.unlinkSync(markerPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    const notificationStatus = await sendNotification(`dev-control deploy ${state}: ${attempt.target_sha.slice(0, 8)}`);
+    await store.appendDeploymentEvent(pool, { attemptId: attempt.id, eventKey: `notification:${crypto.randomUUID()}`, eventType: 'notification', metadata: { notification_status: notificationStatus } })
+      .catch(() => logger.error('[webhook] notification outcome recording failed'));
     logger.info(`[webhook] deployment ${state} for ${attempt.target_sha.slice(0, 8)}`);
     if (state === 'succeeded') await processNext();
   }
@@ -105,7 +111,6 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
   async function finalizeAttempt(attempt, markerPath) {
     let marker;
     try { marker = JSON.parse(fsModule.readFileSync(markerPath, 'utf8')); } catch { marker = null; }
-    try { fsModule.unlinkSync(markerPath); } catch { /* artifact already absent */ }
     if (!marker || Object.keys(marker).length !== 3 || marker.attemptId !== attempt.id || marker.sha !== attempt.target_sha || !Number.isInteger(marker.exitCode)) {
       await complete(attempt, 'blocked', markerPath);
       return;
@@ -116,12 +121,20 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
   function startCompletionPoll(attempt, markerPath) {
     if (activePolls.has(attempt.id)) return;
     activePolls.add(attempt.id);
+    const stop = () => { clearInterval(interval); clearInterval(renewal); activePolls.delete(attempt.id); };
     const interval = setInterval(() => {
       if (!fsModule.existsSync(markerPath)) return;
-      clearInterval(interval); activePolls.delete(attempt.id);
+      stop();
       finalizeAttempt(attempt, markerPath).catch(() => logger.error('[webhook] completion finalization failed'));
     }, 500);
+    const renewal = setInterval(() => {
+      store.renewDeploymentLease(pool, { attemptId: attempt.id, owner: attempt.owner || config.owner, leaseMs: config.leaseMs })
+        .then((renewed) => { if (!renewed) stop(); })
+        .catch(() => stop());
+    }, Math.max(1000, Math.floor(config.leaseMs / 2)));
     interval.unref?.();
+    renewal.unref?.();
+    return stop;
   }
 
   async function launchAttempt(attempt) {
@@ -130,14 +143,44 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
       return false;
     }
     const markerPath = path.join(config.completionsDir, `${attempt.id}.done`);
-    launchDeploy(attempt.target_sha, markerPath, attempt.id, attempt.protected_branch);
-    startCompletionPoll(attempt, markerPath);
+    let launched;
+    try {
+      launched = launchDeploy(attempt.target_sha, markerPath, attempt.id, attempt.protected_branch);
+      if (!Number.isSafeInteger(launched.childPid) || launched.childPid <= 0) throw new Error('spawn returned no child PID');
+      const recorded = await store.recordDeploymentLaunch(pool, { attemptId: attempt.id, owner: attempt.owner || config.owner, markerPath, childPid: launched.childPid });
+      if (!recorded) throw new Error('deployment launch was not persisted');
+    } catch {
+      launched?.child?.kill?.('SIGTERM');
+      await complete(attempt, 'blocked', null, 'spawn_failed');
+      return false;
+    }
+    const stopPolling = startCompletionPoll(attempt, markerPath);
+    launched.child.once?.('error', () => {
+      stopPolling?.();
+      complete(attempt, 'blocked', markerPath, 'spawn_failed').catch(() => logger.error('[webhook] spawn failure finalization failed'));
+    });
     return true;
+  }
+
+  async function recoverAttempt(attempt) {
+    const markerPath = attempt.marker_path || path.join(config.completionsDir, `${attempt.id}.done`);
+    if (fsModule.existsSync(markerPath)) { await finalizeAttempt(attempt, markerPath); return true; }
+    if (Number.isSafeInteger(attempt.child_pid) && attempt.child_pid > 0 && isAliveFn(attempt.child_pid)) {
+      if (!await store.renewDeploymentLease(pool, { attemptId: attempt.id, owner: attempt.owner || config.owner, leaseMs: config.leaseMs })) {
+        await complete(attempt, 'blocked', null, 'recovery_lease_not_renewed');
+        return false;
+      }
+      startCompletionPoll(attempt, markerPath);
+      return true;
+    }
+    await complete(attempt, 'blocked', null, 'recovery_no_marker_or_live_child');
+    return false;
   }
 
   async function processNext() {
     const claim = await store.claimDeploymentAttempt(pool, { owner: config.owner, leaseMs: config.leaseMs });
-    if (claim.kind === 'claimed' || claim.kind === 'recovered') return launchAttempt(claim.attempt);
+    if (claim.kind === 'claimed') return launchAttempt(claim.attempt);
+    if (claim.kind === 'recovered') return recoverAttempt(claim.attempt);
     return false;
   }
 
