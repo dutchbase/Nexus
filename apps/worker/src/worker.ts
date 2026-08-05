@@ -22,7 +22,7 @@ import {
   stageConflictResolutionPaths, validateExecutionWorktree, WorktreeValidationError, worktreeDiff,
 } from "../../../packages/git-runner/src/index.ts";
 import {
-  createPullRequest, createPullRequestComment, findOpenPullRequestForHead, getPullRequest, listPullRequestComments, updatePullRequestBase,
+  createPullRequest, createPullRequestComment, findOpenPullRequestForHead, getPullRequest, listPullRequestComments, probeGitHubCapability, updatePullRequestBase,
 } from "@dcc/github-provider";
 import { validateProject } from "@dcc/project-config";
 import {
@@ -1622,6 +1622,28 @@ while (!stopping) {
     for (const project of projects) {
       try { await importGithubPullRequests(pool, project); }
       catch (error) { console.error(`github import failed for ${project.name}:`, error); }
+    }
+    const probeProject = projects.find((project) => project.github_owner && project.github_repository);
+    try {
+      const capability = probeProject
+        ? await probeGitHubCapability(probeProject.github_owner, probeProject.github_repository)
+        : { status: "not_configured", canRead: false, canWrite: false, reason: "no project has a GitHub owner/repository configured", checkedAt: new Date().toISOString() };
+      await pool.query(
+        `INSERT INTO github_capability (id, status, can_read, can_write, reason, checked_at) VALUES (1, $1, $2, $3, $4, $5)
+         ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, can_read=EXCLUDED.can_read, can_write=EXCLUDED.can_write, reason=EXCLUDED.reason, checked_at=EXCLUDED.checked_at`,
+        [capability.status, capability.canRead, capability.canWrite, capability.reason, capability.checkedAt],
+      );
+    } catch (error) {
+      console.error("github capability probe failed:", error);
+      try {
+        await pool.query(
+          `INSERT INTO github_capability (id, status, can_read, can_write, reason, checked_at) VALUES (1, 'unreachable', false, false, $1, now())
+           ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, can_read=EXCLUDED.can_read, can_write=EXCLUDED.can_write, reason=EXCLUDED.reason, checked_at=EXCLUDED.checked_at`,
+          [error instanceof Error ? error.message : "github capability probe failed"],
+        );
+      } catch (upsertError) {
+        console.error("github capability upsert failed:", upsertError);
+      }
     }
   }
   let job = await claimJob(workerId, ["project.validate", ...publicationJobTypes, ...providerJobTypes]);

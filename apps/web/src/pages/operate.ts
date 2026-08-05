@@ -26,7 +26,15 @@ function maskedDatabaseUrl() {
   }
 }
 
-function settingsBody(aiReviewSettings: any): string {
+export function capabilityLabel(row: { status: string; can_read: boolean; can_write: boolean; reason: string | null; checked_at: string | Date } | null): string {
+  if (!row) return "never checked";
+  const checked = `checked ${since(row.checked_at)} ago`;
+  if (row.status === "ok" && row.can_read && row.can_write) return `read + write · ${checked}`;
+  if (row.status === "ok" && row.can_read) return `read only · ${checked}`;
+  return row.reason ? `${row.status} · ${row.reason} · ${checked}` : `${row.status} · ${checked}`;
+}
+
+function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: boolean; can_write: boolean; reason: string | null; checked_at: string | Date } | null): string {
   const panel = (index: number, content: string) => `<div role="tabpanel" id="panel-${index}" aria-labelledby="tab-${index}"${index === 0 ? "" : " hidden"}>${content}</div>`;
   const field = (label: string, value: string) => `<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div class="eyebrow">${escapeHtml(label)}</div><div class="mono" style="font-size:13px;margin-top:4px">${escapeHtml(value)}</div></div>`;
   const check = (label: string) => `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:13px"><input type="checkbox" checked disabled>${escapeHtml(label)}</label>`;
@@ -58,7 +66,9 @@ function settingsBody(aiReviewSettings: any): string {
 
   const github = `<section class="card">
     ${field("GitHub API base URL", process.env.GITHUB_API_BASE_URL ?? "not configured")}
-    <div style="padding-top:10px">${check("Always open pull requests as draft")}${check("Automatic merge permanently disabled")}</div>
+    ${field("GitHub access", capabilityLabel(cap))}
+    <div class="eyebrow" style="margin-top:14px">Configuration intent — not verified against GitHub</div>
+    <div style="padding-top:4px">${field("Pull request draft policy", "Always open pull requests as draft")}${field("Merge policy", "Automatic merge permanently disabled")}</div>
   </section>`;
 
   const backupRetention = /^[1-9][0-9]*$/.test(process.env.DCC_BACKUP_RETENTION_DAYS ?? "") ? process.env.DCC_BACKUP_RETENTION_DAYS + " days" : "not configured";
@@ -197,8 +207,11 @@ async function systemBody(): Promise<string> {
 
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname === "/admin/settings") {
-    const aiReviewSettings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
-    return { status: 200, title: "Settings", body: settingsBody(aiReviewSettings) };
+    const [aiReviewSettings, capability] = await Promise.all([
+      pool.query("SELECT * FROM ai_review_settings WHERE id=1"),
+      pool.query("SELECT * FROM github_capability WHERE id=1"),
+    ]);
+    return { status: 200, title: "Settings", body: settingsBody(aiReviewSettings.rows[0], capability.rows[0] ?? null) };
   }
   if (url.pathname === "/admin/system") return { status: 200, title: "System health", body: await systemBody() };
   return null;

@@ -44,6 +44,14 @@ export type ProviderGitHubPolicyInputs = {
   fetchedAt: string;
 };
 
+export type GitHubCapability = {
+  status: "ok" | "unauthorized" | "unreachable" | "not_configured";
+  canRead: boolean;
+  canWrite: boolean;
+  reason: string | null;
+  checkedAt: string;
+};
+
 export type GitHubFetchMetadata = {
   complete: boolean;
   fetchedAt: string;
@@ -369,4 +377,61 @@ export async function mergeBranch(owner: string, repository: string, base: strin
   if (response.status === 204) return { outcome: "already_up_to_date" };
   if (response.status === 409) return { outcome: "conflict" };
   throw await errorFor(response);
+}
+
+// Pure classifier: given a `GET /repos/{owner}/{repo}` response body (or null
+// when the repository could not be read at all) and an optional
+// `X-OAuth-Scopes` header value, derives what the configured token can
+// actually do. Never inspects or calls a write endpoint itself.
+export function capabilityFromRepo(
+  body: { permissions?: { pull?: boolean; push?: boolean } } | null,
+  scopesHeader: string | null,
+): Omit<GitHubCapability, "checkedAt"> {
+  if (!body) {
+    return { status: "unauthorized", canRead: false, canWrite: false, reason: "GitHub repository is not accessible with the configured token" };
+  }
+  const canRead = body.permissions?.pull === true;
+  const canWrite = body.permissions?.push === true;
+  if (!canRead) {
+    return {
+      status: "unauthorized",
+      canRead: false,
+      canWrite: false,
+      reason: scopesHeader ? `token scopes (${scopesHeader}) do not include repository read access` : "token does not have pull permission on this repository",
+    };
+  }
+  return { status: "ok", canRead, canWrite, reason: null };
+}
+
+// Issues exactly one read-only `GET /repos/{owner}/{repo}` request and
+// classifies the result. Never calls a write/mutating GitHub endpoint.
+export async function probeGitHubCapability(owner: string, repository: string): Promise<GitHubCapability> {
+  const checkedAt = new Date().toISOString();
+  if (!process.env.GITHUB_API_BASE_URL || !process.env.GITHUB_TOKEN) {
+    return { status: "not_configured", canRead: false, canWrite: false, reason: "GITHUB_API_BASE_URL or GITHUB_TOKEN is not configured", checkedAt };
+  }
+  try {
+    const response = await responseFor(
+      `${apiBaseUrl()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`,
+      {},
+      [401, 403, 404],
+    );
+    if (response.status === 401 || response.status === 403) {
+      return { status: "unauthorized", canRead: false, canWrite: false, reason: `GitHub returned HTTP ${response.status}`, checkedAt };
+    }
+    if (response.status === 404) {
+      return { status: "unauthorized", canRead: false, canWrite: false, reason: "repository not found or inaccessible with the configured token", checkedAt };
+    }
+    const body = await jsonFor<{ permissions?: { pull?: boolean; push?: boolean } }>(response);
+    const scopesHeader = response.headers.get("x-oauth-scopes");
+    return { ...capabilityFromRepo(body, scopesHeader), checkedAt };
+  } catch (error) {
+    return {
+      status: "unreachable",
+      canRead: false,
+      canWrite: false,
+      reason: error instanceof Error ? error.message : "GitHub capability probe failed",
+      checkedAt,
+    };
+  }
 }
