@@ -41,6 +41,9 @@ export async function enqueueNotification(
   options: { runId?: string | null; pullRequestId?: string | null } = {},
   assertOwned: () => Promise<void> = async () => {},
 ) {
+  if (!(NOTIFICATION_EVENTS as readonly string[]).includes(event)) {
+    throw new Error(`Unknown notification event: ${event}`);
+  }
   const row = (await client.query(
     `SELECT t.id,t.ticket_number,t.title,t.status,t.priority,p.id project_id,p.name project_name,
             ar.id run_id,ar.run_type,ar.model,ar.reasoning_level
@@ -61,7 +64,8 @@ export async function enqueueNotification(
     `INSERT INTO notification_deliveries
        (provider_id,event_type,ticket_id,project_id,run_id,pull_request_id,idempotency_key,payload_json,status,attempt_count)
      SELECT np.id,$1,$2,$3,$4,$5,$6 || ':' || np.id,$7,'queued',0
-     FROM notification_providers np WHERE np.enabled=true
+     FROM notification_providers np
+     WHERE np.enabled=true AND np.enabled_events @> to_jsonb($1::text)
      ON CONFLICT (idempotency_key) DO NOTHING`,
     [event, ticketId, row.project_id, options.runId ?? null, options.pullRequestId ?? null,
       `${event}:${entityId}`, payload],
