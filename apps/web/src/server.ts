@@ -56,6 +56,7 @@ const fieldTypes = new Set([
   "short_text", "long_text", "email", "url", "number", "dropdown", "radio", "checkbox", "multi_select",
   "project_selector", "category_selector", "environment_selector", "image_upload", "hidden", "static",
 ]);
+const optionTypes = new Set(["dropdown", "radio", "multi_select", "category_selector", "environment_selector"]);
 const skillSourceTypes = new Set([
   "workspace_global", "project_local", "personal_claude", "repository", "external_directory",
 ]);
@@ -461,7 +462,7 @@ async function publicForm(slug: string) {
   return (await pool.query("SELECT * FROM forms WHERE slug = $1 AND status = 'published'", [slug])).rows[0] ?? null;
 }
 
-function validateFields(fields: any[], body: Record<string, any>) {
+export function validateFields(fields: any[], body: Record<string, any>) {
   const errors: Record<string, string> = {};
   for (const field of fields) {
     if (field.field_type === "hidden" || field.field_type === "static") continue;
@@ -474,12 +475,22 @@ function validateFields(fields: any[], body: Record<string, any>) {
       continue;
     }
     if (field.required && (value === undefined || value === null || value === "")) errors[field.field_key] = "required";
+    if (optionTypes.has(field.field_type)) {
+      const options = Array.isArray(field.options_json) ? field.options_json : [];
+      const values = Array.isArray(value) ? value : (value === undefined || value === null || value === "" ? [] : [value]);
+      if (field.field_type !== "multi_select" && values.length > 1) errors[field.field_key] = "invalid option";
+      else if (values.some((v: any) => !options.includes(v))) errors[field.field_key] = "invalid option";
+      continue;
+    }
     if (typeof value === "string") {
       const limit = Math.min(Number(field.validation_json?.max_length ?? (field.field_type === "long_text" ? 10000 : 500)), 10000);
       if (value.length > limit) errors[field.field_key] = "too long";
-      if (field.required && field.field_type === "email" && value && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) errors[field.field_key] = "invalid email";
-      if (field.required && field.field_type === "url" && value) {
-        try { new URL(value); } catch { errors[field.field_key] = "invalid URL"; }
+      if (field.field_type === "email" && value && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) errors[field.field_key] = "invalid email";
+      if (field.field_type === "url" && value) {
+        try {
+          const parsed = new URL(value);
+          if (parsed.protocol !== "http:" && parsed.protocol !== "https:") errors[field.field_key] = "invalid URL";
+        } catch { errors[field.field_key] = "invalid URL"; }
       }
     }
   }
@@ -615,11 +626,14 @@ async function upload(request: IncomingMessage, response: ServerResponse) {
   }
 }
 
-function normalizeFields(fields: any[]) {
+export function normalizeFields(fields: any[]) {
   if (!Array.isArray(fields)) return null;
   return fields.map((field, index) => {
     if (!field || typeof field.field_key !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(field.field_key)) throw Object.assign(new Error("invalid field key"), { status: 400 });
     if (!fieldTypes.has(field.field_type)) throw Object.assign(new Error("invalid field type"), { status: 400 });
+    if (optionTypes.has(field.field_type) && !(Array.isArray(field.options_json) && field.options_json.length && field.options_json.every((o: any) => typeof o === "string"))) {
+      throw Object.assign(new Error("option fields require options"), { status: 400 });
+    }
     return {
       field_key: field.field_key, field_type: field.field_type, label: String(field.label ?? field.field_key).slice(0, 200),
       description: field.description ?? null, placeholder: field.placeholder ?? null, required: Boolean(field.required),
