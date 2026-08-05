@@ -299,6 +299,33 @@ test("classifies headerless and type-only secondary rate limits with fallback re
   });
 });
 
+test("classifies a non-rate-limited 403 as http_error with a cooldown and endpoint context", async () => {
+  await withServer((_incoming, outgoing) => {
+    outgoing.statusCode = 403;
+    outgoing.end("Resource not accessible by integration");
+  }, async (baseUrl) => {
+    await expect(getPullRequest("acme", "widgets", 42)).rejects.toMatchObject({
+      code: "http_error",
+      status: 403,
+      retryAt: expect.any(String),
+      endpoint: `${baseUrl}/repos/acme/widgets/pulls/42`,
+    });
+  });
+});
+
+test("does not add a cooldown to an ordinary 404", async () => {
+  await withServer((_incoming, outgoing) => {
+    outgoing.statusCode = 404;
+    outgoing.end("Not Found");
+  }, async () => {
+    await expect(getPullRequest("acme", "widgets", 42)).rejects.toMatchObject({
+      code: "http_error",
+      status: 404,
+      retryAt: undefined,
+    });
+  });
+});
+
 test("redacts non-2xx response bodies", async () => {
   await withServer((_incoming, outgoing) => {
     outgoing.statusCode = 500;
