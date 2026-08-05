@@ -62,7 +62,7 @@ export function safeNotificationConfiguration(value: unknown): NotificationConfi
 export function safeNotificationProvider(value: unknown): any {
   if (!object(value)) return {};
   const provider: Record<string, unknown> = {};
-  for (const key of ["id", "name", "type", "enabled", "created_at", "updated_at"]) {
+  for (const key of ["id", "name", "type", "enabled", "enabled_events", "max_attempts", "created_at", "updated_at"]) {
     if (value[key] !== undefined) provider[key] = value[key];
   }
   provider.configuration_encrypted_json = safeNotificationConfiguration(value.configuration_encrypted_json);
