@@ -43,11 +43,16 @@ function hasUrlUserinfo(value: string) {
   }
 }
 
+function httpsOrRelative(value: string) {
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(value)) return true; // relative
+  try { return new URL(value).protocol === "https:"; } catch { return false; }
+}
+
 export function safeNotificationConfiguration(value: unknown): NotificationConfiguration {
   if (!object(value)) return {};
   const safe: NotificationConfiguration = {};
-  if (typeof value.base_url === "string" && value.base_url && !hasUrlUserinfo(value.base_url)) safe.base_url = value.base_url;
-  if (typeof value.endpoint === "string" && value.endpoint && !hasUrlUserinfo(value.endpoint)) safe.endpoint = value.endpoint;
+  if (typeof value.base_url === "string" && value.base_url && !hasUrlUserinfo(value.base_url) && /^https:\/\//i.test(value.base_url)) safe.base_url = value.base_url;
+  if (typeof value.endpoint === "string" && value.endpoint && !hasUrlUserinfo(value.endpoint) && httpsOrRelative(value.endpoint)) safe.endpoint = value.endpoint;
   if (value.method === "POST" || value.method === "PUT" || value.method === "PATCH") safe.method = value.method;
   if (typeof value.timeout_seconds === "number" && Number.isFinite(value.timeout_seconds) && value.timeout_seconds >= 1 && value.timeout_seconds <= 60) safe.timeout_seconds = value.timeout_seconds;
   if (validAuthentication(value.authentication)) safe.authentication = value.authentication;
@@ -57,7 +62,7 @@ export function safeNotificationConfiguration(value: unknown): NotificationConfi
 export function safeNotificationProvider(value: unknown): any {
   if (!object(value)) return {};
   const provider: Record<string, unknown> = {};
-  for (const key of ["id", "name", "type", "enabled", "created_at", "updated_at"]) {
+  for (const key of ["id", "name", "type", "enabled", "enabled_events", "max_attempts", "created_at", "updated_at"]) {
     if (value[key] !== undefined) provider[key] = value[key];
   }
   provider.configuration_encrypted_json = safeNotificationConfiguration(value.configuration_encrypted_json);
@@ -89,7 +94,8 @@ export function mergeNotificationConfiguration(existing: unknown, patch: Notific
 function endpointFor(configuration: NotificationConfiguration) {
   if (!configuration.endpoint) return null;
   try {
-    return new URL(configuration.endpoint, configuration.base_url).toString();
+    const url = new URL(configuration.endpoint, configuration.base_url);
+    return url.protocol === "https:" ? url.toString() : null;
   } catch {
     return null;
   }

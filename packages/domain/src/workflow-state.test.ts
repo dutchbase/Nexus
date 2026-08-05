@@ -98,7 +98,7 @@ test("claims notification deliveries with a 60-second lease", async () => {
   await expect(notifications.claimNotificationDelivery("worker-a")).resolves.toMatchObject({ id: "delivery-id" });
 
   expect(client.query).toHaveBeenCalledWith(
-    expect.stringContaining("lease_expires_at = now() + interval '60 seconds'"),
+    expect.stringContaining("ELSE now() + interval '60 seconds'"),
     ["worker-a"],
   );
 });

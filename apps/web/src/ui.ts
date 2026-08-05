@@ -452,7 +452,9 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           event.preventDefault();
           const data=new FormData(providerForm);const providerId=providerForm.dataset.providerId;
           const authType=data.get("auth_type");
+          const enabledEvents=[...providerForm.querySelectorAll('input[type=checkbox][name^="event:"]')].filter(box=>box.checked).map(box=>box.name.slice(6));
           const payload={name:data.get("name"),type:"webhook",enabled:providerForm.elements.enabled.checked,
+            enabled_events:enabledEvents,max_attempts:Number(data.get("max_attempts")),
             configuration:{base_url:data.get("base_url"),endpoint:data.get("endpoint"),timeout_seconds:Number(data.get("timeout_seconds")),
               authentication:authType==="none"?(providerId?null:undefined):{type:authType==="header"?"raw":authType,secret_reference:data.get("secret_reference")}}};
           const response=await fetch(providerId?"/api/admin/notifications/providers/"+providerId:"/api/admin/notifications/providers",

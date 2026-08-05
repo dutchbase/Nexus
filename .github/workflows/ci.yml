@@ -45,7 +45,7 @@ jobs:
       - run: pnpm exec tsc --noEmit
 
       - name: Deployment database tests
-        run: pnpm exec vitest run --no-file-parallelism --testTimeout=15000 scripts/webhook-deployments.test.ts packages/database/src/migrate.test.ts
+        run: pnpm exec vitest run --no-file-parallelism --testTimeout=15000 scripts/webhook-deployments.test.ts packages/database/src/migrate.test.ts packages/domain/src/notifications.db.test.ts
         env:
           DCC_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dcc_test
 

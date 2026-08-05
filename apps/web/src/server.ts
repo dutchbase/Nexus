@@ -10,8 +10,8 @@ import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransacti
 import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
   buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
-  globalPromptTypes, enqueueNotification, promptContentHash, PullRequestMergeError,
-  rejectPlanDecision, requestPlanRevisionDecision, requireApprovalPrompt, resolveAiConfiguration, setPullRequestTicketStatus,
+  globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, promptContentHash, PullRequestMergeError,
+  rejectPlanDecision, requestPlanRevisionDecision, requireApprovalPrompt, resolveAiConfiguration, retryNotificationDelivery, setPullRequestTicketStatus,
   validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
 import {
@@ -875,9 +875,11 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (!body.name || !body.type) return json(response, 400, { error: "name and type are required" });
     const configuration = parseNotificationConfiguration(body.configuration);
     if (!configuration) return json(response, 400, { error: "invalid notification configuration" });
+    if (body.enabled_events !== undefined && !(Array.isArray(body.enabled_events) && body.enabled_events.every((e: unknown) => (NOTIFICATION_EVENTS as readonly string[]).includes(e as string)))) return json(response, 400, { error: "invalid enabled_events" });
+    if (body.max_attempts !== undefined && !(Number.isInteger(body.max_attempts) && body.max_attempts >= 1 && body.max_attempts <= 10)) return json(response, 400, { error: "invalid max_attempts" });
     const result = await pool.query(
-      `INSERT INTO notification_providers (name,type,enabled,configuration_encrypted_json) VALUES ($1,$2,$3,$4) RETURNING *`,
-      [body.name, body.type, body.enabled ?? true, configuration],
+      `INSERT INTO notification_providers (name,type,enabled,configuration_encrypted_json,enabled_events,max_attempts) VALUES ($1,$2,$3,$4,$5,$6) RETURNING *`,
+      [body.name, body.type, body.enabled ?? true, configuration, JSON.stringify(body.enabled_events ?? NOTIFICATION_EVENTS), body.max_attempts ?? 5],
     );
     await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.create", entityType: "notification_provider", entityId: result.rows[0].id, after: safeNotificationProvider(result.rows[0]), ip: ipOf(request) });
     return json(response, 201, { provider: safeNotificationProvider(result.rows[0]) });
@@ -889,10 +891,12 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const body = await bodyOf(request);
     const configurationPatch = body.configuration === undefined ? {} : parseNotificationConfigurationPatch(body.configuration);
     if (!configurationPatch) return json(response, 400, { error: "invalid notification configuration" });
+    if (body.enabled_events !== undefined && !(Array.isArray(body.enabled_events) && body.enabled_events.every((e: unknown) => (NOTIFICATION_EVENTS as readonly string[]).includes(e as string)))) return json(response, 400, { error: "invalid enabled_events" });
+    if (body.max_attempts !== undefined && !(Number.isInteger(body.max_attempts) && body.max_attempts >= 1 && body.max_attempts <= 10)) return json(response, 400, { error: "invalid max_attempts" });
     const configuration = mergeNotificationConfiguration(before.configuration_encrypted_json, configurationPatch);
     const after = (await pool.query(
-      `UPDATE notification_providers SET name=COALESCE($2,name),enabled=COALESCE($3,enabled),configuration_encrypted_json=$4,updated_at=now() WHERE id=$1 RETURNING *`,
-      [before.id, body.name ?? null, body.enabled ?? null, configuration],
+      `UPDATE notification_providers SET name=COALESCE($2,name),enabled=COALESCE($3,enabled),configuration_encrypted_json=$4,enabled_events=COALESCE($5,enabled_events),max_attempts=COALESCE($6,max_attempts),updated_at=now() WHERE id=$1 RETURNING *`,
+      [before.id, body.name ?? null, body.enabled ?? null, configuration, body.enabled_events !== undefined ? JSON.stringify(body.enabled_events) : null, body.max_attempts ?? null],
     )).rows[0];
     await audit({ actorType: "admin", actorId: session.user_id, action: "notification_provider.update", entityType: "notification_provider", entityId: after.id, before: safeNotificationProvider(before), after: safeNotificationProvider(after), ip: ipOf(request) });
     return json(response, 200, { provider: safeNotificationProvider(after) });
@@ -911,11 +915,11 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   }
   const notificationRetryMatch = url.pathname.match(/^\/api\/admin\/notifications\/deliveries\/([0-9a-f-]+)\/retry$/i);
   if (notificationRetryMatch && request.method === "POST") {
-    const delivery = (await pool.query(
-      `UPDATE notification_deliveries SET status='queued',next_attempt_at=now(),error_message=NULL,response_status=NULL,updated_at=now() WHERE id=$1 RETURNING *`,
-      [notificationRetryMatch[1]],
-    )).rows[0];
-    if (!delivery) return json(response, 404, { error: "notification delivery not found" });
+    const delivery = await retryNotificationDelivery(notificationRetryMatch[1]);
+    if (!delivery) {
+      const exists = (await pool.query("SELECT 1 FROM notification_deliveries WHERE id=$1", [notificationRetryMatch[1]])).rowCount === 1;
+      return json(response, exists ? 409 : 404, { error: exists ? "delivery is not retryable" : "notification delivery not found" });
+    }
     await audit({ actorType: "admin", actorId: session.user_id, action: "notification_delivery.retry", entityType: "notification_delivery", entityId: delivery.id, after: delivery, ip: ipOf(request) });
     return json(response, 202, { delivery });
   }
