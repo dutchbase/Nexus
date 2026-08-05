@@ -19,6 +19,6 @@ test("web provider routes only persist or enqueue provider work", async () => {
   expect(source).toContain("after: safeNotificationProvider(result.rows[0])");
   expect(source).toContain("before: safeNotificationProvider(before), after: safeNotificationProvider(after)");
   expect(source).toContain("provider: safeNotificationProvider(after)");
-  expect(source).toContain("next_attempt_at=now()");
+  expect(source).toContain("retryNotificationDelivery");
   expect(ui).toContain('authentication:authType==="none"?(providerId?null:undefined)');
 });
