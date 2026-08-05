@@ -25,7 +25,7 @@ async function fixture() {
   execFileSync("git", ["init", "--quiet", "--initial-branch=release", checkout]);
   execFileSync("git", ["-C", checkout, "add", "."]);
   execFileSync("git", ["-C", checkout, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--quiet", "-m", "release"]);
-  execFileSync("git", ["-C", checkout, "tag", "-a", "v4.1.0", "-m", "release"]);
+  execFileSync("git", ["-C", checkout, "-c", "user.name=Test", "-c", "user.email=test@example.com", "tag", "-a", "v4.1.0", "-m", "release"]);
   return { root, checkout };
 }
 
@@ -77,7 +77,7 @@ describe("Superpowers content", () => {
     await unlink(join(checkout, "package.json"));
     execFileSync("git", ["-C", checkout, "add", "package.json"]);
     execFileSync("git", ["-C", checkout, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--amend", "--quiet", "--no-edit"]);
-    execFileSync("git", ["-C", checkout, "tag", "-f", "-a", "v4.1.0", "-m", "release"]);
+    execFileSync("git", ["-C", checkout, "-c", "user.name=Test", "-c", "user.email=test@example.com", "tag", "-f", "-a", "v4.1.0", "-m", "release"]);
     const manifest = { superpowers: { repository: "obra/superpowers", tag: "v4.1.0", review_rubric: "skills/requesting-code-review/code-reviewer.md", source: { type: "git", license: "MIT" }, skills: { planning: ["writing-plans"] } } };
 
     await expect(importSuperpowers({
