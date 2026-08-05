@@ -1,6 +1,8 @@
 #!/bin/bash
 set -euo pipefail
 
+(($# == 4)) || { echo "deploy.sh: expected <sha> <marker-path> <attempt-uuid> <protected-branch>" >&2; exit 1; }
+
 ROOT="${DCC_ROOT:-/home/deploy/projects/dev-control}"
 SHA="${1:-}"
 MARKER="${2:-}"
@@ -25,13 +27,24 @@ die() {
 write_marker() {
   local exit_code="$1"
   local temporary="$MARKER.tmp.$$"
-  printf '{"attemptId":"%s","sha":"%s","exitCode":%s}' "$ATTEMPT_ID" "$SHA" "$exit_code" > "$temporary"
+  if [ "${2:-}" = "reload_pending" ]; then
+    printf '{"attemptId":"%s","sha":"%s","exitCode":%s,"reloadPending":true}' "$ATTEMPT_ID" "$SHA" "$exit_code" > "$temporary"
+  else
+    printf '{"attemptId":"%s","sha":"%s","exitCode":%s}' "$ATTEMPT_ID" "$SHA" "$exit_code" > "$temporary"
+  fi
   mv -f "$temporary" "$MARKER"
 }
 
 record_event() {
   local stage="$1"
   psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=attempt_id="$ATTEMPT_ID" --set=event_key="deploy:$stage" --set=event_type=stage --set=stage="$stage" --command "INSERT INTO deployment_events (attempt_id,event_key,event_type,metadata) VALUES (:'attempt_id'::uuid, :'event_key', :'event_type', jsonb_build_object('stage', :'stage')) ON CONFLICT (attempt_id,event_key) DO NOTHING"
+}
+
+record_rollback() {
+  local outcome="$1"
+  local recovery_health="$2"
+  local reason="$3"
+  psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=attempt_id="$ATTEMPT_ID" --set=event_key=deploy:rollback --set=prior_release="$PRIOR_RELEASE" --set=rollback_outcome="$outcome" --set=recovery_health="$recovery_health" --set=reason="$reason" --command "INSERT INTO deployment_events (attempt_id,event_key,event_type,metadata) VALUES (:'attempt_id'::uuid, :'event_key', 'rollback', jsonb_strip_nulls(jsonb_build_object('stage','rollback','prior_release_path',NULLIF(:'prior_release',''),'rollback_outcome',:'rollback_outcome','recovery_health',:'recovery_health','reason',:'reason'))) ON CONFLICT (attempt_id,event_key) DO NOTHING"
 }
 
 switch_current() {
@@ -42,22 +55,26 @@ switch_current() {
 rollback() {
   local status="$?"
   local recovered=1
+  local rollback_outcome="not_needed"
+  local recovery_health="not_checked"
   trap - EXIT
   if [ "$status" -ne 0 ]; then
+    write_marker "$status" || recovered=0
     if [ "$CUTOVER" -eq 1 ]; then
       if [ -n "$PRIOR_RELEASE" ]; then
-        switch_current "$PRIOR_RELEASE" || recovered=0
+        if switch_current "$PRIOR_RELEASE"; then rollback_outcome="prior_release_restored"; else rollback_outcome="prior_release_restore_failed"; recovered=0; fi
         pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-web --update-env || recovered=0
         pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-worker --update-env || recovered=0
-        curl --fail --silent --show-error --max-time 10 "$DCC_DEPLOY_HEALTH_URL" || recovered=0
+        if curl --fail --silent --show-error --max-time 10 "$DCC_DEPLOY_HEALTH_URL"; then recovery_health="passed"; else recovery_health="failed"; recovered=0; fi
+        pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-webhook --update-env || recovered=0
       else
-        rm -f "$CURRENT"
+        if rm -f "$CURRENT"; then rollback_outcome="bootstrap_processes_stopped"; else rollback_outcome="bootstrap_current_remove_failed"; recovered=0; fi
         pm2 delete dcc-web || recovered=0
         pm2 delete dcc-worker || recovered=0
+        pm2 delete dcc-webhook || recovered=0
       fi
     fi
-    if [ -n "${DATABASE_URL:-}" ]; then record_event "rollback" || recovered=0; fi
-    write_marker "$status" || recovered=0
+    if [ -n "${DATABASE_URL:-}" ]; then record_rollback "$rollback_outcome" "$recovery_health" "deploy_exit_$status" || recovered=0; fi
     [ "$recovered" -eq 1 ] || echo "deploy.sh: rollback recovery failed" >&2
     exit "$status"
   fi
@@ -109,6 +126,6 @@ pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-worker --update-env
 record_event "processes_reloaded"
 curl --fail --silent --show-error --max-time 10 "$DCC_DEPLOY_HEALTH_URL"
 record_event "healthy"
-write_marker 0
+write_marker 0 reload_pending
 pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-webhook --update-env
 echo "deploy.sh: deployed $SHA"

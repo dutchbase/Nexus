@@ -9,7 +9,7 @@ const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const attemptId = "11111111-1111-4111-8111-111111111111";
 const directories: string[] = [];
 
-async function deploy({ fetchHead = sha, failMigration = false, failHealth = false, failWorker = false, failBranch = false, prior = true } = {}) {
+async function deploy({ fetchHead = sha, failMigration = false, failHealth = false, failWorker = false, failWebhook = false, failBranch = false, extraArg = false, prior = true } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "dcc-deploy-"));
   directories.push(directory);
   const bin = join(directory, "bin");
@@ -49,6 +49,7 @@ echo "psql $*" >> "$DCC_LOG"
     pm2: `#!/bin/sh
 echo "pm2 $* current=$(readlink "$DCC_ROOT/.deploy-current" 2>/dev/null || true)" >> "$DCC_LOG"
 if [ "$DCC_FAIL_WORKER" = 1 ] && [ "$*" = "startOrReload $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-worker --update-env" ] && [ ! -f "$DCC_WORKER_FAILED" ]; then touch "$DCC_WORKER_FAILED"; exit 75; fi
+if [ "$DCC_FAIL_WEBHOOK" = 1 ] && [ "$*" = "startOrReload $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-webhook --update-env" ] && [ ! -f "$DCC_WEBHOOK_FAILED" ]; then touch "$DCC_WEBHOOK_FAILED"; exit 74; fi
 if [ "$*" = "startOrReload $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-webhook --update-env" ] && [ ! -f "$DCC_MARKER" ]; then exit 79; fi
 `,
   };
@@ -57,7 +58,7 @@ if [ "$*" = "startOrReload $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only
     await writeFile(file, script);
     await chmod(file, 0o755);
   }));
-  const result = spawnSync(join(root, "deploy.sh"), [sha, marker, attemptId, "master"], {
+  const result = spawnSync(join(root, "deploy.sh"), [sha, marker, attemptId, "master", ...(extraArg ? ["unexpected"] : [])], {
     encoding: "utf8",
     env: {
       ...process.env,
@@ -70,17 +71,19 @@ if [ "$*" = "startOrReload $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only
       DCC_FAIL_MIGRATION: failMigration ? "1" : "0",
       DCC_FAIL_HEALTH: failHealth ? "1" : "0",
       DCC_FAIL_WORKER: failWorker ? "1" : "0",
+      DCC_FAIL_WEBHOOK: failWebhook ? "1" : "0",
       DCC_FAIL_BRANCH: failBranch ? "1" : "0",
       DCC_HEALTH_FAILED: join(directory, "health-failed"),
       DCC_WORKER_FAILED: join(directory, "worker-failed"),
+      DCC_WEBHOOK_FAILED: join(directory, "webhook-failed"),
       PATH: `${bin}:${process.env.PATH}`,
     },
   });
   return {
-    commands: await readFile(log, "utf8"),
+    commands: await readFile(log, "utf8").catch(() => ""),
     current,
     directory,
-    marker: JSON.parse(await readFile(marker, "utf8")),
+    marker: await readFile(marker, "utf8").then(JSON.parse).catch(() => null),
     previous,
     releases,
     status: result.status,
@@ -122,7 +125,7 @@ describe("health-gated release deployment", () => {
     expect(result.commands.match(/pm2 startOrReload .*dcc-worker /g)).toHaveLength(2);
     expect(result.commands.match(/curl /g)).toHaveLength(2);
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 76 });
-    expect(result.commands).not.toContain("dcc-webhook");
+    expect(result.commands.match(/pm2 startOrReload .*dcc-webhook /g)).toHaveLength(1);
   });
 
   it("rolls back after a partial process restart", async () => {
@@ -132,16 +135,26 @@ describe("health-gated release deployment", () => {
     expect(await readlink(result.current)).toBe(result.previous);
     expect(result.commands.match(/pm2 startOrReload .*dcc-web /g)).toHaveLength(2);
     expect(result.commands.match(/pm2 startOrReload .*dcc-worker /g)).toHaveLength(2);
+    expect(result.commands.match(/pm2 startOrReload .*dcc-webhook /g)).toHaveLength(1);
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 75 });
   });
 
   it("writes the atomic JSON completion marker before restarting the webhook", async () => {
     const result = await deploy();
 
-    expect(result.marker).toEqual({ attemptId, sha, exitCode: 0 });
+    expect(result.marker).toEqual({ attemptId, sha, exitCode: 0, reloadPending: true });
     expect(result.commands).toContain("psql");
     expect(result.commands.indexOf("pm2 startOrReload " + join(result.directory, ".deploy-current", "ecosystem.config.cjs") + " --only dcc-webhook"))
       .toBeGreaterThan(result.commands.indexOf("curl "));
+  });
+
+  it("replaces pending success with failure and restores the webhook when webhook reload fails", async () => {
+    const result = await deploy({ failWebhook: true });
+
+    expect(result.status).toBe(74);
+    expect(await readlink(result.current)).toBe(result.previous);
+    expect(result.commands.match(/pm2 startOrReload .*dcc-webhook /g)).toHaveLength(2);
+    expect(result.marker).toEqual({ attemptId, sha, exitCode: 74 });
   });
 
   it("refuses a fetched head that no longer matches the protected target", async () => {
@@ -158,5 +171,13 @@ describe("health-gated release deployment", () => {
     expect(result.status).toBe(1);
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 1 });
     expect(result.commands).not.toContain("git fetch");
+  });
+
+  it("rejects extra deploy arguments", async () => {
+    const result = await deploy({ extraArg: true });
+
+    expect(result.status).toBe(1);
+    expect(result.marker).toBeNull();
+    expect(result.commands).toBe("");
   });
 });

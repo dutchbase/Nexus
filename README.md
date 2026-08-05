@@ -264,6 +264,13 @@ and worker, health-checks them, writes its atomic JSON completion marker, and
 only then reloads the webhook. Stage evidence is appended to
 `deployment_events` for the supplied attempt.
 
+A successful marker carries `reloadPending: true`. The old webhook must leave
+that marker alone; only a webhook whose working directory is the atomically
+selected release for that SHA may finalize it during boot recovery. If webhook
+reload fails, deployment replaces it with a nonzero final marker before
+restoring the previous release, so any running webhook records failure rather
+than success.
+
 On a migration failure, the old release remains live. On a failed process
 reload or health check after cutover, the old symlink and its web/worker
 processes are restored and recovery is health-checked. A first deployment has
@@ -279,11 +286,17 @@ For an incident, inspect the attempt and its ordered stage events, then repair
 the failed dependency or release and enqueue a new protected-head deployment:
 
 ```sql
-SELECT id, state, target_sha, prior_release_path, recovery_reason, completed_at
+SELECT id, state, target_sha, recovery_reason, completed_at
 FROM deployment_attempts ORDER BY created_at DESC LIMIT 10;
 SELECT event_key, event_type, metadata, created_at
 FROM deployment_events WHERE attempt_id = '<attempt-uuid>' ORDER BY id;
 ```
+
+The `rollback` event's safe metadata records `prior_release_path`,
+`rollback_outcome`, `recovery_health`, and a non-secret reason. Those details
+remain in the append-only event because terminal completion currently clears
+the attempt's `prior_release_path`; recovery health has no separate attempt
+column.
 
 After confirming no deployment is running and `.deploy-current` points to the
 known-good worktree, remove obsolete directories manually; releases are kept

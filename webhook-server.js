@@ -18,6 +18,7 @@ function readConfig(env = process.env) {
     port: Number(env.WEBHOOK_PORT || 9003),
     protectedBranch: env.DEPLOY_PROTECTED_BRANCH,
     deployShPath: env.DEPLOY_SH_PATH || '/home/deploy/projects/dev-control/deploy.sh',
+    currentReleaseLink: env.DCC_DEPLOY_CURRENT_LINK || path.join(env.DCC_ROOT || '/home/deploy/projects/dev-control', '.deploy-current'),
     completionsDir: path.join(stateDir, 'completions'),
     logsDir: path.join(stateDir, 'logs'),
     requiredCiCheck: env.REQUIRED_CI_CHECK || 'ci',
@@ -30,7 +31,12 @@ function readConfig(env = process.env) {
   };
 }
 
-function createWebhook({ config = readConfig(), store = deployments, pool = null, fetchFn = fetch, spawnFn = spawn, fsModule = fs, isAliveFn = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } }, logger = console } = {}) {
+function createWebhook({ config = readConfig(), store = deployments, pool = null, fetchFn = fetch, spawnFn = spawn, fsModule = fs, isAliveFn = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } }, isCurrentReleaseFn = (markerSha) => {
+  try {
+    const currentRelease = fsModule.realpathSync(config.currentReleaseLink);
+    return currentRelease === fsModule.realpathSync(process.cwd()) && path.basename(currentRelease) === markerSha;
+  } catch { return false; }
+}, logger = console } = {}) {
   if (!config.secret || !config.protectedBranch) throw new Error('WEBHOOK_SECRET and DEPLOY_PROTECTED_BRANCH are required');
   fsModule.mkdirSync(config.completionsDir, { recursive: true });
   fsModule.mkdirSync(config.logsDir, { recursive: true });
@@ -111,11 +117,15 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
   async function finalizeAttempt(attempt, markerPath) {
     let marker;
     try { marker = JSON.parse(fsModule.readFileSync(markerPath, 'utf8')); } catch { marker = null; }
-    if (!marker || Object.keys(marker).length !== 3 || marker.attemptId !== attempt.id || marker.sha !== attempt.target_sha || !Number.isInteger(marker.exitCode)) {
+    const finalMarker = marker && Object.keys(marker).length === 3 && marker.attemptId === attempt.id && marker.sha === attempt.target_sha && Number.isInteger(marker.exitCode) && marker.exitCode !== 0;
+    const pendingSuccess = marker && Object.keys(marker).length === 4 && marker.attemptId === attempt.id && marker.sha === attempt.target_sha && marker.exitCode === 0 && marker.reloadPending === true;
+    if (!finalMarker && !pendingSuccess) {
       await complete(attempt, 'blocked', markerPath);
-      return;
+      return true;
     }
-    await complete(attempt, marker.exitCode === 0 ? 'succeeded' : 'failed', markerPath);
+    if (pendingSuccess && !isCurrentReleaseFn(marker.sha)) return false;
+    await complete(attempt, pendingSuccess ? 'succeeded' : 'failed', markerPath);
+    return true;
   }
 
   function startCompletionPoll(attempt, markerPath) {
@@ -124,8 +134,7 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
     const stop = () => { clearInterval(interval); clearInterval(renewal); activePolls.delete(attempt.id); };
     const interval = setInterval(() => {
       if (!fsModule.existsSync(markerPath)) return;
-      stop();
-      finalizeAttempt(attempt, markerPath).catch(() => logger.error('[webhook] completion finalization failed'));
+      finalizeAttempt(attempt, markerPath).then((finalized) => { if (finalized) stop(); }).catch(() => logger.error('[webhook] completion finalization failed'));
     }, 500);
     const renewal = setInterval(() => {
       store.renewDeploymentLease(pool, { attemptId: attempt.id, owner: attempt.owner || config.owner, leaseMs: config.leaseMs })
@@ -204,7 +213,16 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
     return false;
   }
 
-  async function recoverOnBoot() { return processNext(); }
+  async function recoverOnBoot() {
+    const claim = await store.claimDeploymentAttempt(pool, { owner: config.owner, leaseMs: config.leaseMs });
+    if (claim.kind === 'busy') {
+      const markerPath = claim.attempt.marker_path || path.join(config.completionsDir, `${claim.attempt.id}.done`);
+      return fsModule.existsSync(markerPath) ? finalizeAttempt(claim.attempt, markerPath) : false;
+    }
+    if (claim.kind === 'claimed') return launchAttempt(claim.attempt);
+    if (claim.kind === 'recovered') return recoverAttempt(claim.attempt);
+    return false;
+  }
 
   async function handleDeploy(res, { sha, deliveryId, eventType, targetRef, checkEvidence }) {
     const head = await protectedHead();

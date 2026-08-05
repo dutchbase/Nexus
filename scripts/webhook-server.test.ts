@@ -66,7 +66,7 @@ async function webhook(overrides: Record<string, unknown> = {}) {
   const fetchFn = overrides.fetchFn ?? githubFetch(overrides.head as string | undefined);
   const spawnFn = overrides.spawnFn ?? vi.fn(() => ({ pid: 42, unref() {} }));
   const logs: string[] = [];
-  const app = api.createWebhook({ config: config(dir, overrides.config as Record<string, unknown>), store, fetchFn, spawnFn, isAliveFn: overrides.isAliveFn, logger: { info: (line: string) => logs.push(line), warn: (line: string) => logs.push(line), error: (line: string) => logs.push(line) } });
+  const app = api.createWebhook({ config: config(dir, overrides.config as Record<string, unknown>), store, fetchFn, spawnFn, isAliveFn: overrides.isAliveFn, isCurrentReleaseFn: overrides.isCurrentReleaseFn, logger: { info: (line: string) => logs.push(line), warn: (line: string) => logs.push(line), error: (line: string) => logs.push(line) } });
   return { app, dir, store, fetchFn, spawnFn, logs };
 }
 
@@ -131,11 +131,44 @@ describe("deployment webhook", () => {
     expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ state: "blocked", attemptId: "attempt-1" }));
   });
 
+  it("leaves a reload-pending success marker for an old release without finalizing it", async () => {
+    const ctx = await webhook({ isCurrentReleaseFn: () => false }); dirs.push(ctx.dir);
+    const marker = join(ctx.dir, "pending.done");
+    await writeFile(marker, JSON.stringify({ attemptId: "attempt-1", sha: protectedSha, exitCode: 0, reloadPending: true }));
+
+    await expect(ctx.app.finalizeAttempt({ id: "attempt-1", target_sha: protectedSha, owner: "webhook" }, marker)).resolves.toBe(false);
+
+    expect(ctx.store.completeDeploymentAttempt).not.toHaveBeenCalled();
+    await expect(require("node:fs/promises").access(marker)).resolves.toBeUndefined();
+  });
+
+  it("finalizes a reload-pending success marker only during current-release boot recovery", async () => {
+    const marker = join(tmpdir(), "pending-current-release.done");
+    const attempt = { id: "attempt-current", target_sha: protectedSha, protected_branch: "master", owner: "webhook", marker_path: marker };
+    const ctx = await webhook({ isCurrentReleaseFn: (markerSha: string) => markerSha === protectedSha, store: { claimDeploymentAttempt: vi.fn(async () => ({ kind: "busy", attempt })) } }); dirs.push(ctx.dir);
+    await writeFile(marker, JSON.stringify({ attemptId: "attempt-current", sha: protectedSha, exitCode: 0, reloadPending: true }));
+
+    await expect(ctx.app.recoverOnBoot()).resolves.toBe(true);
+
+    expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ attemptId: "attempt-current", state: "succeeded", markerPath: marker }));
+    await expect(require("node:fs/promises").access(marker)).rejects.toThrow();
+  });
+
+  it("finalizes a failed marker even when the old release is still running", async () => {
+    const ctx = await webhook({ isCurrentReleaseFn: () => false }); dirs.push(ctx.dir);
+    const marker = join(ctx.dir, "failed.done");
+    await writeFile(marker, JSON.stringify({ attemptId: "attempt-1", sha: protectedSha, exitCode: 74 }));
+
+    await ctx.app.finalizeAttempt({ id: "attempt-1", target_sha: protectedSha, owner: "webhook" }, marker);
+
+    expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ state: "failed", attemptId: "attempt-1" }));
+  });
+
   it("finalizes a recovered marker before considering another launch", async () => {
     const recovered = { id: "attempt-recovered", target_sha: protectedSha, protected_branch: "master", owner: "webhook" };
-    const ctx = await webhook({ store: { claimDeploymentAttempt: vi.fn(async () => ({ kind: "recovered", attempt: recovered })) } }); dirs.push(ctx.dir);
+    const ctx = await webhook({ isCurrentReleaseFn: () => true, store: { claimDeploymentAttempt: vi.fn(async () => ({ kind: "recovered", attempt: recovered })) } }); dirs.push(ctx.dir);
     const marker = join(ctx.dir, "completions", "attempt-recovered.done");
-    await writeFile(marker, JSON.stringify({ attemptId: "attempt-recovered", sha: protectedSha, exitCode: 0 }));
+    await writeFile(marker, JSON.stringify({ attemptId: "attempt-recovered", sha: protectedSha, exitCode: 0, reloadPending: true }));
 
     await ctx.app.recoverOnBoot();
 
@@ -169,9 +202,9 @@ describe("deployment webhook", () => {
   });
 
   it("leaves a completion marker when the fenced terminal write fails", async () => {
-    const ctx = await webhook({ store: { completeDeploymentAttempt: vi.fn(async () => { throw new Error("database unavailable"); }) } }); dirs.push(ctx.dir);
+    const ctx = await webhook({ isCurrentReleaseFn: () => true, store: { completeDeploymentAttempt: vi.fn(async () => { throw new Error("database unavailable"); }) } }); dirs.push(ctx.dir);
     const marker = join(ctx.dir, "completion.done");
-    await writeFile(marker, JSON.stringify({ attemptId: "attempt-1", sha: protectedSha, exitCode: 0 }));
+    await writeFile(marker, JSON.stringify({ attemptId: "attempt-1", sha: protectedSha, exitCode: 0, reloadPending: true }));
 
     await expect(ctx.app.finalizeAttempt({ id: "attempt-1", target_sha: protectedSha, owner: "webhook" }, marker)).rejects.toThrow("database unavailable");
     await expect(require("node:fs/promises").access(marker)).resolves.toBeUndefined();
