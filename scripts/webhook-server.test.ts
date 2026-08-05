@@ -309,6 +309,47 @@ describe("deployment webhook", () => {
     }
   });
 
+  it("keeps polling and renewing when dead-child terminal persistence fails once", async () => {
+    vi.useFakeTimers();
+    try {
+      const attempt = { id: "attempt-dead-retry", target_sha: protectedSha, protected_branch: "master", owner: "webhook" };
+      const child = Object.assign(new EventEmitter(), {
+        pid: 42,
+        stdio: [null, null, null, { end() {}, destroy() {}, unref() {} }],
+        unref() {},
+      });
+      const claimDeploymentAttempt = vi.fn(async () => ({ kind: "claimed", attempt }));
+      let persistTerminal!: (value: object) => void;
+      const terminalPersisted = new Promise<object>((resolve) => { persistTerminal = resolve; });
+      const completeDeploymentAttempt = vi.fn()
+        .mockRejectedValueOnce(new Error("database unavailable"))
+        .mockReturnValueOnce(terminalPersisted);
+      const ctx = await webhook({
+        config: { leaseMs: 2_000 },
+        spawnFn: vi.fn(() => child),
+        isAliveFn: vi.fn(() => false),
+        store: { claimDeploymentAttempt, completeDeploymentAttempt },
+      }); dirs.push(ctx.dir);
+
+      await ctx.app.processNext();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(completeDeploymentAttempt).toHaveBeenCalledTimes(1);
+
+      await vi.advanceTimersByTimeAsync(500);
+      expect(completeDeploymentAttempt).toHaveBeenCalledTimes(2);
+      expect(ctx.store.renewDeploymentLease).toHaveBeenCalledTimes(1);
+
+      persistTerminal({});
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(completeDeploymentAttempt).toHaveBeenCalledTimes(2);
+      expect(ctx.store.renewDeploymentLease).toHaveBeenCalledTimes(1);
+      expect(claimDeploymentAttempt).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("passes metacharacter paths as argv with no shell", async () => {
     const ctx = await webhook(); dirs.push(ctx.dir);
     const marker = join(ctx.dir, "marker;still-data.done");

@@ -163,8 +163,9 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
       }
       if (Number.isSafeInteger(attempt.child_pid) && attempt.child_pid > 0 && !isAliveFn(attempt.child_pid)) {
         settling = true;
-        stop();
-        complete(attempt, 'blocked', null, 'child_exited_without_marker').catch(() => logger.error('[webhook] dead child finalization failed'));
+        complete(attempt, 'blocked', null, 'child_exited_without_marker')
+          .then(() => stop())
+          .catch(() => { settling = false; logger.error('[webhook] dead child finalization failed'); });
       }
     }, 500);
     const renewal = setInterval(() => {
