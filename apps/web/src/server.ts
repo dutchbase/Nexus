@@ -508,6 +508,22 @@ export function sanitizeFormSettings(settings: any): Record<string, any> {
   };
 }
 
+export async function consumeSubmissionAttempt(formId: string, ip: string, limit: number) {
+  return inTransaction(async (client) => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text || '/' || $2, 0))", [formId, ip]);
+    const recent = await client.query(
+      `SELECT count(*)::integer AS count,
+              coalesce(ceil(extract(epoch FROM min(created_at) + interval '1 hour' - now()))::integer, 0) AS reset_seconds
+       FROM public_submission_attempts
+       WHERE form_id = $1 AND ip_address = $2 AND created_at > now() - interval '1 hour'`,
+      [formId, ip],
+    );
+    if (recent.rows[0].count >= limit) return { allowed: false, resetSeconds: Math.max(1, recent.rows[0].reset_seconds) };
+    await client.query("INSERT INTO public_submission_attempts (form_id, ip_address, accepted) VALUES ($1,$2,true)", [formId, ip]);
+    return { allowed: true, resetSeconds: 0 };
+  });
+}
+
 export async function submitPublicForm(request: IncomingMessage, response: ServerResponse, form: any) {
   const body = await bodyOf(request);
   const fields = await fieldsFor(form.id);
@@ -518,12 +534,10 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
   const ip = ipOf(request);
   const configuredLimit = Number(form.settings_json?.rate_limit ?? defaultRateLimit);
   const limit = Number.isFinite(configuredLimit) ? Math.max(1, Math.min(configuredLimit, 20)) : defaultRateLimit;
-  const recent = await pool.query(
-    `SELECT count(*)::integer AS count FROM public_submission_attempts
-     WHERE form_id = $1 AND ip_address = $2 AND created_at > now() - interval '15 seconds'`,
-    [form.id, ip],
-  );
-  if (recent.rows[0].count >= limit) return json(response, 429, { error: "submission rate limit exceeded" });
+  const attempt = await consumeSubmissionAttempt(form.id, ip, limit);
+  if (!attempt.allowed) {
+    return json(response, 429, { error: "submission rate limit exceeded", code: "rate_limited", retry_after_seconds: attempt.resetSeconds }, { "retry-after": String(attempt.resetSeconds) });
+  }
   const errors = validateFields(fields, body);
   if (form.settings_json?.allow_image_attachments === false) {
     for (const field of fields) {
@@ -550,7 +564,6 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
   if (!fallbackProject) return json(response, 400, { error: "no enabled project available" });
   const projectId = fallbackProject.id;
   const ticket = await inTransaction(async (client) => {
-    await client.query("INSERT INTO public_submission_attempts (form_id, ip_address, accepted) VALUES ($1,$2,true)", [form.id, ip]);
     const number = (await client.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
     const ticketNumber = `DCC-${number}`;
     const reservedKeys = [
