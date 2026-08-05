@@ -497,6 +497,17 @@ export function validateFields(fields: any[], body: Record<string, any>) {
   return errors;
 }
 
+export function sanitizeFormSettings(settings: any): Record<string, any> {
+  const source = settings ?? {};
+  return {
+    rate_limit: Math.max(1, Math.min(20, Number.parseInt(source.rate_limit, 10) || 15)),
+    captcha_mode: "honeypot",
+    notify_on_submission: source.notify_on_submission !== false,
+    allow_image_attachments: source.allow_image_attachments !== false,
+    completion_message: String(source.completion_message ?? "").slice(0, 2000),
+  };
+}
+
 async function submitPublicForm(request: IncomingMessage, response: ServerResponse, form: any) {
   const body = await bodyOf(request);
   const fields = await fieldsFor(form.id);
@@ -514,6 +525,13 @@ async function submitPublicForm(request: IncomingMessage, response: ServerRespon
   );
   if (recent.rows[0].count >= limit) return json(response, 429, { error: "submission rate limit exceeded" });
   const errors = validateFields(fields, body);
+  if (form.settings_json?.allow_image_attachments === false) {
+    for (const field of fields) {
+      if (field.field_type !== "image_upload") continue;
+      const value = body[field.field_key];
+      if (Array.isArray(value) ? value.length : value) errors[field.field_key] = "attachments disabled";
+    }
+  }
   if (typeof body.title !== "string" || !body.title.trim()) errors.title = "required";
   if (typeof body.description !== "string" || !body.description.trim()) errors.description = "required";
   if (Object.keys(errors).length) return json(response, 400, { error: "validation failed", fields: errors });
@@ -535,10 +553,12 @@ async function submitPublicForm(request: IncomingMessage, response: ServerRespon
     await client.query("INSERT INTO public_submission_attempts (form_id, ip_address, accepted) VALUES ($1,$2,true)", [form.id, ip]);
     const number = (await client.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
     const ticketNumber = `DCC-${number}`;
-    const customValues = Object.fromEntries(Object.entries(body).filter(([key]) => ![
+    const reservedKeys = [
       "project_id", "title", "description", "category", "priority", "submitter_name", "submitter_email",
       "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", honeypot,
-    ].includes(key)));
+    ];
+    const excludedKeys = new Set([...reservedKeys, ...fields.filter((f) => f.field_type === "static" || f.field_type === "hidden").map((f) => f.field_key)]);
+    const customValues = Object.fromEntries(Object.entries(body).filter(([key]) => !excludedKeys.has(key)));
     const result = await client.query(
       `INSERT INTO tickets
        (ticket_number,form_id,project_id,title,description,category,priority,status,submitter_name,submitter_email,
@@ -563,7 +583,7 @@ async function submitPublicForm(request: IncomingMessage, response: ServerRespon
       );
     }
     await audit({ actorType: "public", action: "ticket.create", entityType: "ticket", entityId: result.rows[0].id, after: result.rows[0], ip }, client);
-    await enqueueNotification(client, "ticket.created", result.rows[0].id, result.rows[0].id);
+    if (form.settings_json?.notify_on_submission !== false) await enqueueNotification(client, "ticket.created", result.rows[0].id, result.rows[0].id);
     return result.rows[0];
   });
   json(response, 201, { ticket_number: ticket.ticket_number, ticket: { id: ticket.id, ticket_number: ticket.ticket_number } });
@@ -1330,7 +1350,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       const result = await client.query(
         `INSERT INTO forms (name,slug,title,description,status,fixed_project_id,settings_json,published_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,CASE WHEN $5='published' THEN now() ELSE NULL END) RETURNING *`,
-        [body.name, body.slug, body.title, body.description ?? null, body.status === "published" ? "published" : "draft", body.fixed_project_id ?? null, body.settings_json ?? {}],
+        [body.name, body.slug, body.title, body.description ?? null, body.status === "published" ? "published" : "draft", body.fixed_project_id ?? null, sanitizeFormSettings(body.settings_json)],
       );
       if (fields) await replaceFields(client, result.rows[0].id, fields);
       await audit({ actorType: "admin", actorId: session.user_id, action: "form.create", entityType: "form", entityId: result.rows[0].id, after: result.rows[0], ip: ipOf(request) }, client);
@@ -1347,7 +1367,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const body = await bodyOf(request);
     const fields = body.fields === undefined ? null : normalizeFields(body.fields);
     const allowed = ["name", "slug", "title", "description", "fixed_project_id", "settings_json"];
-    const entries = Object.entries(body).filter(([key]) => allowed.includes(key));
+    const entries = Object.entries(body).filter(([key]) => allowed.includes(key))
+      .map(([key, value]) => [key, key === "settings_json" ? sanitizeFormSettings(value) : value]);
     const form = await inTransaction(async (client) => {
       const before = (await client.query("SELECT * FROM forms WHERE id=$1 FOR UPDATE", [formMatch[1]])).rows[0];
       if (!before) return null;
