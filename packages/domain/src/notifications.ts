@@ -116,6 +116,17 @@ export async function completeNotificationDelivery(id: string, workerId: string,
   return result.rowCount === 1;
 }
 
+export async function retryNotificationDelivery(id: string) {
+  const result = await pool.query(
+    `UPDATE notification_deliveries
+     SET status='queued',attempt_count=0,next_attempt_at=now(),error_message=NULL,response_status=NULL,
+         recovery_reason='manual_retry',claimed_by=NULL,lease_expires_at=NULL,updated_at=now()
+     WHERE id=$1 AND status IN ('failed','exhausted') RETURNING *`,
+    [id],
+  );
+  return result.rows[0] ?? null;
+}
+
 export async function failNotificationDelivery(
   id: string,
   workerId: string,

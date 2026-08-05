@@ -11,7 +11,7 @@ import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
   buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
   globalPromptTypes, enqueueNotification, promptContentHash, PullRequestMergeError,
-  rejectPlanDecision, requestPlanRevisionDecision, requireApprovalPrompt, resolveAiConfiguration, setPullRequestTicketStatus,
+  rejectPlanDecision, requestPlanRevisionDecision, requireApprovalPrompt, resolveAiConfiguration, retryNotificationDelivery, setPullRequestTicketStatus,
   validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
 import {
@@ -911,11 +911,11 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   }
   const notificationRetryMatch = url.pathname.match(/^\/api\/admin\/notifications\/deliveries\/([0-9a-f-]+)\/retry$/i);
   if (notificationRetryMatch && request.method === "POST") {
-    const delivery = (await pool.query(
-      `UPDATE notification_deliveries SET status='queued',next_attempt_at=now(),error_message=NULL,response_status=NULL,updated_at=now() WHERE id=$1 RETURNING *`,
-      [notificationRetryMatch[1]],
-    )).rows[0];
-    if (!delivery) return json(response, 404, { error: "notification delivery not found" });
+    const delivery = await retryNotificationDelivery(notificationRetryMatch[1]);
+    if (!delivery) {
+      const exists = (await pool.query("SELECT 1 FROM notification_deliveries WHERE id=$1", [notificationRetryMatch[1]])).rowCount === 1;
+      return json(response, exists ? 409 : 404, { error: exists ? "delivery is not retryable" : "notification delivery not found" });
+    }
     await audit({ actorType: "admin", actorId: session.user_id, action: "notification_delivery.retry", entityType: "notification_delivery", entityId: delivery.id, after: delivery, ip: ipOf(request) });
     return json(response, 202, { delivery });
   }

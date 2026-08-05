@@ -6,7 +6,7 @@ import pg from "pg";
 
 process.env.DATABASE_URL = process.env.DCC_TEST_DATABASE_URL ?? "postgres://unused:unused@127.0.0.1:1/unused";
 const { migrate } = await import("../../database/src/migrate.ts");
-const { enqueueNotification, claimNotificationDelivery, failNotificationDelivery } = await import("./notifications.ts");
+const { enqueueNotification, claimNotificationDelivery, failNotificationDelivery, retryNotificationDelivery } = await import("./notifications.ts");
 
 const testDatabaseUrl = process.env.DCC_TEST_DATABASE_URL;
 const integration = testDatabaseUrl ? describe : describe.skip;
@@ -162,6 +162,54 @@ integration("enqueueNotification rule filtering", () => {
 
       const claimed = await claimNotificationDelivery("another-worker");
       expect(claimed).toBeNull();
+    } finally {
+      await client.end();
+    }
+  });
+
+  it("manual retry re-queues only failed/exhausted deliveries", async () => {
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const { ticketId, projectId } = await seedTicket(client);
+      const providerId = (await client.query(
+        "INSERT INTO notification_providers (name,type,enabled,enabled_events) VALUES ($1,$2,true,$3) RETURNING id",
+        ["retry-provider", "webhook", JSON.stringify(["ticket.created"])],
+      )).rows[0].id;
+
+      const failedId = (await client.query(
+        `INSERT INTO notification_deliveries
+           (provider_id,event_type,ticket_id,project_id,idempotency_key,payload_json,status,attempt_count,next_attempt_at)
+         VALUES ($1,$2,$3,$4,$5,$6,'failed',3,now() + interval '1 hour')
+         RETURNING id`,
+        [providerId, "ticket.created", ticketId, projectId, "failed-key", JSON.stringify({})],
+      )).rows[0].id;
+
+      const retried = await retryNotificationDelivery(failedId);
+      expect(retried?.status).toBe("queued");
+      expect(retried?.attempt_count).toBe(0);
+      expect(retried?.recovery_reason).toBe("manual_retry");
+
+      const sendingId = (await client.query(
+        `INSERT INTO notification_deliveries
+           (provider_id,event_type,ticket_id,project_id,idempotency_key,payload_json,status,attempt_count,claimed_by,lease_expires_at,next_attempt_at)
+         VALUES ($1,$2,$3,$4,$5,$6,'sending',1,'active-worker',now() + interval '1 minute',now())
+         RETURNING id`,
+        [providerId, "ticket.created", ticketId, projectId, "sending-key", JSON.stringify({})],
+      )).rows[0].id;
+
+      const sendingRetry = await retryNotificationDelivery(sendingId);
+      expect(sendingRetry).toBeNull();
+      const sendingRow = (await client.query(
+        "SELECT status,claimed_by,lease_expires_at FROM notification_deliveries WHERE id=$1",
+        [sendingId],
+      )).rows[0];
+      expect(sendingRow.status).toBe("sending");
+      expect(sendingRow.claimed_by).toBe("active-worker");
+      expect(sendingRow.lease_expires_at).not.toBeNull();
+
+      const secondRetry = await retryNotificationDelivery(failedId);
+      expect(secondRetry).toBeNull();
     } finally {
       await client.end();
     }
