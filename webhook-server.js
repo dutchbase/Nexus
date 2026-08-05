@@ -143,21 +143,41 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
       return false;
     }
     const markerPath = path.join(config.completionsDir, `${attempt.id}.done`);
+    const owner = attempt.owner || config.owner;
+    if (!await store.recordDeploymentLaunchIntent(pool, { attemptId: attempt.id, owner, markerPath })) {
+      await complete(attempt, 'blocked', null, 'launch_intent_not_persisted');
+      return false;
+    }
     let launched;
+    let spawnFailure;
+    const failSpawn = () => {
+      spawnFailure ??= complete(attempt, 'blocked', markerPath, 'spawn_failed')
+        .catch(() => logger.error('[webhook] spawn failure finalization failed'));
+      return spawnFailure;
+    };
     try {
       launched = launchDeploy(attempt.target_sha, markerPath, attempt.id, attempt.protected_branch);
-      if (!Number.isSafeInteger(launched.childPid) || launched.childPid <= 0) throw new Error('spawn returned no child PID');
-      const recorded = await store.recordDeploymentLaunch(pool, { attemptId: attempt.id, owner: attempt.owner || config.owner, markerPath, childPid: launched.childPid });
-      if (!recorded) throw new Error('deployment launch was not persisted');
+      launched.child.once?.('error', failSpawn);
+      if (!Number.isSafeInteger(launched.childPid) || launched.childPid <= 0) {
+        await failSpawn();
+        return false;
+      }
+      const recorded = await store.recordDeploymentLaunch(pool, { attemptId: attempt.id, owner, markerPath, childPid: launched.childPid });
+      if (spawnFailure) { await spawnFailure; return false; }
+      if (!recorded) {
+        launched.child.kill?.('SIGTERM');
+        await complete(attempt, 'blocked', markerPath, 'launch_pid_not_persisted');
+        return false;
+      }
     } catch {
       launched?.child?.kill?.('SIGTERM');
-      await complete(attempt, 'blocked', null, 'spawn_failed');
+      await failSpawn();
       return false;
     }
     const stopPolling = startCompletionPoll(attempt, markerPath);
     launched.child.once?.('error', () => {
       stopPolling?.();
-      complete(attempt, 'blocked', markerPath, 'spawn_failed').catch(() => logger.error('[webhook] spawn failure finalization failed'));
+      failSpawn();
     });
     return true;
   }
@@ -173,7 +193,7 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
       startCompletionPoll(attempt, markerPath);
       return true;
     }
-    await complete(attempt, 'blocked', null, 'recovery_no_marker_or_live_child');
+    await complete(attempt, 'blocked', null, attempt.marker_path ? 'recovery_launch_intent_without_live_child' : 'recovery_no_marker_or_live_child');
     return false;
   }
 

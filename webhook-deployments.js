@@ -143,6 +143,20 @@ async function renewDeploymentLease(pool, { attemptId, owner, leaseMs }) {
   });
 }
 
+async function recordDeploymentLaunchIntent(pool, { attemptId, owner, markerPath }) {
+  assertString(attemptId, 'attemptId');
+  assertString(owner, 'owner');
+  assertString(markerPath, 'markerPath');
+  return inTransaction(pool, async (client) => {
+    const intended = (await client.query(
+      "UPDATE deployment_attempts SET marker_path=$3,child_pid=NULL,updated_at=now() WHERE id=$1 AND state='running' AND owner=$2 AND lease_expires_at > now() RETURNING *",
+      [attemptId, owner, markerPath],
+    )).rows[0] ?? null;
+    if (intended) await insertEvent(client, { attemptId, eventKey: `launch_intent:${randomUUID()}`, eventType: 'launch_intent', metadata: { marker_path: markerPath } });
+    return intended;
+  });
+}
+
 async function recordDeploymentLaunch(pool, { attemptId, owner, markerPath, childPid }) {
   assertString(attemptId, 'attemptId');
   assertString(owner, 'owner');
@@ -150,7 +164,7 @@ async function recordDeploymentLaunch(pool, { attemptId, owner, markerPath, chil
   assertPid(childPid);
   return inTransaction(pool, async (client) => {
     const launched = (await client.query(
-      "UPDATE deployment_attempts SET marker_path=$3,child_pid=$4,updated_at=now() WHERE id=$1 AND state='running' AND owner=$2 AND lease_expires_at > now() RETURNING *",
+      "UPDATE deployment_attempts SET child_pid=$4,updated_at=now() WHERE id=$1 AND state='running' AND owner=$2 AND marker_path=$3 AND lease_expires_at > now() RETURNING *",
       [attemptId, owner, markerPath, childPid],
     )).rows[0] ?? null;
     if (launched) await insertEvent(client, { attemptId, eventKey: `launched:${randomUUID()}`, eventType: 'launched', metadata: { child_pid: childPid } });
@@ -180,6 +194,7 @@ module.exports = {
   completeDeploymentAttempt,
   createDeploymentPool,
   enqueueDeploymentAttempt,
+  recordDeploymentLaunchIntent,
   recordDeploymentLaunch,
   renewDeploymentLease,
 };

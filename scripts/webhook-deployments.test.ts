@@ -39,8 +39,17 @@ function fakePool(reply: (text: string, values: unknown[], queries: Array<{ text
 }
 
 describe("webhook deployment store query semantics", () => {
-  it("persists a spawned child PID with its marker under the owner lease", async () => {
+  it("records a launch intent before a child PID exists", async () => {
     const db = fakePool((text) => text.startsWith("UPDATE deployment_attempts SET marker_path")
+      ? { rows: [{ id: "attempt", marker_path: "/safe/attempt.done", child_pid: null }] }
+      : { rows: [] });
+
+    await expect(deployments.recordDeploymentLaunchIntent(db.pool, { attemptId: "attempt", owner: "webhook", markerPath: "/safe/attempt.done" }))
+      .resolves.toMatchObject({ id: "attempt", child_pid: null });
+  });
+
+  it("persists a spawned child PID with its marker under the owner lease", async () => {
+    const db = fakePool((text) => text.startsWith("UPDATE deployment_attempts SET child_pid")
       ? { rows: [{ id: "attempt", child_pid: 42 }] }
       : { rows: [] });
 

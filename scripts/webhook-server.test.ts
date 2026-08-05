@@ -44,6 +44,7 @@ function fakeStore(overrides: Record<string, unknown> = {}) {
   return {
     enqueueDeploymentAttempt: vi.fn(async () => ({ created: true, attempt: { id: "attempt-1" } })),
     claimDeploymentAttempt: vi.fn(async () => ({ kind: "busy", attempt: null })),
+    recordDeploymentLaunchIntent: vi.fn(async () => ({})),
     recordDeploymentLaunch: vi.fn(async () => ({})),
     renewDeploymentLease: vi.fn(async () => ({})),
     completeDeploymentAttempt: vi.fn(async () => ({})),
@@ -155,6 +156,18 @@ describe("deployment webhook", () => {
     expect(ctx.store.completeDeploymentAttempt).not.toHaveBeenCalled();
   });
 
+  it("blocks a recovered launch intent without a marker or live PID and never promotes the queue", async () => {
+    const recovered = { id: "attempt-intent", target_sha: protectedSha, protected_branch: "master", owner: "webhook", marker_path: join(tmpdir(), "missing.done"), child_pid: null };
+    const claimDeploymentAttempt = vi.fn(async () => ({ kind: "recovered", attempt: recovered }));
+    const ctx = await webhook({ store: { claimDeploymentAttempt } }); dirs.push(ctx.dir);
+
+    await expect(ctx.app.recoverOnBoot()).resolves.toBe(false);
+
+    expect(ctx.spawnFn).not.toHaveBeenCalled();
+    expect(claimDeploymentAttempt).toHaveBeenCalledTimes(1);
+    expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ state: "blocked", recoveryReason: "recovery_launch_intent_without_live_child" }));
+  });
+
   it("leaves a completion marker when the fenced terminal write fails", async () => {
     const ctx = await webhook({ store: { completeDeploymentAttempt: vi.fn(async () => { throw new Error("database unavailable"); }) } }); dirs.push(ctx.dir);
     const marker = join(ctx.dir, "completion.done");
@@ -171,6 +184,34 @@ describe("deployment webhook", () => {
     await expect(ctx.app.processNext()).resolves.toBe(false);
 
     expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ attemptId: "attempt-spawn", state: "blocked" }));
+  });
+
+  it("handles an asynchronous native spawn error before PID validation", async () => {
+    const child = Object.assign(new EventEmitter(), { pid: undefined, unref() {} });
+    const attempt = { id: "attempt-native-error", target_sha: protectedSha, protected_branch: "master", owner: "webhook" };
+    const ctx = await webhook({
+      spawnFn: vi.fn(() => { queueMicrotask(() => child.emit("error", Object.assign(new Error("not executable"), { code: "EACCES" }))); return child; }),
+      store: { claimDeploymentAttempt: vi.fn(async () => ({ kind: "claimed", attempt })) },
+    }); dirs.push(ctx.dir);
+
+    await expect(ctx.app.processNext()).resolves.toBe(false);
+    expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ attemptId: "attempt-native-error", state: "blocked", recoveryReason: "spawn_failed" }));
+  });
+
+  it("persists launch intent before spawn and blocks when PID persistence fails", async () => {
+    const attempt = { id: "attempt-persist", target_sha: protectedSha, protected_branch: "master", owner: "webhook" };
+    const calls: string[] = [];
+    const recordDeploymentLaunchIntent = vi.fn(async () => { calls.push("intent"); return {}; });
+    const recordDeploymentLaunch = vi.fn(async () => null);
+    const ctx = await webhook({
+      spawnFn: vi.fn(() => { calls.push("spawn"); return { pid: 42, unref() {} }; }),
+      store: { claimDeploymentAttempt: vi.fn(async () => ({ kind: "claimed", attempt })), recordDeploymentLaunchIntent, recordDeploymentLaunch },
+    }); dirs.push(ctx.dir);
+
+    await expect(ctx.app.processNext()).resolves.toBe(false);
+
+    expect(calls).toEqual(["intent", "spawn"]);
+    expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ attemptId: "attempt-persist", state: "blocked", recoveryReason: "launch_pid_not_persisted" }));
   });
 
   it("passes metacharacter paths as argv with no shell", async () => {
