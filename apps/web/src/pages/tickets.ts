@@ -1,7 +1,6 @@
 import { escapeHtml, lineDiff, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { checkPlanApprovalGate } from "@dcc/domain";
-import { inTransaction } from "@dcc/database";
 
 export function selectedStatusesFrom(url: URL): string[] {
   return url.searchParams.getAll("status").filter((status) => validStatuses.has(status));
@@ -18,6 +17,14 @@ export function skillPresentation(skill: any) {
     removable: !projectAttached || overridable,
     badge: required ? "required" : automatic && !overridable ? "auto" : null,
   };
+}
+
+export function approvalGatesCard(ticket: { status: string }) {
+  const canAcknowledge = ticket.status === "Submitted";
+  const canApprovePlanning = ["Triage", "Needs Information", "Planning Failed"].includes(ticket.status);
+  return `<section class="card"><div class="card-head">Approval gates</div><div class="card-body">
+    <p><button class="button" type="button" data-acknowledge-ticket${canAcknowledge ? "" : " disabled"} title="${canAcknowledge ? "" : "Ticket must be Submitted"}">Acknowledge</button></p>
+    <p><button class="button primary" type="button" data-approve-planning${canApprovePlanning ? "" : " disabled"} title="${canApprovePlanning ? "" : "Ticket must be Triage, Needs Information or Planning Failed"}">Approve for planning</button></p><p class="error" role="alert"></p></div></section>`;
 }
 
 export function ticketCreateModal(projects: Array<{ id: string; name: string }>) {
@@ -286,29 +293,11 @@ export async function render(url: URL, session: Session, _metrics: Record<string
   }
   const ticketMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)$/);
   if (ticketMatch) {
-    let ticket = (await pool.query(
+    const ticket = (await pool.query(
       `SELECT t.*,p.name project_name,f.name form_name FROM tickets t JOIN projects p ON p.id=t.project_id LEFT JOIN forms f ON f.id=t.form_id WHERE t.id::text=$1 OR t.ticket_number=$1`,
       [decodeURIComponent(ticketMatch[1])],
     )).rows[0];
     if (!ticket) return { status: 404, title: "Ticket not found", body: "<h1>Ticket not found</h1>" };
-    if (ticket.status === "Submitted") {
-      // PRD §17.2 "Administrator opens triage": Submitted -> Triage fires
-      // as a side effect of an admin viewing the ticket.
-      ticket = await inTransaction(async (client) => {
-        const updated = (await client.query(
-          "UPDATE tickets SET status='Triage',updated_at=now() WHERE id=$1 AND status='Submitted' RETURNING *",
-          [ticket.id],
-        )).rows[0];
-        if (updated) {
-          await client.query(
-            `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
-             VALUES ($1,'Submitted','Triage','Administrator opened triage','admin',$2)`,
-            [ticket.id, session.user_id],
-          );
-        }
-        return { ...ticket, ...(updated ?? {}) };
-      });
-    }
     const [notesResult, historyResult, skillsResult, notificationsResult, runsResult, prsResult, planVersionsResult] = await Promise.all([
       pool.query("SELECT n.*,u.username FROM ticket_notes n LEFT JOIN users u ON u.id=n.author_id WHERE ticket_id=$1 ORDER BY n.created_at DESC", [ticket.id]),
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
@@ -381,7 +370,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       </div></section>
       <section class="card"><div class="card-head">Internal notes</div><div class="card-body notes">${notes.map((note) => `<div class="note"><strong>${escapeHtml(note.username ?? "Administrator")}</strong><p>${escapeHtml(note.body)}</p></div>`).join("") || "<p>No notes yet.</p>"}<form data-notes-form><label class="field"><span>Add an internal note…</span><textarea name="body" placeholder="Add an internal note…" rows="3"></textarea></label><button class="button" type="submit">Save note</button><p class="error" role="alert"></p></form></div></section></div>
       <div class="grid rail"><section class="card"><div class="card-head">Ticket</div><div class="card-body"><dl><dt>Project</dt><dd>${escapeHtml(ticket.project_name)}</dd><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Source form</dt><dd>${escapeHtml(ticket.form_name ?? "—")}</dd><dt>Created</dt><dd>${new Date(ticket.created_at).toLocaleDateString("nl-NL")}</dd></dl></div></section>
-      <section class="card"><div class="card-head">Approval gates</div><div class="card-body"><p><button class="button primary" type="button" data-approve-planning${["Triage", "Needs Information", "Planning Failed"].includes(ticket.status) ? "" : " disabled"} title="${["Triage", "Needs Information", "Planning Failed"].includes(ticket.status) ? "" : "Ticket must be Triage, Needs Information or Planning Failed"}">Approve for planning</button></p><p class="error" role="alert"></p></div></section>
+      ${approvalGatesCard(ticket)}
       <section class="card"><div class="card-head">Danger zone</div><div class="card-body"><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reject-ticket${["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : " disabled"} title="${["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : "Can only reject early-stage tickets"}">Reject</button></p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-cancel-ticket${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : " disabled"} title="${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : "Can only cancel in-progress tickets"}">Cancel</button></p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-archive-ticket${["Completed", "Merged", "Rejected", "Cancelled"].includes(ticket.status) ? "" : " disabled"} title="${["Completed", "Merged", "Rejected", "Cancelled"].includes(ticket.status) ? "" : "Can only archive finished tickets"}">Archive</button></p></div></section></div>`;
     const aiPanel = `<section class="card"><div class="card-head">AI configuration</div><div class="card-body">
         <form id="ai-config" data-ticket-id="${ticket.id}"><label class="field"><span>Mode</span><select name="ai_configuration_mode"><option value="basic"${ticket.ai_configuration_mode !== "advanced" ? " selected" : ""}>Basic</option><option value="advanced"${ticket.ai_configuration_mode === "advanced" ? " selected" : ""}>Advanced</option></select></label>

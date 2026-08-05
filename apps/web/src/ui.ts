@@ -196,6 +196,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(!message){commitDialog.querySelector(".error").textContent="Commit message is required";return}
           await approvePlanning(message);
         });
+        document.querySelector("[data-acknowledge-ticket]")?.addEventListener("click",()=>ticketAction("acknowledge"));
         document.querySelector("[data-reject-ticket]")?.addEventListener("click",()=>{if(confirm("Reject this ticket?"))ticketAction("reject")});
         document.querySelector("[data-cancel-ticket]")?.addEventListener("click",()=>{if(confirm("Cancel this ticket? In-flight work stops."))ticketAction("cancel")});
         document.querySelector("[data-archive-ticket]")?.addEventListener("click",()=>{if(confirm("Archive this ticket?"))ticketAction("archive")});

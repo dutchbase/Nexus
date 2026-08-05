@@ -345,6 +345,36 @@ function html(response: ServerResponse, status: number, body: string, headers: R
   response.end(body);
 }
 
+const RECOVERY_BY_STATUS: Record<number, string> = {
+  400: "Correct the request and retry.",
+  401: "Sign in again.",
+  403: "Ask an administrator for access.",
+  404: "Check the identifier and retry.",
+  409: "Reload the page to get the current state, then retry.",
+  413: "Reduce the request size.",
+  422: "Fix the highlighted fields.",
+  500: "Check /admin/system for worker and queue health, then retry.",
+};
+
+export function operationalError(message: string, options: { status: number; code: string; recovery: string }) {
+  return Object.assign(new Error(message), { status: options.status, code: options.code, recovery_action: options.recovery });
+}
+
+export function errorEnvelope(error: any) {
+  const status = Number(error?.status) || 500;
+  const error_code = error?.code ?? `http_${status}`;
+  const recovery_action = error?.recovery_action ?? RECOVERY_BY_STATUS[status] ?? RECOVERY_BY_STATUS[500];
+  if (error instanceof ApprovalConflictError) {
+    return { error: error.code, message: error.message, current_snapshot_id: error.currentSnapshotId, error_code, recovery_action };
+  }
+  return {
+    error: status === 413 ? "request too large" : status < 500 ? error.message : "internal error",
+    code: status < 500 ? error?.code : undefined,
+    error_code,
+    recovery_action,
+  };
+}
+
 async function bodyBuffer(request: IncomingMessage, maximum: number) {
   const declared = Number(request.headers["content-length"] ?? 0);
   if (declared > maximum) throw Object.assign(new Error("request too large"), { status: 413 });
@@ -1608,10 +1638,21 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     )).rows[0];
     return json(response, 201, { skill_snapshot: snapshot });
   }
-  const actionMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/(reject|cancel|archive)$/);
+  const actionMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/(acknowledge|reject|cancel|archive)$/);
   if (actionMatch && request.method === "POST") {
+    const ticketRef = decodeURIComponent(actionMatch[1]);
+    if (actionMatch[2] === "acknowledge") {
+      const before = (await pool.query("SELECT status FROM tickets WHERE id::text = $1 OR ticket_number = $1", [ticketRef])).rows[0];
+      if (!before) return json(response, 404, { error: "ticket not found" });
+      if (before.status !== "Submitted") {
+        throw operationalError("Ticket is not awaiting acknowledgement", {
+          status: 409, code: "ticket_not_submitted", recovery: "Reload the ticket to see its current status.",
+        });
+      }
+      return transitionTicket(ticketRef, "Triage", "Administrator opened triage", session, request, response);
+    }
     const statuses: Record<string, string> = { reject: "Rejected", cancel: "Cancelled", archive: "Archived" };
-    return transitionTicket(decodeURIComponent(actionMatch[1]), statuses[actionMatch[2]], `${actionMatch[2]} by administrator`, session, request, response);
+    return transitionTicket(ticketRef, statuses[actionMatch[2]], `${actionMatch[2]} by administrator`, session, request, response);
   }
   const reopenMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/reopen$/);
   if (reopenMatch && request.method === "POST") {
@@ -2349,12 +2390,7 @@ const server = createServer((request, response) => {
   route(request, response).catch((error) => {
     console.error(error);
     const status = Number(error?.status) || 500;
-    if (!response.headersSent) json(response, status, error instanceof ApprovalConflictError ? {
-      error: error.code, message: error.message, current_snapshot_id: error.currentSnapshotId,
-    } : {
-      error: status === 413 ? "request too large" : status < 500 ? error.message : "internal error",
-      code: status < 500 ? error?.code : undefined,
-    });
+    if (!response.headersSent) json(response, status, errorEnvelope(error));
     else response.end();
   });
 });
