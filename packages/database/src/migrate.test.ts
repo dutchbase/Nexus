@@ -17,6 +17,10 @@ describe("validateMigrations", () => {
     await expect(readdir(new URL("../migrations/", import.meta.url))).resolves.toContain("037_workflow_state.sql");
   });
 
+  it("includes the durable deployment safety migration", async () => {
+    await expect(readdir(new URL("../migrations/", import.meta.url))).resolves.toContain("042_deployment_safety.sql");
+  });
+
   it("backfills expiry for existing terminal execution worktrees", async () => {
     const migration = await readFile(new URL("../migrations/038_execution_safety.sql", import.meta.url), "utf8");
     expect(migration).toContain("UPDATE execution_attempts");
