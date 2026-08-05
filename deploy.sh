@@ -71,7 +71,6 @@ rollback() {
         if rm -f "$CURRENT"; then rollback_outcome="bootstrap_processes_stopped"; else rollback_outcome="bootstrap_current_remove_failed"; recovered=0; fi
         pm2 delete dcc-web || recovered=0
         pm2 delete dcc-worker || recovered=0
-        pm2 delete dcc-webhook || recovered=0
       fi
     fi
     if [ -n "${DATABASE_URL:-}" ]; then record_rollback "$rollback_outcome" "$recovery_health" "deploy_exit_$status" || recovered=0; fi

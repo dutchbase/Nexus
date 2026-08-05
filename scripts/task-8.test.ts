@@ -139,6 +139,16 @@ describe("health-gated release deployment", () => {
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 75 });
   });
 
+  it("keeps the bootstrap webhook alive to consume a failed marker", async () => {
+    const result = await deploy({ prior: false, failHealth: true });
+
+    expect(result.status).toBe(76);
+    expect(result.commands).toContain("pm2 delete dcc-web");
+    expect(result.commands).toContain("pm2 delete dcc-worker");
+    expect(result.commands).not.toContain("dcc-webhook");
+    expect(result.marker).toEqual({ attemptId, sha, exitCode: 76 });
+  });
+
   it("writes the atomic JSON completion marker before restarting the webhook", async () => {
     const result = await deploy();
 
