@@ -28,7 +28,7 @@ describe("probeGitHubCapability", () => {
   it("issues a single read-only GET to /repos/{owner}/{repo}", async () => {
     process.env.GITHUB_API_BASE_URL = "https://github.example/api/v3";
     process.env.GITHUB_TOKEN = "test-token";
-    const fetchSpy = vi.fn(async () => new Response(JSON.stringify({ permissions: { pull: true, push: false } }), {
+    const fetchSpy = vi.fn<(input: string, init?: RequestInit) => Promise<Response>>(async () => new Response(JSON.stringify({ permissions: { pull: true, push: false } }), {
       status: 200,
       headers: { "content-type": "application/json" },
     }));
@@ -45,7 +45,7 @@ describe("probeGitHubCapability", () => {
   it("reports unauthorized on a 401 with exactly one call (no retry-into-write, no second call)", async () => {
     process.env.GITHUB_API_BASE_URL = "https://github.example/api/v3";
     process.env.GITHUB_TOKEN = "test-token";
-    const fetchSpy = vi.fn(async () => new Response("", { status: 401 }));
+    const fetchSpy = vi.fn<(input: string, init?: RequestInit) => Promise<Response>>(async () => new Response("", { status: 401 }));
     vi.stubGlobal("fetch", fetchSpy);
 
     await expect(probeGitHubCapability("acme", "widgets")).resolves.toMatchObject({
@@ -58,7 +58,7 @@ describe("probeGitHubCapability", () => {
   it("reports unauthorized on a 403 with exactly one call (no retry-into-write, no second call)", async () => {
     process.env.GITHUB_API_BASE_URL = "https://github.example/api/v3";
     process.env.GITHUB_TOKEN = "test-token";
-    const fetchSpy = vi.fn(async () => new Response("", { status: 403 }));
+    const fetchSpy = vi.fn<(input: string, init?: RequestInit) => Promise<Response>>(async () => new Response("", { status: 403 }));
     vi.stubGlobal("fetch", fetchSpy);
 
     await expect(probeGitHubCapability("acme", "widgets")).resolves.toMatchObject({
@@ -70,7 +70,7 @@ describe("probeGitHubCapability", () => {
   it("maps a 404 to unauthorized with exactly one call", async () => {
     process.env.GITHUB_API_BASE_URL = "https://github.example/api/v3";
     process.env.GITHUB_TOKEN = "test-token";
-    const fetchSpy = vi.fn(async () => new Response("", { status: 404 }));
+    const fetchSpy = vi.fn<(input: string, init?: RequestInit) => Promise<Response>>(async () => new Response("", { status: 404 }));
     vi.stubGlobal("fetch", fetchSpy);
 
     await expect(probeGitHubCapability("acme", "widgets")).resolves.toMatchObject({
