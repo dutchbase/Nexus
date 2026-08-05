@@ -1,7 +1,29 @@
 import { pool } from "@dcc/database";
 import { adminPage, escapeHtml } from "../ui.ts";
+import { WORKER_STALE_AFTER_MS } from "@dcc/domain";
 
 export { pool, adminPage, escapeHtml };
+
+// Derives worker health from the `workers` table's own heartbeat_at rather
+// than from job-claim activity (PRD G10-F01): an idle-but-alive worker no
+// longer reads as stale, and a dead worker stops reading as healthy
+// WORKER_STALE_AFTER_MS after its last heartbeat instead of after its last
+// claimed job.
+export function workerHealth(
+  row: { id: string; heartbeat_at: string | Date; capabilities: string[]; version: string | null } | undefined,
+  now = Date.now(),
+): { tone: "ok" | "warn"; label: string; detail: string } {
+  if (!row) {
+    return { tone: "warn", label: "no worker registered", detail: "No row in workers.heartbeat_at yet — the worker process has not sent a heartbeat." };
+  }
+  const ageMs = now - new Date(row.heartbeat_at).getTime();
+  const stale = ageMs >= WORKER_STALE_AFTER_MS;
+  const ageSecs = Math.round(ageMs / 1000);
+  const capabilityCount = row.capabilities.length;
+  const capabilityLabel = `${capabilityCount} job type${capabilityCount === 1 ? "" : "s"}`;
+  const detail = `Source: workers.heartbeat_at · ${ageSecs}s ago · ${capabilityLabel}${row.version ? ` · v${row.version}` : ""}`;
+  return { tone: stale ? "warn" : "ok", label: stale ? "stale" : "healthy", detail };
+}
 
 // Shared by both the admin page renderers and the admin API.
 export const validStatuses = new Set([

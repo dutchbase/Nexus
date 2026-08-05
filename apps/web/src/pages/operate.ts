@@ -2,7 +2,7 @@ import { statfsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { artifactDataRoot } from "../../../../packages/database/src/artifacts.ts";
-import { escapeHtml, pool, shortRef } from "./shared.ts";
+import { escapeHtml, pool, shortRef, workerHealth } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { aiModels, reasoningLevels } from "@dcc/domain";
 
@@ -110,7 +110,7 @@ export function backupStatusCards(retentionDays: string | undefined, latest: { s
 
 async function systemBody(): Promise<string> {
   const [heartbeat, depth, projects, failedJobs, failedDeliveries, failedRuns, sessionCleanup, latestBackupVerification] = await Promise.all([
-    pool.query("SELECT MAX(claimed_at) hb, (array_agg(claimed_by ORDER BY claimed_at DESC))[1] worker FROM jobs WHERE claimed_at IS NOT NULL"),
+    pool.query("SELECT (SELECT row_to_json(w) FROM (SELECT id,heartbeat_at,capabilities,version FROM workers ORDER BY heartbeat_at DESC LIMIT 1) w) worker"),
     pool.query("SELECT status, count(*)::int c FROM jobs GROUP BY status"),
     pool.query("SELECT slug, name, repository_path, health_status FROM projects ORDER BY name"),
     pool.query("SELECT id, type, error_json->>'message' message, updated_at FROM jobs WHERE status='failed' ORDER BY updated_at DESC LIMIT 10"),
@@ -120,10 +120,15 @@ async function systemBody(): Promise<string> {
     pool.query("SELECT status, verified_at FROM backup_recovery_verifications ORDER BY verified_at DESC LIMIT 1"),
   ]);
 
-  const hb = heartbeat.rows[0]?.hb;
-  const hbFresh = hb && Date.now() - new Date(hb).getTime() < 5 * 60_000;
-  const workerLabel = heartbeat.rows[0]?.worker ?? "no worker seen yet";
-  const workerCard = statCard("Worker", hb ? workerLabel : "no worker seen", hb ? `heartbeat ${since(hb)} ago` : "queue has no claimed jobs yet", hbFresh ? "ok" : "warn");
+  const worker = heartbeat.rows[0]?.worker;
+  const health = workerHealth(worker);
+  const capabilityCount = worker?.capabilities?.length ?? 0;
+  const workerCard = statCard(
+    "Worker",
+    health.label,
+    worker ? `${health.detail} · ${capabilityCount ? worker.capabilities.join(", ") : "no capabilities"}` : health.detail,
+    health.tone,
+  );
 
   const claudeVersion = process.env.CLAUDE_CODE_VERSION ?? "unknown";
   const claudeCard = statCard("Claude Code", claudeVersion, "subscription auth", claudeVersion === "unknown" ? "muted" : "ok");

@@ -1,4 +1,4 @@
-import { escapeHtml, pool, shortRef } from "./shared.ts";
+import { escapeHtml, pool, shortRef, workerHealth } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 
 function since(date: string | Date) {
@@ -76,7 +76,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       FROM agent_runs ar JOIN tickets t ON t.id = ar.ticket_id
       WHERE ar.status = 'running' LIMIT 10`),
     pool.query(`SELECT
-      (SELECT MAX(claimed_at) FROM jobs WHERE claimed_at IS NOT NULL) heartbeat,
+      (SELECT row_to_json(w) FROM (SELECT id,heartbeat_at,capabilities,version FROM workers ORDER BY heartbeat_at DESC LIMIT 1) w) worker,
       (SELECT count(*)::int FROM projects WHERE health_status = 'repository_dirty') dirty_projects`),
     pool.query("SELECT slug, name FROM projects WHERE health_status = 'repository_dirty' LIMIT 5"),
     pool.query("SELECT count(*)::int c FROM notification_deliveries WHERE status = 'failed'"),
@@ -91,8 +91,8 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   const totalNeedAttention = awaitingCount + plansCount + runsCount + prsCount + jobsCount;
   const needsPlural = totalNeedAttention === 1 ? "thing" : "things";
 
-  const hb = healthData.rows[0]?.heartbeat;
-  const hbFresh = hb && Date.now() - new Date(hb).getTime() < 5 * 60_000;
+  const worker = healthData.rows[0]?.worker;
+  const health = workerHealth(worker);
 
   // Format elapsed time
   const formatElapsed = (secs: number) => {
@@ -144,7 +144,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
 
   const queuedCount = queuedJobs.rows[0]?.c ?? 0;
   const healthRows = [
-    healthRow("Worker", hb ? `${since(hb)} ago` : "no worker", hbFresh ? "ok" : "warn"),
+    healthRow("Worker", `${health.label} — ${health.detail}`, health.tone),
     healthRow("Project health", `${healthData.rows[0]?.dirty_projects || 0} blocked`, healthData.rows[0]?.dirty_projects > 0 ? "danger" : "ok"),
     healthRow("Failed deliveries", `${failedDeliveries.rows[0]?.c || 0}`, failedDeliveries.rows[0]?.c > 0 ? "warn" : "ok"),
   ].join("");

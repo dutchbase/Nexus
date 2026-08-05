@@ -12,7 +12,7 @@ import {
   assertPrReviewDestination, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
   claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, resumePrReviewPublication,
   claimNotificationDelivery, completeNotificationDelivery, failNotificationDelivery, renewJobLease,
-  renewNotificationDeliveryLease,
+  renewNotificationDeliveryLease, recordWorkerHeartbeat, WORKER_HEARTBEAT_INTERVAL_MS,
   renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
@@ -60,6 +60,15 @@ const publicationJobTypes = ["pull-request.retry"];
 const aiReviewJobTypes = ["pr.ai_review"];
 const followUpDescriptionJobTypes = ["pr.follow_up_description"];
 const conflictResolutionJobTypes = ["pr.conflict_resolution"];
+// Reported to the `workers` table as this process's heartbeat capabilities
+// (G10-F01) — every job type this worker instance can claim, so the admin
+// UI can show what a healthy worker is actually able to do.
+const workerCapabilities = [
+  "project.validate",
+  ...planningJobTypes, ...executionJobTypes, ...publicationJobTypes,
+  ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes,
+  ...providerJobTypes,
+].sort();
 let stopping = false;
 let activeExecutionCancellation: AbortController | null = null;
 let lastPullRequestSync = 0;
@@ -67,6 +76,7 @@ let lastNotificationDelivery = 0;
 let lastGithubImport = 0;
 let lastSessionCleanup = 0;
 let lastWorkflowRecovery = 0;
+let lastWorkerHeartbeat = 0;
 
 process.on("SIGTERM", () => { stopping = true; activeExecutionCancellation?.abort(); });
 process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort(); });
@@ -1563,6 +1573,11 @@ async function deliverDueNotification() {
 }
 
 while (!stopping) {
+  if (Date.now() - lastWorkerHeartbeat >= WORKER_HEARTBEAT_INTERVAL_MS) {
+    lastWorkerHeartbeat = Date.now();
+    try { await recordWorkerHeartbeat(workerId, workerCapabilities, process.env.npm_package_version ?? null); }
+    catch (error) { console.error(`Worker heartbeat failed: ${error instanceof Error ? error.message : "unknown error"}`); }
+  }
   if (Date.now() - lastWorkflowRecovery >= 20_000) {
     lastWorkflowRecovery = Date.now();
     try { await recoverExpiredWorkflowState(inTransaction); }
