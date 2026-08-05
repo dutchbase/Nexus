@@ -32,14 +32,34 @@ CREATE UNIQUE INDEX deployment_attempts_one_running_idx
 CREATE INDEX deployment_attempts_queue_idx
   ON deployment_attempts (queued_at, created_at) WHERE state = 'queued';
 
+CREATE OR REPLACE FUNCTION deployment_event_metadata_is_safe(metadata_value jsonb) RETURNS boolean
+LANGUAGE plpgsql IMMUTABLE STRICT AS $$
+DECLARE
+  item record;
+BEGIN
+  IF jsonb_typeof(metadata_value) = 'object' THEN
+    FOR item IN SELECT entry.key, entry.value FROM jsonb_each(metadata_value) AS entry LOOP
+      IF item.key ~* '^(authorization|token|secret|recipient|body|payload|webhook_body|response_body)$'
+        OR NOT deployment_event_metadata_is_safe(item.value) THEN
+        RETURN false;
+      END IF;
+    END LOOP;
+  ELSIF jsonb_typeof(metadata_value) = 'array' THEN
+    FOR item IN SELECT entry.value FROM jsonb_array_elements(metadata_value) AS entry LOOP
+      IF NOT deployment_event_metadata_is_safe(item.value) THEN RETURN false; END IF;
+    END LOOP;
+  END IF;
+  RETURN true;
+END;
+$$;
+
 CREATE TABLE deployment_events (
   id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   attempt_id uuid NOT NULL REFERENCES deployment_attempts(id),
   event_key text NOT NULL,
   event_type text NOT NULL,
   metadata jsonb NOT NULL DEFAULT '{}'::jsonb CHECK (
-    jsonb_typeof(metadata) = 'object'
-    AND NOT (metadata ?| ARRAY['authorization', 'token', 'secret', 'recipient', 'body', 'payload', 'webhook_body', 'response_body'])
+    jsonb_typeof(metadata) = 'object' AND deployment_event_metadata_is_safe(metadata)
   ),
   created_at timestamptz NOT NULL DEFAULT now(),
   UNIQUE (attempt_id, event_key)

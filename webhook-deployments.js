@@ -81,7 +81,7 @@ async function enqueueDeploymentAttempt(pool, input) {
     const attempt = result.rows[0];
     if (!attempt) {
       const duplicate = (await client.query(
-        'SELECT *, CASE WHEN delivery_id=$1 THEN $2 ELSE $3 END AS duplicate FROM deployment_attempts WHERE delivery_id=$1 OR (protected_branch=$4 AND target_sha=$5) LIMIT 1',
+        'SELECT *, CASE WHEN delivery_id=$1 THEN $2 ELSE $3 END AS duplicate FROM deployment_attempts WHERE delivery_id=$1 OR (protected_branch=$4 AND target_sha=$5) ORDER BY CASE WHEN delivery_id=$1 THEN 0 ELSE 1 END LIMIT 1',
         [input.deliveryId, 'delivery', 'sha', input.protectedBranch, input.targetSha],
       )).rows[0];
       return { created: false, duplicate: duplicate.duplicate, attempt: duplicate };
@@ -96,9 +96,9 @@ async function claimDeploymentAttempt(pool, { owner, leaseMs }) {
   assertLease(leaseMs);
   return inTransaction(pool, async (client) => {
     await client.query('SELECT pg_advisory_xact_lock($1)', [DEPLOYMENT_LOCK]);
-    const running = (await client.query("SELECT * FROM deployment_attempts WHERE state='running' FOR UPDATE")).rows[0];
+    const running = (await client.query("SELECT *,lease_expires_at > now() AS lease_active FROM deployment_attempts WHERE state='running' FOR UPDATE")).rows[0];
     if (running) {
-      if (new Date(running.lease_expires_at).getTime() > Date.now()) return { kind: 'busy', attempt: running };
+      if (running.lease_active) return { kind: 'busy', attempt: running };
       if (running.recovery_count === 0) {
         const recovered = (await client.query(
           "UPDATE deployment_attempts SET owner=$2,lease_expires_at=now()+($3 * interval '1 millisecond'),recovery_count=1,recovery_reason='lease_expired',updated_at=now() WHERE id=$1 RETURNING *",

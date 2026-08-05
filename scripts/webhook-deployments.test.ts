@@ -22,6 +22,46 @@ const attempt = (suffix: string) => ({
   checkEvidence: { requiredCheck: "ci", conclusion: "success" },
 });
 
+function fakePool(reply: (text: string, values: unknown[], queries: Array<{ text: string; values: unknown[] }>) => { rows: unknown[] }) {
+  const queries: Array<{ text: string; values: unknown[] }> = [];
+  return {
+    queries,
+    pool: {
+      connect: async () => ({
+        query: async (text: string, values: unknown[] = []) => {
+          queries.push({ text, values });
+          return reply(text, values, queries);
+        },
+        release() {},
+      }),
+    },
+  };
+}
+
+describe("webhook deployment store query semantics", () => {
+  it("uses PostgreSQL time to retain a lease that appears expired to the host", async () => {
+    const db = fakePool((text) => text.includes("lease_expires_at > now() AS lease_active")
+      ? { rows: [{ id: "attempt", lease_expires_at: "1970-01-01T00:00:00.000Z", lease_active: true, recovery_count: 0 }] }
+      : { rows: [] });
+
+    await expect(deployments.claimDeploymentAttempt(db.pool, { owner: "webhook", leaseMs: 60_000 }))
+      .resolves.toMatchObject({ kind: "busy", attempt: { id: "attempt" } });
+  });
+
+  it("prefers a delivery collision when delivery and SHA collisions coexist", async () => {
+    const db = fakePool((text) => {
+      if (text.startsWith("INSERT INTO deployment_attempts")) return { rows: [] };
+      if (text.startsWith("SELECT *, CASE WHEN delivery_id")) {
+        return { rows: [{ id: "delivery-attempt", duplicate: text.includes("ORDER BY CASE WHEN delivery_id=$1") ? "delivery" : "sha" }] };
+      }
+      return { rows: [] };
+    });
+
+    await expect(deployments.enqueueDeploymentAttempt(db.pool, attempt("a")))
+      .resolves.toMatchObject({ created: false, duplicate: "delivery", attempt: { id: "delivery-attempt" } });
+  });
+});
+
 integration("webhook deployment store", () => {
   beforeEach(async () => {
     const client = new pg.Client({ connectionString: testDatabaseUrl });
@@ -62,6 +102,10 @@ integration("webhook deployment store", () => {
     await expect(deployments.appendDeploymentEvent(pool, {
       attemptId: created.attempt.id, eventKey: "queued", eventType: "queued", metadata: { source: "webhook" },
     })).resolves.toBeNull();
+    await expect(pool.query(
+      "INSERT INTO deployment_events (attempt_id,event_key,event_type,metadata) VALUES ($1,$2,$3,$4::jsonb)",
+      [created.attempt.id, "unsafe-nested", "queued", JSON.stringify({ diagnostic: { token: "secret" } })],
+    )).rejects.toThrow();
   });
 
   it("allows only one running attempt", async () => {
