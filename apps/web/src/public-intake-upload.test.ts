@@ -78,7 +78,7 @@ describe("submitPublicForm upload claim", () => {
       if (sql.includes("FROM projects")) return { rows: [{ id: "project-1" }] };
       return { rows: [] };
     });
-    const form = { id: "form-1", settings_json: { notify_on_submission: false } };
+    const form = { id: "form-1", fixed_project_id: "project-1", settings_json: { notify_on_submission: false } };
     const uploadId = "11111111-1111-4111-8111-111111111111";
     const body = {
       title: "A bug", description: "It broke", website: "", image: uploadId,

@@ -556,13 +556,10 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
     : requestedProjectSlug
     ? (await pool.query("SELECT id FROM projects WHERE slug = $1 AND enabled = true", [requestedProjectSlug])).rows[0]
     : undefined;
-  if ((requestedProjectId || requestedProjectSlug) && !project) return json(response, 400, { error: "valid project is required" });
-  // No project selected and the form isn't fixed to one: triage assigns it
-  // later (PRD §17.1's Submitted -> Triage step), so default to the
-  // earliest enabled project rather than blocking submission outright.
-  const fallbackProject = project ?? (await pool.query("SELECT id FROM projects WHERE enabled = true ORDER BY created_at LIMIT 1")).rows[0];
-  if (!fallbackProject) return json(response, 400, { error: "no enabled project available" });
-  const projectId = fallbackProject.id;
+  if ((requestedProjectId || requestedProjectSlug) && !project) return json(response, 400, { error: "valid project is required", code: "invalid_project" });
+  // ponytail: silent oldest-project fallback removed per audit G06-F05 — forms must carry fixed_project_id or the client an explicit project.
+  if (!project) return json(response, 400, { error: "project assignment required", code: "project_assignment_required" });
+  const projectId = project.id;
   const ticket = await inTransaction(async (client) => {
     const number = (await client.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
     const ticketNumber = `DCC-${number}`;
