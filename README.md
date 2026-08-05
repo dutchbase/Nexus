@@ -250,22 +250,68 @@ the worker.
 
 ## Updating
 
-The deployment webhook runs `deploy.sh <merged-sha>`. It installs locked
-dependencies, migrates the database, syncs agent content, then restarts the
-application only if every prior step succeeds.
+The webhook invokes `deploy.sh <40-char-sha> <absolute-marker-path>
+<attempt-uuid> <protected-branch>`. Its environment must provide
+`DATABASE_URL` and `DCC_DEPLOY_HEALTH_URL`; the latter is a URL that returns a
+successful response only when the new web and worker release is healthy. The
+webhook also supplies a private inherited launch pipe; `deploy.sh` cannot begin
+deployment stages until the child PID is durable under the active lease.
 
-```bash
-cd /opt/dev-control
-git pull
-pnpm install --frozen-lockfile
-pnpm --filter database migrate
-pnpm exec tsx scripts/sync-agent-content.ts
-sudo systemctl restart dcc-web dcc-worker
+Each release is a detached worktree in `$DCC_ROOT/.deploy-releases` (override
+with `DCC_DEPLOY_RELEASES_DIR`). The script keeps `.env`, `.env.worker`, and
+`data` in `$DCC_ROOT`, then atomically changes the
+`$DCC_ROOT/.deploy-current` symlink (override with `DCC_DEPLOY_CURRENT_LINK`).
+It installs locked dependencies, migrates, synchronizes content, reloads web
+and worker, health-checks them, writes its atomic JSON completion marker, and
+only then reloads the webhook. Stage evidence is appended to
+`deployment_events` for the supplied attempt. A protected-head mismatch is
+also retained as a rejected attempt with only delivery identity, target/head
+SHAs, branch/ref, and check/rejection evidence; request bodies and credentials
+are never deployment history.
+
+A successful marker carries `reloadPending: true`. The old webhook must leave
+that marker alone; only a webhook whose working directory is the atomically
+selected release for that SHA may finalize it during boot recovery. If webhook
+reload fails, deployment replaces it with a nonzero final marker before
+restoring the previous release, so any running webhook records failure rather
+than success.
+
+On a migration failure, the old release remains live. On a failed process
+reload or health check after cutover, the old symlink and its web/worker
+processes are restored and recovery is health-checked. A first deployment has
+no prior release: a failed health gate removes `current` and stops its web and
+worker processes, so bootstrap remains fail-closed. The webhook must not
+promote queued attempts after any failure.
+
+Migrations must remain compatible with the immediately previous release:
+automatic code rollback does not roll back the database. Use an additive,
+expand/contract migration or ship a forward fix; do not reset production data.
+
+For an incident, inspect the attempt and its ordered stage events, then repair
+the failed dependency or release and enqueue a new protected-head deployment:
+
+```sql
+SELECT id, state, target_sha, prior_release_path, recovery_reason,
+       notification_status, notification_error_code, completed_at
+FROM deployment_attempts ORDER BY created_at DESC LIMIT 10;
+SELECT event_key, event_type, metadata, created_at
+FROM deployment_events WHERE attempt_id = '<attempt-uuid>' ORDER BY id;
 ```
 
-To roll back code, redeploy the previous known-good SHA with `deploy.sh`.
-Migrations are forward-only: restore the database backup or ship a forward
-fix for a schema problem; do not reset a production database to roll back.
+Before cutover, `prior_release_path` is stored on the attempt and a
+`cutover_prepared` event records the prior and target release paths. The
+`rollback` event's safe metadata records `prior_release_path`,
+`rollback_outcome`, `recovery_health`, and a non-secret reason. Terminal
+completion preserves the rollback target and durably records notification
+outcome/error code; recovery health remains in the append-only event.
+
+After confirming no deployment is running and `.deploy-current` points to the
+known-good worktree, remove obsolete directories manually; releases are kept
+for recovery and are never pruned automatically:
+
+```bash
+rm -rf /opt/dev-control/.deploy-releases/<old-sha>
+```
 
 ### Superpowers updates
 

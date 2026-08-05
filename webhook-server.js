@@ -1,322 +1,351 @@
 /* eslint-disable @typescript-eslint/no-require-imports -- standalone CommonJS node script, run directly via webhook-runner.sh */
-const http = require('http');
-const crypto = require('crypto');
-const fs = require('fs');
-const path = require('path');
-const { spawn } = require('child_process');
+const http = require('node:http');
+const crypto = require('node:crypto');
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+const deployments = require('./webhook-deployments.js');
 
-const SECRET = process.env.WEBHOOK_SECRET;
-const PORT = Number(process.env.WEBHOOK_PORT || 9003);
-const DEPLOY_SH_PATH = process.env.DEPLOY_SH_PATH || '/home/deploy/projects/dev-control/deploy.sh';
-const DEPLOY_STATE_DIR = process.env.DEPLOY_STATE_DIR || '/home/deploy/projects/dev-control/.deploy-state';
-const REQUIRED_CI_CHECK = process.env.REQUIRED_CI_CHECK || 'ci';
-const GITHUB_REPO = process.env.GITHUB_REPO || 'dutchbase/dev-control';
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN;
-const GITHUB_API_BASE_URL = process.env.GITHUB_API_BASE_URL || 'https://api.github.com';
-const DEPLOY_STUCK_TIMEOUT_MS = Number(process.env.DEPLOY_STUCK_TIMEOUT_MS || 1800000);
-const VALID_SHA_RE = /^[0-9a-f]{40}$/;
-const REF = 'refs/heads/master';
+const SHA = /^[0-9a-f]{40}$/;
+const MAX_BODY_BYTES = 1024 * 1024;
 
-if (!SECRET) { console.error('WEBHOOK_SECRET is not set'); process.exit(1); }
+function respond(res, code, body) { res.writeHead(code).end(body); }
 
-const WHATSAPP_API_URL = process.env.WHATSAPP_API_URL;
-const WHATSAPP_API_SECRET = process.env.WHATSAPP_API_SECRET;
-const WHATSAPP_PHONE = process.env.WHATSAPP_PHONE || '31612952820';
+function readConfig(env = process.env) {
+  const stateDir = env.DEPLOY_STATE_DIR || '/home/deploy/projects/dev-control/.deploy-state';
+  return {
+    secret: env.WEBHOOK_SECRET,
+    port: Number(env.WEBHOOK_PORT || 9003),
+    protectedBranch: env.DEPLOY_PROTECTED_BRANCH,
+    deployShPath: env.DEPLOY_SH_PATH || '/home/deploy/projects/dev-control/deploy.sh',
+    currentReleaseLink: env.DCC_DEPLOY_CURRENT_LINK || path.join(env.DCC_ROOT || '/home/deploy/projects/dev-control', '.deploy-current'),
+    completionsDir: path.join(stateDir, 'completions'),
+    logsDir: path.join(stateDir, 'logs'),
+    requiredCiCheck: env.REQUIRED_CI_CHECK || 'ci',
+    repo: env.GITHUB_REPO || 'dutchbase/dev-control',
+    githubApiBaseUrl: env.GITHUB_API_BASE_URL || 'https://api.github.com',
+    githubToken: env.GITHUB_TOKEN,
+    leaseMs: Number(env.DEPLOY_STUCK_TIMEOUT_MS || 1800000),
+    owner: `webhook-${process.pid}`,
+    notification: { url: env.WHATSAPP_API_URL, secret: env.WHATSAPP_API_SECRET, phone: env.WHATSAPP_PHONE },
+  };
+}
 
-async function sendNotification(message) {
-  if (!WHATSAPP_API_URL || !WHATSAPP_API_SECRET) return;
+function createWebhook({ config = readConfig(), store = deployments, pool = null, fetchFn = fetch, spawnFn = spawn, fsModule = fs, isAliveFn = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } }, isCurrentReleaseFn = (markerSha) => {
   try {
-    await fetch(`${WHATSAPP_API_URL}/send/text`, {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${WHATSAPP_API_SECRET}`, 'Content-Type': 'application/json' },
-      body: JSON.stringify({ to: WHATSAPP_PHONE, message }),
-    });
-  } catch (e) { console.error('[notify] failed:', e.message); }
-}
+    const currentRelease = fsModule.realpathSync(config.currentReleaseLink);
+    return currentRelease === fsModule.realpathSync(process.cwd()) && path.basename(currentRelease) === markerSha;
+  } catch { return false; }
+}, logger = console } = {}) {
+  if (!config.secret || !config.protectedBranch) throw new Error('WEBHOOK_SECRET and DEPLOY_PROTECTED_BRANCH are required');
+  fsModule.mkdirSync(config.completionsDir, { recursive: true });
+  fsModule.mkdirSync(config.logsDir, { recursive: true });
+  const activePolls = new Set();
 
-const STATE_FILE = path.join(DEPLOY_STATE_DIR, 'state.json');
-const LOCK_FILE = path.join(DEPLOY_STATE_DIR, 'state.lock');
-const COMPLETIONS_DIR = path.join(DEPLOY_STATE_DIR, 'completions');
-const LOGS_DIR = path.join(DEPLOY_STATE_DIR, 'logs');
-const PRUNE_AFTER_MS = 30 * 24 * 60 * 60 * 1000;
-
-fs.mkdirSync(COMPLETIONS_DIR, { recursive: true });
-fs.mkdirSync(LOGS_DIR, { recursive: true });
-
-// ---- durable state: single JSON file, atomic write, exclusive lock file ----
-
-function loadState() {
-  try {
-    return JSON.parse(fs.readFileSync(STATE_FILE, 'utf8'));
-  } catch {
-    return { processedDeliveries: {}, shaOutcomes: {}, queued: {}, running: {} };
-  }
-}
-
-function saveState(state) {
-  const tmp = `${STATE_FILE}.tmp`;
-  const fd = fs.openSync(tmp, 'w');
-  fs.writeSync(fd, JSON.stringify(state, null, 2));
-  fs.fsyncSync(fd);
-  fs.closeSync(fd);
-  fs.renameSync(tmp, STATE_FILE);
-}
-
-function pruneProcessedDeliveries(state) {
-  const cutoff = Date.now() - PRUNE_AFTER_MS;
-  for (const [id, rec] of Object.entries(state.processedDeliveries)) {
-    if (rec && rec.at && new Date(rec.at).getTime() < cutoff) delete state.processedDeliveries[id];
-  }
-}
-
-function isAlive(pid) {
-  try { process.kill(pid, 0); return true; } catch { return false; }
-}
-
-async function withLock(fn) {
-  const start = Date.now();
-  for (;;) {
+  async function requestJson(url) {
     try {
-      const fd = fs.openSync(LOCK_FILE, 'wx');
-      fs.writeSync(fd, String(process.pid));
-      fs.closeSync(fd);
-      break;
-    } catch (e) {
-      if (e.code !== 'EEXIST') throw e;
-      let heldPid = null;
-      try { heldPid = parseInt(fs.readFileSync(LOCK_FILE, 'utf8'), 10); } catch { /* lock removed concurrently */ }
-      if (!heldPid || !isAlive(heldPid)) {
-        try { fs.unlinkSync(LOCK_FILE); } catch { /* raced with another releaser */ }
-        continue; // stale lock cleared — retry
-      }
-      if (Date.now() - start > 5000) throw new Error(`could not acquire state lock (held by live pid ${heldPid})`);
-      await new Promise((r) => { setTimeout(r, 20); });
-    }
-  }
-  try {
-    return await fn();
-  } finally {
-    try { fs.unlinkSync(LOCK_FILE); } catch { /* already gone */ }
-  }
-}
-
-async function mutateState(fn) {
-  return withLock(() => {
-    const state = loadState();
-    const result = fn(state);
-    pruneProcessedDeliveries(state);
-    saveState(state);
-    return result;
-  });
-}
-
-// ---- CI-status gate ----
-
-async function checkRequiredCiStatus(sha) {
-  if (!GITHUB_REPO) return { ok: false, reason: 'GITHUB_REPO not configured' };
-  const url = `${GITHUB_API_BASE_URL}/repos/${GITHUB_REPO}/commits/${sha}/check-runs`;
-  try {
-    const res = await fetch(url, {
-      headers: {
-        'User-Agent': 'dev-control-webhook',
-        Accept: 'application/vnd.github+json',
-        ...(GITHUB_TOKEN ? { Authorization: `Bearer ${GITHUB_TOKEN}` } : {}),
-      },
-    });
-    const body = await res.json();
-    const runs = (body.check_runs || []).filter((r) => r.name === REQUIRED_CI_CHECK);
-    if (runs.length === 0) return { ok: false, reason: 'no matching check run' };
-    runs.sort((a, b) => new Date(b.started_at) - new Date(a.started_at));
-    const latest = runs[0];
-    if (latest.status !== 'completed') return { ok: false, reason: `status=${latest.status}` };
-    if (latest.conclusion !== 'success') return { ok: false, reason: `conclusion=${latest.conclusion}` };
-    return { ok: true };
-  } catch (e) {
-    return { ok: false, reason: `CI status check error: ${e.message}` };
-  }
-}
-
-// ---- launching + tracking a deploy (survives the webhook process dying) ----
-
-function launchDeploy(sha) {
-  const startedAt = new Date().toISOString();
-  const marker = path.join(COMPLETIONS_DIR, `${sha}.done`);
-  const logPath = path.join(LOGS_DIR, `${sha}.log`);
-  const child = spawn('sh', ['-c',
-    `'${DEPLOY_SH_PATH}' '${sha}' '${marker}' > '${logPath}' 2>&1`,
-  ], { detached: true, stdio: 'ignore' });
-  child.unref();
-  return { sha, startedAt, childPid: child.pid, markerPath: marker };
-}
-
-const activePolls = new Set();
-
-function startCompletionPoll(ref, sha, markerPath, startedAt) {
-  if (activePolls.has(ref)) return;
-  activePolls.add(ref);
-  const remaining = DEPLOY_STUCK_TIMEOUT_MS - (Date.now() - new Date(startedAt).getTime());
-  const stuckTimer = setTimeout(() => {
-    console.warn(`[webhook] deploy for ${sha} on ${ref} exceeded stuck timeout (started ${startedAt}) — operator attention needed, not auto-retried`);
-  }, Math.max(0, remaining));
-  const interval = setInterval(() => {
-    if (!fs.existsSync(markerPath)) return;
-    clearInterval(interval);
-    clearTimeout(stuckTimer);
-    activePolls.delete(ref);
-    finalizeDeploy(ref, sha, markerPath).catch((e) => console.error('[webhook] finalize failed:', e));
-  }, 500);
-}
-
-async function finalizeDeploy(ref, sha, markerPath) {
-  let outcome = null;
-  let promoted = null;
-  await mutateState((state) => {
-    if (state.shaOutcomes[sha] === 'success' || state.shaOutcomes[sha] === 'failed') {
-      delete state.running[ref];
-      return;
-    }
-    let ec = '1';
-    try { ec = fs.readFileSync(markerPath, 'utf8').trim(); } catch { /* marker unreadable, treat as failed */ }
-    try { fs.unlinkSync(markerPath); } catch { /* already gone */ }
-    outcome = ec === '0' ? 'success' : 'failed';
-    state.shaOutcomes[sha] = outcome;
-    delete state.running[ref];
-    if (state.queued[ref]) {
-      const queuedSha = state.queued[ref];
-      delete state.queued[ref];
-      promoted = launchDeploy(queuedSha);
-      state.running[ref] = promoted;
-      state.shaOutcomes[queuedSha] = 'running';
-    }
-  });
-  if (!outcome) return; // already finalized by another process
-  console.log(outcome === 'success'
-    ? `[webhook] deploy OK for SHA ${sha.slice(0, 8)}`
-    : `[webhook] deploy FAILED for SHA ${sha.slice(0, 8)}. Check server logs.`);
-  sendNotification(outcome === 'success'
-    ? `dev-control deploy OK: ${sha.slice(0, 8)}`
-    : `dev-control deploy FAILED: ${sha.slice(0, 8)}`);
-  if (promoted) startCompletionPoll(ref, promoted.sha, promoted.markerPath, promoted.startedAt);
-}
-
-function recoverOnBoot() {
-  const state = loadState();
-  for (const [ref, info] of Object.entries(state.running)) {
-    if (fs.existsSync(info.markerPath)) {
-      finalizeDeploy(ref, info.sha, info.markerPath).catch((e) => console.error('[webhook] boot finalize failed:', e));
-    } else {
-      startCompletionPoll(ref, info.sha, info.markerPath, info.startedAt);
-    }
-  }
-}
-
-// ---- request handling ----
-
-function respond(res, code, msg) { res.writeHead(code).end(msg); }
-
-async function handleDeploy(res, sha, deliveryId, ciAlreadyOk = false) {
-  const preState = loadState();
-  if (deliveryId && preState.processedDeliveries[deliveryId]) {
-    respond(res, 200, 'Already processed (delivery dedup)');
-    return;
-  }
-  const preOutcome = preState.shaOutcomes[sha];
-  if (preOutcome === 'success' || preOutcome === 'running') {
-    respond(res, 200, `Already ${preOutcome} (sha dedup)`);
-    return;
-  }
-
-  if (!ciAlreadyOk) {
-    const ci = await checkRequiredCiStatus(sha);
-    if (!ci.ok) {
-      await mutateState((state) => {
-        state.shaOutcomes[sha] = 'rejected-ci';
-        if (deliveryId) state.processedDeliveries[deliveryId] = { sha, at: new Date().toISOString() };
+      const response = await fetchFn(url, {
+        headers: { 'User-Agent': 'dev-control-webhook', Accept: 'application/vnd.github+json', ...(config.githubToken ? { Authorization: `Bearer ${config.githubToken}` } : {}) },
+        signal: AbortSignal.timeout(5000),
       });
-      console.warn(`[webhook] CI gate rejected ${sha}: ${ci.reason}`);
-      sendNotification(`dev-control deploy REJECTED: ${sha.slice(0, 8)} — CI '${REQUIRED_CI_CHECK}' ${ci.reason}`);
-      respond(res, 409, `CI check '${REQUIRED_CI_CHECK}' not successful for ${sha}`);
-      return;
+      return response.ok ? await response.json() : null;
+    } catch { return null; }
+  }
+
+  async function protectedHead() {
+    const body = await requestJson(`${config.githubApiBaseUrl}/repos/${config.repo}/git/ref/heads/${encodeURIComponent(config.protectedBranch)}`);
+    const head = body?.object?.sha;
+    return SHA.test(head || '') ? head : null;
+  }
+
+  async function isCurrentProtectedHead(sha) {
+    return (await protectedHead()) === sha;
+  }
+
+  async function checkRequiredCiStatus(sha) {
+    const body = await requestJson(`${config.githubApiBaseUrl}/repos/${config.repo}/commits/${sha}/check-runs`);
+    const latest = body?.check_runs?.filter((run) => run.name === config.requiredCiCheck)
+      .sort((a, b) => new Date(b.started_at) - new Date(a.started_at))[0];
+    return latest?.status === 'completed' && latest?.conclusion === 'success';
+  }
+
+  async function sendNotification(message, notification = config.notification) {
+    if (!notification?.url || !notification.secret || !notification.phone) return { status: 'disabled_config', errorCode: 'missing_config' };
+    try {
+      const response = await fetchFn(`${notification.url}/send/text`, {
+        method: 'POST', headers: { Authorization: `Bearer ${notification.secret}`, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ to: notification.phone, message }), signal: AbortSignal.timeout(5000),
+      });
+      if (response.ok) return { status: 'accepted', errorCode: null };
+      logger.warn('[notify] provider rejected notification');
+      return { status: 'failed_http', errorCode: Number.isInteger(response.status) ? `http_${response.status}` : 'http_unknown' };
+    } catch {
+      logger.warn('[notify] network failure');
+      return { status: 'failed_network', errorCode: 'network_error' };
     }
   }
 
-  let launched = null;
-  let code = 202;
-  let msg = '';
-  await mutateState((state) => {
-    if (deliveryId && state.processedDeliveries[deliveryId]) {
-      code = 200; msg = 'Already processed (delivery dedup)';
-      return;
+  function launchDeploy(sha, markerPath, attemptId, protectedBranch) {
+    const logPath = path.join(config.logsDir, `${attemptId}.log`);
+    const logFd = fsModule.openSync(logPath, 'a');
+    try {
+      const child = spawnFn(config.deployShPath, [sha, markerPath, attemptId, protectedBranch], {
+        detached: true,
+        env: { ...process.env, DCC_DEPLOY_LAUNCH_FD: '3' },
+        shell: false,
+        stdio: ['ignore', logFd, logFd, 'pipe'],
+      });
+      const gate = child.stdio?.[3];
+      let gateClosed = false;
+      gate?.unref?.();
+      child.unref();
+      return {
+        child,
+        markerPath,
+        childPid: child.pid,
+        abort() { if (!gateClosed) { gateClosed = true; gate?.destroy?.(); } },
+        release() {
+          if (gateClosed) return;
+          if (!gate?.end) throw new Error('deployment launch gate unavailable');
+          gateClosed = true;
+          gate.end('1');
+        },
+      };
+    } finally {
+      fsModule.closeSync(logFd);
     }
-    const outcome = state.shaOutcomes[sha];
-    if (outcome === 'success' || outcome === 'running') {
-      code = 200; msg = `Already ${outcome} (sha dedup)`;
-    } else if (!state.running[REF]) {
-      launched = launchDeploy(sha);
-      state.running[REF] = launched;
-      state.shaOutcomes[sha] = 'running';
-      msg = `Deploying ${sha}`;
-    } else {
-      state.queued[REF] = sha;
-      msg = `Queued behind ${state.running[REF].sha}`;
-    }
-    if (deliveryId) state.processedDeliveries[deliveryId] = { sha, at: new Date().toISOString() };
-  });
-  if (launched) startCompletionPoll(REF, sha, launched.markerPath, launched.startedAt);
-  sendNotification(`dev-control deploying ${sha.slice(0, 8)}`);
-  respond(res, code, msg);
-}
-
-async function handleRequest(req, res, body) {
-  const sig = req.headers['x-hub-signature-256'] || '';
-  const expected = 'sha256=' + crypto.createHmac('sha256', SECRET).update(body).digest('hex');
-  if (sig.length !== expected.length ||
-      !crypto.timingSafeEqual(Buffer.from(sig), Buffer.from(expected))) {
-    console.warn('[webhook] invalid signature'); respond(res, 401, 'Unauthorized'); return;
-  }
-  let payload;
-  try { payload = JSON.parse(body); } catch { respond(res, 400, 'Bad Request'); return; }
-
-  const event = req.headers['x-github-event'] || '';
-
-  if (event === 'check_run') {
-    if (payload.action !== 'completed') { respond(res, 200, 'Ignored (not completed)'); return; }
-    const cr = payload.check_run;
-    if (!cr || cr.name !== REQUIRED_CI_CHECK) { respond(res, 200, 'Ignored (wrong check)'); return; }
-    if (cr.conclusion !== 'success') {
-      console.log(`[webhook] check_run ${cr.name} conclusion=${cr.conclusion}, skipping deploy`);
-      respond(res, 200, 'CI not successful'); return;
-    }
-    const sha = cr.head_sha;
-    if (!sha || !VALID_SHA_RE.test(sha)) { respond(res, 400, 'Bad Request'); return; }
-    console.log(`[webhook] check_run success -> evaluating ${sha}`);
-    await handleDeploy(res, sha, req.headers['x-github-delivery'] || '', true);
-    return;
   }
 
-  if (payload.ref !== REF) {
-    console.log(`[webhook] push to ${payload.ref} ignored`);
-    respond(res, 200, 'Ignored'); return;
-  }
-  const sha = payload.head_commit?.id;
-  if (!sha || !VALID_SHA_RE.test(sha)) { respond(res, 400, 'Bad Request'); return; }
-
-  const deliveryId = req.headers['x-github-delivery'] || '';
-  console.log(`[webhook] master push -> evaluating ${sha}`);
-  await handleDeploy(res, sha, deliveryId);
-}
-
-recoverOnBoot();
-
-http.createServer((req, res) => {
-  if (req.method !== 'POST' || req.url !== '/deploy') { res.writeHead(404).end(); return; }
-  const MAX = 1024 * 1024;
-  let body = '', size = 0;
-  req.on('data', c => { size += c.length; if (size > MAX) { req.destroy(); return; } body += c; });
-  req.on('end', () => {
-    handleRequest(req, res, body).catch((e) => {
-      console.error('[webhook] unhandled error:', e);
-      if (!res.writableEnded) res.writeHead(500).end('Internal Server Error');
+  async function complete(attempt, state, markerPath, recoveryReason = null) {
+    const notification = await sendNotification(`dev-control deploy ${state}: ${attempt.target_sha.slice(0, 8)}`);
+    const completed = await store.completeDeploymentAttempt(pool, {
+      attemptId: attempt.id,
+      owner: attempt.owner || config.owner,
+      state,
+      markerPath,
+      notificationStatus: notification.status,
+      notificationErrorCode: notification.errorCode,
+      recoveryReason,
     });
-  });
-}).listen(PORT, () => console.log(`Webhook listening on :${PORT}`));
+    if (!completed) throw new Error('deployment terminal transition was not accepted');
+    if (markerPath) {
+      try { fsModule.unlinkSync(markerPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
+    }
+    logger.info(`[webhook] deployment ${state} for ${attempt.target_sha.slice(0, 8)}`);
+    if (state === 'succeeded') await processNext();
+  }
+
+  async function finalizeAttempt(attempt, markerPath) {
+    let marker;
+    try { marker = JSON.parse(fsModule.readFileSync(markerPath, 'utf8')); } catch { marker = null; }
+    const finalMarker = marker && Object.keys(marker).length === 3 && marker.attemptId === attempt.id && marker.sha === attempt.target_sha && Number.isInteger(marker.exitCode) && marker.exitCode !== 0;
+    const pendingSuccess = marker && Object.keys(marker).length === 4 && marker.attemptId === attempt.id && marker.sha === attempt.target_sha && marker.exitCode === 0 && marker.reloadPending === true;
+    if (!finalMarker && !pendingSuccess) {
+      await complete(attempt, 'blocked', markerPath);
+      return true;
+    }
+    if (pendingSuccess && !isCurrentReleaseFn(marker.sha)) return false;
+    await complete(attempt, pendingSuccess ? 'succeeded' : 'failed', markerPath);
+    return true;
+  }
+
+  function startCompletionPoll(attempt, markerPath) {
+    if (activePolls.has(attempt.id)) return;
+    activePolls.add(attempt.id);
+    const stop = () => { clearInterval(interval); clearInterval(renewal); activePolls.delete(attempt.id); };
+    let settling = false;
+    const interval = setInterval(() => {
+      if (settling) return;
+      if (fsModule.existsSync(markerPath)) {
+        settling = true;
+        finalizeAttempt(attempt, markerPath).then((finalized) => { if (finalized) stop(); else settling = false; }).catch(() => { settling = false; logger.error('[webhook] completion finalization failed'); });
+        return;
+      }
+      if (Number.isSafeInteger(attempt.child_pid) && attempt.child_pid > 0 && !isAliveFn(attempt.child_pid)) {
+        settling = true;
+        complete(attempt, 'blocked', null, 'child_exited_without_marker')
+          .then(() => stop())
+          .catch(() => { settling = false; logger.error('[webhook] dead child finalization failed'); });
+      }
+    }, 500);
+    const renewal = setInterval(() => {
+      store.renewDeploymentLease(pool, { attemptId: attempt.id, owner: attempt.owner || config.owner, leaseMs: config.leaseMs })
+        .then((renewed) => { if (!renewed) stop(); })
+        .catch(() => stop());
+    }, Math.max(1000, Math.floor(config.leaseMs / 2)));
+    interval.unref?.();
+    renewal.unref?.();
+    return stop;
+  }
+
+  async function launchAttempt(attempt) {
+    if (!await isCurrentProtectedHead(attempt.target_sha)) {
+      await complete(attempt, 'blocked', null);
+      return false;
+    }
+    const markerPath = path.join(config.completionsDir, `${attempt.id}.done`);
+    const owner = attempt.owner || config.owner;
+    if (!await store.recordDeploymentLaunchIntent(pool, { attemptId: attempt.id, owner, markerPath })) {
+      await complete(attempt, 'blocked', null, 'launch_intent_not_persisted');
+      return false;
+    }
+    let launched;
+    let spawnFailure;
+    const failSpawn = () => {
+      launched?.abort?.();
+      spawnFailure ??= complete(attempt, 'blocked', markerPath, 'spawn_failed')
+        .catch(() => logger.error('[webhook] spawn failure finalization failed'));
+      return spawnFailure;
+    };
+    try {
+      launched = launchDeploy(attempt.target_sha, markerPath, attempt.id, attempt.protected_branch);
+      launched.child.once?.('error', failSpawn);
+      if (!Number.isSafeInteger(launched.childPid) || launched.childPid <= 0) {
+        await failSpawn();
+        return false;
+      }
+      const recorded = await store.recordDeploymentLaunch(pool, { attemptId: attempt.id, owner, markerPath, childPid: launched.childPid });
+      if (spawnFailure) { await spawnFailure; return false; }
+      if (!recorded) {
+        launched.abort();
+        launched.child.kill?.('SIGTERM');
+        await complete(attempt, 'blocked', markerPath, 'launch_pid_not_persisted');
+        return false;
+      }
+      launched.release();
+    } catch {
+      launched?.abort?.();
+      launched?.child?.kill?.('SIGTERM');
+      await failSpawn();
+      return false;
+    }
+    const stopPolling = startCompletionPoll({ ...attempt, child_pid: launched.childPid }, markerPath);
+    launched.child.once?.('error', () => {
+      stopPolling?.();
+      failSpawn();
+    });
+    return true;
+  }
+
+  async function recoverAttempt(attempt) {
+    const markerPath = attempt.marker_path || path.join(config.completionsDir, `${attempt.id}.done`);
+    if (fsModule.existsSync(markerPath)) { await finalizeAttempt(attempt, markerPath); return true; }
+    if (Number.isSafeInteger(attempt.child_pid) && attempt.child_pid > 0 && isAliveFn(attempt.child_pid)) {
+      if (!await store.renewDeploymentLease(pool, { attemptId: attempt.id, owner: attempt.owner || config.owner, leaseMs: config.leaseMs })) {
+        await complete(attempt, 'blocked', null, 'recovery_lease_not_renewed');
+        return false;
+      }
+      startCompletionPoll(attempt, markerPath);
+      return true;
+    }
+    const deadChild = Number.isSafeInteger(attempt.child_pid) && attempt.child_pid > 0;
+    await complete(attempt, 'blocked', null, deadChild ? 'recovery_child_not_alive' : attempt.marker_path ? 'recovery_launch_intent_without_live_child' : 'recovery_no_marker_or_live_child');
+    return false;
+  }
+
+  async function processNext() {
+    const claim = await store.claimDeploymentAttempt(pool, { owner: config.owner, leaseMs: config.leaseMs });
+    if (claim.kind === 'claimed') return launchAttempt(claim.attempt);
+    if (claim.kind === 'recovered') return recoverAttempt(claim.attempt);
+    return false;
+  }
+
+  async function recoverOnBoot() {
+    const claim = await store.claimDeploymentAttempt(pool, { owner: config.owner, leaseMs: config.leaseMs });
+    if (claim.kind === 'busy') {
+      const markerPath = claim.attempt.marker_path || path.join(config.completionsDir, `${claim.attempt.id}.done`);
+      if (fsModule.existsSync(markerPath)) return finalizeAttempt(claim.attempt, markerPath);
+      return Number.isSafeInteger(claim.attempt.child_pid) && claim.attempt.child_pid > 0 ? recoverAttempt(claim.attempt) : false;
+    }
+    if (claim.kind === 'claimed') return launchAttempt(claim.attempt);
+    if (claim.kind === 'recovered') return recoverAttempt(claim.attempt);
+    return false;
+  }
+
+  async function handleDeploy(res, { sha, deliveryId, eventType, targetRef, checkEvidence }) {
+    const head = await protectedHead();
+    if (head !== sha) {
+      if (SHA.test(head || '')) await store.enqueueDeploymentAttempt(pool, {
+        deliveryId,
+        eventType,
+        targetRef,
+        targetSha: sha,
+        protectedBranch: config.protectedBranch,
+        protectedHeadSha: head,
+        checkEvidence: { ...checkEvidence, rejectionReason: 'protected_head_mismatch' },
+        state: 'rejected',
+      });
+      respond(res, 409, 'protected_head_mismatch');
+      return;
+    }
+    const queued = await store.enqueueDeploymentAttempt(pool, {
+      deliveryId, eventType, targetRef, targetSha: sha, protectedBranch: config.protectedBranch, protectedHeadSha: head, checkEvidence,
+    });
+    if (!queued.created) { respond(res, 200, 'already_processed'); return; }
+    await processNext();
+    respond(res, 202, 'queued');
+  }
+
+  async function handleRequest(req, res, body) {
+    const rawBody = Buffer.isBuffer(body) ? body : Buffer.from(body);
+    const signature = req.headers['x-hub-signature-256'] || '';
+    const expected = `sha256=${crypto.createHmac('sha256', config.secret).update(rawBody).digest('hex')}`;
+    if (signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) { respond(res, 401, 'Unauthorized'); return; }
+    let payload;
+    try { payload = JSON.parse(rawBody.toString('utf8')); } catch { respond(res, 400, 'Bad Request'); return; }
+    const eventType = req.headers['x-github-event'] || 'push';
+    const deliveryId = req.headers['x-github-delivery'] || '';
+    if (!deliveryId) { respond(res, 400, 'Bad Request'); return; }
+
+    if (eventType === 'check_run') {
+      const run = payload.check_run;
+      if (payload.action !== 'completed' || run?.name !== config.requiredCiCheck || run?.conclusion !== 'success' || !SHA.test(run?.head_sha || '')) { respond(res, 200, 'Ignored'); return; }
+      await handleDeploy(res, { sha: run.head_sha, deliveryId, eventType, targetRef: `refs/heads/${config.protectedBranch}`, checkEvidence: { requiredCheck: config.requiredCiCheck, conclusion: 'success' } });
+      return;
+    }
+    if (eventType !== 'push' || payload.ref !== `refs/heads/${config.protectedBranch}` || !SHA.test(payload.head_commit?.id || '')) { respond(res, 200, 'Ignored'); return; }
+    const sha = payload.head_commit.id;
+    if (!await checkRequiredCiStatus(sha)) { respond(res, 409, 'ci_not_successful'); return; }
+    await handleDeploy(res, { sha, deliveryId, eventType, targetRef: payload.ref, checkEvidence: { requiredCheck: config.requiredCiCheck, conclusion: 'success' } });
+  }
+
+  function handleHttp(req, res) {
+    return new Promise((resolve) => {
+      const chunks = []; let size = 0; let tooLarge = false;
+      req.on('data', (chunk) => {
+        if (tooLarge) return;
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        size += buffer.length;
+        if (size > MAX_BODY_BYTES) {
+          tooLarge = true;
+          logger.warn('[webhook] request rejected: body too large');
+          respond(res, 413, 'webhook_body_too_large');
+          return;
+        }
+        chunks.push(buffer);
+      });
+      req.on('end', () => {
+        if (tooLarge) { resolve(); return; }
+        handleRequest(req, res, Buffer.concat(chunks, size)).catch(() => { if (!res.writableEnded) respond(res, 500, 'Internal Server Error'); }).finally(resolve);
+      });
+    });
+  }
+
+  return { finalizeAttempt, handleHttp, handleRequest, launchDeploy, processNext, recoverOnBoot, sendNotification };
+}
+
+function start() {
+  const config = readConfig();
+  if (!config.secret || !config.protectedBranch) throw new Error('WEBHOOK_SECRET and DEPLOY_PROTECTED_BRANCH are required');
+  const pool = deployments.createDeploymentPool();
+  const app = createWebhook({ config, pool });
+  app.recoverOnBoot().catch(() => console.error('[webhook] recovery failed'));
+  http.createServer((req, res) => {
+    if (req.method !== 'POST' || req.url !== '/deploy') { res.writeHead(404).end(); return; }
+    app.handleHttp(req, res);
+  }).listen(config.port, () => console.log(`Webhook listening on :${config.port}`));
+}
+
+if (require.main === module) start();
+
+module.exports = { createWebhook, readConfig };

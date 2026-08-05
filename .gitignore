@@ -11,4 +11,7 @@ dist/
 .next/
 test-results/
 .deploy-state/
+.deploy-releases/
+.deploy-current
+.deploy-current.next
 .gstack/

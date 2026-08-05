@@ -17,6 +17,14 @@ describe("validateMigrations", () => {
     await expect(readdir(new URL("../migrations/", import.meta.url))).resolves.toContain("037_workflow_state.sql");
   });
 
+  it("includes the durable deployment safety migration", async () => {
+    await expect(readdir(new URL("../migrations/", import.meta.url))).resolves.toContain("042_deployment_safety.sql");
+  });
+
+  it("includes rejected deployment history without weakening active SHA deduplication", async () => {
+    await expect(readdir(new URL("../migrations/", import.meta.url))).resolves.toContain("044_deployment_rejection_history.sql");
+  });
+
   it("backfills expiry for existing terminal execution worktrees", async () => {
     const migration = await readFile(new URL("../migrations/038_execution_safety.sql", import.meta.url), "utf8");
     expect(migration).toContain("UPDATE execution_attempts");
@@ -172,7 +180,9 @@ integration("migrate", () => {
 
   it("returns cleared legacy approvals to the existing plan-review state", async () => {
     await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
-    await rm(join(migrationDirectory, "034_legacy_approval_review_state.sql"));
+    await Promise.all((await readdir(migrationDirectory))
+      .filter((name) => Number(name.slice(0, 3)) >= 36)
+      .map((name) => rm(join(migrationDirectory, name))));
     await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
     const client = new pg.Client({ connectionString: testDatabaseUrl });
     await client.connect();
@@ -185,7 +195,7 @@ integration("migrate", () => {
     } finally {
       await client.end();
     }
-    await cp(new URL("../migrations/034_legacy_approval_review_state.sql", import.meta.url), join(migrationDirectory, "034_legacy_approval_review_state.sql"));
+    await cp(new URL("../migrations/036_legacy_approval_review_state.sql", import.meta.url), join(migrationDirectory, "036_legacy_approval_review_state.sql"));
     await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
     const verify = new pg.Client({ connectionString: testDatabaseUrl });
     await verify.connect();
@@ -644,7 +654,9 @@ integration("migrate", () => {
 
   it("makes live pre-migration jobs and deliveries immediately recoverable", async () => {
     await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
-    await rm(join(migrationDirectory, "037_workflow_state.sql"));
+    await Promise.all((await readdir(migrationDirectory))
+      .filter((name) => Number(name.slice(0, 3)) >= 37)
+      .map((name) => rm(join(migrationDirectory, name))));
     await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
     const client = new pg.Client({ connectionString: testDatabaseUrl });
     await client.connect();
