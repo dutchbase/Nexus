@@ -1,17 +1,26 @@
-import { escapeHtml, pool, shortRefs } from "./shared.ts";
+import { escapeHtml, keysetCondition, nextCursor, pageRequest, pagerHtml, pool, shortRefs } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { safeNotificationProvider } from "../../../../packages/notification-provider/src/index.ts";
 import { NOTIFICATION_EVENTS } from "@dcc/domain";
 
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname !== "/admin/notifications") return null;
+  const { limit, cursor } = pageRequest(url);
+  const deliveryValues: any[] = [];
+  const deliveryKeyset = keysetCondition(cursor, "nd.created_at", "nd.id", deliveryValues);
+  deliveryValues.push(limit);
+  const deliveryLimitIdx = deliveryValues.length;
   const [providers, deliveries] = await Promise.all([
     pool.query("SELECT * FROM notification_providers ORDER BY name"),
     pool.query(
       `SELECT nd.*,np.name provider FROM notification_deliveries nd
-       LEFT JOIN notification_providers np ON np.id=nd.provider_id ORDER BY nd.created_at DESC LIMIT 200`,
+       LEFT JOIN notification_providers np ON np.id=nd.provider_id
+       ${deliveryKeyset ? `WHERE ${deliveryKeyset}` : ""}
+       ORDER BY nd.created_at DESC, nd.id DESC LIMIT $${deliveryLimitIdx}`,
+      deliveryValues,
     ),
   ]);
+  const deliveriesNext = nextCursor(deliveries.rows, limit, "created_at");
   const safeProviders = providers.rows.map(safeNotificationProvider);
   const whatsapp = safeProviders.find((provider) => provider.type === "whatsapp") ?? null;
   const webhook = safeProviders.find((provider) => provider.type === "webhook") ?? null;
@@ -67,7 +76,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   // has no effect on behavior, only literal source position.
   const body = `<div class="eyebrow">Event-driven · provider independent</div><h1>Notifications</h1>
       <div class="tabs" role="tablist">${["Event rules", "Providers", "Templates", "Deliveries"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
-      <div role="tabpanel" id="panel-3" aria-labelledby="tab-3" hidden><section class="card"><div class="list-head deliveries-head"><span>Delivery</span><span>Event</span><span>Provider</span><span>Status</span><span>HTTP</span><span>Error</span></div>${deliveryRows || '<div class="card-body"><p>No deliveries yet.</p></div>'}</section></div>
+      <div role="tabpanel" id="panel-3" aria-labelledby="tab-3" hidden><section class="card"><div class="list-head deliveries-head"><span>Delivery</span><span>Event</span><span>Provider</span><span>Status</span><span>HTTP</span><span>Error</span></div>${deliveryRows || '<div class="card-body"><p>No deliveries yet.</p></div>'}</section>${pagerHtml(url, deliveriesNext)}</div>
       <div role="tabpanel" id="panel-1" aria-labelledby="tab-1" hidden class="grid two">${whatsappCard}${webhookCard}</div>
       <div role="tabpanel" id="panel-2" aria-labelledby="tab-2" hidden><section class="card"><div class="card-body"><p>Message templates use {{ticket.number}}-style placeholders, rendered literally.</p></div></section></div>
       <div role="tabpanel" id="panel-0" aria-labelledby="tab-0"><section class="card"><div class="card-head">Event rules</div><div class="card-body">

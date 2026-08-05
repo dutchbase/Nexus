@@ -1,4 +1,4 @@
-import { escapeHtml, lineDiff, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
+import { escapeHtml, keysetCondition, lineDiff, nextCursor, pageRequest, pagerHtml, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { checkPlanApprovalGate } from "@dcc/domain";
 
@@ -43,16 +43,22 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     if (selectedStatuses.length) { values.push(selectedStatuses); conditions.push(`t.status = ANY($${values.length}::text[])`); }
     const search = url.searchParams.get("search");
     if (search) { values.push(`%${search}%`); conditions.push(`(t.ticket_number ILIKE $${values.length} OR t.title ILIKE $${values.length} OR t.description ILIKE $${values.length})`); }
+    const { limit, cursor } = pageRequest(url);
+    const keyset = keysetCondition(cursor, "t.updated_at", "t.id", values);
+    if (keyset) conditions.push(keyset);
+    values.push(limit);
+    const limitIdx = values.length;
     const [ticketsResult, projectsResult] = await Promise.all([
       pool.query(
         `SELECT t.*,p.name project_name,f.name form_name FROM tickets t JOIN projects p ON p.id=t.project_id LEFT JOIN forms f ON f.id=t.form_id
-         ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY t.updated_at DESC LIMIT 200`,
+         ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY t.updated_at DESC, t.id DESC LIMIT $${limitIdx}`,
         values,
       ),
       pool.query("SELECT id, slug, name FROM projects ORDER BY name"),
     ]);
     const tickets = ticketsResult.rows;
     const projects = projectsResult.rows;
+    const ticketsNext = nextCursor(tickets, limit, "updated_at");
     const view = url.searchParams.get("view");
 
     const buildFilterUrl = (newView?: string) => {
@@ -184,7 +190,8 @@ export async function render(url: URL, session: Session, _metrics: Record<string
         <a class="button" data-tickets-reset href="/admin/tickets">Reset</a>
         <span aria-live="polite" style="margin-left:auto">${tickets.length} shown</span>
       </form>
-      <section class="card">${emptyState || `<div class="list-head tickets7"><span>Ticket</span><span>Title</span><span>Project</span><span>Priority</span><span>AI config</span><span>Status</span><span>Updated</span></div>${rows}`}</section>`;
+      <section class="card">${emptyState || `<div class="list-head tickets7"><span>Ticket</span><span>Title</span><span>Project</span><span>Priority</span><span>AI config</span><span>Status</span><span>Updated</span></div>${rows}`}</section>
+      ${pagerHtml(url, ticketsNext)}`;
     return { status: 200, title: "Tickets", body };
   }
   const planComparePageMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)\/plans\/compare$/);

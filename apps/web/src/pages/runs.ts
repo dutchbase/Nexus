@@ -23,6 +23,17 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       [runPageMatch[1]],
     )).rows[0];
     if (!run) return { status: 404, title: "Run not found", body: "<h1>Run not found</h1>" };
+    // PRD G10-F04: a repair opens a new execution_attempts row (and its own
+    // agent_runs row) rather than overwriting the one it repairs, so a prior
+    // attempt's execution log is never hidden or deleted — surface every
+    // attempt's log for this ticket here, each linking to its own run's
+    // existing /api/admin/runs/:id/log route via ea.agent_run_id.
+    const attemptLogs = run.ticket_id ? (await pool.query(
+      `SELECT a.id, a.execution_attempt_id, ea.attempt_number, ea.agent_run_id, a.status, a.created_at
+       FROM artifacts a JOIN execution_attempts ea ON ea.id = a.execution_attempt_id
+       WHERE a.artifact_type='execution_log' AND ea.ticket_id = $1 ORDER BY ea.attempt_number DESC`,
+      [run.ticket_id],
+    )).rows : [];
     const meta = run.metadata_json ?? {};
     const isActive = ["running", "queued"].includes(run.status);
     const canCancel = ["running", "cancellation_requested"].includes(run.status);
@@ -51,6 +62,9 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         <dt>Started</dt><dd>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : "Not started"}</dd>
         <dt>Finished</dt><dd>${run.finished_at ? new Date(run.finished_at).toLocaleString("nl-NL") : "Running"}</dd>
       </dl>${run.error_message ? `<p class="error">${escapeHtml(run.error_code ?? "")}: ${escapeHtml(run.error_message)}</p>` : ""}</div></section>
+      <section class="card"><div class="card-head">Attempt logs</div>${attemptLogs.length ? attemptLogs.map((log) =>
+        `<a class="ticket-row" href="/api/admin/runs/${log.agent_run_id}/log" download><span class="mono">Attempt ${log.attempt_number}</span><span class="status">${escapeHtml(log.status)}</span><time>${new Date(log.created_at).toLocaleString("nl-NL")}</time></a>`,
+      ).join("") : '<div class="card-body"><p>No attempt logs recorded.</p></div>'}</section>
       <dialog data-repair-dialog style="border:none;border-radius:8px;box-shadow:var(--shadow);width:100%;max-width:660px">
         <div style="padding:20px;border-bottom:1px solid var(--border)"><h2 style="font-size:16px;font-weight:600;margin:0">Repair with instructions</h2></div>
         <div style="padding:20px"><label style="display:flex;flex-direction:column;gap:8px"><span style="font-size:11.5px;font-weight:600;color:var(--text2)">Instructions</span><textarea name="feedback" data-repair-feedback style="border:1px solid var(--border);background:var(--bg);border-radius:4px;padding:9px 11px;font-size:13px;font-family:monospace;resize:vertical;min-height:120px" required></textarea></label></div>

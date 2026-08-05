@@ -145,6 +145,62 @@ export function shortRefs(prefix: string, rows: Array<{ id: string }>) {
   return labels;
 }
 
+// PRD G10-F04: admin list pages (audit log, notification deliveries, tickets)
+// used ORDER BY <col> DESC LIMIT 200 with no way to page past row 200 — older
+// records became silently unreachable once a list grew past the limit. These
+// are shared keyset ("seek") pagination helpers: pageRequest reads
+// ?limit=&cursor=<iso>,<uuid> off the URL (clamping/validating both),
+// keysetCondition builds the `(at,id) < ($n,$n+1)` WHERE predicate, and
+// nextCursor/pagerHtml surface a "Next" link only when a full page came back
+// — a short page means there is nothing left to page to.
+export const PAGE_SIZE_DEFAULT = 50;
+export const PAGE_SIZE_MAX = 200;
+
+export function pageRequest(url: URL): { limit: number; cursor: { at: string; id: string } | null } {
+  const limitParam = Number(url.searchParams.get("limit"));
+  const limit = Number.isFinite(limitParam) && limitParam > 0
+    ? Math.min(Math.trunc(limitParam), PAGE_SIZE_MAX)
+    : PAGE_SIZE_DEFAULT;
+
+  const cursorParam = url.searchParams.get("cursor");
+  let cursor: { at: string; id: string } | null = null;
+  if (cursorParam) {
+    const commaIndex = cursorParam.indexOf(",");
+    if (commaIndex > 0) {
+      const at = cursorParam.slice(0, commaIndex);
+      const id = cursorParam.slice(commaIndex + 1);
+      if (at && id && !Number.isNaN(new Date(at).getTime())) cursor = { at, id };
+    }
+  }
+  return { limit, cursor };
+}
+
+export function keysetCondition(
+  cursor: { at: string; id: string } | null,
+  atColumn: string,
+  idColumn: string,
+  values: any[],
+): string | null {
+  if (!cursor) return null;
+  values.push(cursor.at, cursor.id);
+  const idIndex = values.length;
+  return `(${atColumn}, ${idColumn}) < ($${idIndex - 1}, $${idIndex})`;
+}
+
+export function nextCursor(rows: any[], limit: number, atKey: string): string | null {
+  if (rows.length < limit) return null;
+  const last = rows[rows.length - 1];
+  const at = last[atKey] instanceof Date ? last[atKey].toISOString() : last[atKey];
+  return `${at},${last.id}`;
+}
+
+export function pagerHtml(url: URL, next: string | null): string {
+  if (!next) return "";
+  const params = new URLSearchParams(url.search);
+  params.set("cursor", next);
+  return `<div class="pager"><a class="button" data-pager-next href="${escapeHtml(`${url.pathname}?${params.toString()}`)}">Next</a></div>`;
+}
+
 export type Session = { username: string; user_id: string };
 export type PageResult = { status: number; title: string; body: string } | null;
 export type PageModule = { render(url: URL, session: Session, metrics: Record<string, number>): Promise<PageResult> };

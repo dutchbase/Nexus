@@ -1,4 +1,4 @@
-import { escapeHtml, pool } from "./shared.ts";
+import { escapeHtml, keysetCondition, nextCursor, pageRequest, pagerHtml, pool } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 
 function auditTone(action: string | null): string {
@@ -24,6 +24,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   if (url.pathname !== "/admin/audit") return null;
 
   const search = url.searchParams.get("search") ?? "";
+  const { limit, cursor } = pageRequest(url);
   const values: any[] = [];
   const conditions: string[] = [];
 
@@ -35,14 +36,21 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     );
   }
 
+  const keyset = keysetCondition(cursor, "ae.created_at", "ae.id", values);
+  if (keyset) conditions.push(keyset);
+
+  values.push(limit);
+  const limitIdx = values.length;
+
   const [events] = await Promise.all([
     pool.query(
       `SELECT ae.* FROM audit_events ae
        ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
-       ORDER BY ae.created_at DESC LIMIT 200`,
+       ORDER BY ae.created_at DESC, ae.id DESC LIMIT $${limitIdx}`,
       values,
     ),
   ]);
+  const next = nextCursor(events.rows, limit, "created_at");
 
   const rows = events.rows.map((event) => {
     const tone = auditTone(event.action);
@@ -73,6 +81,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         <span style="font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3);text-align:right">IP</span>
       </div>
       ${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px"><p>No audit events match your search.</p></div>`}
-    </section>`;
+    </section>
+    ${pagerHtml(url, next)}`;
   return { status: 200, title: "Audit log", body };
 }
