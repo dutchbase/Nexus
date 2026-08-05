@@ -477,9 +477,15 @@ export function validateFields(fields: any[], body: Record<string, any>) {
     if (field.required && (value === undefined || value === null || value === "")) errors[field.field_key] = "required";
     if (optionTypes.has(field.field_type)) {
       const options = Array.isArray(field.options_json) ? field.options_json : [];
-      const values = Array.isArray(value) ? value : (value === undefined || value === null || value === "" ? [] : [value]);
-      if (field.field_type !== "multi_select" && values.length > 1) errors[field.field_key] = "invalid option";
-      else if (values.some((v: any) => !options.includes(v))) errors[field.field_key] = "invalid option";
+      if (field.field_type === "multi_select") {
+        const isEmpty = value === undefined || value === null || value === "";
+        if (!isEmpty && !Array.isArray(value)) errors[field.field_key] = "invalid option";
+        else if (Array.isArray(value) && value.some((v: any) => !options.includes(v))) errors[field.field_key] = "invalid option";
+      } else if (Array.isArray(value)) {
+        errors[field.field_key] = "invalid option";
+      } else if (value !== undefined && value !== null && value !== "" && !options.includes(value)) {
+        errors[field.field_key] = "invalid option";
+      }
       continue;
     }
     if (typeof value === "string") {
