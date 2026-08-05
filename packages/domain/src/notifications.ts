@@ -85,14 +85,28 @@ export async function claimNotificationDelivery(workerId: string) {
          ORDER BY nd.next_attempt_at,nd.created_at FOR UPDATE OF nd SKIP LOCKED LIMIT 1
        )
        UPDATE notification_deliveries nd
-       SET status='sending', claimed_by=$1, lease_expires_at = now() + interval '60 seconds', updated_at=now(),
+       SET attempt_count = CASE WHEN candidate.prior_status='sending' THEN COALESCE(nd.attempt_count,0)+1 ELSE nd.attempt_count END,
+           status = CASE
+             WHEN candidate.prior_status='sending' AND COALESCE(nd.attempt_count,0)+1 >= candidate.max_attempts THEN 'exhausted'
+             ELSE 'sending'
+           END,
+           claimed_by = CASE
+             WHEN candidate.prior_status='sending' AND COALESCE(nd.attempt_count,0)+1 >= candidate.max_attempts THEN NULL
+             ELSE $1
+           END,
+           lease_expires_at = CASE
+             WHEN candidate.prior_status='sending' AND COALESCE(nd.attempt_count,0)+1 >= candidate.max_attempts THEN NULL
+             ELSE now() + interval '60 seconds'
+           END,
+           updated_at=now(),
            recovery_reason = CASE WHEN candidate.prior_status='sending' THEN 'lease_expired' ELSE nd.recovery_reason END
        FROM candidate
        WHERE nd.id=candidate.id AND (nd.status IN ('queued','failed') OR (nd.status='sending' AND nd.lease_expires_at<=now()))
        RETURNING nd.*,candidate.provider_type,candidate.configuration_encrypted_json,candidate.max_attempts`,
       [workerId],
     );
-    return result.rows[0] ?? null;
+    const row = result.rows[0];
+    return row && row.status !== "exhausted" ? row : null;
   });
 }
 

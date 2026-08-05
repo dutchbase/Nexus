@@ -133,6 +133,42 @@ integration("enqueueNotification rule filtering", () => {
     }
   });
 
+  it("exhausts a delivery that keeps crashing mid-send instead of reclaiming it forever", async () => {
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const { ticketId, projectId } = await seedTicket(client);
+      const providerId = (await client.query(
+        "INSERT INTO notification_providers (name,type,enabled,enabled_events,max_attempts) VALUES ($1,$2,true,$3,$4) RETURNING id",
+        ["crash-provider", "webhook", JSON.stringify(["ticket.created"]), 2],
+      )).rows[0].id;
+      const deliveryId = (await client.query(
+        `INSERT INTO notification_deliveries
+           (provider_id,event_type,ticket_id,project_id,idempotency_key,payload_json,status,attempt_count,claimed_by,lease_expires_at,next_attempt_at)
+         VALUES ($1,$2,$3,$4,$5,$6,'sending',1,'crashed-worker',now() - interval '1 second',now() - interval '1 second')
+         RETURNING id`,
+        [providerId, "ticket.created", ticketId, projectId, "crash-key", JSON.stringify({})],
+      )).rows[0].id;
+
+      const claimed = await claimNotificationDelivery("recovery-worker");
+      expect(claimed).toBeNull();
+
+      const row = (await client.query(
+        "SELECT status,attempt_count,claimed_by,lease_expires_at FROM notification_deliveries WHERE id=$1",
+        [deliveryId],
+      )).rows[0];
+      expect(row.status).toBe("exhausted");
+      expect(row.attempt_count).toBe(2);
+      expect(row.claimed_by).toBeNull();
+      expect(row.lease_expires_at).toBeNull();
+
+      const secondClaim = await claimNotificationDelivery("another-worker");
+      expect(secondClaim).toBeNull();
+    } finally {
+      await client.end();
+    }
+  });
+
   it("moves a delivery to terminal exhausted at max_attempts", async () => {
     const client = new pg.Client({ connectionString: testDatabaseUrl });
     await client.connect();
