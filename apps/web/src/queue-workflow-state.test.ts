@@ -29,7 +29,7 @@ test("queue reports sequential capacity and the running job's workflow state", a
     if (sql.includes("SELECT DISTINCT status")) return { rows: [{ status: "running" }] };
     if (sql.includes("SELECT DISTINCT type")) return { rows: [{ type: "workflow" }] };
     if (sql.includes("GROUP BY status")) return { rows: [{ status: "running", c: 1 }] };
-    if (sql.includes("MAX(updated_at)") && sql.includes("status='running'")) return { rows: [{ hb: job.updated_at }] };
+    if (sql.includes("FROM workers")) return { rows: [{ worker: { id: "worker-1", heartbeat_at: job.updated_at, capabilities: ["execution.run"], version: "1.0" } }] };
     throw new Error(`unexpected query: ${sql}`);
   });
 
