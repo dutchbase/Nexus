@@ -56,6 +56,7 @@ const fieldTypes = new Set([
   "short_text", "long_text", "email", "url", "number", "dropdown", "radio", "checkbox", "multi_select",
   "project_selector", "category_selector", "environment_selector", "image_upload", "hidden", "static",
 ]);
+const optionTypes = new Set(["dropdown", "radio", "multi_select", "category_selector", "environment_selector"]);
 const skillSourceTypes = new Set([
   "workspace_global", "project_local", "personal_claude", "repository", "external_directory",
 ]);
@@ -461,7 +462,7 @@ async function publicForm(slug: string) {
   return (await pool.query("SELECT * FROM forms WHERE slug = $1 AND status = 'published'", [slug])).rows[0] ?? null;
 }
 
-function validateFields(fields: any[], body: Record<string, any>) {
+export function validateFields(fields: any[], body: Record<string, any>) {
   const errors: Record<string, string> = {};
   for (const field of fields) {
     if (field.field_type === "hidden" || field.field_type === "static") continue;
@@ -474,19 +475,62 @@ function validateFields(fields: any[], body: Record<string, any>) {
       continue;
     }
     if (field.required && (value === undefined || value === null || value === "")) errors[field.field_key] = "required";
+    if (optionTypes.has(field.field_type)) {
+      const options = Array.isArray(field.options_json) ? field.options_json : [];
+      if (field.field_type === "multi_select") {
+        const isEmpty = value === undefined || value === null || value === "";
+        if (!isEmpty && !Array.isArray(value)) errors[field.field_key] = "invalid option";
+        else if (Array.isArray(value) && value.some((v: any) => !options.includes(v))) errors[field.field_key] = "invalid option";
+      } else if (Array.isArray(value)) {
+        errors[field.field_key] = "invalid option";
+      } else if (value !== undefined && value !== null && value !== "" && !options.includes(value)) {
+        errors[field.field_key] = "invalid option";
+      }
+      continue;
+    }
     if (typeof value === "string") {
       const limit = Math.min(Number(field.validation_json?.max_length ?? (field.field_type === "long_text" ? 10000 : 500)), 10000);
       if (value.length > limit) errors[field.field_key] = "too long";
-      if (field.required && field.field_type === "email" && value && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) errors[field.field_key] = "invalid email";
-      if (field.required && field.field_type === "url" && value) {
-        try { new URL(value); } catch { errors[field.field_key] = "invalid URL"; }
+      if (field.field_type === "email" && value && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) errors[field.field_key] = "invalid email";
+      if (field.field_type === "url" && value) {
+        try {
+          const parsed = new URL(value);
+          if (parsed.protocol !== "http:" && parsed.protocol !== "https:") errors[field.field_key] = "invalid URL";
+        } catch { errors[field.field_key] = "invalid URL"; }
       }
     }
   }
   return errors;
 }
 
-async function submitPublicForm(request: IncomingMessage, response: ServerResponse, form: any) {
+export function sanitizeFormSettings(settings: any): Record<string, any> {
+  const source = settings ?? {};
+  return {
+    rate_limit: Math.max(1, Math.min(20, Number.parseInt(source.rate_limit, 10) || 15)),
+    captcha_mode: "honeypot",
+    notify_on_submission: source.notify_on_submission !== false,
+    allow_image_attachments: source.allow_image_attachments !== false,
+    completion_message: String(source.completion_message ?? "").slice(0, 2000),
+  };
+}
+
+export async function consumeSubmissionAttempt(formId: string, ip: string, limit: number) {
+  return inTransaction(async (client) => {
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text || '/' || $2, 0))", [formId, ip]);
+    const recent = await client.query(
+      `SELECT count(*)::integer AS count,
+              coalesce(ceil(extract(epoch FROM min(created_at) + interval '1 hour' - now()))::integer, 0) AS reset_seconds
+       FROM public_submission_attempts
+       WHERE form_id = $1 AND ip_address = $2 AND created_at > now() - interval '1 hour'`,
+      [formId, ip],
+    );
+    if (recent.rows[0].count >= limit) return { allowed: false, resetSeconds: Math.max(1, recent.rows[0].reset_seconds) };
+    await client.query("INSERT INTO public_submission_attempts (form_id, ip_address, accepted) VALUES ($1,$2,true)", [formId, ip]);
+    return { allowed: true, resetSeconds: 0 };
+  });
+}
+
+export async function submitPublicForm(request: IncomingMessage, response: ServerResponse, form: any) {
   const body = await bodyOf(request);
   const fields = await fieldsFor(form.id);
   const honeypot = fields.find((field) => field.field_type === "hidden")?.field_key ?? "website";
@@ -496,13 +540,18 @@ async function submitPublicForm(request: IncomingMessage, response: ServerRespon
   const ip = ipOf(request);
   const configuredLimit = Number(form.settings_json?.rate_limit ?? defaultRateLimit);
   const limit = Number.isFinite(configuredLimit) ? Math.max(1, Math.min(configuredLimit, 20)) : defaultRateLimit;
-  const recent = await pool.query(
-    `SELECT count(*)::integer AS count FROM public_submission_attempts
-     WHERE form_id = $1 AND ip_address = $2 AND created_at > now() - interval '15 seconds'`,
-    [form.id, ip],
-  );
-  if (recent.rows[0].count >= limit) return json(response, 429, { error: "submission rate limit exceeded" });
+  const attempt = await consumeSubmissionAttempt(form.id, ip, limit);
+  if (!attempt.allowed) {
+    return json(response, 429, { error: "submission rate limit exceeded", code: "rate_limited", retry_after_seconds: attempt.resetSeconds }, { "retry-after": String(attempt.resetSeconds) });
+  }
   const errors = validateFields(fields, body);
+  if (form.settings_json?.allow_image_attachments === false) {
+    for (const field of fields) {
+      if (field.field_type !== "image_upload") continue;
+      const value = body[field.field_key];
+      if (Array.isArray(value) ? value.length : value) errors[field.field_key] = "attachments disabled";
+    }
+  }
   if (typeof body.title !== "string" || !body.title.trim()) errors.title = "required";
   if (typeof body.description !== "string" || !body.description.trim()) errors.description = "required";
   if (Object.keys(errors).length) return json(response, 400, { error: "validation failed", fields: errors });
@@ -513,21 +562,19 @@ async function submitPublicForm(request: IncomingMessage, response: ServerRespon
     : requestedProjectSlug
     ? (await pool.query("SELECT id FROM projects WHERE slug = $1 AND enabled = true", [requestedProjectSlug])).rows[0]
     : undefined;
-  if ((requestedProjectId || requestedProjectSlug) && !project) return json(response, 400, { error: "valid project is required" });
-  // No project selected and the form isn't fixed to one: triage assigns it
-  // later (PRD §17.1's Submitted -> Triage step), so default to the
-  // earliest enabled project rather than blocking submission outright.
-  const fallbackProject = project ?? (await pool.query("SELECT id FROM projects WHERE enabled = true ORDER BY created_at LIMIT 1")).rows[0];
-  if (!fallbackProject) return json(response, 400, { error: "no enabled project available" });
-  const projectId = fallbackProject.id;
+  if ((requestedProjectId || requestedProjectSlug) && !project) return json(response, 400, { error: "valid project is required", code: "invalid_project" });
+  // ponytail: silent oldest-project fallback removed per audit G06-F05 — forms must carry fixed_project_id or the client an explicit project.
+  if (!project) return json(response, 400, { error: "project assignment required", code: "project_assignment_required" });
+  const projectId = project.id;
   const ticket = await inTransaction(async (client) => {
-    await client.query("INSERT INTO public_submission_attempts (form_id, ip_address, accepted) VALUES ($1,$2,true)", [form.id, ip]);
     const number = (await client.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
     const ticketNumber = `DCC-${number}`;
-    const customValues = Object.fromEntries(Object.entries(body).filter(([key]) => ![
+    const reservedKeys = [
       "project_id", "title", "description", "category", "priority", "submitter_name", "submitter_email",
       "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", honeypot,
-    ].includes(key)));
+    ];
+    const excludedKeys = new Set([...reservedKeys, ...fields.filter((f) => f.field_type === "static" || f.field_type === "hidden").map((f) => f.field_key)]);
+    const customValues = Object.fromEntries(Object.entries(body).filter(([key]) => !excludedKeys.has(key)));
     const result = await client.query(
       `INSERT INTO tickets
        (ticket_number,form_id,project_id,title,description,category,priority,status,submitter_name,submitter_email,
@@ -547,12 +594,15 @@ async function submitPublicForm(request: IncomingMessage, response: ServerRespon
       .filter((value) => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value));
     if (uploadIds.length) {
       await client.query(
-        `UPDATE attachments SET ticket_id = $1 WHERE ticket_id IS NULL AND upload_id = ANY($2::uuid[])`,
-        [result.rows[0].id, uploadIds],
+        `UPDATE attachments a SET ticket_id = $1
+         FROM uploads u
+         WHERE a.upload_id = u.id AND a.ticket_id IS NULL AND u.form_id = $3
+           AND u.created_at > now() - interval '1 hour' AND a.upload_id = ANY($2::uuid[])`,
+        [result.rows[0].id, uploadIds, form.id],
       );
     }
     await audit({ actorType: "public", action: "ticket.create", entityType: "ticket", entityId: result.rows[0].id, after: result.rows[0], ip }, client);
-    await enqueueNotification(client, "ticket.created", result.rows[0].id, result.rows[0].id);
+    if (form.settings_json?.notify_on_submission !== false) await enqueueNotification(client, "ticket.created", result.rows[0].id, result.rows[0].id);
     return result.rows[0];
   });
   json(response, 201, { ticket_number: ticket.ticket_number, ticket: { id: ticket.id, ticket_number: ticket.ticket_number } });
@@ -564,7 +614,7 @@ function sniffImage(buffer: Buffer) {
   return null;
 }
 
-async function upload(request: IncomingMessage, response: ServerResponse) {
+export async function upload(request: IncomingMessage, response: ServerResponse, form: any) {
   const contentType = request.headers["content-type"] ?? "";
   const boundary = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType)?.slice(1).find(Boolean);
   if (!boundary) return json(response, 400, { error: "multipart form data required" });
@@ -587,8 +637,8 @@ async function upload(request: IncomingMessage, response: ServerResponse) {
     const originalName = /filename="([^"]*)"/i.exec(raw.subarray(0, headerEnd).toString("utf8"))?.[1] ?? null;
     const row = await inTransaction(async (client) => {
       const upload = (await client.query(
-        `INSERT INTO uploads (storage_path,original_name,media_type,size_bytes) VALUES ($1,$2,$3,$4) RETURNING *`,
-        [staged.storagePath, originalName ? originalName.slice(0, 255) : null, sniffed.mediaType, bytes.length],
+        `INSERT INTO uploads (storage_path,original_name,media_type,size_bytes,form_id) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [staged.storagePath, originalName ? originalName.slice(0, 255) : null, sniffed.mediaType, bytes.length, form.id],
       )).rows[0];
       await client.query(
         `INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,upload_id)
@@ -615,11 +665,14 @@ async function upload(request: IncomingMessage, response: ServerResponse) {
   }
 }
 
-function normalizeFields(fields: any[]) {
+export function normalizeFields(fields: any[]) {
   if (!Array.isArray(fields)) return null;
   return fields.map((field, index) => {
     if (!field || typeof field.field_key !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(field.field_key)) throw Object.assign(new Error("invalid field key"), { status: 400 });
     if (!fieldTypes.has(field.field_type)) throw Object.assign(new Error("invalid field type"), { status: 400 });
+    if (optionTypes.has(field.field_type) && !(Array.isArray(field.options_json) && field.options_json.length && field.options_json.every((o: any) => typeof o === "string"))) {
+      throw Object.assign(new Error("option fields require options"), { status: 400 });
+    }
     return {
       field_key: field.field_key, field_type: field.field_type, label: String(field.label ?? field.field_key).slice(0, 200),
       description: field.description ?? null, placeholder: field.placeholder ?? null, required: Boolean(field.required),
@@ -1316,7 +1369,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       const result = await client.query(
         `INSERT INTO forms (name,slug,title,description,status,fixed_project_id,settings_json,published_at)
          VALUES ($1,$2,$3,$4,$5,$6,$7,CASE WHEN $5='published' THEN now() ELSE NULL END) RETURNING *`,
-        [body.name, body.slug, body.title, body.description ?? null, body.status === "published" ? "published" : "draft", body.fixed_project_id ?? null, body.settings_json ?? {}],
+        [body.name, body.slug, body.title, body.description ?? null, body.status === "published" ? "published" : "draft", body.fixed_project_id ?? null, sanitizeFormSettings(body.settings_json)],
       );
       if (fields) await replaceFields(client, result.rows[0].id, fields);
       await audit({ actorType: "admin", actorId: session.user_id, action: "form.create", entityType: "form", entityId: result.rows[0].id, after: result.rows[0], ip: ipOf(request) }, client);
@@ -1333,7 +1386,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const body = await bodyOf(request);
     const fields = body.fields === undefined ? null : normalizeFields(body.fields);
     const allowed = ["name", "slug", "title", "description", "fixed_project_id", "settings_json"];
-    const entries = Object.entries(body).filter(([key]) => allowed.includes(key));
+    const entries = Object.entries(body).filter(([key]) => allowed.includes(key))
+      .map(([key, value]) => [key, key === "settings_json" ? sanitizeFormSettings(value) : value]);
     const form = await inTransaction(async (client) => {
       const before = (await client.query("SELECT * FROM forms WHERE id=$1 FOR UPDATE", [formMatch[1]])).rows[0];
       if (!before) return null;
@@ -2266,7 +2320,13 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     const form = await publicForm(decodeURIComponent(submissionMatch[1]));
     return form ? submitPublicForm(request, response, form) : json(response, 404, { error: "form not found" });
   }
-  if (request.method === "POST" && url.pathname === "/api/public/uploads") return upload(request, response);
+  const uploadMatch = url.pathname.match(/^\/api\/public\/forms\/([^/]+)\/uploads$/);
+  if (uploadMatch && request.method === "POST") {
+    const form = await publicForm(decodeURIComponent(uploadMatch[1]));
+    if (!form) return json(response, 404, { error: "form not found" });
+    if (form.settings_json?.allow_image_attachments === false) return json(response, 403, { error: "attachments disabled" });
+    return upload(request, response, form);
+  }
   const publicPageMatch = url.pathname.match(/^\/f\/([^/]+)(\/submitted)?$/);
   if (publicPageMatch && request.method === "GET") {
     const form = await publicForm(decodeURIComponent(publicPageMatch[1]));

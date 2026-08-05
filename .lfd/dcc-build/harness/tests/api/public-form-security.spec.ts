@@ -143,7 +143,7 @@ async function ticketExistsForMarker(marker: string): Promise<boolean> {
 async function upload(buffer: Buffer, filename: string, contentType: string) {
   const form = new FormData();
   form.append("file", new Blob([buffer], { type: contentType }), filename);
-  const res = await fetch(`${APP_BASE_URL}/api/public/uploads`, { method: "POST", body: form });
+  const res = await fetch(`${APP_BASE_URL}/api/public/forms/${FORM_SLUG}/uploads`, { method: "POST", body: form });
   const text = await res.text();
   let json: any = undefined;
   try {
