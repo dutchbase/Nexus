@@ -253,7 +253,9 @@ the worker.
 The webhook invokes `deploy.sh <40-char-sha> <absolute-marker-path>
 <attempt-uuid> <protected-branch>`. Its environment must provide
 `DATABASE_URL` and `DCC_DEPLOY_HEALTH_URL`; the latter is a URL that returns a
-successful response only when the new web and worker release is healthy.
+successful response only when the new web and worker release is healthy. The
+webhook also supplies a private inherited launch pipe; `deploy.sh` cannot begin
+deployment stages until the child PID is durable under the active lease.
 
 Each release is a detached worktree in `$DCC_ROOT/.deploy-releases` (override
 with `DCC_DEPLOY_RELEASES_DIR`). The script keeps `.env`, `.env.worker`, and
@@ -262,7 +264,10 @@ with `DCC_DEPLOY_RELEASES_DIR`). The script keeps `.env`, `.env.worker`, and
 It installs locked dependencies, migrates, synchronizes content, reloads web
 and worker, health-checks them, writes its atomic JSON completion marker, and
 only then reloads the webhook. Stage evidence is appended to
-`deployment_events` for the supplied attempt.
+`deployment_events` for the supplied attempt. A protected-head mismatch is
+also retained as a rejected attempt with only delivery identity, target/head
+SHAs, branch/ref, and check/rejection evidence; request bodies and credentials
+are never deployment history.
 
 A successful marker carries `reloadPending: true`. The old webhook must leave
 that marker alone; only a webhook whose working directory is the atomically
@@ -286,17 +291,19 @@ For an incident, inspect the attempt and its ordered stage events, then repair
 the failed dependency or release and enqueue a new protected-head deployment:
 
 ```sql
-SELECT id, state, target_sha, recovery_reason, completed_at
+SELECT id, state, target_sha, prior_release_path, recovery_reason,
+       notification_status, notification_error_code, completed_at
 FROM deployment_attempts ORDER BY created_at DESC LIMIT 10;
 SELECT event_key, event_type, metadata, created_at
 FROM deployment_events WHERE attempt_id = '<attempt-uuid>' ORDER BY id;
 ```
 
-The `rollback` event's safe metadata records `prior_release_path`,
-`rollback_outcome`, `recovery_health`, and a non-secret reason. Those details
-remain in the append-only event because terminal completion currently clears
-the attempt's `prior_release_path`; recovery health has no separate attempt
-column.
+Before cutover, `prior_release_path` is stored on the attempt and a
+`cutover_prepared` event records the prior and target release paths. The
+`rollback` event's safe metadata records `prior_release_path`,
+`rollback_outcome`, `recovery_health`, and a non-secret reason. Terminal
+completion preserves the rollback target and durably records notification
+outcome/error code; recovery health remains in the append-only event.
 
 After confirming no deployment is running and `.deploy-current` points to the
 known-good worktree, remove obsolete directories manually; releases are kept

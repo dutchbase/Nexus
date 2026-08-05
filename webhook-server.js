@@ -70,18 +70,18 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
   }
 
   async function sendNotification(message, notification = config.notification) {
-    if (!notification?.url || !notification.secret || !notification.phone) return 'disabled_config';
+    if (!notification?.url || !notification.secret || !notification.phone) return { status: 'disabled_config', errorCode: 'missing_config' };
     try {
       const response = await fetchFn(`${notification.url}/send/text`, {
         method: 'POST', headers: { Authorization: `Bearer ${notification.secret}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ to: notification.phone, message }), signal: AbortSignal.timeout(5000),
       });
-      if (response.ok) return 'accepted';
+      if (response.ok) return { status: 'accepted', errorCode: null };
       logger.warn('[notify] provider rejected notification');
-      return 'failed_http';
+      return { status: 'failed_http', errorCode: Number.isInteger(response.status) ? `http_${response.status}` : 'http_unknown' };
     } catch {
       logger.warn('[notify] network failure');
-      return 'failed_network';
+      return { status: 'failed_network', errorCode: 'network_error' };
     }
   }
 
@@ -90,26 +90,47 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
     const logFd = fsModule.openSync(logPath, 'a');
     try {
       const child = spawnFn(config.deployShPath, [sha, markerPath, attemptId, protectedBranch], {
-        detached: true, shell: false, stdio: ['ignore', logFd, logFd],
+        detached: true,
+        env: { ...process.env, DCC_DEPLOY_LAUNCH_FD: '3' },
+        shell: false,
+        stdio: ['ignore', logFd, logFd, 'pipe'],
       });
+      const gate = child.stdio?.[3];
+      let gateClosed = false;
+      gate?.unref?.();
       child.unref();
-      return { child, markerPath, childPid: child.pid };
+      return {
+        child,
+        markerPath,
+        childPid: child.pid,
+        abort() { if (!gateClosed) { gateClosed = true; gate?.destroy?.(); } },
+        release() {
+          if (gateClosed) return;
+          if (!gate?.end) throw new Error('deployment launch gate unavailable');
+          gateClosed = true;
+          gate.end('1');
+        },
+      };
     } finally {
       fsModule.closeSync(logFd);
     }
   }
 
   async function complete(attempt, state, markerPath, recoveryReason = null) {
+    const notification = await sendNotification(`dev-control deploy ${state}: ${attempt.target_sha.slice(0, 8)}`);
     const completed = await store.completeDeploymentAttempt(pool, {
-      attemptId: attempt.id, owner: attempt.owner || config.owner, state, markerPath, recoveryReason,
+      attemptId: attempt.id,
+      owner: attempt.owner || config.owner,
+      state,
+      markerPath,
+      notificationStatus: notification.status,
+      notificationErrorCode: notification.errorCode,
+      recoveryReason,
     });
     if (!completed) throw new Error('deployment terminal transition was not accepted');
     if (markerPath) {
       try { fsModule.unlinkSync(markerPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     }
-    const notificationStatus = await sendNotification(`dev-control deploy ${state}: ${attempt.target_sha.slice(0, 8)}`);
-    await store.appendDeploymentEvent(pool, { attemptId: attempt.id, eventKey: `notification:${crypto.randomUUID()}`, eventType: 'notification', metadata: { notification_status: notificationStatus } })
-      .catch(() => logger.error('[webhook] notification outcome recording failed'));
     logger.info(`[webhook] deployment ${state} for ${attempt.target_sha.slice(0, 8)}`);
     if (state === 'succeeded') await processNext();
   }
@@ -132,9 +153,19 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
     if (activePolls.has(attempt.id)) return;
     activePolls.add(attempt.id);
     const stop = () => { clearInterval(interval); clearInterval(renewal); activePolls.delete(attempt.id); };
+    let settling = false;
     const interval = setInterval(() => {
-      if (!fsModule.existsSync(markerPath)) return;
-      finalizeAttempt(attempt, markerPath).then((finalized) => { if (finalized) stop(); }).catch(() => logger.error('[webhook] completion finalization failed'));
+      if (settling) return;
+      if (fsModule.existsSync(markerPath)) {
+        settling = true;
+        finalizeAttempt(attempt, markerPath).then((finalized) => { if (finalized) stop(); else settling = false; }).catch(() => { settling = false; logger.error('[webhook] completion finalization failed'); });
+        return;
+      }
+      if (Number.isSafeInteger(attempt.child_pid) && attempt.child_pid > 0 && !isAliveFn(attempt.child_pid)) {
+        settling = true;
+        stop();
+        complete(attempt, 'blocked', null, 'child_exited_without_marker').catch(() => logger.error('[webhook] dead child finalization failed'));
+      }
     }, 500);
     const renewal = setInterval(() => {
       store.renewDeploymentLease(pool, { attemptId: attempt.id, owner: attempt.owner || config.owner, leaseMs: config.leaseMs })
@@ -160,6 +191,7 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
     let launched;
     let spawnFailure;
     const failSpawn = () => {
+      launched?.abort?.();
       spawnFailure ??= complete(attempt, 'blocked', markerPath, 'spawn_failed')
         .catch(() => logger.error('[webhook] spawn failure finalization failed'));
       return spawnFailure;
@@ -174,16 +206,19 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
       const recorded = await store.recordDeploymentLaunch(pool, { attemptId: attempt.id, owner, markerPath, childPid: launched.childPid });
       if (spawnFailure) { await spawnFailure; return false; }
       if (!recorded) {
+        launched.abort();
         launched.child.kill?.('SIGTERM');
         await complete(attempt, 'blocked', markerPath, 'launch_pid_not_persisted');
         return false;
       }
+      launched.release();
     } catch {
+      launched?.abort?.();
       launched?.child?.kill?.('SIGTERM');
       await failSpawn();
       return false;
     }
-    const stopPolling = startCompletionPoll(attempt, markerPath);
+    const stopPolling = startCompletionPoll({ ...attempt, child_pid: launched.childPid }, markerPath);
     launched.child.once?.('error', () => {
       stopPolling?.();
       failSpawn();
@@ -202,7 +237,8 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
       startCompletionPoll(attempt, markerPath);
       return true;
     }
-    await complete(attempt, 'blocked', null, attempt.marker_path ? 'recovery_launch_intent_without_live_child' : 'recovery_no_marker_or_live_child');
+    const deadChild = Number.isSafeInteger(attempt.child_pid) && attempt.child_pid > 0;
+    await complete(attempt, 'blocked', null, deadChild ? 'recovery_child_not_alive' : attempt.marker_path ? 'recovery_launch_intent_without_live_child' : 'recovery_no_marker_or_live_child');
     return false;
   }
 
@@ -217,7 +253,8 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
     const claim = await store.claimDeploymentAttempt(pool, { owner: config.owner, leaseMs: config.leaseMs });
     if (claim.kind === 'busy') {
       const markerPath = claim.attempt.marker_path || path.join(config.completionsDir, `${claim.attempt.id}.done`);
-      return fsModule.existsSync(markerPath) ? finalizeAttempt(claim.attempt, markerPath) : false;
+      if (fsModule.existsSync(markerPath)) return finalizeAttempt(claim.attempt, markerPath);
+      return Number.isSafeInteger(claim.attempt.child_pid) && claim.attempt.child_pid > 0 ? recoverAttempt(claim.attempt) : false;
     }
     if (claim.kind === 'claimed') return launchAttempt(claim.attempt);
     if (claim.kind === 'recovered') return recoverAttempt(claim.attempt);
@@ -226,7 +263,20 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
 
   async function handleDeploy(res, { sha, deliveryId, eventType, targetRef, checkEvidence }) {
     const head = await protectedHead();
-    if (head !== sha) { respond(res, 409, 'protected_head_mismatch'); return; }
+    if (head !== sha) {
+      if (SHA.test(head || '')) await store.enqueueDeploymentAttempt(pool, {
+        deliveryId,
+        eventType,
+        targetRef,
+        targetSha: sha,
+        protectedBranch: config.protectedBranch,
+        protectedHeadSha: head,
+        checkEvidence: { ...checkEvidence, rejectionReason: 'protected_head_mismatch' },
+        state: 'rejected',
+      });
+      respond(res, 409, 'protected_head_mismatch');
+      return;
+    }
     const queued = await store.enqueueDeploymentAttempt(pool, {
       deliveryId, eventType, targetRef, targetSha: sha, protectedBranch: config.protectedBranch, protectedHeadSha: head, checkEvidence,
     });
@@ -236,11 +286,12 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
   }
 
   async function handleRequest(req, res, body) {
+    const rawBody = Buffer.isBuffer(body) ? body : Buffer.from(body);
     const signature = req.headers['x-hub-signature-256'] || '';
-    const expected = `sha256=${crypto.createHmac('sha256', config.secret).update(body).digest('hex')}`;
+    const expected = `sha256=${crypto.createHmac('sha256', config.secret).update(rawBody).digest('hex')}`;
     if (signature.length !== expected.length || !crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(expected))) { respond(res, 401, 'Unauthorized'); return; }
     let payload;
-    try { payload = JSON.parse(body); } catch { respond(res, 400, 'Bad Request'); return; }
+    try { payload = JSON.parse(rawBody.toString('utf8')); } catch { respond(res, 400, 'Bad Request'); return; }
     const eventType = req.headers['x-github-event'] || 'push';
     const deliveryId = req.headers['x-github-delivery'] || '';
     if (!deliveryId) { respond(res, 400, 'Bad Request'); return; }
@@ -259,16 +310,22 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
 
   function handleHttp(req, res) {
     return new Promise((resolve) => {
-      let body = ''; let size = 0; let tooLarge = false;
+      const chunks = []; let size = 0; let tooLarge = false;
       req.on('data', (chunk) => {
         if (tooLarge) return;
-        size += chunk.length;
-        if (size > MAX_BODY_BYTES) { tooLarge = true; respond(res, 413, 'webhook_body_too_large'); return; }
-        body += chunk;
+        const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        size += buffer.length;
+        if (size > MAX_BODY_BYTES) {
+          tooLarge = true;
+          logger.warn('[webhook] request rejected: body too large');
+          respond(res, 413, 'webhook_body_too_large');
+          return;
+        }
+        chunks.push(buffer);
       });
       req.on('end', () => {
         if (tooLarge) { resolve(); return; }
-        handleRequest(req, res, body).catch(() => { if (!res.writableEnded) respond(res, 500, 'Internal Server Error'); }).finally(resolve);
+        handleRequest(req, res, Buffer.concat(chunks, size)).catch(() => { if (!res.writableEnded) respond(res, 500, 'Internal Server Error'); }).finally(resolve);
       });
     });
   }

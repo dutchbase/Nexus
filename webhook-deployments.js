@@ -37,6 +37,7 @@ function assertAttempt(input) {
   if (!EVENT_TYPES.has(input.eventType)) throw new Error('unsupported deployment event type');
   if (!SHA.test(input.targetSha) || !SHA.test(input.protectedHeadSha)) throw new Error('deployment SHA must be lowercase 40-character hex');
   if (!input.checkEvidence || Array.isArray(input.checkEvidence) || typeof input.checkEvidence !== 'object') throw new Error('checkEvidence must be an object');
+  assertSafeMetadata(input.checkEvidence);
 }
 
 async function inTransaction(pool, fn) {
@@ -179,11 +180,11 @@ async function completeDeploymentAttempt(pool, { attemptId, owner, state, marker
   return inTransaction(pool, async (client) => {
     const completed = (await client.query(
       `UPDATE deployment_attempts
-       SET state=$3,owner=NULL,lease_expires_at=NULL,marker_path=$4,prior_release_path=$5,notification_status=$6,notification_error_code=$7,recovery_reason=COALESCE($8,recovery_reason),completed_at=now(),updated_at=now()
+       SET state=$3,owner=NULL,lease_expires_at=NULL,marker_path=$4,prior_release_path=COALESCE($5,prior_release_path),notification_status=$6,notification_error_code=$7,recovery_reason=COALESCE($8,recovery_reason),completed_at=now(),updated_at=now()
        WHERE id=$1 AND state='running' AND owner=$2 AND lease_expires_at > now() RETURNING *`,
       [attemptId, owner, state, markerPath, priorReleasePath, notificationStatus, notificationErrorCode, recoveryReason],
     )).rows[0] ?? null;
-    if (completed) await insertEvent(client, { attemptId, eventKey: `completed:${randomUUID()}`, eventType: state, metadata: { state, notification_status: notificationStatus, recovery_reason: recoveryReason } });
+    if (completed) await insertEvent(client, { attemptId, eventKey: `completed:${randomUUID()}`, eventType: state, metadata: { state, notification_status: notificationStatus, notification_error_code: notificationErrorCode, recovery_reason: recoveryReason } });
     return completed;
   });
 }

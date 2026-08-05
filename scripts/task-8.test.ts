@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { chmod, lstat, mkdir, mkdtemp, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, mkdtemp, open, readFile, readlink, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
@@ -9,7 +9,7 @@ const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const attemptId = "11111111-1111-4111-8111-111111111111";
 const directories: string[] = [];
 
-async function deploy({ fetchHead = sha, failMigration = false, failHealth = false, failWorker = false, failWebhook = false, failBranch = false, extraArg = false, prior = true } = {}) {
+async function deploy({ fetchHead = sha, failMigration = false, failHealth = false, failWorker = false, failWebhook = false, failBranch = false, extraArg = false, prior = true, launchAllowed = true } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "dcc-deploy-"));
   directories.push(directory);
   const bin = join(directory, "bin");
@@ -46,6 +46,10 @@ if [ "$DCC_FAIL_HEALTH" = 1 ] && [ ! -f "$DCC_HEALTH_FAILED" ]; then touch "$DCC
     psql: `#!/bin/sh
 echo "psql $*" >> "$DCC_LOG"
 `,
+    mv: `#!/bin/sh
+echo "mv $*" >> "$DCC_LOG"
+exec /bin/mv "$@"
+`,
     pm2: `#!/bin/sh
 echo "pm2 $* current=$(readlink "$DCC_ROOT/.deploy-current" 2>/dev/null || true)" >> "$DCC_LOG"
 if [ "$DCC_FAIL_WORKER" = 1 ] && [ "$*" = "startOrReload $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-worker --update-env" ] && [ ! -f "$DCC_WORKER_FAILED" ]; then touch "$DCC_WORKER_FAILED"; exit 75; fi
@@ -58,12 +62,17 @@ if [ "$*" = "startOrReload $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only
     await writeFile(file, script);
     await chmod(file, 0o755);
   }));
+  const launchGate = join(directory, "launch-gate");
+  await writeFile(launchGate, launchAllowed ? "1" : "");
+  const gate = await open(launchGate, "r");
   const result = spawnSync(join(root, "deploy.sh"), [sha, marker, attemptId, "master", ...(extraArg ? ["unexpected"] : [])], {
     encoding: "utf8",
+    stdio: ["ignore", "pipe", "pipe", gate.fd],
     env: {
       ...process.env,
       DATABASE_URL: "postgresql://deploy-test/dbc",
       DCC_DEPLOY_HEALTH_URL: "http://127.0.0.1/health",
+      DCC_DEPLOY_LAUNCH_FD: "3",
       DCC_ROOT: directory,
       DCC_LOG: log,
       DCC_MARKER: marker,
@@ -79,6 +88,7 @@ if [ "$*" = "startOrReload $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only
       PATH: `${bin}:${process.env.PATH}`,
     },
   });
+  await gate.close();
   return {
     commands: await readFile(log, "utf8").catch(() => ""),
     current,
@@ -158,6 +168,26 @@ describe("health-gated release deployment", () => {
       .toBeGreaterThan(result.commands.indexOf("curl "));
   });
 
+  it("does not enter deployment stages until the inherited launch gate is released", async () => {
+    const result = await deploy({ launchAllowed: false });
+
+    expect(result.status).not.toBe(0);
+    expect(result.commands).not.toContain("git fetch");
+    expect(result.commands).not.toContain("pnpm ");
+    expect(result.marker).toEqual({ attemptId, sha, exitCode: 1 });
+  });
+
+  it("persists rollback target evidence before atomically switching current", async () => {
+    const result = await deploy();
+    const evidence = result.commands.indexOf("--set=event_type=cutover_prepared");
+    const cutover = result.commands.indexOf(`mv -Tf ${result.current}.next ${result.current}`);
+
+    expect(evidence).toBeGreaterThanOrEqual(0);
+    expect(cutover).toBeGreaterThan(evidence);
+    expect(result.commands).toContain("prior_release_path");
+    expect(result.commands).toContain("target_release_path");
+  });
+
   it("replaces pending success with failure and restores the webhook when webhook reload fails", async () => {
     const result = await deploy({ failWebhook: true });
 
@@ -189,5 +219,22 @@ describe("health-gated release deployment", () => {
     expect(result.status).toBe(1);
     expect(result.marker).toBeNull();
     expect(result.commands).toBe("");
+  });
+
+  it("stages all imported artifacts before detecting Superpowers updates and keeps CI fail-closed", async () => {
+    const workflow = await readFile(join(root, ".github/workflows/superpowers-update.yml"), "utf8");
+    const ci = await readFile(join(root, ".github/workflows/ci.yml"), "utf8");
+
+    expect(workflow).toContain('cron: "17 4 * * *"');
+    expect(workflow).toContain("workflow_dispatch:");
+    expect(workflow).toContain("gh release view");
+    expect(workflow).toContain("automation/superpowers-${TAG}");
+    expect(workflow).toContain("pnpm exec tsx scripts/update-superpowers.ts --checkout");
+    expect(workflow).toContain("pnpm test:unit");
+    expect(workflow.indexOf("git add config/agent-content.json prompts/global/code-reviewer.md skills/vendor/superpowers"))
+      .toBeLessThan(workflow.indexOf("git diff --cached --quiet"));
+    expect(workflow).toContain("gh pr create");
+    expect(ci).toContain("pnpm test:unit");
+    expect(ci).not.toContain("|| echo");
   });
 });

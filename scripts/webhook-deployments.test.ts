@@ -39,6 +39,17 @@ function fakePool(reply: (text: string, values: unknown[], queries: Array<{ text
 }
 
 describe("webhook deployment store query semantics", () => {
+  it("rejects unsafe check evidence before touching PostgreSQL", async () => {
+    const db = fakePool(() => ({ rows: [] }));
+
+    await expect(deployments.enqueueDeploymentAttempt(db.pool, {
+      ...attempt("a"),
+      checkEvidence: { conclusion: "success", payload: "webhook-secret" },
+      state: "rejected",
+    })).rejects.toThrow("unsafe event metadata key payload");
+    expect(db.queries).toEqual([]);
+  });
+
   it("records a launch intent before a child PID exists", async () => {
     const db = fakePool((text) => text.startsWith("UPDATE deployment_attempts SET marker_path")
       ? { rows: [{ id: "attempt", marker_path: "/safe/attempt.done", child_pid: null }] }
@@ -55,6 +66,35 @@ describe("webhook deployment store query semantics", () => {
 
     await expect(deployments.recordDeploymentLaunch(db.pool, { attemptId: "attempt", owner: "webhook", markerPath: "/safe/attempt.done", childPid: 42 }))
       .resolves.toMatchObject({ id: "attempt", child_pid: 42 });
+  });
+
+  it("keeps the durable rollback target and notification evidence at terminal completion", async () => {
+    const db = fakePool((text, values) => text.includes("SET state=$3")
+      ? { rows: [{ id: "attempt", prior_release_path: "/releases/previous", notification_status: values[5], notification_error_code: values[6] }] }
+      : { rows: [] });
+
+    await expect(deployments.completeDeploymentAttempt(db.pool, {
+      attemptId: "attempt",
+      owner: "webhook",
+      state: "failed",
+      notificationStatus: "failed_http",
+      notificationErrorCode: "http_503",
+      recoveryReason: "deploy_failed",
+    })).resolves.toMatchObject({
+      prior_release_path: "/releases/previous",
+      notification_status: "failed_http",
+      notification_error_code: "http_503",
+    });
+
+    const terminal = db.queries.find(({ text }) => text.includes("SET state=$3"));
+    expect(terminal?.text).toContain("prior_release_path=COALESCE($5,prior_release_path)");
+    const completedEvent = db.queries.find(({ text, values }) => text.startsWith("INSERT INTO deployment_events") && values[2] === "failed");
+    expect(JSON.parse(completedEvent?.values[3] as string)).toEqual({
+      state: "failed",
+      notification_status: "failed_http",
+      notification_error_code: "http_503",
+      recovery_reason: "deploy_failed",
+    });
   });
 
   it("uses PostgreSQL time to retain a lease that appears expired to the host", async () => {
@@ -104,6 +144,21 @@ integration("webhook deployment store", () => {
 
     await expect(deployments.enqueueDeploymentAttempt(pool, { ...attempt("b"), deliveryId: "delivery-a" })).resolves.toMatchObject({ created: false, duplicate: "delivery" });
     await expect(deployments.enqueueDeploymentAttempt(pool, { ...attempt("a"), deliveryId: "delivery-c" })).resolves.toMatchObject({ created: false, duplicate: "sha" });
+  });
+
+  it("keeps a stale-head rejection distinct from prior deployment history for the same SHA", async () => {
+    const first = await deployments.enqueueDeploymentAttempt(pool, attempt("a"));
+    const rejected = await deployments.enqueueDeploymentAttempt(pool, {
+      ...attempt("a"),
+      deliveryId: "delivery-stale-a",
+      state: "rejected",
+      checkEvidence: { requiredCheck: "ci", conclusion: "success", rejectionReason: "protected_head_mismatch" },
+    });
+
+    expect(first).toMatchObject({ created: true });
+    expect(rejected).toMatchObject({ created: true, attempt: { state: "rejected" } });
+    await expect(pool.query("SELECT state FROM deployment_attempts WHERE target_sha=$1 ORDER BY created_at", [sha("a")]))
+      .resolves.toMatchObject({ rows: [{ state: "queued" }, { state: "rejected" }] });
   });
 
   it("keeps deployment events append-only and idempotent", async () => {

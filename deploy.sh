@@ -47,6 +47,10 @@ record_rollback() {
   psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=attempt_id="$ATTEMPT_ID" --set=event_key=deploy:rollback --set=prior_release="$PRIOR_RELEASE" --set=rollback_outcome="$outcome" --set=recovery_health="$recovery_health" --set=reason="$reason" --command "INSERT INTO deployment_events (attempt_id,event_key,event_type,metadata) VALUES (:'attempt_id'::uuid, :'event_key', 'rollback', jsonb_strip_nulls(jsonb_build_object('stage','rollback','prior_release_path',NULLIF(:'prior_release',''),'rollback_outcome',:'rollback_outcome','recovery_health',:'recovery_health','reason',:'reason'))) ON CONFLICT (attempt_id,event_key) DO NOTHING"
 }
 
+record_cutover_target() {
+  psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=attempt_id="$ATTEMPT_ID" --set=event_key=deploy:cutover_prepared --set=event_type=cutover_prepared --set=prior_release="$PRIOR_RELEASE" --set=target_release="$RELEASE" --command "WITH updated AS (UPDATE deployment_attempts SET prior_release_path=NULLIF(:'prior_release',''),updated_at=now() WHERE id=:'attempt_id'::uuid AND state='running' RETURNING id), recorded AS (INSERT INTO deployment_events (attempt_id,event_key,event_type,metadata) SELECT id,:'event_key',:'event_type',jsonb_strip_nulls(jsonb_build_object('prior_release_path',NULLIF(:'prior_release',''),'target_release_path',:'target_release')) FROM updated RETURNING 1) SELECT 1 / count(*)::integer FROM recorded"
+}
+
 switch_current() {
   ln -s "$1" "$NEXT_CURRENT"
   mv -Tf "$NEXT_CURRENT" "$CURRENT"
@@ -79,6 +83,11 @@ rollback() {
   fi
 }
 trap rollback EXIT
+
+[ "${DCC_DEPLOY_LAUNCH_FD:-}" = 3 ] || die "launch gate FD is required"
+IFS= read -r -N 1 <&3 || die "launch gate closed before PID persistence"
+exec 3<&-
+unset DCC_DEPLOY_LAUNCH_FD
 
 git check-ref-format --branch "$BRANCH" >/dev/null 2>&1 || die "protected branch is invalid"
 : "${DATABASE_URL:?deploy.sh: DATABASE_URL is required}"
@@ -117,6 +126,7 @@ record_event "migrated"
 pnpm exec tsx scripts/sync-agent-content.ts
 record_event "synced"
 
+record_cutover_target
 switch_current "$RELEASE"
 CUTOVER=1
 record_event "cutover"
