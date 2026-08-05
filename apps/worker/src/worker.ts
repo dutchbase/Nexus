@@ -12,7 +12,7 @@ import {
   assertPrReviewDestination, buildPlanningPrompt, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
   claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, resumePrReviewPublication,
   claimNotificationDelivery, completeNotificationDelivery, failNotificationDelivery, renewJobLease,
-  renewNotificationDeliveryLease,
+  renewNotificationDeliveryLease, recordWorkerHeartbeat, WORKER_HEARTBEAT_INTERVAL_MS,
   renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
@@ -22,7 +22,7 @@ import {
   stageConflictResolutionPaths, validateExecutionWorktree, WorktreeValidationError, worktreeDiff,
 } from "../../../packages/git-runner/src/index.ts";
 import {
-  createPullRequest, createPullRequestComment, findOpenPullRequestForHead, getPullRequest, listPullRequestComments, updatePullRequestBase,
+  createPullRequest, createPullRequestComment, findOpenPullRequestForHead, getPullRequest, listPullRequestComments, probeGitHubCapability, updatePullRequestBase,
 } from "@dcc/github-provider";
 import { validateProject } from "@dcc/project-config";
 import {
@@ -60,6 +60,20 @@ const publicationJobTypes = ["pull-request.retry"];
 const aiReviewJobTypes = ["pr.ai_review"];
 const followUpDescriptionJobTypes = ["pr.follow_up_description"];
 const conflictResolutionJobTypes = ["pr.conflict_resolution"];
+// PRD G10-F03: how often runExecution's cancellation poll also pushes a
+// heartbeat_at/phase update onto agent_runs, so long-running runs report
+// live progress instead of only the metadata_json->>'turn' snapshot taken
+// once at run start.
+const RUN_HEARTBEAT_INTERVAL_MS = 15_000;
+// Reported to the `workers` table as this process's heartbeat capabilities
+// (G10-F01) — every job type this worker instance can claim, so the admin
+// UI can show what a healthy worker is actually able to do.
+const workerCapabilities = [
+  "project.validate",
+  ...planningJobTypes, ...executionJobTypes, ...publicationJobTypes,
+  ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes,
+  ...providerJobTypes,
+].sort();
 let stopping = false;
 let activeExecutionCancellation: AbortController | null = null;
 let lastPullRequestSync = 0;
@@ -67,6 +81,7 @@ let lastNotificationDelivery = 0;
 let lastGithubImport = 0;
 let lastSessionCleanup = 0;
 let lastWorkflowRecovery = 0;
+let lastWorkerHeartbeat = 0;
 
 process.on("SIGTERM", () => { stopping = true; activeExecutionCancellation?.abort(); });
 process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort(); });
@@ -670,8 +685,17 @@ async function runExecution(job: any, lease: LeaseGuard) {
   const temporary = await mkdtemp(path.join(tmpdir(), "dcc-execution-"));
   const cancellation = new AbortController();
   activeExecutionCancellation = cancellation;
+  let lastPhase: string | null = null;
+  let lastHeartbeatAt = 0;
   const cancellationPoll = setInterval(async () => {
-    const row = (await pool.query("SELECT status FROM agent_runs WHERE id=$1", [runId])).rows[0];
+    const dueForHeartbeat = Date.now() - lastHeartbeatAt >= RUN_HEARTBEAT_INTERVAL_MS;
+    const row = dueForHeartbeat
+      ? (await pool.query(
+          `UPDATE agent_runs SET heartbeat_at=now(), phase=COALESCE($2,phase) WHERE id=$1 RETURNING status`,
+          [runId, lastPhase],
+        )).rows[0]
+      : (await pool.query("SELECT status FROM agent_runs WHERE id=$1", [runId])).rows[0];
+    if (dueForHeartbeat) lastHeartbeatAt = Date.now();
     if (row?.status === "cancellation_requested") cancellation.abort();
   }, 250);
   let sequence = 0;
@@ -710,6 +734,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
         timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 30 * 60 * 1000),
         signal: AbortSignal.any([cancellation.signal, lease.signal]),
         onEvent: async ({ eventType, event }: { eventType: string; event: unknown }) => {
+          lastPhase = eventType;
           usedAgent ||= isAgentToolEvent(eventType, event);
           sequence += 1;
           await lease.run(() => pool.query(
@@ -1563,6 +1588,11 @@ async function deliverDueNotification() {
 }
 
 while (!stopping) {
+  if (Date.now() - lastWorkerHeartbeat >= WORKER_HEARTBEAT_INTERVAL_MS) {
+    lastWorkerHeartbeat = Date.now();
+    try { await recordWorkerHeartbeat(workerId, workerCapabilities, process.env.npm_package_version ?? null); }
+    catch (error) { console.error(`Worker heartbeat failed: ${error instanceof Error ? error.message : "unknown error"}`); }
+  }
   if (Date.now() - lastWorkflowRecovery >= 20_000) {
     lastWorkflowRecovery = Date.now();
     try { await recoverExpiredWorkflowState(inTransaction); }
@@ -1592,6 +1622,28 @@ while (!stopping) {
     for (const project of projects) {
       try { await importGithubPullRequests(pool, project); }
       catch (error) { console.error(`github import failed for ${project.name}:`, error); }
+    }
+    const probeProject = projects.find((project) => project.github_owner && project.github_repository);
+    try {
+      const capability = probeProject
+        ? await probeGitHubCapability(probeProject.github_owner, probeProject.github_repository)
+        : { status: "not_configured", canRead: false, canWrite: false, reason: "no project has a GitHub owner/repository configured", checkedAt: new Date().toISOString() };
+      await pool.query(
+        `INSERT INTO github_capability (id, status, can_read, can_write, reason, checked_at) VALUES (1, $1, $2, $3, $4, $5)
+         ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, can_read=EXCLUDED.can_read, can_write=EXCLUDED.can_write, reason=EXCLUDED.reason, checked_at=EXCLUDED.checked_at`,
+        [capability.status, capability.canRead, capability.canWrite, capability.reason, capability.checkedAt],
+      );
+    } catch (error) {
+      console.error("github capability probe failed:", error);
+      try {
+        await pool.query(
+          `INSERT INTO github_capability (id, status, can_read, can_write, reason, checked_at) VALUES (1, 'unreachable', false, false, $1, now())
+           ON CONFLICT (id) DO UPDATE SET status=EXCLUDED.status, can_read=EXCLUDED.can_read, can_write=EXCLUDED.can_write, reason=EXCLUDED.reason, checked_at=EXCLUDED.checked_at`,
+          [error instanceof Error ? error.message : "github capability probe failed"],
+        );
+      } catch (upsertError) {
+        console.error("github capability upsert failed:", upsertError);
+      }
     }
   }
   let job = await claimJob(workerId, ["project.validate", ...publicationJobTypes, ...providerJobTypes]);

@@ -1,4 +1,4 @@
-import { escapeHtml, pool, shortRef } from "./shared.ts";
+import { escapeHtml, pool, shortRef, workerHealth } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 
 const cap = (value: string) => value.charAt(0).toUpperCase() + value.slice(1);
@@ -32,7 +32,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   if (status) { values.push(status); conditions.push(`j.status=$${values.length}`); } else { conditions.push(`j.status NOT IN ('completed','failed')`); }
   if (type) { values.push(type); conditions.push(`j.type=$${values.length}`); }
 
-  const [jobs, statuses, types, depth, heartbeat] = await Promise.all([
+  const [jobs, statuses, types, depth, healthData] = await Promise.all([
     pool.query(
       `SELECT j.*,COALESCE(t.ticket_number,j.payload_json->>'ticket') ticket_label,p.name project_name
        FROM jobs j
@@ -45,7 +45,11 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     pool.query("SELECT DISTINCT status FROM jobs ORDER BY status"),
     pool.query("SELECT DISTINCT type FROM jobs ORDER BY type"),
     pool.query("SELECT status,count(*)::int c FROM jobs GROUP BY status"),
-    pool.query("SELECT MAX(updated_at) hb FROM jobs WHERE status='running'"),
+    // PRD G10-F01: worker health comes from the workers table's own
+    // heartbeat_at, not from job-claim activity — an idle-but-alive worker
+    // must read the same way here as on dashboard.ts/operate.ts, or it
+    // shows "healthy" on those pages and "stale" here for the same worker.
+    pool.query("SELECT (SELECT row_to_json(w) FROM (SELECT id,heartbeat_at,capabilities,version FROM workers ORDER BY heartbeat_at DESC LIMIT 1) w) worker"),
   ]);
 
   const depthByStatus = new Map(depth.rows.map((row) => [row.status, row.c]));
@@ -53,9 +57,8 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   const depthLabel = depth.rows.length
     ? depth.rows.map((row) => `${row.c} ${row.status}`).join(" · ")
     : "0 jobs";
-  const hb = heartbeat.rows[0]?.hb;
-  const hbFresh = hb && Date.now() - new Date(hb).getTime() < 5 * 60_000;
-  const heartbeatLabel = hb ? `${since(hb)} ago` : "no recent activity";
+  const worker = healthData.rows[0]?.worker;
+  const health = workerHealth(worker);
 
   const rows = jobs.rows.map((job) => {
     const workflow = [
@@ -81,7 +84,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         <div><div class="eyebrow">Queue depth</div><div style="font-size:13px;color:var(--text2);margin-top:3px">${escapeHtml(depthLabel)}</div></div>
         <div><div class="eyebrow">Worker capacity</div><div style="font-size:13px;color:var(--text2);margin-top:3px">1 total · sequential</div></div>
         <div><div class="eyebrow">Observed running</div><div style="font-size:13px;color:var(--text2);margin-top:3px">${running} observed running</div></div>
-        <div><div class="eyebrow">Worker heartbeat</div><div style="font-size:13px;color:${hbFresh ? "var(--t-ok)" : "var(--text3)"};margin-top:3px">${escapeHtml(heartbeatLabel)}</div></div>
+        <div><div class="eyebrow">Worker heartbeat</div><div style="font-size:13px;color:${health.tone === "ok" ? "var(--t-ok)" : "var(--t-warn)"};margin-top:3px" title="${escapeHtml(health.detail)}">${escapeHtml(health.label)}</div></div>
       </div>
     </div>
     <form class="toolbar" style="margin-top:16px">

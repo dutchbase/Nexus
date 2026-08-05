@@ -1,7 +1,69 @@
 import { pool } from "@dcc/database";
 import { adminPage, escapeHtml } from "../ui.ts";
+import { WORKER_STALE_AFTER_MS } from "@dcc/domain";
 
 export { pool, adminPage, escapeHtml };
+
+// Derives worker health from the `workers` table's own heartbeat_at rather
+// than from job-claim activity (PRD G10-F01): an idle-but-alive worker no
+// longer reads as stale, and a dead worker stops reading as healthy
+// WORKER_STALE_AFTER_MS after its last heartbeat instead of after its last
+// claimed job.
+export function workerHealth(
+  row: { id: string; heartbeat_at: string | Date; capabilities: string[]; version: string | null } | undefined,
+  now = Date.now(),
+): { tone: "ok" | "warn"; label: string; detail: string } {
+  if (!row) {
+    return { tone: "warn", label: "no worker registered", detail: "No row in workers.heartbeat_at yet — the worker process has not sent a heartbeat." };
+  }
+  const ageMs = now - new Date(row.heartbeat_at).getTime();
+  const stale = ageMs >= WORKER_STALE_AFTER_MS;
+  const ageSecs = Math.round(ageMs / 1000);
+  const capabilityCount = row.capabilities.length;
+  const capabilityLabel = `${capabilityCount} job type${capabilityCount === 1 ? "" : "s"}`;
+  const detail = `Source: workers.heartbeat_at · ${ageSecs}s ago · ${capabilityLabel}${row.version ? ` · v${row.version}` : ""}`;
+  return { tone: stale ? "warn" : "ok", label: stale ? "stale" : "healthy", detail };
+}
+
+// PRD G10-F03: dashboards previously read metadata_json->>'turn', a value the
+// worker sets once at run start and never updates again — a run stuck for
+// hours still showed "turn 1/50" as if it were progressing. agent_runs now
+// carries a live heartbeat_at/phase pair (migration 047) that the worker
+// updates on a throttled cadence during execution; this derives a label from
+// that instead, and never fabricates a percentage when turn is unknown.
+export const RUN_STALE_AFTER_MS = 60_000;
+
+export function runProgress(
+  row: { phase: string | null; heartbeat_at: string | Date | null; turn: number | null; max_turns: number | null },
+  now = Date.now(),
+): { label: string; stale: boolean } {
+  if (!row.heartbeat_at) {
+    return { label: row.phase ? `phase ${row.phase} · no heartbeat yet` : "no heartbeat yet", stale: true };
+  }
+  const ageMs = now - new Date(row.heartbeat_at).getTime();
+  const stale = ageMs >= RUN_STALE_AFTER_MS;
+  const phaseLabel = row.phase ? `phase ${row.phase}` : "no phase reported";
+  if (stale) {
+    const ageMinutes = Math.max(1, Math.round(ageMs / 60000));
+    return { label: `${phaseLabel} · no heartbeat for ${ageMinutes} min`, stale: true };
+  }
+  const ageSecs = Math.max(0, Math.round(ageMs / 1000));
+  return { label: `${phaseLabel} · updated ${ageSecs} s ago`, stale: false };
+}
+
+// PRD G10-F03: pull_requests.last_synced_at can silently go stale (sync job
+// failing, GitHub API down) while the UI keeps showing the last cached
+// state as if it were current. Flag rows whose sync age exceeds the
+// threshold instead of presenting stale cache data as live.
+export const PR_STALE_AFTER_MS = 15 * 60_000;
+
+export function prFreshness(lastSyncedAt: string | Date | null, now = Date.now()): { stale: boolean; label: string } {
+  if (!lastSyncedAt) return { stale: true, label: "never synced" };
+  const ageMs = now - new Date(lastSyncedAt).getTime();
+  const stale = ageMs >= PR_STALE_AFTER_MS;
+  const ageMinutes = Math.max(0, Math.round(ageMs / 60000));
+  return { stale, label: `last synced ${ageMinutes} min ago` };
+}
 
 // Shared by both the admin page renderers and the admin API.
 export const validStatuses = new Set([
@@ -81,6 +143,62 @@ export function shortRefs(prefix: string, rows: Array<{ id: string }>) {
     labels.set(row.id, label);
   }
   return labels;
+}
+
+// PRD G10-F04: admin list pages (audit log, notification deliveries, tickets)
+// used ORDER BY <col> DESC LIMIT 200 with no way to page past row 200 — older
+// records became silently unreachable once a list grew past the limit. These
+// are shared keyset ("seek") pagination helpers: pageRequest reads
+// ?limit=&cursor=<iso>,<uuid> off the URL (clamping/validating both),
+// keysetCondition builds the `(at,id) < ($n,$n+1)` WHERE predicate, and
+// nextCursor/pagerHtml surface a "Next" link only when a full page came back
+// — a short page means there is nothing left to page to.
+export const PAGE_SIZE_DEFAULT = 50;
+export const PAGE_SIZE_MAX = 200;
+
+export function pageRequest(url: URL): { limit: number; cursor: { at: string; id: string } | null } {
+  const limitParam = Number(url.searchParams.get("limit"));
+  const limit = Number.isFinite(limitParam) && limitParam > 0
+    ? Math.min(Math.trunc(limitParam), PAGE_SIZE_MAX)
+    : PAGE_SIZE_DEFAULT;
+
+  const cursorParam = url.searchParams.get("cursor");
+  let cursor: { at: string; id: string } | null = null;
+  if (cursorParam) {
+    const commaIndex = cursorParam.indexOf(",");
+    if (commaIndex > 0) {
+      const at = cursorParam.slice(0, commaIndex);
+      const id = cursorParam.slice(commaIndex + 1);
+      if (at && id && !Number.isNaN(new Date(at).getTime())) cursor = { at, id };
+    }
+  }
+  return { limit, cursor };
+}
+
+export function keysetCondition(
+  cursor: { at: string; id: string } | null,
+  atColumn: string,
+  idColumn: string,
+  values: any[],
+): string | null {
+  if (!cursor) return null;
+  values.push(cursor.at, cursor.id);
+  const idIndex = values.length;
+  return `(${atColumn}, ${idColumn}) < ($${idIndex - 1}, $${idIndex})`;
+}
+
+export function nextCursor(rows: any[], limit: number, atKey: string): string | null {
+  if (rows.length < limit) return null;
+  const last = rows[rows.length - 1];
+  const at = last[atKey] instanceof Date ? last[atKey].toISOString() : last[atKey];
+  return `${at},${last.id}`;
+}
+
+export function pagerHtml(url: URL, next: string | null): string {
+  if (!next) return "";
+  const params = new URLSearchParams(url.search);
+  params.set("cursor", next);
+  return `<div class="pager"><a class="button" data-pager-next href="${escapeHtml(`${url.pathname}?${params.toString()}`)}">Next</a></div>`;
 }
 
 export type Session = { username: string; user_id: string };

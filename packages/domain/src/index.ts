@@ -132,6 +132,24 @@ export async function claimJob(workerId: string, supportedTypes: string[]) {
   });
 }
 
+// Worker heartbeat: the worker process upserts its own row into `workers`
+// every WORKER_HEARTBEAT_INTERVAL_MS regardless of whether it is claiming
+// jobs, so health can be inferred from process liveness instead of from
+// job-claim activity (an idle-but-alive worker no longer looks stale, and a
+// dead worker stops looking healthy WORKER_STALE_AFTER_MS after its last
+// heartbeat rather than after its last job).
+export const WORKER_HEARTBEAT_INTERVAL_MS = 10_000;
+export const WORKER_STALE_AFTER_MS = 45_000;
+
+export async function recordWorkerHeartbeat(id: string, capabilities: string[], version: string | null): Promise<void> {
+  await pool.query(
+    `INSERT INTO workers (id, capabilities, version)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (id) DO UPDATE SET heartbeat_at = now(), capabilities = EXCLUDED.capabilities, version = EXCLUDED.version`,
+    [id, capabilities, version],
+  );
+}
+
 export async function renewJobLease(id: string, workerId: string): Promise<boolean> {
   const result = await pool.query(
     `UPDATE jobs SET lease_expires_at = now() + interval '60 seconds', updated_at = now()

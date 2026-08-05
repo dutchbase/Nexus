@@ -1,4 +1,4 @@
-import { escapeHtml, pool, renderMarkdown, shortRef } from "./shared.ts";
+import { escapeHtml, pool, prFreshness, renderMarkdown, shortRef } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { aiModels, reasoningLevels } from "@dcc/domain";
 
@@ -188,7 +188,12 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       } as Record<string, { cls: string; label: string }>)[item.latest_ai_review_status ?? ""]
         ?? { cls: "muted", label: item.latest_ai_review_status ? escapeHtml(item.latest_ai_review_status) : "No review yet" };
       const href = `/admin/pull-requests/${escapeHtml(item.project_slug)}/${escapeHtml(item.number)}`;
-      return `<div class="ticket-row prs-row" data-pr-id="${item.id}"><a class="pr-row-link" href="${href}" aria-label="Open pull request #${escapeHtml(item.number)}"></a><span class="mono">#${escapeHtml(item.number)}</span><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.project_name)}</span><span class="status ${stateBadge.cls}">${escapeHtml(stateBadge.label)}</span><span class="status ${aiBadge.cls}">${escapeHtml(aiBadge.label)}</span><span>${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}</span><time>${item.created_at_provider ? escapeHtml(new Date(item.created_at_provider).toLocaleDateString("nl-NL")) : "—"}</time><div class="pr-actions"><a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a></div></div>`;
+      // PRD G10-F03: pull_requests is a cache of GitHub state kept fresh by a
+      // sync job; if that job stalls, the row otherwise looks exactly like a
+      // freshly synced one. Label rows whose last_synced_at has aged past
+      // PR_STALE_AFTER_MS instead of presenting stale data as current.
+      const freshness = prFreshness(item.last_synced_at);
+      return `<div class="ticket-row prs-row" data-pr-id="${item.id}"><a class="pr-row-link" href="${href}" aria-label="Open pull request #${escapeHtml(item.number)}"></a><span class="mono">#${escapeHtml(item.number)}</span><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.project_name)}</span><span class="status ${stateBadge.cls}">${escapeHtml(stateBadge.label)}</span><span class="status ${aiBadge.cls}">${escapeHtml(aiBadge.label)}</span><span>${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}${freshness.stale ? `<span class="status warn">Stale · ${escapeHtml(freshness.label)}</span>` : ""}</span><time>${item.created_at_provider ? escapeHtml(new Date(item.created_at_provider).toLocaleDateString("nl-NL")) : "—"}</time><div class="pr-actions"><a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a></div></div>`;
     }).join("");
     const tabs = [["all", "All"], ["open", "Open"], ["draft", "Draft"], ["merged", "Merged"], ["closed", "Closed"]] as const;
     const withTab = (value: string) => {

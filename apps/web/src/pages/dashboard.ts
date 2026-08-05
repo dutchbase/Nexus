@@ -1,4 +1,4 @@
-import { escapeHtml, pool, shortRef } from "./shared.ts";
+import { escapeHtml, pool, runProgress, shortRef, workerHealth } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 
 function since(date: string | Date) {
@@ -25,8 +25,18 @@ function waitingRow(ticketNum: string, title: string, meta: string, pillLabel: s
   </a>`;
 }
 
-function runRow(runId: string, type: string, ticketNum: string, model: string, effort: string, turns: number, maxTurns: number, elapsed: string) {
-  const pct = Math.round((turns / maxTurns) * 100);
+// PRD G10-F03: turn is only ever set once, at run start (metadata_json->>'turn')
+// — a run stuck for hours still looked like it was "progressing" toward
+// max_turns. When turn is unknown we render no bar (dividing by max_turns||1
+// would draw a fabricated 0%/NaN% bar) and fall back to the live
+// phase/heartbeat label from runProgress() instead.
+function runRow(runId: string, type: string, ticketNum: string, model: string, effort: string, turn: number | null, maxTurns: number | null, elapsed: string, progress: { label: string; stale: boolean }) {
+  const hasTurn = turn != null;
+  const progressCell = hasTurn
+    ? `<div style="height:3px;background:var(--surface2);border-radius:99px;overflow:hidden">
+        <div style="width:${Math.round((turn / (maxTurns || 1)) * 100)}%;height:100%;background:var(--t-run)"></div>
+      </div>`
+    : `<div style="font-size:11.5px;color:${progress.stale ? "var(--t-danger)" : "var(--text3)"}">${escapeHtml(progress.label)}</div>`;
   return `<div style="display:grid;grid-template-rows:auto auto;gap:10px;padding:13px 18px;border-bottom:1px solid var(--border)">
     <div style="display:flex;align-items:center;gap:10px">
       <span style="width:6px;height:6px;border-radius:50%;background:var(--t-run);animation:dccPulse 1.4s ease-in-out infinite;flex-shrink:0"></span>
@@ -35,10 +45,8 @@ function runRow(runId: string, type: string, ticketNum: string, model: string, e
       <span style="font-size:12px;color:var(--text3)">${escapeHtml(ticketNum)}</span>
     </div>
     <div style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center">
-      <div style="height:3px;background:var(--surface2);border-radius:99px;overflow:hidden">
-        <div style="width:${pct}%;height:100%;background:var(--t-run)"></div>
-      </div>
-      <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text3);white-space:nowrap">${escapeHtml(model)} · ${escapeHtml(effort)} · turn ${turns}/${maxTurns} · ${escapeHtml(elapsed)}</div>
+      ${progressCell}
+      <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text3);white-space:nowrap">${escapeHtml(model)} · ${escapeHtml(effort)}${hasTurn ? ` · turn ${turn}/${maxTurns ?? "?"}` : ""} · ${escapeHtml(elapsed)}</div>
     </div>
   </div>`;
 }
@@ -71,12 +79,13 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       ORDER BY t.updated_at DESC LIMIT 8`),
     pool.query(`SELECT ar.id, ar.run_type, t.ticket_number, ar.model, ar.reasoning_level effort,
       (ar.metadata_json->>'turn')::int turn, (ar.metadata_json->>'max_turns')::int max_turns,
+      ar.phase, ar.heartbeat_at,
       CASE WHEN ar.finished_at IS NOT NULL THEN (EXTRACT(EPOCH FROM (ar.finished_at - ar.started_at)))::int
            ELSE (EXTRACT(EPOCH FROM (now() - ar.started_at)))::int END elapsed_secs
       FROM agent_runs ar JOIN tickets t ON t.id = ar.ticket_id
       WHERE ar.status = 'running' LIMIT 10`),
     pool.query(`SELECT
-      (SELECT MAX(claimed_at) FROM jobs WHERE claimed_at IS NOT NULL) heartbeat,
+      (SELECT row_to_json(w) FROM (SELECT id,heartbeat_at,capabilities,version FROM workers ORDER BY heartbeat_at DESC LIMIT 1) w) worker,
       (SELECT count(*)::int FROM projects WHERE health_status = 'repository_dirty') dirty_projects`),
     pool.query("SELECT slug, name FROM projects WHERE health_status = 'repository_dirty' LIMIT 5"),
     pool.query("SELECT count(*)::int c FROM notification_deliveries WHERE status = 'failed'"),
@@ -91,8 +100,8 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   const totalNeedAttention = awaitingCount + plansCount + runsCount + prsCount + jobsCount;
   const needsPlural = totalNeedAttention === 1 ? "thing" : "things";
 
-  const hb = healthData.rows[0]?.heartbeat;
-  const hbFresh = hb && Date.now() - new Date(hb).getTime() < 5 * 60_000;
+  const worker = healthData.rows[0]?.worker;
+  const health = workerHealth(worker);
 
   // Format elapsed time
   const formatElapsed = (secs: number) => {
@@ -136,15 +145,16 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       row.ticket_number,
       row.model,
       row.effort,
-      row.turn || 0,
-      row.max_turns || 1,
-      elapsed
+      row.turn,
+      row.max_turns,
+      elapsed,
+      runProgress(row)
     );
   }).join("");
 
   const queuedCount = queuedJobs.rows[0]?.c ?? 0;
   const healthRows = [
-    healthRow("Worker", hb ? `${since(hb)} ago` : "no worker", hbFresh ? "ok" : "warn"),
+    healthRow("Worker", `${health.label} — ${health.detail}`, health.tone),
     healthRow("Project health", `${healthData.rows[0]?.dirty_projects || 0} blocked`, healthData.rows[0]?.dirty_projects > 0 ? "danger" : "ok"),
     healthRow("Failed deliveries", `${failedDeliveries.rows[0]?.c || 0}`, failedDeliveries.rows[0]?.c > 0 ? "warn" : "ok"),
   ].join("");

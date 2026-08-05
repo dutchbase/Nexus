@@ -2,7 +2,7 @@ import { statfsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { artifactDataRoot } from "../../../../packages/database/src/artifacts.ts";
-import { escapeHtml, pool, shortRef } from "./shared.ts";
+import { escapeHtml, pool, shortRef, workerHealth } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { aiModels, reasoningLevels } from "@dcc/domain";
 
@@ -26,7 +26,15 @@ function maskedDatabaseUrl() {
   }
 }
 
-function settingsBody(aiReviewSettings: any): string {
+export function capabilityLabel(row: { status: string; can_read: boolean; can_write: boolean; reason: string | null; checked_at: string | Date } | null): string {
+  if (!row) return "never checked";
+  const checked = `checked ${since(row.checked_at)} ago`;
+  if (row.status === "ok" && row.can_read && row.can_write) return `read + write · ${checked}`;
+  if (row.status === "ok" && row.can_read) return `read only · ${checked}`;
+  return row.reason ? `${row.status} · ${row.reason} · ${checked}` : `${row.status} · ${checked}`;
+}
+
+function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: boolean; can_write: boolean; reason: string | null; checked_at: string | Date } | null): string {
   const panel = (index: number, content: string) => `<div role="tabpanel" id="panel-${index}" aria-labelledby="tab-${index}"${index === 0 ? "" : " hidden"}>${content}</div>`;
   const field = (label: string, value: string) => `<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div class="eyebrow">${escapeHtml(label)}</div><div class="mono" style="font-size:13px;margin-top:4px">${escapeHtml(value)}</div></div>`;
   const check = (label: string) => `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:13px"><input type="checkbox" checked disabled>${escapeHtml(label)}</label>`;
@@ -53,12 +61,16 @@ function settingsBody(aiReviewSettings: any): string {
     <p style="font-size:12.5px;color:var(--text3)">The worker rejects API authentication variables; there is no fallback path to the API.</p>
     <div class="eyebrow" style="margin-top:14px">Refused environment variables</div>
     <div style="font-size:12.5px;color:var(--text3);margin-top:8px">Anthropic API, Bedrock, Vertex, and Foundry credentials.</div>
-    <div class="grid two" style="margin-top:14px">${field("Planning max turns", "40")}${field("Planning timeout (min)", "45")}${field("Execution max turns", "150")}${field("Execution timeout (min)", "180")}</div>
+    <div class="eyebrow" style="margin-top:14px">Configuration intent — worker defaults, not verified against GitHub</div>
+    <p style="font-size:12.5px;color:var(--text3);margin-top:4px">Each value is the worker's fallback when a project's config_json does not override it — not a universal fact.</p>
+    <div class="grid two" style="margin-top:10px">${field("Planning max turns", "40")}${field("Planning timeout (min)", "30")}${field("Execution max turns", "50")}${field("Execution timeout (min)", "30")}</div>
   </div></section>`;
 
   const github = `<section class="card">
     ${field("GitHub API base URL", process.env.GITHUB_API_BASE_URL ?? "not configured")}
-    <div style="padding-top:10px">${check("Always open pull requests as draft")}${check("Automatic merge permanently disabled")}</div>
+    ${field("GitHub access", capabilityLabel(cap))}
+    <div class="eyebrow" style="margin-top:14px">Configuration intent — not verified against GitHub</div>
+    <div style="padding-top:4px">${field("Pull request draft policy", "Always open pull requests as draft")}${field("Merge policy", "Automatic merge permanently disabled")}</div>
   </section>`;
 
   const backupRetention = /^[1-9][0-9]*$/.test(process.env.DCC_BACKUP_RETENTION_DAYS ?? "") ? process.env.DCC_BACKUP_RETENTION_DAYS + " days" : "not configured";
@@ -110,7 +122,7 @@ export function backupStatusCards(retentionDays: string | undefined, latest: { s
 
 async function systemBody(): Promise<string> {
   const [heartbeat, depth, projects, failedJobs, failedDeliveries, failedRuns, sessionCleanup, latestBackupVerification] = await Promise.all([
-    pool.query("SELECT MAX(claimed_at) hb, (array_agg(claimed_by ORDER BY claimed_at DESC))[1] worker FROM jobs WHERE claimed_at IS NOT NULL"),
+    pool.query("SELECT (SELECT row_to_json(w) FROM (SELECT id,heartbeat_at,capabilities,version FROM workers ORDER BY heartbeat_at DESC LIMIT 1) w) worker"),
     pool.query("SELECT status, count(*)::int c FROM jobs GROUP BY status"),
     pool.query("SELECT slug, name, repository_path, health_status FROM projects ORDER BY name"),
     pool.query("SELECT id, type, error_json->>'message' message, updated_at FROM jobs WHERE status='failed' ORDER BY updated_at DESC LIMIT 10"),
@@ -120,10 +132,15 @@ async function systemBody(): Promise<string> {
     pool.query("SELECT status, verified_at FROM backup_recovery_verifications ORDER BY verified_at DESC LIMIT 1"),
   ]);
 
-  const hb = heartbeat.rows[0]?.hb;
-  const hbFresh = hb && Date.now() - new Date(hb).getTime() < 5 * 60_000;
-  const workerLabel = heartbeat.rows[0]?.worker ?? "no worker seen yet";
-  const workerCard = statCard("Worker", hb ? workerLabel : "no worker seen", hb ? `heartbeat ${since(hb)} ago` : "queue has no claimed jobs yet", hbFresh ? "ok" : "warn");
+  const worker = heartbeat.rows[0]?.worker;
+  const health = workerHealth(worker);
+  const capabilityCount = worker?.capabilities?.length ?? 0;
+  const workerCard = statCard(
+    "Worker",
+    health.label,
+    worker ? `${health.detail} · ${capabilityCount ? worker.capabilities.join(", ") : "no capabilities"}` : health.detail,
+    health.tone,
+  );
 
   const claudeVersion = process.env.CLAUDE_CODE_VERSION ?? "unknown";
   const claudeCard = statCard("Claude Code", claudeVersion, "subscription auth", claudeVersion === "unknown" ? "muted" : "ok");
@@ -192,8 +209,11 @@ async function systemBody(): Promise<string> {
 
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname === "/admin/settings") {
-    const aiReviewSettings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
-    return { status: 200, title: "Settings", body: settingsBody(aiReviewSettings) };
+    const [aiReviewSettings, capability] = await Promise.all([
+      pool.query("SELECT * FROM ai_review_settings WHERE id=1"),
+      pool.query("SELECT * FROM github_capability WHERE id=1"),
+    ]);
+    return { status: 200, title: "Settings", body: settingsBody(aiReviewSettings.rows[0], capability.rows[0] ?? null) };
   }
   if (url.pathname === "/admin/system") return { status: 200, title: "System health", body: await systemBody() };
   return null;

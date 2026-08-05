@@ -1,4 +1,4 @@
-import { escapeHtml, pool, shortRef, shortRefs } from "./shared.ts";
+import { escapeHtml, pool, runProgress, shortRef, shortRefs } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
@@ -23,14 +23,34 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       [runPageMatch[1]],
     )).rows[0];
     if (!run) return { status: 404, title: "Run not found", body: "<h1>Run not found</h1>" };
+    // PRD G10-F04: a repair opens a new execution_attempts row (and its own
+    // agent_runs row) rather than overwriting the one it repairs, so a prior
+    // attempt's execution log is never hidden or deleted — surface every
+    // attempt's log for this ticket here, each linking to its own run's
+    // existing /api/admin/runs/:id/log route via a.agent_run_id — the
+    // artifact's OWN run id. execution_attempts.agent_run_id is mutated
+    // (last-writer-wins) on every attempt of the same execution_attempt_id
+    // by worker.ts, so it must never be used to build these links or repeat
+    // attempts collapse onto the same (latest) log. a.status is restricted
+    // to the same set the download route accepts, so abandoned/GC'd staged
+    // artifacts never render as dead links.
+    const attemptLogs = run.ticket_id ? (await pool.query(
+      `SELECT a.id, a.execution_attempt_id, a.agent_run_id, ea.attempt_number, a.status, a.created_at
+       FROM artifacts a JOIN execution_attempts ea ON ea.id = a.execution_attempt_id
+       WHERE a.artifact_type='execution_log' AND a.status IN ('staged','finalized') AND ea.ticket_id = $1
+       ORDER BY ea.attempt_number DESC, a.created_at DESC`,
+      [run.ticket_id],
+    )).rows : [];
     const meta = run.metadata_json ?? {};
     const isActive = ["running", "queued"].includes(run.status);
     const canCancel = ["running", "cancellation_requested"].includes(run.status);
     const canRepair = run.error_code === "validation_failed";
     const canRetry = run.ticket_status === "PR Creation Failed";
-    const statusLine = run.status === "timed_out"
+    const progress = isActive ? runProgress({ phase: run.phase, heartbeat_at: run.heartbeat_at, turn: meta.turn ?? null, max_turns: meta.max_turns ?? null }) : null;
+    const statusLine = (run.status === "timed_out"
       ? `Timed out at ${escapeHtml(meta.turn ?? "?")}/${escapeHtml(meta.max_turns ?? "?")} turns`
-      : `${escapeHtml(run.status)}${meta.turn != null ? ` · turn ${escapeHtml(meta.turn)}/${escapeHtml(meta.max_turns ?? "?")}` : ""}`;
+      : `${escapeHtml(run.status)}${meta.turn != null ? ` · turn ${escapeHtml(meta.turn)}/${escapeHtml(meta.max_turns ?? "?")}` : ""}`)
+      + (progress ? ` · ${escapeHtml(progress.label)}` : "");
     const body = `<div class="eyebrow">${escapeHtml(run.ticket_number ?? "")} · ${escapeHtml(run.project_name ?? "")}</div>
       <h1>${shortRef("RUN", run.id)} · ${escapeHtml(run.run_type)}</h1>
       <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
@@ -49,6 +69,9 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         <dt>Started</dt><dd>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : "Not started"}</dd>
         <dt>Finished</dt><dd>${run.finished_at ? new Date(run.finished_at).toLocaleString("nl-NL") : "Running"}</dd>
       </dl>${run.error_message ? `<p class="error">${escapeHtml(run.error_code ?? "")}: ${escapeHtml(run.error_message)}</p>` : ""}</div></section>
+      <section class="card"><div class="card-head">Attempt logs</div>${attemptLogs.length ? attemptLogs.map((log) =>
+        `<a class="ticket-row" href="/api/admin/runs/${log.agent_run_id}/log" download><span class="mono">Attempt ${log.attempt_number}</span><span class="status">${escapeHtml(log.status)}</span><time>${new Date(log.created_at).toLocaleString("nl-NL")}</time></a>`,
+      ).join("") : '<div class="card-body"><p>No attempt logs recorded.</p></div>'}</section>
       <dialog data-repair-dialog style="border:none;border-radius:8px;box-shadow:var(--shadow);width:100%;max-width:660px">
         <div style="padding:20px;border-bottom:1px solid var(--border)"><h2 style="font-size:16px;font-weight:600;margin:0">Repair with instructions</h2></div>
         <div style="padding:20px"><label style="display:flex;flex-direction:column;gap:8px"><span style="font-size:11.5px;font-weight:600;color:var(--text2)">Instructions</span><textarea name="feedback" data-repair-feedback style="border:1px solid var(--border);background:var(--bg);border-radius:4px;padding:9px 11px;font-size:13px;font-family:monospace;resize:vertical;min-height:120px" required></textarea></label></div>

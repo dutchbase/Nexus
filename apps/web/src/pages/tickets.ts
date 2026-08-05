@@ -1,7 +1,6 @@
-import { escapeHtml, lineDiff, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
+import { escapeHtml, keysetCondition, lineDiff, nextCursor, pageRequest, PAGE_SIZE_MAX, pagerHtml, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { checkPlanApprovalGate } from "@dcc/domain";
-import { inTransaction } from "@dcc/database";
 
 export function selectedStatusesFrom(url: URL): string[] {
   return url.searchParams.getAll("status").filter((status) => validStatuses.has(status));
@@ -20,6 +19,14 @@ export function skillPresentation(skill: any) {
   };
 }
 
+export function approvalGatesCard(ticket: { status: string }) {
+  const canAcknowledge = ticket.status === "Submitted";
+  const canApprovePlanning = ["Triage", "Needs Information", "Planning Failed"].includes(ticket.status);
+  return `<section class="card"><div class="card-head">Approval gates</div><div class="card-body">
+    <p><button class="button" type="button" data-acknowledge-ticket${canAcknowledge ? "" : " disabled"} title="${canAcknowledge ? "" : "Ticket must be Submitted"}">Acknowledge</button></p>
+    <p><button class="button primary" type="button" data-approve-planning${canApprovePlanning ? "" : " disabled"} title="${canApprovePlanning ? "" : "Ticket must be Triage, Needs Information or Planning Failed"}">Approve for planning</button></p><p class="error" role="alert"></p></div></section>`;
+}
+
 export function ticketCreateModal(projects: Array<{ id: string; name: string }>) {
   const priorities = ["critical", "high", "medium", "low"];
   return `<button class="button primary" type="button" data-add-ticket-button>Add ticket</button><dialog data-add-ticket-modal aria-label="Add ticket"><div class="card-head">Add ticket</div><form data-add-ticket-form><div class="card-body"><label class="field"><span>Project</span><select name="project_id" required><option value="">Choose a project</option>${projects.map((project) => `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`).join("")}</select></label><label class="field"><span>Title</span><input name="title" required></label><label class="field"><span>Description</span><textarea name="description" rows="4" required></textarea></label><div class="grid two"><label class="field"><span>Category</span><input name="category"></label><label class="field"><span>Priority</span><select name="priority"><option value="">Choose priority</option>${priorities.map((priority) => `<option value="${priority}">${priority[0].toUpperCase()}${priority.slice(1)}</option>`).join("")}</select></label></div><label class="field"><span>Environment</span><input name="environment"></label><label class="field"><span>Expected behavior</span><textarea name="expected_behavior" rows="3"></textarea></label><label class="field"><span>Actual behavior</span><textarea name="actual_behavior" rows="3"></textarea></label><label class="field"><span>Reproduction steps</span><textarea name="reproduction_steps" rows="3"></textarea></label><p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Create ticket</button></div></form></dialog>`;
@@ -36,17 +43,34 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     if (selectedStatuses.length) { values.push(selectedStatuses); conditions.push(`t.status = ANY($${values.length}::text[])`); }
     const search = url.searchParams.get("search");
     if (search) { values.push(`%${search}%`); conditions.push(`(t.ticket_number ILIKE $${values.length} OR t.title ILIKE $${values.length} OR t.description ILIKE $${values.length})`); }
+    const view = url.searchParams.get("view");
+    const isBoard = view === "board";
+    const { limit, cursor } = pageRequest(url);
+    // Board view has no pager and previously showed every ticket up to the
+    // old LIMIT 200 across all 6 columns. Keep that ceiling here instead of
+    // the table view's paginated PAGE_SIZE_DEFAULT (50) — otherwise
+    // long-lived terminal-status cards (Merged/Completed/Archived), which
+    // rarely get updated_at bumped, silently fall out of the board as newer
+    // tickets push them past the top-50 window. Board also ignores any
+    // cursor: it has no "Next" affordance to have produced one.
+    const effectiveLimit = isBoard ? PAGE_SIZE_MAX : limit;
+    if (!isBoard) {
+      const keyset = keysetCondition(cursor, "t.updated_at", "t.id", values);
+      if (keyset) conditions.push(keyset);
+    }
+    values.push(effectiveLimit);
+    const limitIdx = values.length;
     const [ticketsResult, projectsResult] = await Promise.all([
       pool.query(
         `SELECT t.*,p.name project_name,f.name form_name FROM tickets t JOIN projects p ON p.id=t.project_id LEFT JOIN forms f ON f.id=t.form_id
-         ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY t.updated_at DESC LIMIT 200`,
+         ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""} ORDER BY t.updated_at DESC, t.id DESC LIMIT $${limitIdx}`,
         values,
       ),
       pool.query("SELECT id, slug, name FROM projects ORDER BY name"),
     ]);
     const tickets = ticketsResult.rows;
     const projects = projectsResult.rows;
-    const view = url.searchParams.get("view");
+    const ticketsNext = nextCursor(tickets, effectiveLimit, "updated_at");
 
     const buildFilterUrl = (newView?: string) => {
       const params = new URLSearchParams();
@@ -81,7 +105,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     const prioTone = { critical: "danger", high: "warn", medium: "info", low: "muted" } as Record<string, string>;
 
     const createTicket = ticketCreateModal(projects);
-    if (view === "board") {
+    if (isBoard) {
       // Board view: group tickets into 6 status columns
       const boardColumns = {
         "Triage": ["Submitted", "Triage", "Needs Information"],
@@ -177,7 +201,8 @@ export async function render(url: URL, session: Session, _metrics: Record<string
         <a class="button" data-tickets-reset href="/admin/tickets">Reset</a>
         <span aria-live="polite" style="margin-left:auto">${tickets.length} shown</span>
       </form>
-      <section class="card">${emptyState || `<div class="list-head tickets7"><span>Ticket</span><span>Title</span><span>Project</span><span>Priority</span><span>AI config</span><span>Status</span><span>Updated</span></div>${rows}`}</section>`;
+      <section class="card">${emptyState || `<div class="list-head tickets7"><span>Ticket</span><span>Title</span><span>Project</span><span>Priority</span><span>AI config</span><span>Status</span><span>Updated</span></div>${rows}`}</section>
+      ${pagerHtml(url, ticketsNext)}`;
     return { status: 200, title: "Tickets", body };
   }
   const planComparePageMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)\/plans\/compare$/);
@@ -286,29 +311,11 @@ export async function render(url: URL, session: Session, _metrics: Record<string
   }
   const ticketMatch = url.pathname.match(/^\/admin\/tickets\/([^/]+)$/);
   if (ticketMatch) {
-    let ticket = (await pool.query(
+    const ticket = (await pool.query(
       `SELECT t.*,p.name project_name,f.name form_name FROM tickets t JOIN projects p ON p.id=t.project_id LEFT JOIN forms f ON f.id=t.form_id WHERE t.id::text=$1 OR t.ticket_number=$1`,
       [decodeURIComponent(ticketMatch[1])],
     )).rows[0];
     if (!ticket) return { status: 404, title: "Ticket not found", body: "<h1>Ticket not found</h1>" };
-    if (ticket.status === "Submitted") {
-      // PRD §17.2 "Administrator opens triage": Submitted -> Triage fires
-      // as a side effect of an admin viewing the ticket.
-      ticket = await inTransaction(async (client) => {
-        const updated = (await client.query(
-          "UPDATE tickets SET status='Triage',updated_at=now() WHERE id=$1 AND status='Submitted' RETURNING *",
-          [ticket.id],
-        )).rows[0];
-        if (updated) {
-          await client.query(
-            `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
-             VALUES ($1,'Submitted','Triage','Administrator opened triage','admin',$2)`,
-            [ticket.id, session.user_id],
-          );
-        }
-        return { ...ticket, ...(updated ?? {}) };
-      });
-    }
     const [notesResult, historyResult, skillsResult, notificationsResult, runsResult, prsResult, planVersionsResult] = await Promise.all([
       pool.query("SELECT n.*,u.username FROM ticket_notes n LEFT JOIN users u ON u.id=n.author_id WHERE ticket_id=$1 ORDER BY n.created_at DESC", [ticket.id]),
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
@@ -381,7 +388,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       </div></section>
       <section class="card"><div class="card-head">Internal notes</div><div class="card-body notes">${notes.map((note) => `<div class="note"><strong>${escapeHtml(note.username ?? "Administrator")}</strong><p>${escapeHtml(note.body)}</p></div>`).join("") || "<p>No notes yet.</p>"}<form data-notes-form><label class="field"><span>Add an internal note…</span><textarea name="body" placeholder="Add an internal note…" rows="3"></textarea></label><button class="button" type="submit">Save note</button><p class="error" role="alert"></p></form></div></section></div>
       <div class="grid rail"><section class="card"><div class="card-head">Ticket</div><div class="card-body"><dl><dt>Project</dt><dd>${escapeHtml(ticket.project_name)}</dd><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Source form</dt><dd>${escapeHtml(ticket.form_name ?? "—")}</dd><dt>Created</dt><dd>${new Date(ticket.created_at).toLocaleDateString("nl-NL")}</dd></dl></div></section>
-      <section class="card"><div class="card-head">Approval gates</div><div class="card-body"><p><button class="button primary" type="button" data-approve-planning${["Triage", "Needs Information", "Planning Failed"].includes(ticket.status) ? "" : " disabled"} title="${["Triage", "Needs Information", "Planning Failed"].includes(ticket.status) ? "" : "Ticket must be Triage, Needs Information or Planning Failed"}">Approve for planning</button></p><p class="error" role="alert"></p></div></section>
+      ${approvalGatesCard(ticket)}
       <section class="card"><div class="card-head">Danger zone</div><div class="card-body"><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reject-ticket${["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : " disabled"} title="${["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : "Can only reject early-stage tickets"}">Reject</button></p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-cancel-ticket${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : " disabled"} title="${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : "Can only cancel in-progress tickets"}">Cancel</button></p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-archive-ticket${["Completed", "Merged", "Rejected", "Cancelled"].includes(ticket.status) ? "" : " disabled"} title="${["Completed", "Merged", "Rejected", "Cancelled"].includes(ticket.status) ? "" : "Can only archive finished tickets"}">Archive</button></p></div></section></div>`;
     const aiPanel = `<section class="card"><div class="card-head">AI configuration</div><div class="card-body">
         <form id="ai-config" data-ticket-id="${ticket.id}"><label class="field"><span>Mode</span><select name="ai_configuration_mode"><option value="basic"${ticket.ai_configuration_mode !== "advanced" ? " selected" : ""}>Basic</option><option value="advanced"${ticket.ai_configuration_mode === "advanced" ? " selected" : ""}>Advanced</option></select></label>
