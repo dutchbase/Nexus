@@ -45,6 +45,7 @@ if [ "$DCC_FAIL_HEALTH" = 1 ] && [ ! -f "$DCC_HEALTH_FAILED" ]; then touch "$DCC
 `,
     psql: `#!/bin/sh
 echo "psql $*" >> "$DCC_LOG"
+cat >> "$DCC_LOG"
 `,
     mv: `#!/bin/sh
 echo "mv $*" >> "$DCC_LOG"
