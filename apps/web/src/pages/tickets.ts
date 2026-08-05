@@ -1,4 +1,4 @@
-import { escapeHtml, keysetCondition, lineDiff, nextCursor, pageRequest, pagerHtml, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
+import { escapeHtml, keysetCondition, lineDiff, nextCursor, pageRequest, PAGE_SIZE_MAX, pagerHtml, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { checkPlanApprovalGate } from "@dcc/domain";
 
@@ -43,10 +43,22 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     if (selectedStatuses.length) { values.push(selectedStatuses); conditions.push(`t.status = ANY($${values.length}::text[])`); }
     const search = url.searchParams.get("search");
     if (search) { values.push(`%${search}%`); conditions.push(`(t.ticket_number ILIKE $${values.length} OR t.title ILIKE $${values.length} OR t.description ILIKE $${values.length})`); }
+    const view = url.searchParams.get("view");
+    const isBoard = view === "board";
     const { limit, cursor } = pageRequest(url);
-    const keyset = keysetCondition(cursor, "t.updated_at", "t.id", values);
-    if (keyset) conditions.push(keyset);
-    values.push(limit);
+    // Board view has no pager and previously showed every ticket up to the
+    // old LIMIT 200 across all 6 columns. Keep that ceiling here instead of
+    // the table view's paginated PAGE_SIZE_DEFAULT (50) — otherwise
+    // long-lived terminal-status cards (Merged/Completed/Archived), which
+    // rarely get updated_at bumped, silently fall out of the board as newer
+    // tickets push them past the top-50 window. Board also ignores any
+    // cursor: it has no "Next" affordance to have produced one.
+    const effectiveLimit = isBoard ? PAGE_SIZE_MAX : limit;
+    if (!isBoard) {
+      const keyset = keysetCondition(cursor, "t.updated_at", "t.id", values);
+      if (keyset) conditions.push(keyset);
+    }
+    values.push(effectiveLimit);
     const limitIdx = values.length;
     const [ticketsResult, projectsResult] = await Promise.all([
       pool.query(
@@ -58,8 +70,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     ]);
     const tickets = ticketsResult.rows;
     const projects = projectsResult.rows;
-    const ticketsNext = nextCursor(tickets, limit, "updated_at");
-    const view = url.searchParams.get("view");
+    const ticketsNext = nextCursor(tickets, effectiveLimit, "updated_at");
 
     const buildFilterUrl = (newView?: string) => {
       const params = new URLSearchParams();
@@ -94,7 +105,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     const prioTone = { critical: "danger", high: "warn", medium: "info", low: "muted" } as Record<string, string>;
 
     const createTicket = ticketCreateModal(projects);
-    if (view === "board") {
+    if (isBoard) {
       // Board view: group tickets into 6 status columns
       const boardColumns = {
         "Triage": ["Submitted", "Triage", "Needs Information"],
