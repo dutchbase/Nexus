@@ -76,16 +76,20 @@ export async function claimNotificationDelivery(workerId: string) {
   return inTransaction(async (client) => {
     const result = await client.query(
       `WITH candidate AS (
-         SELECT nd.id,np.type provider_type,np.configuration_encrypted_json
+         SELECT nd.id,nd.status prior_status,np.type provider_type,np.configuration_encrypted_json,np.max_attempts
          FROM notification_deliveries nd JOIN notification_providers np ON np.id=nd.provider_id
-         WHERE np.enabled=true AND nd.status IN ('queued','failed') AND nd.next_attempt_at<=now()
+         WHERE np.enabled=true AND (
+           (nd.status IN ('queued','failed') AND nd.next_attempt_at<=now())
+           OR (nd.status='sending' AND nd.lease_expires_at<=now())
+         )
          ORDER BY nd.next_attempt_at,nd.created_at FOR UPDATE OF nd SKIP LOCKED LIMIT 1
        )
        UPDATE notification_deliveries nd
-       SET status='sending', claimed_by=$1, lease_expires_at = now() + interval '60 seconds', updated_at=now()
+       SET status='sending', claimed_by=$1, lease_expires_at = now() + interval '60 seconds', updated_at=now(),
+           recovery_reason = CASE WHEN candidate.prior_status='sending' THEN 'lease_expired' ELSE nd.recovery_reason END
        FROM candidate
-       WHERE nd.id=candidate.id AND nd.status IN ('queued','failed')
-       RETURNING nd.*,candidate.provider_type,candidate.configuration_encrypted_json`,
+       WHERE nd.id=candidate.id AND (nd.status IN ('queued','failed') OR (nd.status='sending' AND nd.lease_expires_at<=now()))
+       RETURNING nd.*,candidate.provider_type,candidate.configuration_encrypted_json,candidate.max_attempts`,
       [workerId],
     );
     return result.rows[0] ?? null;
@@ -112,15 +116,23 @@ export async function completeNotificationDelivery(id: string, workerId: string,
   return result.rowCount === 1;
 }
 
-export async function failNotificationDelivery(id: string, workerId: string, error: unknown, responseStatus?: number): Promise<boolean> {
+export async function failNotificationDelivery(
+  id: string,
+  workerId: string,
+  error: unknown,
+  responseStatus?: number,
+  maxAttempts = 5,
+): Promise<boolean> {
   const message = error instanceof Error ? error.message : "Notification delivery failed";
   const result = await pool.query(
     `UPDATE notification_deliveries
-     SET attempt_count=COALESCE(attempt_count,0)+1,status='failed',response_status=COALESCE($4,response_status),
+     SET attempt_count=COALESCE(attempt_count,0)+1,
+         status = CASE WHEN COALESCE(attempt_count,0)+1 >= $5 THEN 'exhausted' ELSE 'failed' END,
+         response_status=COALESCE($4,response_status),
          error_message=$3,next_attempt_at=now() + interval '2 seconds' * power(2,LEAST(COALESCE(attempt_count,0),8)),
          claimed_by=NULL,lease_expires_at=NULL,updated_at=now()
      WHERE id=$1 AND status='sending' AND claimed_by=$2 AND lease_expires_at > now()`,
-    [id, workerId, message, responseStatus ?? null],
+    [id, workerId, message, responseStatus ?? null, maxAttempts],
   );
   return result.rowCount === 1;
 }

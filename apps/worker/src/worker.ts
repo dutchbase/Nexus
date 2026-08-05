@@ -1553,10 +1553,10 @@ async function deliverDueNotification() {
         const provider = createNotificationProvider(delivery.provider_type, delivery.configuration_encrypted_json ?? {});
         const result = await lease.run(() => provider.send(delivery.payload_json));
         if (result.ok) await lease.run(() => completeNotificationDelivery(delivery.id, workerId, result.responseStatus ?? undefined));
-        else await lease.run(() => failNotificationDelivery(delivery.id, workerId, redactNotificationError(result.errorMessage), result.responseStatus ?? undefined));
+        else await lease.run(() => failNotificationDelivery(delivery.id, workerId, redactNotificationError(result.errorMessage), result.responseStatus ?? undefined, delivery.max_attempts));
       } catch (error) {
         if (error instanceof LeaseLostError) return;
-        await lease.run(() => failNotificationDelivery(delivery.id, workerId, redactNotificationError(error instanceof Error ? error.message : "Notification delivery failed")));
+        await lease.run(() => failNotificationDelivery(delivery.id, workerId, redactNotificationError(error instanceof Error ? error.message : "Notification delivery failed"), undefined, delivery.max_attempts));
       }
     },
   );
