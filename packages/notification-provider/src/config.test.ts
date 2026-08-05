@@ -103,6 +103,26 @@ describe("notification configuration", () => {
     expect(result.errorMessage).not.toContain("secret-canary");
   });
 
+  test("rejects non-https endpoints", async () => {
+    for (const configuration of [
+      { endpoint: "http://x.example/hook" },
+      { endpoint: "ftp://x.example/hook" },
+      { base_url: "http://x.example", endpoint: "/hook" },
+    ]) {
+      const provider = createNotificationProvider("webhook", configuration);
+      expect((await provider.validateConfiguration()).valid).toBe(false);
+    }
+  });
+
+  test("accepts https endpoints", async () => {
+    const provider = createNotificationProvider("webhook", { base_url: "https://x.example", endpoint: "/hook" });
+    expect((await provider.validateConfiguration()).valid).toBe(true);
+  });
+
+  test("strips non-https urls from safe configuration", () => {
+    expect(safeNotificationConfiguration({ base_url: "http://x.example", endpoint: "javascript:alert(1)" })).toEqual({});
+  });
+
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.unstubAllEnvs();
