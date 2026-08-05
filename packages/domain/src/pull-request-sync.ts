@@ -187,14 +187,17 @@ export async function importGithubPullRequests(
 export async function syncOpenPullRequests(assertOwned: () => Promise<void> = async () => {}) {
   const rows = (await pool.query(
     `SELECT pr.id FROM pull_requests pr
-     WHERE pr.provider='github' AND pr.state='open' ORDER BY pr.last_synced_at NULLS FIRST`,
+     WHERE pr.provider='github' AND pr.state='open'
+       AND (pr.policy_retry_after IS NULL OR pr.policy_retry_after <= now())
+     ORDER BY pr.last_synced_at NULLS FIRST`,
   )).rows;
   for (const row of rows) {
     try {
       await syncPullRequest(row.id, "worker", undefined, assertOwned);
     } catch (error) {
       await assertOwned();
-      console.error(`Pull-request sync failed for ${row.id}:`, error);
+      const endpoint = error instanceof GitHubProviderError && error.endpoint ? ` (${error.endpoint})` : "";
+      console.error(`Pull-request sync failed for ${row.id}${endpoint}:`, error);
     }
   }
 }
