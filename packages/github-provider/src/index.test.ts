@@ -159,6 +159,41 @@ test("fetches paginated policy inputs and marks unsupported protection incomplet
   expect(urls).toContain("/repos/acme/widgets/collaborators/alice/permission");
 });
 
+test("surfaces the failing endpoint when reviews fetch returns 403", async () => {
+  await withServer((incoming, outgoing) => {
+    const url = incoming.url ?? "";
+    outgoing.setHeader("content-type", "application/json");
+    if (url === "/repos/acme/widgets/pulls/42") {
+      outgoing.end(JSON.stringify({
+        number: 42, html_url: "url", state: "open", draft: false, title: "Policy",
+        head: { ref: "feature", sha: "head-sha" }, base: { ref: "main", sha: "base-sha" },
+        requested_reviewers: [], requested_teams: [],
+        created_at: "2026-08-03", updated_at: "2026-08-04",
+      }));
+      return;
+    }
+    if (url.includes("/branches/main/protection")) {
+      outgoing.end(JSON.stringify({
+        required_pull_request_reviews: { required_approving_review_count: 1 },
+        required_status_checks: { checks: [{ context: "build", app_id: 7 }] },
+      }));
+      return;
+    }
+    if (url.includes("/pulls/42/reviews")) {
+      outgoing.statusCode = 403;
+      outgoing.end("Resource not accessible by integration");
+      return;
+    }
+    outgoing.statusCode = 404;
+    outgoing.end("{}");
+  }, async (baseUrl) => {
+    await expect(getPullRequestPolicyInputs("acme", "widgets", 42)).rejects.toMatchObject({
+      code: "http_error",
+      endpoint: expect.stringContaining("/repos/acme/widgets/pulls/42/reviews"),
+    });
+  });
+});
+
 test("routes the mark-ready pull-request mutation to configured Enterprise GraphQL", async () => {
   const urls: string[] = [];
   await withServer((incoming, outgoing) => {
@@ -296,6 +331,33 @@ test("classifies headerless and type-only secondary rate limits with fallback re
     process.env.GITHUB_API_BASE_URL = `${baseUrl}/api/v3`;
     await expect(markReadyForReview("acme", "widgets", 1))
       .rejects.toMatchObject({ code: "rate_limited", retryAt: expect.any(String) });
+  });
+});
+
+test("classifies a non-rate-limited 403 as http_error with a cooldown and endpoint context", async () => {
+  await withServer((_incoming, outgoing) => {
+    outgoing.statusCode = 403;
+    outgoing.end("Resource not accessible by integration");
+  }, async (baseUrl) => {
+    await expect(getPullRequest("acme", "widgets", 42)).rejects.toMatchObject({
+      code: "http_error",
+      status: 403,
+      retryAt: expect.any(String),
+      endpoint: `${baseUrl}/repos/acme/widgets/pulls/42`,
+    });
+  });
+});
+
+test("does not add a cooldown to an ordinary 404", async () => {
+  await withServer((_incoming, outgoing) => {
+    outgoing.statusCode = 404;
+    outgoing.end("Not Found");
+  }, async () => {
+    await expect(getPullRequest("acme", "widgets", 42)).rejects.toMatchObject({
+      code: "http_error",
+      status: 404,
+      retryAt: undefined,
+    });
   });
 });
 

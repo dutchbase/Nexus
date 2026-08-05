@@ -60,6 +60,7 @@ export class GitHubProviderError extends Error {
     message: string,
     public status?: number,
     public retryAt?: string,
+    public endpoint?: string,
   ) {
     super(message);
     this.name = "GitHubProviderError";
@@ -93,12 +94,16 @@ function retryAt(response: Response) {
   return reset && Number.isFinite(Number(reset)) ? new Date(Number(reset) * 1000).toISOString() : new Date(Date.now() + 60_000).toISOString();
 }
 
+const FORBIDDEN_RETRY_DELAY_MS = 15 * 60 * 1000;
+
 async function errorFor(response: Response) {
   const detail = response.status === 403 ? await response.clone().text().catch(() => "") : "";
   const limited = response.status === 429
     || (response.status === 403 && (response.headers.get("x-ratelimit-remaining") === "0" || !!response.headers.get("retry-after") || /rate limit/i.test(detail)));
+  const forbidden = !limited && (response.status === 401 || response.status === 403);
   const code = limited ? "rate_limited" : response.status >= 500 || response.status === 408 ? "transient" : "http_error";
-  return new GitHubProviderError(code, `GitHub provider request failed with status ${response.status}`, response.status, limited ? retryAt(response) : undefined);
+  const retry = limited ? retryAt(response) : forbidden ? new Date(Date.now() + FORBIDDEN_RETRY_DELAY_MS).toISOString() : undefined;
+  return new GitHubProviderError(code, `GitHub provider request failed with status ${response.status}`, response.status, retry, response.url);
 }
 
 async function jsonFor<T>(response: Response): Promise<T> {
@@ -295,7 +300,7 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
   const checkRunsResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(headSha)}/check-runs?per_page=100`, (page) => page.check_runs ?? []);
   const statusesResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(headSha)}/status?per_page=100`, (page) => page.statuses ?? []);
   for (const result of [reviewsResult, checkRunsResult, statusesResult]) {
-    if (!result.complete) throw new GitHubProviderError(result.errorCode ?? "transient", "GitHub policy input fetch failed", undefined, result.retryAt);
+    if (!result.complete) throw new GitHubProviderError(result.errorCode ?? "transient", "GitHub policy input fetch failed", undefined, result.retryAt, result.cursor ?? undefined);
   }
   const reviewerPermissions = new Map(await Promise.all([...new Set(reviewsResult.items
     .filter((review: any) => ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state?.toUpperCase()) && review.user?.login && review.user?.type !== "Bot")

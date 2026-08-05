@@ -8,7 +8,7 @@ const github = vi.hoisted(() => ({
   getPullRequestPolicyInputs: vi.fn(),
   listPullRequests: vi.fn(),
   GitHubProviderError: class extends Error {
-    constructor(public code: string, message: string, public status?: number, public retryAt?: string) { super(message); }
+    constructor(public code: string, message: string, public status?: number, public retryAt?: string, public endpoint?: string) { super(message); }
   },
 }));
 
@@ -73,6 +73,47 @@ test("retains the last snapshot and marks policy stale on a rate limit", async (
   expect(database.pool.query.mock.calls[2][0]).toContain("policy_stale=true");
   expect(database.pool.query.mock.calls[2][1]).toEqual(["pr-id", "rate_limited", "2026-08-04T12:01:00Z", expect.any(String)]);
   expect(database.pool.query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO pull_request_policy_snapshots"))).toBe(false);
+});
+
+test("retains the last snapshot and marks policy stale on a non-rate-limited 403", async () => {
+  database.pool.query
+    .mockResolvedValueOnce({ rows: [{ id: "pr-id", current_policy_snapshot_id: "old-snapshot", github_owner: "acme", github_repository: "widgets", number: 42, ticket_id: null }] })
+    .mockResolvedValueOnce({ rows: [], rowCount: 1 })
+    .mockResolvedValueOnce({ rows: [], rowCount: 1 });
+  github.getPullRequestPolicyInputs.mockRejectedValue(new github.GitHubProviderError(
+    "http_error", "forbidden", 403, "2026-08-04T12:15:00Z", "https://api.github.com/repos/acme/widgets/branches/main/protection",
+  ));
+
+  await expect(syncPullRequest("pr-id")).rejects.toMatchObject({ code: "http_error", status: 403 });
+
+  expect(database.pool.query.mock.calls[2][0]).toContain("policy_stale=true");
+  expect(database.pool.query.mock.calls[2][1]).toEqual(["pr-id", "http_error", "2026-08-04T12:15:00Z", expect.any(String)]);
+});
+
+test("excludes pull requests still in their retry cooldown from the sync batch", async () => {
+  database.pool.query.mockResolvedValue({ rows: [] });
+
+  await syncOpenPullRequests();
+
+  const select = database.pool.query.mock.calls.find(([sql]) => String(sql).includes("SELECT pr.id FROM pull_requests"));
+  expect(String(select?.[0])).toContain("policy_retry_after");
+});
+
+test("logs the failing endpoint when a per-PR sync fails with a GitHub provider error", async () => {
+  const log = vi.spyOn(console, "error").mockImplementation(() => undefined);
+  database.pool.query.mockImplementation(async (sql: string, values?: unknown[]) => {
+    if (sql.includes("SELECT pr.id FROM pull_requests")) return { rows: [{ id: "pr-1" }] };
+    if (sql.includes("WHERE pr.id=$1")) return { rows: [{ id: values?.[0], github_owner: "acme", github_repository: "widgets", number: 42, ticket_id: null }] };
+    return { rows: [], rowCount: 1 };
+  });
+  github.getPullRequestPolicyInputs.mockRejectedValue(new github.GitHubProviderError(
+    "http_error", "forbidden", 403, "2026-08-04T12:15:00Z", "https://api.github.com/repos/acme/widgets/branches/main/protection",
+  ));
+
+  await syncOpenPullRequests();
+
+  expect(log).toHaveBeenCalledWith(expect.stringContaining("https://api.github.com/repos/acme/widgets/branches/main/protection"), expect.anything());
+  log.mockRestore();
 });
 
 test("rejects a superseded sync instead of replacing newer freshness", async () => {
