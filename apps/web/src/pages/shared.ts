@@ -25,6 +25,46 @@ export function workerHealth(
   return { tone: stale ? "warn" : "ok", label: stale ? "stale" : "healthy", detail };
 }
 
+// PRD G10-F03: dashboards previously read metadata_json->>'turn', a value the
+// worker sets once at run start and never updates again — a run stuck for
+// hours still showed "turn 1/50" as if it were progressing. agent_runs now
+// carries a live heartbeat_at/phase pair (migration 047) that the worker
+// updates on a throttled cadence during execution; this derives a label from
+// that instead, and never fabricates a percentage when turn is unknown.
+export const RUN_STALE_AFTER_MS = 60_000;
+
+export function runProgress(
+  row: { phase: string | null; heartbeat_at: string | Date | null; turn: number | null; max_turns: number | null },
+  now = Date.now(),
+): { label: string; stale: boolean } {
+  if (!row.heartbeat_at) {
+    return { label: row.phase ? `phase ${row.phase} · no heartbeat yet` : "no heartbeat yet", stale: true };
+  }
+  const ageMs = now - new Date(row.heartbeat_at).getTime();
+  const stale = ageMs >= RUN_STALE_AFTER_MS;
+  const phaseLabel = row.phase ? `phase ${row.phase}` : "no phase reported";
+  if (stale) {
+    const ageMinutes = Math.max(1, Math.round(ageMs / 60000));
+    return { label: `${phaseLabel} · no heartbeat for ${ageMinutes} min`, stale: true };
+  }
+  const ageSecs = Math.max(0, Math.round(ageMs / 1000));
+  return { label: `${phaseLabel} · updated ${ageSecs} s ago`, stale: false };
+}
+
+// PRD G10-F03: pull_requests.last_synced_at can silently go stale (sync job
+// failing, GitHub API down) while the UI keeps showing the last cached
+// state as if it were current. Flag rows whose sync age exceeds the
+// threshold instead of presenting stale cache data as live.
+export const PR_STALE_AFTER_MS = 15 * 60_000;
+
+export function prFreshness(lastSyncedAt: string | Date | null, now = Date.now()): { stale: boolean; label: string } {
+  if (!lastSyncedAt) return { stale: true, label: "never synced" };
+  const ageMs = now - new Date(lastSyncedAt).getTime();
+  const stale = ageMs >= PR_STALE_AFTER_MS;
+  const ageMinutes = Math.max(0, Math.round(ageMs / 60000));
+  return { stale, label: `last synced ${ageMinutes} min ago` };
+}
+
 // Shared by both the admin page renderers and the admin API.
 export const validStatuses = new Set([
   "Submitted", "Triage", "Needs Information", "Rejected", "Approved for Planning", "Planning Queued",

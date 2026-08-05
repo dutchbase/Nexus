@@ -60,6 +60,11 @@ const publicationJobTypes = ["pull-request.retry"];
 const aiReviewJobTypes = ["pr.ai_review"];
 const followUpDescriptionJobTypes = ["pr.follow_up_description"];
 const conflictResolutionJobTypes = ["pr.conflict_resolution"];
+// PRD G10-F03: how often runExecution's cancellation poll also pushes a
+// heartbeat_at/phase update onto agent_runs, so long-running runs report
+// live progress instead of only the metadata_json->>'turn' snapshot taken
+// once at run start.
+const RUN_HEARTBEAT_INTERVAL_MS = 15_000;
 // Reported to the `workers` table as this process's heartbeat capabilities
 // (G10-F01) — every job type this worker instance can claim, so the admin
 // UI can show what a healthy worker is actually able to do.
@@ -680,8 +685,17 @@ async function runExecution(job: any, lease: LeaseGuard) {
   const temporary = await mkdtemp(path.join(tmpdir(), "dcc-execution-"));
   const cancellation = new AbortController();
   activeExecutionCancellation = cancellation;
+  let lastPhase: string | null = null;
+  let lastHeartbeatAt = 0;
   const cancellationPoll = setInterval(async () => {
-    const row = (await pool.query("SELECT status FROM agent_runs WHERE id=$1", [runId])).rows[0];
+    const dueForHeartbeat = Date.now() - lastHeartbeatAt >= RUN_HEARTBEAT_INTERVAL_MS;
+    const row = dueForHeartbeat
+      ? (await pool.query(
+          `UPDATE agent_runs SET heartbeat_at=now(), phase=COALESCE($2,phase) WHERE id=$1 RETURNING status`,
+          [runId, lastPhase],
+        )).rows[0]
+      : (await pool.query("SELECT status FROM agent_runs WHERE id=$1", [runId])).rows[0];
+    if (dueForHeartbeat) lastHeartbeatAt = Date.now();
     if (row?.status === "cancellation_requested") cancellation.abort();
   }, 250);
   let sequence = 0;
@@ -720,6 +734,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
         timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 30 * 60 * 1000),
         signal: AbortSignal.any([cancellation.signal, lease.signal]),
         onEvent: async ({ eventType, event }: { eventType: string; event: unknown }) => {
+          lastPhase = eventType;
           usedAgent ||= isAgentToolEvent(eventType, event);
           sequence += 1;
           await lease.run(() => pool.query(

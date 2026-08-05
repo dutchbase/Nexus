@@ -1,4 +1,4 @@
-import { escapeHtml, pool, shortRef, shortRefs } from "./shared.ts";
+import { escapeHtml, pool, runProgress, shortRef, shortRefs } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
@@ -28,9 +28,11 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const canCancel = ["running", "cancellation_requested"].includes(run.status);
     const canRepair = run.error_code === "validation_failed";
     const canRetry = run.ticket_status === "PR Creation Failed";
-    const statusLine = run.status === "timed_out"
+    const progress = isActive ? runProgress({ phase: run.phase, heartbeat_at: run.heartbeat_at, turn: meta.turn ?? null, max_turns: meta.max_turns ?? null }) : null;
+    const statusLine = (run.status === "timed_out"
       ? `Timed out at ${escapeHtml(meta.turn ?? "?")}/${escapeHtml(meta.max_turns ?? "?")} turns`
-      : `${escapeHtml(run.status)}${meta.turn != null ? ` · turn ${escapeHtml(meta.turn)}/${escapeHtml(meta.max_turns ?? "?")}` : ""}`;
+      : `${escapeHtml(run.status)}${meta.turn != null ? ` · turn ${escapeHtml(meta.turn)}/${escapeHtml(meta.max_turns ?? "?")}` : ""}`)
+      + (progress ? ` · ${escapeHtml(progress.label)}` : "");
     const body = `<div class="eyebrow">${escapeHtml(run.ticket_number ?? "")} · ${escapeHtml(run.project_name ?? "")}</div>
       <h1>${shortRef("RUN", run.id)} · ${escapeHtml(run.run_type)}</h1>
       <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
