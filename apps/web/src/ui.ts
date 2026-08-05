@@ -724,7 +724,7 @@ export function publicFormPage(form: any, fields: any[], projects: any[]) {
         const ids=[];
         for(const file of list){
           const upload=new FormData();upload.append("file",file);
-          const result=await fetch("/api/public/uploads",{method:"POST",body:upload});
+          const result=await fetch("/api/public/forms/${escapeHtml(form.slug)}/uploads",{method:"POST",body:upload});
           if(!result.ok){document.querySelector(".error").textContent="Upload geweigerd";return}
           ids.push((await result.json()).upload_id);
         }

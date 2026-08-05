@@ -508,7 +508,7 @@ export function sanitizeFormSettings(settings: any): Record<string, any> {
   };
 }
 
-async function submitPublicForm(request: IncomingMessage, response: ServerResponse, form: any) {
+export async function submitPublicForm(request: IncomingMessage, response: ServerResponse, form: any) {
   const body = await bodyOf(request);
   const fields = await fieldsFor(form.id);
   const honeypot = fields.find((field) => field.field_type === "hidden")?.field_key ?? "website";
@@ -578,8 +578,11 @@ async function submitPublicForm(request: IncomingMessage, response: ServerRespon
       .filter((value) => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value));
     if (uploadIds.length) {
       await client.query(
-        `UPDATE attachments SET ticket_id = $1 WHERE ticket_id IS NULL AND upload_id = ANY($2::uuid[])`,
-        [result.rows[0].id, uploadIds],
+        `UPDATE attachments a SET ticket_id = $1
+         FROM uploads u
+         WHERE a.upload_id = u.id AND a.ticket_id IS NULL AND u.form_id = $3
+           AND u.created_at > now() - interval '1 hour' AND a.upload_id = ANY($2::uuid[])`,
+        [result.rows[0].id, uploadIds, form.id],
       );
     }
     await audit({ actorType: "public", action: "ticket.create", entityType: "ticket", entityId: result.rows[0].id, after: result.rows[0], ip }, client);
@@ -595,7 +598,7 @@ function sniffImage(buffer: Buffer) {
   return null;
 }
 
-async function upload(request: IncomingMessage, response: ServerResponse) {
+export async function upload(request: IncomingMessage, response: ServerResponse, form: any) {
   const contentType = request.headers["content-type"] ?? "";
   const boundary = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType)?.slice(1).find(Boolean);
   if (!boundary) return json(response, 400, { error: "multipart form data required" });
@@ -618,8 +621,8 @@ async function upload(request: IncomingMessage, response: ServerResponse) {
     const originalName = /filename="([^"]*)"/i.exec(raw.subarray(0, headerEnd).toString("utf8"))?.[1] ?? null;
     const row = await inTransaction(async (client) => {
       const upload = (await client.query(
-        `INSERT INTO uploads (storage_path,original_name,media_type,size_bytes) VALUES ($1,$2,$3,$4) RETURNING *`,
-        [staged.storagePath, originalName ? originalName.slice(0, 255) : null, sniffed.mediaType, bytes.length],
+        `INSERT INTO uploads (storage_path,original_name,media_type,size_bytes,form_id) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
+        [staged.storagePath, originalName ? originalName.slice(0, 255) : null, sniffed.mediaType, bytes.length, form.id],
       )).rows[0];
       await client.query(
         `INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,upload_id)
@@ -2301,7 +2304,13 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     const form = await publicForm(decodeURIComponent(submissionMatch[1]));
     return form ? submitPublicForm(request, response, form) : json(response, 404, { error: "form not found" });
   }
-  if (request.method === "POST" && url.pathname === "/api/public/uploads") return upload(request, response);
+  const uploadMatch = url.pathname.match(/^\/api\/public\/forms\/([^/]+)\/uploads$/);
+  if (uploadMatch && request.method === "POST") {
+    const form = await publicForm(decodeURIComponent(uploadMatch[1]));
+    if (!form) return json(response, 404, { error: "form not found" });
+    if (form.settings_json?.allow_image_attachments === false) return json(response, 403, { error: "attachments disabled" });
+    return upload(request, response, form);
+  }
   const publicPageMatch = url.pathname.match(/^\/f\/([^/]+)(\/submitted)?$/);
   if (publicPageMatch && request.method === "GET") {
     const form = await publicForm(decodeURIComponent(publicPageMatch[1]));
