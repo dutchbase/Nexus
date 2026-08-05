@@ -61,7 +61,9 @@ function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: bo
     <p style="font-size:12.5px;color:var(--text3)">The worker rejects API authentication variables; there is no fallback path to the API.</p>
     <div class="eyebrow" style="margin-top:14px">Refused environment variables</div>
     <div style="font-size:12.5px;color:var(--text3);margin-top:8px">Anthropic API, Bedrock, Vertex, and Foundry credentials.</div>
-    <div class="grid two" style="margin-top:14px">${field("Planning max turns", "40")}${field("Planning timeout (min)", "45")}${field("Execution max turns", "150")}${field("Execution timeout (min)", "180")}</div>
+    <div class="eyebrow" style="margin-top:14px">Configuration intent — worker defaults, not verified against GitHub</div>
+    <p style="font-size:12.5px;color:var(--text3);margin-top:4px">Each value is the worker's fallback when a project's config_json does not override it — not a universal fact.</p>
+    <div class="grid two" style="margin-top:10px">${field("Planning max turns", "40")}${field("Planning timeout (min)", "30")}${field("Execution max turns", "50")}${field("Execution timeout (min)", "30")}</div>
   </div></section>`;
 
   const github = `<section class="card">

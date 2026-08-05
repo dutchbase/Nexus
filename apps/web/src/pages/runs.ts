@@ -27,11 +27,18 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     // agent_runs row) rather than overwriting the one it repairs, so a prior
     // attempt's execution log is never hidden or deleted — surface every
     // attempt's log for this ticket here, each linking to its own run's
-    // existing /api/admin/runs/:id/log route via ea.agent_run_id.
+    // existing /api/admin/runs/:id/log route via a.agent_run_id — the
+    // artifact's OWN run id. execution_attempts.agent_run_id is mutated
+    // (last-writer-wins) on every attempt of the same execution_attempt_id
+    // by worker.ts, so it must never be used to build these links or repeat
+    // attempts collapse onto the same (latest) log. a.status is restricted
+    // to the same set the download route accepts, so abandoned/GC'd staged
+    // artifacts never render as dead links.
     const attemptLogs = run.ticket_id ? (await pool.query(
-      `SELECT a.id, a.execution_attempt_id, ea.attempt_number, ea.agent_run_id, a.status, a.created_at
+      `SELECT a.id, a.execution_attempt_id, a.agent_run_id, ea.attempt_number, a.status, a.created_at
        FROM artifacts a JOIN execution_attempts ea ON ea.id = a.execution_attempt_id
-       WHERE a.artifact_type='execution_log' AND ea.ticket_id = $1 ORDER BY ea.attempt_number DESC`,
+       WHERE a.artifact_type='execution_log' AND a.status IN ('staged','finalized') AND ea.ticket_id = $1
+       ORDER BY ea.attempt_number DESC, a.created_at DESC`,
       [run.ticket_id],
     )).rows : [];
     const meta = run.metadata_json ?? {};
