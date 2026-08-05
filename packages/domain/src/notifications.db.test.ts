@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import pg from "pg";
 
-process.env.DATABASE_URL ??= "postgres://unused:unused@127.0.0.1:1/unused";
+process.env.DATABASE_URL = process.env.DCC_TEST_DATABASE_URL ?? "postgres://unused:unused@127.0.0.1:1/unused";
 const { migrate } = await import("../../database/src/migrate.ts");
 const { enqueueNotification, claimNotificationDelivery, failNotificationDelivery } = await import("./notifications.ts");
 
