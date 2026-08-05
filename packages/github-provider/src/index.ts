@@ -300,7 +300,7 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
   const checkRunsResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(headSha)}/check-runs?per_page=100`, (page) => page.check_runs ?? []);
   const statusesResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(headSha)}/status?per_page=100`, (page) => page.statuses ?? []);
   for (const result of [reviewsResult, checkRunsResult, statusesResult]) {
-    if (!result.complete) throw new GitHubProviderError(result.errorCode ?? "transient", "GitHub policy input fetch failed", undefined, result.retryAt);
+    if (!result.complete) throw new GitHubProviderError(result.errorCode ?? "transient", "GitHub policy input fetch failed", undefined, result.retryAt, result.cursor ?? undefined);
   }
   const reviewerPermissions = new Map(await Promise.all([...new Set(reviewsResult.items
     .filter((review: any) => ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state?.toUpperCase()) && review.user?.login && review.user?.type !== "Bot")
