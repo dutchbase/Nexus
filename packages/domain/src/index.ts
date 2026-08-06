@@ -14,7 +14,7 @@ export * from "./pr-conflict-resolution.ts";
 export * from "./follow-up-ticket.ts";
 export * from "./planning-inputs.ts";
 
-export const aiModels = ["fable", "opus", "sonnet", "haiku"] as const;
+export const aiModels = ["fable", "opus", "sonnet", "haiku", "deepseek"] as const;
 export const reasoningLevels = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
 export type AiModel = typeof aiModels[number];
 export type ReasoningLevel = typeof reasoningLevels[number];
@@ -32,6 +32,8 @@ const supportedReasoning: Record<AiModel, readonly ReasoningLevel[]> = {
   sonnet: ["low", "medium", "high", "xhigh"],
   opus: ["low", "medium", "high", "xhigh", "max"],
   fable: reasoningLevels,
+  // deepseek runs via the OpenCode CLI; low/medium → deepseek-chat, high → deepseek-reasoner
+  deepseek: ["low", "medium", "high"],
 };
 
 export class AiConfigurationError extends Error {
