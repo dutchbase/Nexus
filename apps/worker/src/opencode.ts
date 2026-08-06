@@ -30,7 +30,15 @@ export function openCodeConfig(mode: "read-only" | "write") {
   };
 }
 
-export function extractEvent(rawLine: string): any | null {
+// ponytail: OpenCode's -f/--file is a yargs array option that greedily
+// consumes the following positional — the task string MUST come immediately
+// after "run" or it gets parsed as a filename ("Error: File not found:
+// <task>"), verified against the real binary.
+function openCodeArgs(task: string, model: string, promptFile: string): string[] {
+  return ["run", task, "--pure", "--format", "json", "-m", model, "-f", promptFile];
+}
+
+function extractEvent(rawLine: string): any | null {
   const trimmed = rawLine.trim();
   if (!trimmed.startsWith("{")) return null;
   try { return JSON.parse(trimmed); } catch { return null; }
@@ -42,6 +50,7 @@ export function extractEvent(rawLine: string): any | null {
 export function parseOpenCodeEvents(stdout: string): { markdown: string; sessionId: string | null } {
   const texts = new Map<string, string>();
   let sessionId: string | null = null;
+  let anonCounter = 0;
   for (const rawLine of stdout.split("\n")) {
     const event = extractEvent(rawLine);
     if (!event) continue;
@@ -50,16 +59,21 @@ export function parseOpenCodeEvents(stdout: string): { markdown: string; session
       const message = event.error?.data?.message ?? event.error?.name ?? "unknown OpenCode error";
       throw new OpenCodeError(`OpenCode reported an error: ${message}`, "opencode_failed");
     }
-    const stack = [event];
-    while (stack.length) {
-      const node = stack.pop();
+    // FIFO traversal (not a LIFO stack-pop) so multi-text-part ordering within
+    // one event preserves document order.
+    const queue = [event];
+    let head = 0;
+    while (head < queue.length) {
+      const node = queue[head++];
       if (!node || typeof node !== "object") continue;
       if (node.type === "text" && typeof node.text === "string") {
-        texts.set(String(node.id ?? texts.size), node.text);
+        // A real node.id could coincidentally collide with a counter value
+        // (e.g. id "0"); use a namespaced fallback key instead.
+        texts.set(node.id !== undefined && node.id !== null ? String(node.id) : `__anon_${anonCounter++}`, node.text);
         continue;
       }
       for (const value of Object.values(node)) {
-        if (value && typeof value === "object") stack.push(value);
+        if (value && typeof value === "object") queue.push(value);
       }
     }
   }
@@ -79,6 +93,13 @@ async function runOpenCode(input: {
   timeoutMs?: number;
   executable?: string;
   onStdoutChunk?: (chunk: string) => void;
+  // Codes to use when termination is attributable to the caller's abort
+  // signal vs. our own internal timeout. Defaults preserve the pre-existing
+  // (execution-taxonomy-agnostic) behavior used by read-only invocations;
+  // the execution entry point overrides these to the codes worker.ts's
+  // cancel/timeout classification understands.
+  cancelledErrorCode?: string;
+  timeoutErrorCode?: string;
 }): Promise<SpawnResult> {
   const stateDir = await mkdtemp(path.join(tmpdir(), "dcc-opencode-"));
   try {
@@ -108,10 +129,12 @@ async function runOpenCode(input: {
       cwd: input.workingDirectory, env, stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
     let stdout = "";
     let stderr = "";
-    child.stdout.on("data", (chunk) => { stdout += chunk; input.onStdoutChunk?.(String(chunk)); });
-    child.stderr.on("data", (chunk) => { stderr += chunk; });
+    child.stdout.on("data", (chunk: string) => { stdout += chunk; input.onStdoutChunk?.(chunk); });
+    child.stderr.on("data", (chunk: string) => { stderr += chunk; });
     const terminate = (killSignal: NodeJS.Signals) => {
       if (!child.pid) return child.kill(killSignal);
       if (process.platform === "win32") {
@@ -129,8 +152,12 @@ async function runOpenCode(input: {
       killTimer = setTimeout(() => terminate("SIGKILL"), 5_000);
     };
     combined.addEventListener("abort", onAbort, { once: true });
+    if (combined.aborted) onAbort();
+    const timeoutErrorCode = input.timeoutErrorCode ?? "opencode_timeout";
+    const cancelledErrorCode = input.cancelledErrorCode ?? "opencode_failed";
     const exitCode = await new Promise<number>((resolve, reject) => {
       const timedOutNotCancelled = () => timeout.aborted && !input.signal?.aborted;
+      const callerCancelled = () => !timeout.aborted && !!input.signal?.aborted;
       const settle = (fn: () => void) => {
         if (killTimer) clearTimeout(killTimer);
         combined.removeEventListener("abort", onAbort);
@@ -138,13 +165,17 @@ async function runOpenCode(input: {
       };
       child.on("error", (error: NodeJS.ErrnoException) => {
         settle(() => reject(timedOutNotCancelled()
-          ? new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, "opencode_timeout")
-          : new OpenCodeError(`failed to launch OpenCode: ${error.message}`, "opencode_failed")));
+          ? new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, timeoutErrorCode)
+          : callerCancelled()
+            ? new OpenCodeError(`OpenCode was cancelled: ${error.message}`, cancelledErrorCode)
+            : new OpenCodeError(`failed to launch OpenCode: ${error.message}`, "opencode_failed")));
       });
       child.on("close", (code, killSignal) => {
         settle(() => {
           if (timedOutNotCancelled()) {
-            reject(new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, "opencode_timeout"));
+            reject(new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, timeoutErrorCode));
+          } else if (callerCancelled()) {
+            reject(new OpenCodeError("OpenCode was cancelled", cancelledErrorCode));
           } else if (killSignal || code === null) {
             reject(new OpenCodeError(`OpenCode terminated by signal ${killSignal}`, "opencode_failed"));
           } else {
@@ -174,7 +205,7 @@ export async function invokeOpenCodePlanning(input: {
   executable?: string;
 }): Promise<{ markdown: string; sessionId: string | null; exitCode: number }> {
   const result = await runOpenCode({
-    args: ["run", "--pure", "--format", "json", "-m", deepSeekModelFor(input.reasoningLevel), "-f", input.promptFile, input.task],
+    args: openCodeArgs(input.task, deepSeekModelFor(input.reasoningLevel), input.promptFile),
     mode: "read-only",
     workingDirectory: input.workingDirectory,
     apiKey: input.apiKey,
@@ -225,7 +256,7 @@ export async function invokeOpenCodeExecution(input: {
   let caught: unknown;
   try {
     result = await runOpenCode({
-      args: ["run", "--pure", "--format", "json", "-m", deepSeekModelFor(input.reasoningLevel), "-f", input.promptFile, input.task],
+      args: openCodeArgs(input.task, deepSeekModelFor(input.reasoningLevel), input.promptFile),
       mode: "write",
       workingDirectory: input.workingDirectory,
       apiKey: input.apiKey,
@@ -233,6 +264,12 @@ export async function invokeOpenCodeExecution(input: {
       timeoutMs: input.timeoutMs,
       executable: input.executable,
       onStdoutChunk: handleChunk,
+      // worker.ts's cancel/timeout classification for the execution path
+      // matches on these exact codes (mirrors ClaudeExecutionError's code
+      // taxonomy) so admin cancels and timeouts don't surface as generic
+      // "opencode_failed" -> Execution Failed.
+      cancelledErrorCode: "execution_cancelled",
+      timeoutErrorCode: "execution_timeout",
     });
   } catch (err) {
     caught = err;

@@ -30,6 +30,29 @@ describe("parseOpenCodeEvents", () => {
   it("ignores unparseable lines", () => {
     expect(parseOpenCodeEvents(["not-json", textPart("p1", "hi")].join("\n")).markdown).toBe("hi");
   });
+  it("preserves document order for multiple text parts nested in a single event (FIFO, not LIFO)", () => {
+    // A single event whose object contains several nested text parts, in a
+    // key order that would come out reversed under a stack-pop (LIFO) walk.
+    const event = {
+      type: "custom.batch",
+      sessionID: "ses_fifo",
+      properties: {
+        first: { type: "text", id: "a", text: "first" },
+        second: { type: "text", id: "b", text: "second" },
+        third: { type: "text", id: "c", text: "third" },
+      },
+    };
+    expect(parseOpenCodeEvents(line(event)).markdown).toBe("first\n\nsecond\n\nthird");
+  });
+  it("does not collide a real numeric-looking id with the anonymous fallback counter", () => {
+    // An id-less part arriving first would, under the old `texts.size`
+    // fallback, be keyed "0" — the exact key a real id="0" part arriving
+    // second would then independently produce, silently overwriting the
+    // anonymous part's text instead of keeping both.
+    const anon = line({ type: "message.part.updated", sessionID: "ses_x", properties: { part: { type: "text", text: "anonymous" } } });
+    const withId0 = line({ type: "message.part.updated", sessionID: "ses_x", properties: { part: { id: "0", type: "text", text: "real id zero" } } });
+    expect(parseOpenCodeEvents([anon, withId0].join("\n")).markdown).toBe("anonymous\n\nreal id zero");
+  });
 });
 
 describe("deepSeekModelFor", () => {
@@ -80,7 +103,10 @@ describe("invokeOpenCodePlanning", () => {
     });
     expect(result).toEqual({ markdown: "plan body", sessionId: "ses_test", exitCode: 0 });
     const captured = await stub.capture();
-    expect(captured.argv).toEqual(["run", "--pure", "--format", "json", "-m", "deepseek/deepseek-chat", "-f", "/tmp/prompt.md", "Plan ticket T-1"]);
+    // Regression for C1: OpenCode's -f/--file is a yargs array option that
+    // greedily consumes the following positional, so the task string MUST
+    // come immediately after "run" or it gets parsed as a filename.
+    expect(captured.argv).toEqual(["run", "Plan ticket T-1", "--pure", "--format", "json", "-m", "deepseek/deepseek-chat", "-f", "/tmp/prompt.md"]);
     expect(captured.config.permission).toEqual({ "*": "allow", edit: "deny", bash: "deny", webfetch: "deny" });
     expect(captured.env.DEEPSEEK_API_KEY).toBe("sk-ds");
     expect(captured.env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
@@ -132,7 +158,9 @@ describe("invokeOpenCodeExecution", () => {
     expect(seen.map((entry) => entry.eventType))
       .toEqual(["message.part.updated", "message.part.updated", "session.idle"]);
     const captured = await stub.capture();
-    expect(captured.argv[5]).toBe("deepseek/deepseek-reasoner");
+    // Full-argv assertion (not just the model index) to keep argv order
+    // unambiguous — see the C1 regression note in invokeOpenCodePlanning's test.
+    expect(captured.argv).toEqual(["run", "Implement the plan", "--pure", "--format", "json", "-m", "deepseek/deepseek-reasoner", "-f", "/tmp/p.md"]);
     expect(captured.config.permission).toEqual({ "*": "allow" });
     expect(await readFile(logPath, "utf8")).toContain('"session.idle"');
   });
@@ -186,5 +214,39 @@ describe("invokeOpenCodeExecution", () => {
     const logContent = await readFile(logPath, "utf8");
     expect(logContent).toContain('"message.part.updated"');
     expect(logContent).toContain('"error"');
+  });
+
+  // I3: worker.ts classifies admin cancels vs. internal timeouts by matching
+  // on error.code — the execution path must emit "execution_cancelled" /
+  // "execution_timeout" (not the generic "opencode_failed"/"opencode_timeout"
+  // used by the read-only planning/pr-review path) or a cancel surfaces as
+  // "Execution Failed" instead of "Cancelled".
+  it("rejects with execution_timeout when the CLI exceeds timeoutMs", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "opencode-hang-"));
+    const stubPath = path.join(dir, "hang.mjs");
+    await writeFileFs(stubPath, "#!/usr/bin/env node\nsetTimeout(() => {}, 60_000);\n");
+    await chmod(stubPath, 0o755);
+    const logDir = await mkdtemp(path.join(tmpdir(), "opencode-log-"));
+    await expect(invokeOpenCodeExecution({
+      task: "t", promptFile: "/tmp/p.md", reasoningLevel: "low",
+      workingDirectory: tmpdir(), apiKey: "k", executable: stubPath, timeoutMs: 300,
+      logPath: path.join(logDir, "x.log"), onEvent: async () => undefined,
+    })).rejects.toMatchObject({ code: "execution_timeout" });
+  });
+
+  it("rejects with execution_cancelled when the caller's abort signal fires", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "opencode-hang-"));
+    const stubPath = path.join(dir, "hang.mjs");
+    await writeFileFs(stubPath, "#!/usr/bin/env node\nsetTimeout(() => {}, 60_000);\n");
+    await chmod(stubPath, 0o755);
+    const logDir = await mkdtemp(path.join(tmpdir(), "opencode-log-"));
+    const controller = new AbortController();
+    setTimeout(() => controller.abort(), 50);
+    await expect(invokeOpenCodeExecution({
+      task: "t", promptFile: "/tmp/p.md", reasoningLevel: "low",
+      workingDirectory: tmpdir(), apiKey: "k", executable: stubPath, timeoutMs: 60_000,
+      signal: controller.signal,
+      logPath: path.join(logDir, "x.log"), onEvent: async () => undefined,
+    })).rejects.toMatchObject({ code: "execution_cancelled" });
   });
 });

@@ -28,7 +28,7 @@ import { validateProject } from "@dcc/project-config";
 import {
   materializeSkillBundle, skillsForPhase, snapshotSkillSet, type SnapshottedSkill,
 } from "@dcc/skill-registry";
-import { invokeOpenCodeExecution, invokeOpenCodePlanning } from "./opencode.ts";
+import { invokeOpenCodeExecution, invokeOpenCodePlanning, OpenCodeError } from "./opencode.ts";
 import { runPrivateExecution } from "./execution-handoff.ts";
 import { failExecutionPublication, handleExecutionPublicationFailure, prepareExecutionPublication, PublicationError, publishExternalResult, storePublishedPullRequest } from "./execution-publication.ts";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
@@ -443,6 +443,17 @@ async function runExecution(job: any, lease: LeaseGuard) {
     throw new Error("execution gate approved a different plan version");
   }
   const phase = repairing ? "repair" : "execution";
+  // Resolve the engine and fail fast (before anything mutates DB state, e.g.
+  // creating the worktree and marking the attempt 'executing') if the
+  // required credential/auth is missing. This block used to run after the
+  // worktree was created and the attempt flipped to 'executing', which left
+  // the attempt permanently stuck 'executing' on a missing DEEPSEEK_API_KEY
+  // or failed Claude preflight, blocking the ticket forever ("another
+  // execution is already active").
+  const executionAiModel = gate.approvedInputSnapshot.materialInput.models?.[phase];
+  const executionIsDeepSeek = executionAiModel?.model === "deepseek";
+  const executionDeepSeekKey = executionIsDeepSeek ? deepSeekKeyOrThrow() : "";
+  if (!executionIsDeepSeek) await preflightClaudeAuthentication();
   const approvedSnapshot = (await pool.query(
     "SELECT id,ticket_id,skills_json,content_hash FROM skill_snapshots WHERE id=$1 AND ticket_id=$2",
     [ticket.approved_skill_snapshot_id, ticket.id],
@@ -524,9 +535,6 @@ async function runExecution(job: any, lease: LeaseGuard) {
   };
   const approvedInput = approvedExecutionInput(gate.approvedInputSnapshot, phase, details);
   const input = { ...approvedInput, project: { id: ticket.project_id, ...approvedInput.project } };
-  const executionIsDeepSeek = input.ai.model === "deepseek";
-  const executionDeepSeekKey = executionIsDeepSeek ? deepSeekKeyOrThrow() : "";
-  if (!executionIsDeepSeek) await preflightClaudeAuthentication();
   try {
     await lease.assertOwned();
     await inTransaction(async (client) => {
@@ -771,16 +779,24 @@ async function runExecution(job: any, lease: LeaseGuard) {
   } catch (error) {
     if (error instanceof PublicationError) throw error;
     await lease.assertOwned();
-    const executionError = error instanceof ClaudeExecutionError ? error : null;
-    const cancelled = executionError?.code === "execution_cancelled";
+    // Match on the error code regardless of concrete error class: DeepSeek
+    // executions throw OpenCodeError (not ClaudeExecutionError), but both
+    // taxonomies use the same "execution_cancelled"/"execution_timeout"
+    // codes for the execution path so cancels/timeouts classify the same
+    // way for either engine instead of opencode runs falling through to a
+    // generic "execution_failed" -> Execution Failed.
+    const executionErrorCode = error instanceof ClaudeExecutionError || error instanceof OpenCodeError
+      ? error.code : null;
+    const executionExitCode = error instanceof ClaudeExecutionError ? error.exitCode : undefined;
+    const cancelled = executionErrorCode === "execution_cancelled";
     await pool.query(
       `UPDATE agent_runs SET status=$2,finished_at=now(),exit_code=$3,error_code=$4,error_message=$5 WHERE id=$1`,
-      [runId, cancelled ? "cancelled" : "failed", executionError?.exitCode ?? 1,
-        executionError?.code ?? "execution_failed", error instanceof Error ? error.message : "execution failed"],
+      [runId, cancelled ? "cancelled" : "failed", executionExitCode ?? 1,
+        executionErrorCode ?? "execution_failed", error instanceof Error ? error.message : "execution failed"],
     );
     await pool.query(
       "UPDATE execution_attempts SET validation_status=$2,completed_at=now() WHERE id=$1",
-      [attempt.id, cancelled ? "cancelled" : executionError?.code === "execution_timeout" ? "timed_out" : "failed"],
+      [attempt.id, cancelled ? "cancelled" : executionErrorCode === "execution_timeout" ? "timed_out" : "failed"],
     );
     await inTransaction(async (client) => {
       const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
@@ -1454,7 +1470,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
       const remaining = await conflictedFiles(worktree.worktreePath);
       if (remaining.length) {
         await abortMerge(worktree.worktreePath);
-        throw new Error(`Claude left ${remaining.length} unresolved conflict(s): ${remaining.join(", ")}`);
+        throw new Error(`${conflictIsDeepSeek ? "OpenCode" : "Claude"} left ${remaining.length} unresolved conflict(s): ${remaining.join(", ")}`);
       }
       try {
         await assertNoConflictMarkers(worktree.worktreePath, conflicts);
@@ -1642,7 +1658,7 @@ while (!stopping) {
       if (error instanceof LeaseLostError) return;
       if (error instanceof ClaudeAuthError) console.error(`${error.code}: ${error.message}`);
       else console.error(error instanceof Error ? error.message : "job failed");
-      if (error instanceof ClaudeExecutionError && error.code === "execution_cancelled") {
+      if ((error instanceof ClaudeExecutionError || error instanceof OpenCodeError) && error.code === "execution_cancelled") {
         await lease.run(() => pool.query(
           `UPDATE jobs SET status='cancelled',completed_at=now(),claimed_by=NULL,lease_expires_at=NULL,updated_at=now()
            WHERE id=$1 AND status='running' AND claimed_by=$2 AND lease_expires_at > now()`,
