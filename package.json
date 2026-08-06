@@ -8,7 +8,9 @@
     "verify": "tsc --noEmit && vitest run --config vitest.config.ts --reporter=verbose",
     "test:unit": "vitest run --config vitest.config.ts --reporter=verbose",
     "admin:create": "tsx scripts/create-admin.ts",
-    "projects:import": "tsx scripts/import-projects.ts"
+    "projects:import": "tsx scripts/import-projects.ts",
+    "postinstall": "tsx scripts/build-argon2.ts",
+    "build:argon2": "tsx scripts/build-argon2.ts"
   },
   "dependencies": {
     "pg": "8.22.0"
