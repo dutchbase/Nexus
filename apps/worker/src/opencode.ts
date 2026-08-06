@@ -202,8 +202,11 @@ export async function invokeOpenCodeExecution(input: {
   // Serialize onEvent like claude-runner's eventWrites chain: events must land
   // in agent_run_events in order.
   let eventWrites: Promise<void> = Promise.resolve();
+  // Serialize log writes to guarantee they land in order (not interleaved).
+  let logWrites: Promise<void> = Promise.resolve();
   const handleChunk = (chunk: string) => {
-    void appendFile(input.logPath, chunk).catch(() => undefined);
+    // Append log writes through the chain to serialize them
+    logWrites = logWrites.then(() => appendFile(input.logPath, chunk));
     buffered += chunk;
     const lines = buffered.split("\n");
     buffered = lines.pop() ?? "";
@@ -218,18 +221,36 @@ export async function invokeOpenCodeExecution(input: {
         input.onEvent({ eventType: String(event.type ?? "unknown"), event, raw: rawLine }));
     }
   };
-  const result = await runOpenCode({
-    args: ["run", "--pure", "--format", "json", "-m", deepSeekModelFor(input.reasoningLevel), "-f", input.promptFile, input.task],
-    mode: "write",
-    workingDirectory: input.workingDirectory,
-    apiKey: input.apiKey,
-    signal: input.signal,
-    timeoutMs: input.timeoutMs,
-    executable: input.executable,
-    onStdoutChunk: handleChunk,
-  });
-  if (buffered.trim()) handleChunk("\n");
-  await eventWrites;
+  let result: { exitCode: number; stderr: string };
+  try {
+    result = await runOpenCode({
+      args: ["run", "--pure", "--format", "json", "-m", deepSeekModelFor(input.reasoningLevel), "-f", input.promptFile, input.task],
+      mode: "write",
+      workingDirectory: input.workingDirectory,
+      apiKey: input.apiKey,
+      signal: input.signal,
+      timeoutMs: input.timeoutMs,
+      executable: input.executable,
+      onStdoutChunk: handleChunk,
+    });
+  } finally {
+    // Flush any final buffered line and await both chains in all exit paths
+    if (buffered.trim()) {
+      const event = extractEvent(buffered);
+      if (event) {
+        if (event.type === "error" && !streamError) {
+          const message = event.error?.data?.message ?? event.error?.name ?? "unknown OpenCode error";
+          streamError = new OpenCodeError(`OpenCode reported an error: ${message}`, "opencode_failed");
+        }
+        eventWrites = eventWrites.then(() =>
+          input.onEvent({ eventType: String(event.type ?? "unknown"), event, raw: buffered }));
+      }
+      logWrites = logWrites.then(() => appendFile(input.logPath, buffered + "\n"));
+    }
+    // Wait for all events and log writes to complete before resolving or rejecting
+    await eventWrites.catch(() => undefined);
+    await logWrites.catch(() => undefined);
+  }
   if (streamError) throw streamError;
   return { exitCode: result.exitCode, stderr: result.stderr };
 }

@@ -146,4 +146,37 @@ describe("invokeOpenCodeExecution", () => {
       logPath: path.join(logDir, "x.log"), onEvent: async () => undefined,
     })).rejects.toMatchObject({ code: "opencode_failed" });
   });
+
+  it("flushes events and logs on nonzero exit with error event in stream", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "opencode-exit-"));
+    const stubPath = path.join(dir, "exit-stub.mjs");
+    const events = [
+      { type: "message.part.updated", sessionID: "ses_e", properties: { part: { id: "p1", type: "text", text: "partial" } } },
+      { type: "error", sessionID: "ses_e", error: { data: { message: "streaming error occurred" } } },
+    ];
+    await writeFileFs(stubPath, [
+      "#!/usr/bin/env node",
+      "import { writeFileSync, readFileSync } from 'node:fs';",
+      `const config = JSON.parse(readFileSync(process.env.OPENCODE_CONFIG, 'utf8'));`,
+      `const capturePath = process.argv[process.argv.length - 1];`,
+      `for (const event of ${JSON.stringify(events)}) console.log(JSON.stringify(event));`,
+      `writeFileSync(capturePath, 'done');`,
+      `process.exit(2);`,
+    ].join("\n"));
+    await chmod(stubPath, 0o755);
+    const logDir = await mkdtemp(path.join(tmpdir(), "opencode-log-"));
+    const logPath = path.join(logDir, "execution.log");
+    const seen: Array<{ eventType: string }> = [];
+    await expect(invokeOpenCodeExecution({
+      task: "t", promptFile: "/tmp/p.md", reasoningLevel: "low",
+      workingDirectory: tmpdir(), apiKey: "k", executable: stubPath,
+      logPath, onEvent: async (event) => { seen.push({ eventType: event.eventType }); },
+    })).rejects.toMatchObject({ code: "opencode_failed", message: /streaming error occurred/ });
+    // Verify all events were delivered despite nonzero exit
+    expect(seen.map((e) => e.eventType)).toEqual(["message.part.updated", "error"]);
+    // Verify log was written
+    const logContent = await readFile(logPath, "utf8");
+    expect(logContent).toContain('"message.part.updated"');
+    expect(logContent).toContain('"error"');
+  });
 });
