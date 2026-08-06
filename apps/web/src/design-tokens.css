@@ -149,6 +149,9 @@ dialog pre { max-height:60vh;overflow:auto }
   .theme button { min-height:44px }
   .hamburger { display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3.5px;width:44px;height:44px;border:1px solid var(--border);border-radius:4px;background:transparent;cursor:pointer }
   .hamburger span { width:15px;height:1.5px;background:var(--text) }
+  button,.button { min-width:44px }
+  .prs-row { grid-template-columns:1fr 1fr }
+  .prs-row > [data-label]::before { content:attr(data-label);display:block;font-size:11px;color:var(--text3) }
 }
 @media(prefers-reduced-motion:reduce) {
   *,*::before,*::after { animation-duration:.01ms !important;animation-iteration-count:1 !important;transition-duration:.01ms !important;scroll-behavior:auto !important }

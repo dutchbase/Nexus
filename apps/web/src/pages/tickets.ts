@@ -151,7 +151,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
           <span style="margin-left:auto">${createTicket}</span>
         </div>
         <form class="toolbar" id="filters" style="margin-top:16px">
-          <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;flex:1;min-width:600px">
+          <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;flex:1;min-width:min(600px,100%)">
             <input class="search" data-ticket-filter name="search" placeholder="Search ticket number or title…" value="${escapeHtml(search || "")}">
             <select data-ticket-filter name="project_id">
               <option value="">All projects</option>
@@ -183,7 +183,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
         <span style="margin-left:auto">${createTicket}</span>
       </div>
       <form class="toolbar" id="filters" style="margin-top:16px">
-        <div style="display:grid;grid-template-columns:repeat(4,1fr);gap:10px;flex:1;min-width:600px">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:10px;flex:1;min-width:min(600px,100%)">
           <input class="search" data-ticket-filter name="search" placeholder="Search ticket number or title…" value="${escapeHtml(search || "")}">
           <select data-ticket-filter name="project_id">
             <option value="">All projects</option>

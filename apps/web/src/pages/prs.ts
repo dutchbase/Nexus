@@ -193,7 +193,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       // freshly synced one. Label rows whose last_synced_at has aged past
       // PR_STALE_AFTER_MS instead of presenting stale data as current.
       const freshness = prFreshness(item.last_synced_at);
-      return `<div class="ticket-row prs-row" data-pr-id="${item.id}"><a class="pr-row-link" href="${href}" aria-label="Open pull request #${escapeHtml(item.number)}"></a><span class="mono">#${escapeHtml(item.number)}</span><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.project_name)}</span><span class="status ${stateBadge.cls}">${escapeHtml(stateBadge.label)}</span><span class="status ${aiBadge.cls}">${escapeHtml(aiBadge.label)}</span><span>${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}${freshness.stale ? `<span class="status warn">Stale · ${escapeHtml(freshness.label)}</span>` : ""}</span><time>${item.created_at_provider ? escapeHtml(new Date(item.created_at_provider).toLocaleDateString("nl-NL")) : "—"}</time><div class="pr-actions"><a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a></div></div>`;
+      return `<div class="ticket-row prs-row" data-pr-id="${item.id}"><a class="pr-row-link" href="${href}" aria-label="Open pull request #${escapeHtml(item.number)}"></a><span class="mono" data-label="PR">#${escapeHtml(item.number)}</span><strong>${escapeHtml(item.title)}</strong><span data-label="Project">${escapeHtml(item.project_name)}</span><span class="status ${stateBadge.cls}" data-label="Merge status">${escapeHtml(stateBadge.label)}</span><span class="status ${aiBadge.cls}" data-label="AI status">${escapeHtml(aiBadge.label)}</span><span data-label="Conflicts">${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}${freshness.stale ? `<span class="status warn">Stale · ${escapeHtml(freshness.label)}</span>` : ""}</span><time data-label="Created">${item.created_at_provider ? escapeHtml(new Date(item.created_at_provider).toLocaleDateString("nl-NL")) : "—"}</time><div class="pr-actions"><a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a></div></div>`;
     }).join("");
     const tabs = [["all", "All"], ["open", "Open"], ["draft", "Draft"], ["merged", "Merged"], ["closed", "Closed"]] as const;
     const withTab = (value: string) => {
@@ -210,8 +210,8 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <div class="toolbar"><button class="button" type="button" data-sync-prs>Sync all · ${escapeHtml(syncedLabel)}</button></div>
       <div class="toolbar" style="margin-top:14px;justify-content:space-between;flex-wrap:wrap">
         ${tabsNav}
-        <form class="toolbar" style="flex:1;min-width:300px;justify-content:flex-end;flex-wrap:wrap">
-          <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px;flex:1;min-width:280px">
+        <form class="toolbar" style="flex:1;min-width:min(300px,100%);justify-content:flex-end;flex-wrap:wrap">
+          <div style="display:grid;grid-template-columns:2fr 1fr;gap:10px;flex:1;min-width:min(280px,100%)">
             <input class="search" name="search" placeholder="Search title, number or ticket…" value="${escapeHtml(search)}">
             <select name="repository"><option value="">All repositories</option>${repositories.rows.map((row) => `<option value="${escapeHtml(row.repository)}"${repository === row.repository ? " selected" : ""}>${escapeHtml(row.repository)}</option>`).join("")}</select>
           </div>
