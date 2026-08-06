@@ -316,7 +316,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       [decodeURIComponent(ticketMatch[1])],
     )).rows[0];
     if (!ticket) return { status: 404, title: "Ticket not found", body: "<h1>Ticket not found</h1>" };
-    const [notesResult, historyResult, skillsResult, notificationsResult, runsResult, prsResult, planVersionsResult] = await Promise.all([
+    const [notesResult, historyResult, skillsResult, notificationsResult, runsResult, prsResult, planVersionsResult, attachmentsResult] = await Promise.all([
       pool.query("SELECT n.*,u.username FROM ticket_notes n LEFT JOIN users u ON u.id=n.author_id WHERE ticket_id=$1 ORDER BY n.created_at DESC", [ticket.id]),
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
       pool.query(
@@ -349,6 +349,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
          WHERE p.ticket_id=$1 ORDER BY pv.version DESC`,
         [ticket.id],
       ),
+      pool.query("SELECT a.id,u.original_name,u.media_type,u.size_bytes FROM attachments a JOIN uploads u ON u.id=a.upload_id WHERE a.ticket_id=$1 ORDER BY a.created_at", [ticket.id]),
     ]);
     const notes = notesResult.rows;
     const history = historyResult.rows;
@@ -388,6 +389,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       </div></section>
       <section class="card"><div class="card-head">Internal notes</div><div class="card-body notes">${notes.map((note) => `<div class="note"><strong>${escapeHtml(note.username ?? "Administrator")}</strong><p>${escapeHtml(note.body)}</p></div>`).join("") || "<p>No notes yet.</p>"}<form data-notes-form><label class="field"><span>Add an internal note…</span><textarea name="body" placeholder="Add an internal note…" rows="3"></textarea></label><button class="button" type="submit">Save note</button><p class="error" role="alert"></p></form></div></section></div>
       <div class="grid rail"><section class="card"><div class="card-head">Ticket</div><div class="card-body"><dl><dt>Project</dt><dd>${escapeHtml(ticket.project_name)}</dd><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Source form</dt><dd>${escapeHtml(ticket.form_name ?? "—")}</dd><dt>Created</dt><dd>${new Date(ticket.created_at).toLocaleDateString("nl-NL")}</dd></dl></div></section>
+      <section class="card"><div class="card-head">Attachments</div><div class="card-body">${attachmentsResult.rows.map((a) => `<p><a href="/admin/attachments/${a.id}">${escapeHtml(a.original_name ?? "attachment")}</a> <span class="mono">${escapeHtml(a.media_type)} · ${Math.round(a.size_bytes / 1024)} kB</span></p>`).join("") || "<p>No attachments.</p>"}</div></section>
       ${approvalGatesCard(ticket)}
       <section class="card"><div class="card-head">Danger zone</div><div class="card-body"><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reject-ticket${["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : " disabled"} title="${["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : "Can only reject early-stage tickets"}">Reject</button></p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-cancel-ticket${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : " disabled"} title="${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : "Can only cancel in-progress tickets"}">Cancel</button></p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-archive-ticket${["Completed", "Merged", "Rejected", "Cancelled"].includes(ticket.status) ? "" : " disabled"} title="${["Completed", "Merged", "Rejected", "Cancelled"].includes(ticket.status) ? "" : "Can only archive finished tickets"}">Archive</button></p></div></section></div>`;
     const aiPanel = `<section class="card"><div class="card-head">AI configuration</div><div class="card-body">
