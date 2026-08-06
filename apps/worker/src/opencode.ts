@@ -221,7 +221,8 @@ export async function invokeOpenCodeExecution(input: {
         input.onEvent({ eventType: String(event.type ?? "unknown"), event, raw: rawLine }));
     }
   };
-  let result: { exitCode: number; stderr: string };
+  let result: { exitCode: number; stderr: string } | undefined;
+  let caught: unknown;
   try {
     result = await runOpenCode({
       args: ["run", "--pure", "--format", "json", "-m", deepSeekModelFor(input.reasoningLevel), "-f", input.promptFile, input.task],
@@ -233,6 +234,8 @@ export async function invokeOpenCodeExecution(input: {
       executable: input.executable,
       onStdoutChunk: handleChunk,
     });
+  } catch (err) {
+    caught = err;
   } finally {
     // Flush any final buffered line and await both chains in all exit paths
     if (buffered.trim()) {
@@ -251,6 +254,8 @@ export async function invokeOpenCodeExecution(input: {
     await eventWrites.catch(() => undefined);
     await logWrites.catch(() => undefined);
   }
+  // Prefer streamError over generic exit error; otherwise throw caught exception
   if (streamError) throw streamError;
-  return { exitCode: result.exitCode, stderr: result.stderr };
+  if (caught) throw caught;
+  return { exitCode: result!.exitCode, stderr: result!.stderr };
 }

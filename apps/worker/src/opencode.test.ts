@@ -167,11 +167,19 @@ describe("invokeOpenCodeExecution", () => {
     const logDir = await mkdtemp(path.join(tmpdir(), "opencode-log-"));
     const logPath = path.join(logDir, "execution.log");
     const seen: Array<{ eventType: string }> = [];
-    await expect(invokeOpenCodeExecution({
-      task: "t", promptFile: "/tmp/p.md", reasoningLevel: "low",
-      workingDirectory: tmpdir(), apiKey: "k", executable: stubPath,
-      logPath, onEvent: async (event) => { seen.push({ eventType: event.eventType }); },
-    })).rejects.toMatchObject({ code: "opencode_failed", message: /streaming error occurred/ });
+    let thrownError: unknown;
+    try {
+      await invokeOpenCodeExecution({
+        task: "t", promptFile: "/tmp/p.md", reasoningLevel: "low",
+        workingDirectory: tmpdir(), apiKey: "k", executable: stubPath,
+        logPath, onEvent: async (event) => { seen.push({ eventType: event.eventType }); },
+      });
+    } catch (err) {
+      thrownError = err;
+    }
+    expect(thrownError).toBeInstanceOf(Error);
+    expect((thrownError as any).code).toBe("opencode_failed");
+    expect((thrownError as Error).message).toMatch(/streaming error occurred/);
     // Verify all events were delivered despite nonzero exit
     expect(seen.map((e) => e.eventType)).toEqual(["message.part.updated", "error"]);
     // Verify log was written
