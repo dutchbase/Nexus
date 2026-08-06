@@ -51,7 +51,7 @@ describe("openCodeConfig", () => {
 import { mkdtemp, writeFile as writeFileFs, chmod, readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { invokeOpenCodePlanning } from "./opencode.ts";
+import { invokeOpenCodePlanning, invokeOpenCodeExecution } from "./opencode.ts";
 
 // Stub "opencode" binary: records argv+env+cwd, prints fixture NDJSON events.
 async function makeStub(events: unknown[]) {
@@ -109,5 +109,41 @@ describe("invokeOpenCodePlanning", () => {
       task: "t", promptFile: "/tmp/p.md", reasoningLevel: "low",
       workingDirectory: tmpdir(), apiKey: "k", executable: stubPath, timeoutMs: 300,
     })).rejects.toMatchObject({ code: "opencode_timeout" });
+  });
+});
+
+describe("invokeOpenCodeExecution", () => {
+  it("streams events to onEvent, appends raw output to the log, uses write config", async () => {
+    const events = [
+      { type: "message.part.updated", sessionID: "ses_e", properties: { part: { id: "p1", type: "tool", tool: "bash" } } },
+      { type: "message.part.updated", sessionID: "ses_e", properties: { part: { id: "p2", type: "text", text: "done" } } },
+      { type: "session.idle", sessionID: "ses_e" },
+    ];
+    const stub = await makeStub(events);
+    const logDir = await mkdtemp(path.join(tmpdir(), "opencode-log-"));
+    const logPath = path.join(logDir, "execution.log");
+    const seen: Array<{ eventType: string }> = [];
+    const result = await invokeOpenCodeExecution({
+      task: "Implement the plan", promptFile: "/tmp/p.md", reasoningLevel: "high",
+      workingDirectory: tmpdir(), apiKey: "k", executable: stub.stubPath, logPath,
+      onEvent: async (event) => { seen.push({ eventType: event.eventType }); },
+    });
+    expect(result.exitCode).toBe(0);
+    expect(seen.map((entry) => entry.eventType))
+      .toEqual(["message.part.updated", "message.part.updated", "session.idle"]);
+    const captured = await stub.capture();
+    expect(captured.argv[5]).toBe("deepseek/deepseek-reasoner");
+    expect(captured.config.permission).toEqual({ "*": "allow" });
+    expect(await readFile(logPath, "utf8")).toContain('"session.idle"');
+  });
+
+  it("rejects with opencode_failed when the stream contains an error event", async () => {
+    const stub = await makeStub([{ type: "error", sessionID: "ses_e", error: { data: { message: "provider exploded" } } }]);
+    const logDir = await mkdtemp(path.join(tmpdir(), "opencode-log-"));
+    await expect(invokeOpenCodeExecution({
+      task: "t", promptFile: "/tmp/p.md", reasoningLevel: "low",
+      workingDirectory: tmpdir(), apiKey: "k", executable: stub.stubPath,
+      logPath: path.join(logDir, "x.log"), onEvent: async () => undefined,
+    })).rejects.toMatchObject({ code: "opencode_failed" });
   });
 });

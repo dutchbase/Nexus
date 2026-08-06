@@ -30,7 +30,7 @@ export function openCodeConfig(mode: "read-only" | "write") {
   };
 }
 
-function extractEvent(rawLine: string): any | null {
+export function extractEvent(rawLine: string): any | null {
   const trimmed = rawLine.trim();
   if (!trimmed.startsWith("{")) return null;
   try { return JSON.parse(trimmed); } catch { return null; }
@@ -183,4 +183,53 @@ export async function invokeOpenCodePlanning(input: {
     executable: input.executable,
   });
   return { ...parseOpenCodeEvents(result.stdout), exitCode: result.exitCode };
+}
+
+export async function invokeOpenCodeExecution(input: {
+  task: string;
+  promptFile: string;
+  reasoningLevel: string;
+  workingDirectory: string;
+  apiKey: string;
+  logPath: string;
+  onEvent: (event: { eventType: string; event: unknown; raw: string }) => Promise<void>;
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  executable?: string;
+}): Promise<{ exitCode: number; stderr: string }> {
+  let buffered = "";
+  let streamError: OpenCodeError | null = null;
+  // Serialize onEvent like claude-runner's eventWrites chain: events must land
+  // in agent_run_events in order.
+  let eventWrites: Promise<void> = Promise.resolve();
+  const handleChunk = (chunk: string) => {
+    void appendFile(input.logPath, chunk).catch(() => undefined);
+    buffered += chunk;
+    const lines = buffered.split("\n");
+    buffered = lines.pop() ?? "";
+    for (const rawLine of lines) {
+      const event = extractEvent(rawLine);
+      if (!event) continue;
+      if (event.type === "error" && !streamError) {
+        const message = event.error?.data?.message ?? event.error?.name ?? "unknown OpenCode error";
+        streamError = new OpenCodeError(`OpenCode reported an error: ${message}`, "opencode_failed");
+      }
+      eventWrites = eventWrites.then(() =>
+        input.onEvent({ eventType: String(event.type ?? "unknown"), event, raw: rawLine }));
+    }
+  };
+  const result = await runOpenCode({
+    args: ["run", "--pure", "--format", "json", "-m", deepSeekModelFor(input.reasoningLevel), "-f", input.promptFile, input.task],
+    mode: "write",
+    workingDirectory: input.workingDirectory,
+    apiKey: input.apiKey,
+    signal: input.signal,
+    timeoutMs: input.timeoutMs,
+    executable: input.executable,
+    onStdoutChunk: handleChunk,
+  });
+  if (buffered.trim()) handleChunk("\n");
+  await eventWrites;
+  if (streamError) throw streamError;
+  return { exitCode: result.exitCode, stderr: result.stderr };
 }
