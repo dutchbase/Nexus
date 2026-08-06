@@ -775,7 +775,7 @@ async function counts() {
   return row;
 }
 
-async function adminHtml(request: IncomingMessage, response: ServerResponse, url: URL) {
+export async function adminHtml(request: IncomingMessage, response: ServerResponse, url: URL) {
   const session = await sessionFor(request);
   if (!session) {
     response.writeHead(302, { location: "/login" });
@@ -788,13 +788,17 @@ async function adminHtml(request: IncomingMessage, response: ServerResponse, url
       [attachmentMatch[1]],
     )).rows[0];
     if (!row) return html(response, 404, "<h1>Not found</h1>");
-    const content = await readArtifact(dataRoot, row.storage_path).catch(() => readArtifact(legacyDataRoot, row.storage_path));
-    response.writeHead(200, {
-      "content-type": row.media_type,
-      "content-disposition": `attachment; filename="${(row.original_name ?? "attachment").replace(/[^\w. -]/g, "_")}"`,
-      ...securityHeaders(),
-    });
-    return response.end(content);
+    try {
+      const content = await readArtifact(dataRoot, row.storage_path).catch(() => readArtifact(legacyDataRoot, row.storage_path));
+      response.writeHead(200, {
+        "content-type": row.media_type,
+        "content-disposition": `attachment; filename="${(row.original_name ?? "attachment").replace(/[^\w. -]/g, "_")}"`,
+        ...securityHeaders(),
+      });
+      return response.end(content);
+    } catch {
+      return html(response, 404, "<h1>Not found</h1>");
+    }
   }
   const metrics = await counts();
   const pageModules = [

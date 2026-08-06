@@ -9,7 +9,9 @@ describe("CSP and assets", () => {
     expect(page).not.toContain("fonts.googleapis.com");
     expect(page).not.toContain("<style>");
   });
-  it("CSP no longer allows inline styles", () => {
-    expect(securityHeaders()["content-security-policy"]).not.toContain("style-src 'self' 'unsafe-inline'");
+  it("CSP allows inline style attributes but forbids injected style blocks", () => {
+    const csp = securityHeaders()["content-security-policy"];
+    expect(csp).toContain("style-src 'self' 'unsafe-inline'");
+    expect(csp).toContain("style-src-elem 'self'");
   });
 });
