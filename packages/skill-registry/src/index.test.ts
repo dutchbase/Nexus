@@ -18,6 +18,27 @@ async function fixture() {
 
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
+test("anchors relative skill roots to the repository when the worker changes cwd", async () => {
+  const originalCwd = process.cwd();
+  const originalSkillsRoot = process.env.DCC_SKILLS_ROOT;
+  try {
+    process.env.DCC_SKILLS_ROOT = ".";
+    process.chdir(path.join(originalCwd, "apps", "worker"));
+
+    const snapshot = await snapshotSkillSet([{
+      id: "writing-plans", slug: "writing-plans", name: "Writing Plans",
+      filesystem_path: "skills/vendor/superpowers/writing-plans/SKILL.md", enabled: true, version: null,
+      resolution_sources: ["phase_required"],
+    }], ["planning"]);
+
+    expect(Buffer.from(snapshot.skills[0]?.files.find((file) => file.path === "SKILL.md")?.content_base64 ?? "", "base64").toString("utf8")).toContain("# Writing Plans");
+  } finally {
+    process.chdir(originalCwd);
+    if (originalSkillsRoot === undefined) delete process.env.DCC_SKILLS_ROOT;
+    else process.env.DCC_SKILLS_ROOT = originalSkillsRoot;
+  }
+});
+
 test("snapshots phase metadata, keeps legacy skills in every phase, and materializes local and vendored skills", async () => {
   const root = await fixture();
   const skills: ResolvedSkill[] = [
