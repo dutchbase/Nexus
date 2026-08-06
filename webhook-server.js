@@ -33,8 +33,7 @@ function readConfig(env = process.env) {
 
 function createWebhook({ config = readConfig(), store = deployments, pool = null, fetchFn = fetch, spawnFn = spawn, fsModule = fs, isAliveFn = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } }, isCurrentReleaseFn = (markerSha) => {
   try {
-    const currentRelease = fsModule.realpathSync(config.currentReleaseLink);
-    return currentRelease === fsModule.realpathSync(process.cwd()) && path.basename(currentRelease) === markerSha;
+    return path.basename(fsModule.realpathSync(config.currentReleaseLink)) === markerSha;
   } catch { return false; }
 }, logger = console } = {}) {
   if (!config.secret || !config.protectedBranch) throw new Error('WEBHOOK_SECRET and DEPLOY_PROTECTED_BRANCH are required');
