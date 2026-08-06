@@ -28,7 +28,7 @@ import { validateProject } from "@dcc/project-config";
 import {
   materializeSkillBundle, skillsForPhase, snapshotSkillSet, type SnapshottedSkill,
 } from "@dcc/skill-registry";
-import { invokeOpenCodePlanning } from "./opencode.ts";
+import { invokeOpenCodeExecution, invokeOpenCodePlanning } from "./opencode.ts";
 import { runPrivateExecution } from "./execution-handoff.ts";
 import { failExecutionPublication, handleExecutionPublicationFailure, prepareExecutionPublication, PublicationError, publishExternalResult, storePublishedPullRequest } from "./execution-publication.ts";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
@@ -433,7 +433,6 @@ async function runPlanning(job: any, lease: LeaseGuard) {
 }
 
 async function runExecution(job: any, lease: LeaseGuard) {
-  await preflightClaudeAuthentication();
   const repairing = job.type === "execution.repair";
   const ticket = (await pool.query("SELECT * FROM tickets WHERE id=$1", [job.payload_json.ticket_id])).rows[0];
   if (!ticket) throw new Error("ticket not found");
@@ -525,6 +524,9 @@ async function runExecution(job: any, lease: LeaseGuard) {
   };
   const approvedInput = approvedExecutionInput(gate.approvedInputSnapshot, phase, details);
   const input = { ...approvedInput, project: { id: ticket.project_id, ...approvedInput.project } };
+  const executionIsDeepSeek = input.ai.model === "deepseek";
+  const executionDeepSeekKey = executionIsDeepSeek ? deepSeekKeyOrThrow() : "";
+  if (!executionIsDeepSeek) await preflightClaudeAuthentication();
   try {
     await lease.assertOwned();
     await inTransaction(async (client) => {
@@ -600,44 +602,76 @@ async function runExecution(job: any, lease: LeaseGuard) {
     const executionBaseCommit = worktree.baseCommit ?? attempt.base_commit;
     if (!executionBaseCommit) throw new Error("execution attempt base commit is unavailable");
     await lease.assertOwned();
-    const result = await runPrivateExecution({
-      worktreePath: worktree.worktreePath,
-      baseCommit: executionBaseCommit,
-      promptFile,
-      skillBundleDir: skillBundle.additionalDirectory,
-      invocation: {
-        task: [
-          repairing ? "Repair the existing implementation for ticket " + ticket.ticket_number + "." : "Implement the approved plan for ticket " + ticket.ticket_number + ".",
-          "Invoke ponytail:ponytail and superpowers:subagent-driven-development.",
-          "Use PLAN_FILE=.git/dcc-support/skills/execution-plan.md as the approved execution plan.",
-          "Choose explicit least-capable subagents and stop after local final review.",
-        ].join(" "),
-        sessionId,
-        model: input.ai.model,
-        effort: input.ai.reasoning_level,
-        pluginDirectories: skillBundle.pluginDirectories.map((directory) =>
-          path.join(".git/dcc-support/skills", path.relative(skillBundle.additionalDirectory, directory))),
-        maxTurns: Number(input.project.config_json?.execution_max_turns ?? 50),
-        oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
-        scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
-        logPath: stagedLog.stagedPath,
-        timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 30 * 60 * 1000),
-        signal: AbortSignal.any([cancellation.signal, lease.signal]),
-        onEvent: async ({ eventType, event }: { eventType: string; event: unknown }) => {
-          lastPhase = eventType;
-          usedAgent ||= isAgentToolEvent(eventType, event);
-          sequence += 1;
-          await lease.run(() => pool.query(
-            `INSERT INTO agent_run_events (agent_run_id,sequence,event_type,event_json)
-             VALUES ($1,$2,$3,$4)`,
-            [runId, sequence, eventType, event],
-          ));
-        },
-      },
-      invoke: invokeExecutionClaude,
-    });
+    const result = executionIsDeepSeek
+      ? await runPrivateExecution({
+          worktreePath: worktree.worktreePath,
+          baseCommit: executionBaseCommit,
+          promptFile,
+          skillBundleDir: skillBundle.additionalDirectory,
+          invocation: {
+            task: [
+              repairing ? "Repair the existing implementation for ticket " + ticket.ticket_number + "." : "Implement the approved plan for ticket " + ticket.ticket_number + ".",
+              "Use PLAN_FILE=.git/dcc-support/skills/execution-plan.md as the approved execution plan.",
+              "Follow the attached instructions exactly, keep changes minimal, and run the project's tests before finishing.",
+            ].join(" "),
+            reasoningLevel: input.ai.reasoning_level,
+            apiKey: executionDeepSeekKey,
+            logPath: stagedLog.stagedPath,
+            timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 30 * 60 * 1000),
+            signal: AbortSignal.any([cancellation.signal, lease.signal]),
+            onEvent: async ({ eventType, event }: { eventType: string; event: unknown }) => {
+              lastPhase = eventType;
+              sequence += 1;
+              await lease.run(() => pool.query(
+                `INSERT INTO agent_run_events (agent_run_id,sequence,event_type,event_json)
+                 VALUES ($1,$2,$3,$4)`,
+                [runId, sequence, eventType, event],
+              ));
+            },
+          },
+          invoke: invokeOpenCodeExecution,
+        })
+      : await runPrivateExecution({
+          worktreePath: worktree.worktreePath,
+          baseCommit: executionBaseCommit,
+          promptFile,
+          skillBundleDir: skillBundle.additionalDirectory,
+          invocation: {
+            task: [
+              repairing ? "Repair the existing implementation for ticket " + ticket.ticket_number + "." : "Implement the approved plan for ticket " + ticket.ticket_number + ".",
+              "Invoke ponytail:ponytail and superpowers:subagent-driven-development.",
+              "Use PLAN_FILE=.git/dcc-support/skills/execution-plan.md as the approved execution plan.",
+              "Choose explicit least-capable subagents and stop after local final review.",
+            ].join(" "),
+            sessionId,
+            model: input.ai.model,
+            effort: input.ai.reasoning_level,
+            pluginDirectories: skillBundle.pluginDirectories.map((directory) =>
+              path.join(".git/dcc-support/skills", path.relative(skillBundle.additionalDirectory, directory))),
+            maxTurns: Number(input.project.config_json?.execution_max_turns ?? 50),
+            oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
+            scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
+            logPath: stagedLog.stagedPath,
+            timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 30 * 60 * 1000),
+            signal: AbortSignal.any([cancellation.signal, lease.signal]),
+            onEvent: async ({ eventType, event }: { eventType: string; event: unknown }) => {
+              lastPhase = eventType;
+              usedAgent ||= isAgentToolEvent(eventType, event);
+              sequence += 1;
+              await lease.run(() => pool.query(
+                `INSERT INTO agent_run_events (agent_run_id,sequence,event_type,event_json)
+                 VALUES ($1,$2,$3,$4)`,
+                [runId, sequence, eventType, event],
+              ));
+            },
+          },
+          invoke: invokeExecutionClaude,
+        });
     await lease.assertOwned();
-    assertExecutionPublicationGate(repairing, usedAgent);
+    // ponytail: the Agent-tool publication gate encodes a Claude-specific
+    // quality bar (forced subagent use); OpenCode runs are gated by the same
+    // downstream validation (worktree checks + validation commands) instead.
+    if (!executionIsDeepSeek) assertExecutionPublicationGate(repairing, usedAgent);
     await pool.query(
       `UPDATE agent_runs
        SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3 WHERE id=$1`,
@@ -1304,7 +1338,6 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
   let runId: string | null = null;
   try {
     await lease.assertOwned();
-    await preflightClaudeAuthentication();
 
     const pullRequest = (
       await pool.query("SELECT * FROM pull_requests WHERE id=$1", [payload.pull_request_id])
@@ -1316,6 +1349,9 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
     const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
     const model = payload.model ?? settings.default_model;
     const reasoningLevel = payload.reasoning_level ?? settings.default_reasoning_level;
+    const conflictIsDeepSeek = model === "deepseek";
+    const conflictDeepSeekKey = conflictIsDeepSeek ? deepSeekKeyOrThrow() : "";
+    if (!conflictIsDeepSeek) await preflightClaudeAuthentication();
 
     const worktree = await createConflictResolutionWorktree({
       repositoryPath: project.repository_path,
@@ -1382,23 +1418,35 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
       await writeFile(promptFile, prompt, { flag: "wx" });
 
       await lease.assertOwned();
-      const result = await invokeExecutionClaude({
-        task: `Resolve the merge conflicts in PR #${pullRequest.number} in ${pullRequest.repository}.`,
-        sessionId,
-        model,
-        effort: reasoningLevel,
-        promptFile,
-        skillBundleDir: temporary,
-        workingDirectory: worktree.worktreePath,
-        executionDirectory: worktree.worktreePath,
-        logPath: path.join(temporary, "conflict-resolution.log"),
-        timeoutMs: 30 * 60 * 1000,
-        onEvent: async () => undefined,
-        allowedWritePaths: conflicts,
-        maxTurns: 10,
-        oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
-        signal: lease.signal,
-      });
+      const result = conflictIsDeepSeek
+        ? await invokeOpenCodeExecution({
+            task: `Resolve the merge conflicts in PR #${pullRequest.number} in ${pullRequest.repository}. Edit ONLY the conflicted files listed in the attached instructions; remove every conflict marker; do not change unrelated code.`,
+            promptFile,
+            reasoningLevel,
+            workingDirectory: worktree.worktreePath,
+            apiKey: conflictDeepSeekKey,
+            logPath: path.join(temporary, "conflict-resolution.log"),
+            timeoutMs: 30 * 60 * 1000,
+            onEvent: async () => undefined,
+            signal: lease.signal,
+          })
+        : await invokeExecutionClaude({
+            task: `Resolve the merge conflicts in PR #${pullRequest.number} in ${pullRequest.repository}.`,
+            sessionId,
+            model,
+            effort: reasoningLevel,
+            promptFile,
+            skillBundleDir: temporary,
+            workingDirectory: worktree.worktreePath,
+            executionDirectory: worktree.worktreePath,
+            logPath: path.join(temporary, "conflict-resolution.log"),
+            timeoutMs: 30 * 60 * 1000,
+            onEvent: async () => undefined,
+            allowedWritePaths: conflicts,
+            maxTurns: 10,
+            oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
+            signal: lease.signal,
+          });
       await lease.assertOwned();
       await pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]);
 
