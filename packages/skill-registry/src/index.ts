@@ -101,8 +101,9 @@ function withinRoot(root: string, target: string) {
 }
 
 async function filesUnderSkill(skillPath: string, skillsRoot: string) {
-  const absoluteFile = path.isAbsolute(skillPath) ? path.normalize(skillPath) : path.resolve(skillsRoot, skillPath);
-  if (!path.isAbsolute(skillPath) && !withinRoot(path.resolve(skillsRoot), absoluteFile)) {
+  const absoluteRoot = path.resolve(REPO_ROOT, skillsRoot);
+  const absoluteFile = path.isAbsolute(skillPath) ? path.normalize(skillPath) : path.resolve(absoluteRoot, skillPath);
+  if (!path.isAbsolute(skillPath) && !withinRoot(absoluteRoot, absoluteFile)) {
     throw new SkillResolutionError(skillPath, "missing");
   }
   const root = path.dirname(absoluteFile);

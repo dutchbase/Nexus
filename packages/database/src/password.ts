@@ -1,10 +1,19 @@
-import { execFileSync, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
-import { tmpdir } from "node:os";
 import { fileURLToPath } from "node:url";
-const binary = join(tmpdir(), `dcc-argon2-helper-${process.pid}`);
-const source = join(dirname(fileURLToPath(import.meta.url)), "..", "native", "argon2-helper.c");
-execFileSync("gcc", [source, "-O2", "-Wl,-l:libargon2.so.1", "-o", binary], { stdio: "ignore" });
+
+const defaultBinary = join(dirname(fileURLToPath(import.meta.url)), "..", "native", "build", "argon2-helper");
+
+function ensureBinary(): string {
+  const binary = process.env.DCC_ARGON2_HELPER_PATH ?? defaultBinary;
+  if (!existsSync(binary)) {
+    throw new Error(
+      `Argon2 helper binary not found at ${binary}. Run \`pnpm build:argon2\` (requires gcc and libargon2) or set DCC_ARGON2_HELPER_PATH to a prebuilt binary.`,
+    );
+  }
+  return binary;
+}
 
 const passwordError = "Password must be 1-4096 UTF-8 bytes without NUL, CR, or LF";
 
@@ -14,6 +23,7 @@ export function validatePassword(password: string) {
 }
 
 function execute(mode: "hash" | "verify", input: string, encoded?: string) {
+  const binary = ensureBinary();
   return new Promise<string>((resolve, reject) => {
     const child = spawn(binary, encoded ? [mode, encoded] : [mode], { stdio: ["pipe", "pipe", "ignore"] });
     let output = "";

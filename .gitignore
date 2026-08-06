@@ -15,3 +15,4 @@ test-results/
 .deploy-current
 .deploy-current.next
 .gstack/
+packages/database/native/build/

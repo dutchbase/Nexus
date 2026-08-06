@@ -9,17 +9,17 @@ import { promisify } from "node:util";
 import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
 import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
-  buildExecutionPrompt, buildPlanningPrompt, checkPlanApprovalGate, enqueueJob,
-  globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, promptContentHash, PullRequestMergeError,
-  rejectPlanDecision, requestPlanRevisionDecision, requireApprovalPrompt, resolveAiConfiguration, retryNotificationDelivery, setPullRequestTicketStatus,
-  validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
+  buildExecutionPrompt, checkPlanApprovalGate, enqueueJob,
+  globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError,
+  rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
+  unionSkills, validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
 import {
   mergeNotificationConfiguration, parseNotificationConfiguration, parseNotificationConfigurationPatch,
   safeNotificationProvider,
 } from "../../../packages/notification-provider/src/index.ts";
 import {
-  resolveSkills, snapshotSkillSet, snapshotSkills, SkillResolutionError, type ResolutionSource, type SkillCandidate,
+  resolveSkills, snapshotSkillSet, snapshotSkills, SkillResolutionError,
 } from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
 import { normalizeAgentStartPath, validateAgentStartPath, validateProject } from "@dcc/project-config";
@@ -76,68 +76,6 @@ async function terminalRerunSource(client: any, metadata: any) {
   return id;
 }
 
-function ticketAiConfiguration(ticket: any) {
-  return {
-    default: { model: ticket.default_model, reasoning_level: ticket.default_reasoning_level },
-    planning: { model: ticket.planning_model, reasoning_level: ticket.planning_reasoning_level },
-    execution: { model: ticket.execution_model, reasoning_level: ticket.execution_reasoning_level },
-    repair: { model: ticket.repair_model, reasoning_level: ticket.repair_reasoning_level },
-  };
-}
-
-function projectAiConfiguration(project: any) {
-  const ai = project.config_json?.ai ?? {};
-  return {
-    default: { model: ai.default_model, reasoning_level: ai.default_reasoning_level },
-    planning: ai.planning,
-    execution: ai.execution,
-    repair: ai.repair,
-  };
-}
-
-function resolvedAiFor(ticket: any, project: any, phase: AiPhase) {
-  return resolveAiConfiguration({
-    phase,
-    system: { default: { model: "sonnet", reasoning_level: "high" } },
-    project: projectAiConfiguration(project),
-    ticket: ticketAiConfiguration(ticket),
-  });
-}
-
-async function skillCandidates(ticket: any, phase: AiPhase, client: any = pool): Promise<SkillCandidate[]> {
-  const rows = (await client.query(
-    `SELECT resolved.* FROM (
-       SELECT s.*, 'global_mandatory'::text source, 1 source_order, NULL::boolean allow_ticket_override
-       FROM skills s WHERE COALESCE((s.configuration_json->>'mandatory')::boolean, false)
-       UNION ALL
-       SELECT s.*, CASE WHEN ps.attachment_type='required' OR ps.required THEN 'project_required' ELSE 'project_automatic' END, 2,
-              ps.allow_ticket_override
-       FROM project_skills ps JOIN skills s ON s.id=ps.skill_id
-       WHERE ps.project_id=$1 AND (ps.attachment_type IN ('automatic','required') OR ps.required)
-       UNION ALL
-       SELECT s.*, CASE WHEN ts.source='excluded' THEN 'ticket_excluded' ELSE 'ticket_selected' END, 3, ps.allow_ticket_override
-       FROM ticket_skills ts LEFT JOIN skills s ON s.id=ts.skill_id
-       LEFT JOIN project_skills ps ON ps.project_id=$1 AND ps.skill_id=ts.skill_id
-       WHERE ts.ticket_id=$2
-       UNION ALL
-       SELECT s.*, 'phase_required', 4, NULL::boolean
-       FROM skills s WHERE s.configuration_json->'required_phases' ? $3
-     ) resolved ORDER BY source_order, slug, id`,
-    [ticket.project_id, ticket.id, phase],
-  )).rows;
-  return rows.map((row: any) => ({
-    skill: row.id ? row : null,
-    skillId: row.id,
-    slug: row.slug,
-    source: row.source as ResolutionSource,
-    allowTicketOverride: row.allow_ticket_override,
-  }));
-}
-
-async function resolvedSkillsFor(ticket: any, phase: AiPhase, client: any = pool) {
-  return resolveSkills(await skillCandidates(ticket, phase, client), ticket.project_id, phase);
-}
-
 function validatePromptTemplate(content: unknown) {
   if (typeof content !== "string") throw Object.assign(new Error("prompt content must be Markdown text"), { status: 400 });
   const variables = [...content.matchAll(/\{\{\s*([^{}]+?)\s*\}\}/g)].map((match) => match[1]);
@@ -146,109 +84,6 @@ function validatePromptTemplate(content: unknown) {
     throw Object.assign(new Error(`unknown template variable: ${invalid.join(", ")}`), { status: 422 });
   }
   return { valid: true, variables: [...new Set(variables)].sort() };
-}
-
-function renderPromptTemplate(content: string, values: Record<string, unknown>) {
-  return content.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_match, variable: string) => String(values[variable] ?? ""));
-}
-
-async function resolvedPrompt(promptType: string, projectId: string, client: any = pool) {
-  const row = (await client.query(
-    `SELECT pf.id prompt_file_id,pf.active_version_id,pv.content,pv.version
-     FROM prompt_files pf LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id
-     WHERE pf.prompt_type=$1 AND pf.active_version_id IS NOT NULL
-       AND ((pf.scope='project' AND pf.project_id=$2) OR (pf.scope='global' AND pf.project_id IS NULL))
-     ORDER BY CASE pf.scope WHEN 'project' THEN 0 ELSE 1 END
-     LIMIT 1`,
-    [promptType, projectId],
-  )).rows[0];
-  return row ?? { prompt_file_id: null, active_version_id: null, content: "", version: null };
-}
-
-async function promptInputsFor(ticket: any, phase: "planning" | "execution", approvedPlan?: string, client: any = pool) {
-  const project = (await client.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
-  if (!project) throw Object.assign(new Error("project not found"), { status: 404 });
-  const [base, phaseResolved] = await Promise.all([
-    resolvedPrompt("base", project.id, client),
-    resolvedPrompt(phase, project.id, client),
-  ]);
-  const ai = resolvedAiFor(ticket, project, phase);
-  const skills = await resolvedSkillsFor(ticket, phase, client);
-  const templateValues = {
-    "project.slug": project.slug,
-    "project.name": project.name,
-    "project.description": project.description,
-    "project.repository_path": project.repository_path,
-    "project.agent_start_path": project.agent_start_path ?? project.repository_path,
-    "project.default_branch": project.default_branch,
-    "ticket.title": ticket.title,
-    "ticket.description": ticket.description,
-    "ticket.category": ticket.category,
-    "ticket.priority": ticket.priority,
-  };
-  for (const prompt of [base, phaseResolved]) {
-    prompt.content = renderPromptTemplate(prompt.content ?? "", templateValues);
-  }
-  const resolvedSkillContent = skills.map((skill) => ({
-    id: skill.id, slug: skill.slug, version: skill.version, resolution_sources: skill.resolution_sources,
-  }));
-  const promptVersionIds = Object.fromEntries(
-    [
-      // ponytail: a project override's version id is recorded under a global.* key;
-      // no consumer reads these keys, scoped keys if audit provenance ever matters.
-      ["global.base", base.active_version_id],
-      [`global.${phase}`, phaseResolved.active_version_id],
-    ].filter(([, id]) => id),
-  );
-  if (phase === "planning") {
-    return {
-      content: buildPlanningPrompt({
-        globalBaseInstructions: base.content,
-        globalPlanningInstructions: phaseResolved.content,
-        projectContext: "",
-        projectPlanningInstructions: "",
-        projectPathsAndRepositoryMetadata: {
-          default_branch: project.default_branch,
-          github_owner: project.github_owner,
-          github_repository: project.github_repository,
-          repository_path: project.repository_path,
-          agent_start_path: project.agent_start_path ?? project.repository_path,
-          slug: project.slug,
-        },
-        resolvedAiConfiguration: ai,
-        resolvedSkills: resolvedSkillContent,
-        ticket: {
-          title: ticket.title, description: ticket.description, category: ticket.category, priority: ticket.priority,
-          environment: ticket.environment, expectedBehavior: ticket.expected_behavior,
-          actualBehavior: ticket.actual_behavior, reproductionSteps: ticket.reproduction_steps,
-          customValues: ticket.custom_values_json,
-        },
-        requiredPlanStructure: "Return a Markdown plan with scope, implementation steps, tests, risks, and validation.",
-        outputConstraints: "Planning is read-only. Do not modify files, commit, push, or open a pull request.",
-      }),
-      ai, skills, promptVersionIds, project,
-    };
-  }
-  return {
-    content: buildExecutionPrompt({
-      globalBaseInstructions: base.content,
-      globalExecutionInstructions: phaseResolved.content,
-      projectContext: "",
-      projectExecutionInstructions: "",
-      projectTestingInstructions: "",
-      resolvedAiConfiguration: ai,
-      resolvedSkills: resolvedSkillContent,
-      exactApprovedPlan: approvedPlan ?? "",
-      worktreeDetails: {
-        repository_path: project.repository_path,
-        default_branch: project.default_branch,
-      },
-      validationCommands: project.config_json?.validation_commands ?? [],
-      definitionOfDone: project.config_json?.definition_of_done ?? "The approved plan is implemented and validation passes.",
-      outputConstraints: "Work only inside the assigned worktree. Do not push, merge, or open a pull request.",
-    }),
-    ai, skills, promptVersionIds, project,
-  };
 }
 
 export async function approvalInputsFor(ticket: any, version: any, client: any) {
@@ -266,24 +101,13 @@ export async function approvalInputsFor(ticket: any, version: any, client: any) 
   const execution = requireApprovalPrompt(prompt("global", "execution"), "global", "execution");
   const repair = requireApprovalPrompt(prompt("global", "execution-repair"), "global", "execution-repair");
   const phases: AiPhase[] = ["planning", "execution", "repair"];
-  const phaseSkills = await Promise.all(phases.map((phase) => resolvedSkillsFor(ticket, phase, client)));
-  const union = new Map<string, any>();
-  for (const skill of phaseSkills.flat()) {
-    const existing = union.get(skill.id);
-    if (!existing) union.set(skill.id, { ...skill, resolution_sources: [...skill.resolution_sources] });
-    else for (const source of skill.resolution_sources) if (!existing.resolution_sources.includes(source)) existing.resolution_sources.push(source);
-  }
-  const snapshotted = await snapshotSkillSet([...union.values()], phases);
+  const phaseSkills = await Promise.all(phases.map((phase) => resolvedSkillsFor(client, ticket, phase)));
+  const snapshotted = await snapshotSkillSet(unionSkills(...phaseSkills), phases);
   const models = Object.fromEntries(phases.map((phase) => {
     const resolved = resolvedAiFor(ticket, project, phase);
     return [phase, { model: resolved.model, reasoningLevel: resolved.reasoning_level }];
   }));
-  const values = {
-    "project.slug": project.slug, "project.name": project.name, "project.description": project.description,
-    "project.repository_path": project.repository_path, "project.agent_start_path": project.agent_start_path ?? project.repository_path,
-    "project.default_branch": project.default_branch, "ticket.title": ticket.title, "ticket.description": ticket.description,
-    "ticket.category": ticket.category, "ticket.priority": ticket.priority,
-  };
+  const values = promptTemplateValues(project, ticket);
   const rendered = (row: any) => renderPromptTemplate(row?.content ?? "", values);
   const provenance = (...rows: any[]) => rows.filter(Boolean).map((row) => ({
     scope: row.scope, promptType: row.prompt_type, versionId: row.active_version_id, contentHash: row.content_hash,
@@ -1639,7 +1463,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
           [ticket.id, skill.id, isExcluded ? "excluded" : "manual", session.user_id],
         );
       }
-      return { ticket, skills: await resolvedSkillsFor(ticket, "planning", client) };
+      return { ticket, skills: await resolvedSkillsFor(client, ticket, "planning") };
     });
     return result ? json(response, 200, result) : json(response, 404, { error: "ticket not found" });
   }
@@ -1650,7 +1474,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const ref = decodeURIComponent(snapshotMatch[1]);
     const ticket = (await pool.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
     if (!ticket) return json(response, 404, { error: "ticket not found" });
-    const copied = await snapshotSkills(await resolvedSkillsFor(ticket, phase), phase);
+    const copied = await snapshotSkills(await resolvedSkillsFor(pool, ticket, phase), phase);
     const snapshot = (await pool.query(
       `INSERT INTO skill_snapshots (ticket_id,run_id,skills_json,content_hash) VALUES ($1,$2,$3,$4) RETURNING *`,
       [ticket.id, body.run_id ?? null, JSON.stringify(copied.skills), copied.contentHash],
@@ -1703,7 +1527,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       model: typeof body.model === "string" ? body.model : selection.model,
       reasoning_level: typeof body.reasoning_level === "string" ? body.reasoning_level : selection.reasoning_level,
     });
-    await resolvedSkillsFor(ticket, "planning");
+    await resolvedSkillsFor(pool, ticket, "planning");
     if (repoCheck.changedFiles.length) {
       if (!commitMessage) {
         return json(response, 409, {
@@ -2253,7 +2077,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
           project_config_version: resolved.approvedInput.project.configVersion, ticket_version: ticket.updated_at,
         };
       }
-      const resolved = await promptInputsFor(ticket, "planning", undefined, client);
+      const resolved = await planningPromptInputs(client, ticket);
       return {
         phase, content: resolved.content, content_hash: promptContentHash(resolved.content),
         model: resolved.ai.model, reasoning_level: resolved.ai.reasoning_level,
