@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createRequire } from "node:module";
@@ -219,6 +219,36 @@ describe("deployment webhook", () => {
 
     await expect(ctx.app.finalizeAttempt({ id: "attempt-1", target_sha: protectedSha, owner: "webhook" }, marker)).rejects.toThrow("database unavailable");
     await expect(require("node:fs/promises").access(marker)).resolves.toBeUndefined();
+  });
+
+  it("finalizes via the real default isCurrentReleaseFn by release-path basename, regardless of the process's own cwd", async () => {
+    const ctx = await webhook(); dirs.push(ctx.dir);
+    const releaseDir = join(ctx.dir, "releases", protectedSha);
+    await mkdir(releaseDir, { recursive: true });
+    const currentReleaseLink = join(ctx.dir, "deploy-current");
+    await symlink(releaseDir, currentReleaseLink);
+    const app = api.createWebhook({ config: config(ctx.dir, { currentReleaseLink }), store: ctx.store, fetchFn: ctx.fetchFn, spawnFn: ctx.spawnFn, logger: { info() {}, warn() {}, error() {} } });
+    const marker = join(ctx.dir, "release-current.done");
+    await writeFile(marker, JSON.stringify({ attemptId: "attempt-1", sha: protectedSha, exitCode: 0, reloadPending: true }));
+
+    await expect(app.finalizeAttempt({ id: "attempt-1", target_sha: protectedSha, owner: "webhook" }, marker)).resolves.toBe(true);
+
+    expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ state: "succeeded", attemptId: "attempt-1" }));
+  });
+
+  it("does not finalize via the real default isCurrentReleaseFn when the release-path basename does not match the marker sha", async () => {
+    const ctx = await webhook(); dirs.push(ctx.dir);
+    const releaseDir = join(ctx.dir, "releases", sha("z"));
+    await mkdir(releaseDir, { recursive: true });
+    const currentReleaseLink = join(ctx.dir, "deploy-current");
+    await symlink(releaseDir, currentReleaseLink);
+    const app = api.createWebhook({ config: config(ctx.dir, { currentReleaseLink }), store: ctx.store, fetchFn: ctx.fetchFn, spawnFn: ctx.spawnFn, logger: { info() {}, warn() {}, error() {} } });
+    const marker = join(ctx.dir, "release-mismatch.done");
+    await writeFile(marker, JSON.stringify({ attemptId: "attempt-1", sha: protectedSha, exitCode: 0, reloadPending: true }));
+
+    await expect(app.finalizeAttempt({ id: "attempt-1", target_sha: protectedSha, owner: "webhook" }, marker)).resolves.toBe(false);
+
+    expect(ctx.store.completeDeploymentAttempt).not.toHaveBeenCalled();
   });
 
   it("blocks a claimed attempt when process spawn fails", async () => {
