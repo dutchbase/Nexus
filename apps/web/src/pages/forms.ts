@@ -10,6 +10,11 @@ export const fieldTypeLabels: [string, string][] = [
 ];
 const optionTypes = new Set(["dropdown", "radio", "multi_select", "category_selector", "environment_selector"]);
 
+export const previewField = (field: { field_type: string; label: string; required: boolean }) =>
+  field.field_type === "image_upload"
+    ? `<label class="field"><span>${escapeHtml(field.label)}${field.required ? " *" : ""}</span><input type="file" disabled accept="image/png,image/jpeg" multiple><small>PNG of JPG · max 5 bestanden · max 5 MB per bestand</small></label>`
+    : `<label class="field"><span>${escapeHtml(field.label)}${field.required ? " *" : ""}</span><input disabled placeholder="${escapeHtml(fieldTypeLabels.find(([value]) => value === field.field_type)?.[1] ?? field.field_type)}"></label>`;
+
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname === "/admin/forms") {
     const forms = (await pool.query(
@@ -75,7 +80,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
 
     const previewPanel = `<div style="background:var(--surface2);padding:32px 16px;border-radius:6px"><div class="card public" style="max-width:620px;margin:0 auto;border-top:3px solid var(--accent)"><div class="card-body">
       <div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description ?? "")}</p>
-      <div class="grid two">${fields.filter((field) => field.field_type !== "static").map((field) => `<label class="field"><span>${escapeHtml(field.label)}${field.required ? " *" : ""}</span><input disabled placeholder="${escapeHtml(fieldTypeLabels.find(([value]) => value === field.field_type)?.[1] ?? field.field_type)}"></label>`).join("")}</div>
+      <div class="grid two">${fields.filter((field) => field.field_type !== "static").map(previewField).join("")}</div>
       <br><button class="button primary" disabled>Melding versturen</button>
     </div></div></div>`;
 
