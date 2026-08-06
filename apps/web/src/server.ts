@@ -23,7 +23,7 @@ import {
 } from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
 import { normalizeAgentStartPath, validateAgentStartPath, validateProject } from "@dcc/project-config";
-import { adminPage, escapeHtml, loginPage, publicFormPage, submittedPage } from "./ui.ts";
+import { adminPage, escapeHtml, loginPage, publicFormPage, styles, submittedPage } from "./ui.ts";
 import { allowedTemplateVariables, fieldsFor, lineDiff, validStatuses } from "./pages/shared.ts";
 import * as dashboardPage from "./pages/dashboard.ts";
 import * as ticketsPage from "./pages/tickets.ts";
@@ -2369,6 +2369,10 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     catch { return json(response, 503, { status: "degraded", database: "unavailable", web: "ok" }); }
   }
   if (request.method === "GET" && url.pathname === "/login") return html(response, 200, loginPage());
+  if (url.pathname === "/assets/design-tokens.css" && request.method === "GET") {
+    response.writeHead(200, { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=300", ...securityHeaders() });
+    return response.end(styles);
+  }
   if (request.method === "POST" && url.pathname === "/api/admin/login") return login(request, response);
   const publicMatch = url.pathname.match(/^\/api\/public\/forms\/([^/]+)$/);
   if (publicMatch && request.method === "GET") {
