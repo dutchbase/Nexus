@@ -13,7 +13,7 @@ try {
   execFileSync("gcc", [source, "-O2", "-Wl,-l:libargon2.so.1", "-o", binary], { stdio: "inherit" });
 } catch (error) {
   console.error(
-    "Failed to build the Argon2 helper. Install a C toolchain and libargon2 (Debian/Ubuntu: sudo apt-get install build-essential libargon2-dev), then re-run `pnpm build:argon2`, or set DCC_ARGON2_HELPER_PATH to a prebuilt binary.",
+    "Failed to build the Argon2 helper. Install a C toolchain and libargon2 (Debian/Ubuntu: sudo apt-get install build-essential libargon2-1), then re-run `pnpm build:argon2`, or set DCC_ARGON2_HELPER_PATH to a prebuilt binary.",
   );
   process.exit(1);
 }

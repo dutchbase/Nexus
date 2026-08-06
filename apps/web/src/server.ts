@@ -12,7 +12,7 @@ import {
   buildExecutionPrompt, checkPlanApprovalGate, enqueueJob,
   globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
-  validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
+  unionSkills, validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
 import {
   mergeNotificationConfiguration, parseNotificationConfiguration, parseNotificationConfigurationPatch,
@@ -102,13 +102,7 @@ export async function approvalInputsFor(ticket: any, version: any, client: any) 
   const repair = requireApprovalPrompt(prompt("global", "execution-repair"), "global", "execution-repair");
   const phases: AiPhase[] = ["planning", "execution", "repair"];
   const phaseSkills = await Promise.all(phases.map((phase) => resolvedSkillsFor(client, ticket, phase)));
-  const union = new Map<string, any>();
-  for (const skill of phaseSkills.flat()) {
-    const existing = union.get(skill.id);
-    if (!existing) union.set(skill.id, { ...skill, resolution_sources: [...skill.resolution_sources] });
-    else for (const source of skill.resolution_sources) if (!existing.resolution_sources.includes(source)) existing.resolution_sources.push(source);
-  }
-  const snapshotted = await snapshotSkillSet([...union.values()], phases);
+  const snapshotted = await snapshotSkillSet(unionSkills(...phaseSkills), phases);
   const models = Object.fromEntries(phases.map((phase) => {
     const resolved = resolvedAiFor(ticket, project, phase);
     return [phase, { model: resolved.model, reasoningLevel: resolved.reasoning_level }];

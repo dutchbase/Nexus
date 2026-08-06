@@ -13,6 +13,9 @@ directly via `tsx`.
 - **Node.js 22+** (built and tested on Node 26)
 - **pnpm 11** (declared in `packageManager`; install validates versions via `engine-strict`)
 - **PostgreSQL 15+**, reachable from the VPS
+- **gcc** and the **libargon2 runtime** (`libargon2-1` on Debian/Ubuntu) —
+  `pnpm install` compiles the Argon2 helper via `postinstall`
+  (`scripts/build-argon2.ts`)
 - **git**, and network access to whatever repos you'll point projects at
 - **Claude Code CLI** (`claude`) installed and on `$PATH` — the worker
   shells out to it (`spawn("claude", ...)`) to run executions. Install and
