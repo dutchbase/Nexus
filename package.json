@@ -1,6 +1,8 @@
 {
   "name": "development-control-center",
   "private": true,
+  "packageManager": "pnpm@11.17.0",
+  "engines": { "node": ">=22" },
   "scripts": {
     "dev": "tsx scripts/dev.ts",
     "test:unit": "vitest run --config vitest.config.ts --reporter=verbose",
@@ -8,14 +10,14 @@
     "projects:import": "tsx scripts/import-projects.ts"
   },
   "dependencies": {
-    "pg": "^8.16.3"
+    "pg": "8.22.0"
   },
   "devDependencies": {
-    "@playwright/test": "^1.48.0",
+    "@playwright/test": "1.62.0",
     "@types/node": "22.20.1",
     "@types/pg": "8.20.0",
     "tsx": "4.20.3",
     "typescript": "5.8.3",
-    "vitest": "^2.1.0"
+    "vitest": "2.1.9"
   }
 }
