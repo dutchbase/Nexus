@@ -97,28 +97,60 @@ async function runOpenCode(input: {
     };
     const timeoutMs = input.timeoutMs ?? 30 * 60 * 1000;
     const timeout = AbortSignal.timeout(timeoutMs);
-    const signal = AbortSignal.any([timeout, ...(input.signal ? [input.signal] : [])]);
-    const child = spawn(input.executable ?? process.env.OPENCODE_BIN ?? "opencode", input.args,
-      { cwd: input.workingDirectory, env, signal, stdio: ["ignore", "pipe", "pipe"] });
+    const combined = AbortSignal.any([timeout, ...(input.signal ? [input.signal] : [])]);
+    // Spawn detached (own process group) and do our own SIGTERM->SIGKILL
+    // escalation instead of handing `signal` to spawn — Node's built-in
+    // signal support only sends a single SIGTERM to the direct child, which
+    // leaves a hung/orphaned process behind if the CLI ignores it or has
+    // spawned subprocesses of its own. Mirrors packages/claude-runner's
+    // terminate() pattern.
+    const child = spawn(input.executable ?? process.env.OPENCODE_BIN ?? "opencode", input.args, {
+      cwd: input.workingDirectory, env, stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
+    });
     let stdout = "";
     let stderr = "";
     child.stdout.on("data", (chunk) => { stdout += chunk; input.onStdoutChunk?.(String(chunk)); });
     child.stderr.on("data", (chunk) => { stderr += chunk; });
+    const terminate = (killSignal: NodeJS.Signals) => {
+      if (!child.pid) return child.kill(killSignal);
+      if (process.platform === "win32") {
+        const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+        killer.on("error", () => child.kill(killSignal));
+        killer.unref();
+        return true;
+      }
+      try { return process.kill(-child.pid, killSignal); }
+      catch { return child.kill(killSignal); }
+    };
+    let killTimer: NodeJS.Timeout | undefined;
+    const onAbort = () => {
+      terminate("SIGTERM");
+      killTimer = setTimeout(() => terminate("SIGKILL"), 5_000);
+    };
+    combined.addEventListener("abort", onAbort, { once: true });
     const exitCode = await new Promise<number>((resolve, reject) => {
       const timedOutNotCancelled = () => timeout.aborted && !input.signal?.aborted;
+      const settle = (fn: () => void) => {
+        if (killTimer) clearTimeout(killTimer);
+        combined.removeEventListener("abort", onAbort);
+        fn();
+      };
       child.on("error", (error: NodeJS.ErrnoException) => {
-        reject(timedOutNotCancelled()
+        settle(() => reject(timedOutNotCancelled()
           ? new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, "opencode_timeout")
-          : new OpenCodeError(`failed to launch OpenCode: ${error.message}`, "opencode_failed"));
+          : new OpenCodeError(`failed to launch OpenCode: ${error.message}`, "opencode_failed")));
       });
       child.on("close", (code, killSignal) => {
-        if (timedOutNotCancelled()) {
-          reject(new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, "opencode_timeout"));
-        } else if (killSignal || code === null) {
-          reject(new OpenCodeError(`OpenCode terminated by signal ${killSignal}`, "opencode_failed"));
-        } else {
-          resolve(code);
-        }
+        settle(() => {
+          if (timedOutNotCancelled()) {
+            reject(new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, "opencode_timeout"));
+          } else if (killSignal || code === null) {
+            reject(new OpenCodeError(`OpenCode terminated by signal ${killSignal}`, "opencode_failed"));
+          } else {
+            resolve(code);
+          }
+        });
       });
     });
     if (exitCode !== 0) {
