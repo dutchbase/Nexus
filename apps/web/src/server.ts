@@ -23,7 +23,7 @@ import {
 } from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
 import { normalizeAgentStartPath, validateAgentStartPath, validateProject } from "@dcc/project-config";
-import { adminPage, escapeHtml, loginPage, publicFormPage, submittedPage } from "./ui.ts";
+import { adminPage, escapeHtml, loginPage, publicFormPage, styles, submittedPage } from "./ui.ts";
 import { allowedTemplateVariables, fieldsFor, lineDiff, validStatuses } from "./pages/shared.ts";
 import * as dashboardPage from "./pages/dashboard.ts";
 import * as ticketsPage from "./pages/tickets.ts";
@@ -775,11 +775,30 @@ async function counts() {
   return row;
 }
 
-async function adminHtml(request: IncomingMessage, response: ServerResponse, url: URL) {
+export async function adminHtml(request: IncomingMessage, response: ServerResponse, url: URL) {
   const session = await sessionFor(request);
   if (!session) {
     response.writeHead(302, { location: "/login" });
     return response.end();
+  }
+  const attachmentMatch = url.pathname.match(/^\/admin\/attachments\/([0-9a-f-]{36})$/);
+  if (attachmentMatch && request.method === "GET") {
+    const row = (await pool.query(
+      `SELECT u.storage_path,u.original_name,u.media_type FROM attachments a JOIN uploads u ON u.id=a.upload_id WHERE a.id=$1 AND a.ticket_id IS NOT NULL`,
+      [attachmentMatch[1]],
+    )).rows[0];
+    if (!row) return html(response, 404, "<h1>Not found</h1>");
+    try {
+      const content = await readArtifact(dataRoot, row.storage_path).catch(() => readArtifact(legacyDataRoot, row.storage_path));
+      response.writeHead(200, {
+        "content-type": row.media_type,
+        "content-disposition": `attachment; filename="${(row.original_name ?? "attachment").replace(/[^\w. -]/g, "_")}"`,
+        ...securityHeaders(),
+      });
+      return response.end(content);
+    } catch {
+      return html(response, 404, "<h1>Not found</h1>");
+    }
   }
   const metrics = await counts();
   const pageModules = [
@@ -2354,6 +2373,10 @@ async function route(request: IncomingMessage, response: ServerResponse) {
     catch { return json(response, 503, { status: "degraded", database: "unavailable", web: "ok" }); }
   }
   if (request.method === "GET" && url.pathname === "/login") return html(response, 200, loginPage());
+  if (url.pathname === "/assets/design-tokens.css" && request.method === "GET") {
+    response.writeHead(200, { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=300", ...securityHeaders() });
+    return response.end(styles);
+  }
   if (request.method === "POST" && url.pathname === "/api/admin/login") return login(request, response);
   const publicMatch = url.pathname.match(/^\/api\/public\/forms\/([^/]+)$/);
   if (publicMatch && request.method === "GET") {

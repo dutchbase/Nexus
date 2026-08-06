@@ -11,10 +11,8 @@ export function escapeHtml(value: unknown) {
     .replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
 
-const fontsHead = `<link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Cormorant+Garamond:ital,wght@0,600;0,700;1,600;1,700&family=DM+Sans:opsz,wght@9..40,300;9..40,400;9..40,500;9..40,700&family=JetBrains+Mono:wght@400;500&display=swap">`;
-
 function document(title: string, content: string, script = "") {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title>${fontsHead}<style>${styles}</style></head><body>${content}${script ? `<script>${script}</script>` : ""}</body></html>`;
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><link rel="stylesheet" href="/assets/design-tokens.css"></head><body>${content}${script ? `<script>${script}</script>` : ""}</body></html>`;
 }
 
 export function loginPage() {
@@ -61,24 +59,33 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
 
   const breadcrumb = section ? `<span class="eyebrow">${section}</span><span>/</span><span>${escapeHtml(title)}</span>` : `<span class="eyebrow">Development Control Center</span><span>/</span><span>${escapeHtml(title)}</span>`;
 
-  return document(title, `<div class="shell"><aside class="sidebar"><div class="brand"><span class="brand-mark">D</span><div><div class="brand-title">Development hub</div><div class="brand-sub">Internet Nederland</div></div></div>
+  return document(title, `<div class="shell"><aside class="sidebar" id="sidebar"><div class="brand"><span class="brand-mark">D</span><div><div class="brand-title">Development hub</div><div class="brand-sub">Internet Nederland</div></div></div>
     <nav class="nav" aria-label="Primary">${nav}</nav><footer class="sidebar-footer"><div class="theme"><button data-theme-choice="light">Light</button><button data-theme-choice="auto">Auto</button><button data-theme-choice="dark">Dark</button></div><p>${escapeHtml(username)} · administrator</p></footer></aside>
     <button class="scrim" type="button" data-scrim hidden aria-label="Close navigation menu"></button>
-    <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}<span class="worker">● worker-01 healthy</span><a class="button" href="/f/website-feedback">Public form</a></header><main class="main">${body}</main></div></div>`, `
+    <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}<span class="worker">● worker-01 healthy</span><a class="button" href="/f/website-feedback">Public form</a></header><main class="main">${body}</main></div></div>`, `
       const cc=document.cookie.match(/(?:^|;\\s*)dcc_csrf=([^;]*)/);if(cc)sessionStorage.setItem("dccCsrf",cc[1]);
       const choice=localStorage.getItem("dccTheme")||"auto";
       const apply=(value)=>{const dark=value==="dark"||(value==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light";document.querySelectorAll("[data-theme-choice]").forEach(b=>b.classList.toggle("selected",b.dataset.themeChoice===value))};
       apply(choice);matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{if((localStorage.getItem("dccTheme")||"auto")==="auto")apply("auto")});
       document.querySelectorAll("[data-theme-choice]").forEach(b=>b.addEventListener("click",()=>{localStorage.setItem("dccTheme",b.dataset.themeChoice);apply(b.dataset.themeChoice)}));
-      const sidebar=document.querySelector(".sidebar"),scrim=document.querySelector("[data-scrim]");
-      document.querySelector("[data-nav-open]")?.addEventListener("click",()=>{sidebar.classList.add("open");scrim.hidden=false});
-      scrim?.addEventListener("click",()=>{sidebar.classList.remove("open");scrim.hidden=true});
+      const sidebar=document.querySelector(".sidebar"),scrim=document.querySelector("[data-scrim]"),opener=document.querySelector("[data-nav-open]");
+      const closeNav=()=>{sidebar.classList.remove("open");scrim.hidden=true;opener?.setAttribute("aria-expanded","false");opener?.focus()};
+      opener?.addEventListener("click",()=>{sidebar.classList.add("open");scrim.hidden=false;opener.setAttribute("aria-expanded","true");sidebar.querySelector("a.nav-item")?.focus()});
+      scrim?.addEventListener("click",closeNav);
+      document.addEventListener("keydown",e=>{if(e.key==="Escape"&&sidebar.classList.contains("open"))closeNav()});
       document.querySelectorAll("[role=tablist]").forEach(list=>{
         const tabs=[...list.querySelectorAll("[role=tab]")];
-        list.addEventListener("click",event=>{
-          const tab=event.target.closest("[role=tab]");if(!tab)return;
-          tabs.forEach(item=>item.setAttribute("aria-selected",String(item===tab)));
-          tabs.forEach(item=>{const panel=document.getElementById(item.getAttribute("aria-controls")||"");if(panel)panel.hidden=item!==tab});
+        const activate=tab=>tabs.forEach(item=>{item.setAttribute("aria-selected",String(item===tab));item.tabIndex=item===tab?0:-1;const panel=document.getElementById(item.getAttribute("aria-controls")||"");if(panel)panel.hidden=item!==tab});
+        tabs.forEach(tab=>tab.tabIndex=tab.getAttribute("aria-selected")==="true"?0:-1);
+        list.addEventListener("click",event=>{const tab=event.target.closest("[role=tab]");if(tab)activate(tab)});
+        list.addEventListener("keydown",event=>{
+          const index=tabs.indexOf(document.activeElement);if(index<0)return;
+          let next=null;
+          if(event.key==="ArrowRight")next=(index+1)%tabs.length;
+          else if(event.key==="ArrowLeft")next=(index-1+tabs.length)%tabs.length;
+          else if(event.key==="Home")next=0;
+          else if(event.key==="End")next=tabs.length-1;
+          if(next===null)return;event.preventDefault();tabs[next].focus();activate(tabs[next]);
         });
       });
       ${path === "/admin/tickets" ? `
