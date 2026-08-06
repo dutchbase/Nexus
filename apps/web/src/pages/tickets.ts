@@ -1,6 +1,6 @@
 import { escapeHtml, keysetCondition, lineDiff, nextCursor, pageRequest, PAGE_SIZE_MAX, pagerHtml, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
-import { checkPlanApprovalGate } from "@dcc/domain";
+import { checkPlanApprovalGate, aiModels } from "@dcc/domain";
 
 export function selectedStatusesFrom(url: URL): string[] {
   return url.searchParams.getAll("status").filter((status) => validStatuses.has(status));
@@ -360,12 +360,12 @@ export async function render(url: URL, session: Session, _metrics: Record<string
        ${skill.removable ? `<button type="button" aria-label="Remove ${escapeHtml(skill.name)}" data-remove-skill="${skill.id}">×</button>` : `<small>${skill.badge}</small>`}</span>`,
     ).join("");
     const referenceLines = selectedSkills.map((skill) => `- ${skill.slug}: ${skill.filesystem_path}`).join("\n") || "No skills resolved for this ticket.";
-    const modelOptions = ["fable", "opus", "sonnet", "haiku"].map((model) => `<option value="${model}"${ticket.default_model === model ? " selected" : ""}>${model[0].toUpperCase()}${model.slice(1)}</option>`).join("");
+    const modelOptions = aiModels.map((model) => `<option value="${model}"${ticket.default_model === model ? " selected" : ""}>${model[0].toUpperCase()}${model.slice(1)}</option>`).join("");
     const reasoningOptions = [["low","Low"],["medium","Medium"],["high","High"],["xhigh","Extra high"],["max","Maximum"],["ultracode","Ultracode"]].map(([value,label]) => `<option value="${value}"${ticket.default_reasoning_level === value ? " selected" : ""}>${label}</option>`).join("");
     const phaseConfiguration = (phase: "planning" | "execution" | "repair") => {
       const selectedModel = ticket[`${phase}_model`];
       const selectedReasoning = ticket[`${phase}_reasoning_level`];
-      const models = ["fable", "opus", "sonnet", "haiku"].map((model) => `<option value="${model}"${selectedModel === model ? " selected" : ""}>${model[0].toUpperCase()}${model.slice(1)}</option>`).join("");
+      const models = aiModels.map((model) => `<option value="${model}"${selectedModel === model ? " selected" : ""}>${model[0].toUpperCase()}${model.slice(1)}</option>`).join("");
       const reasoning = [["low","Low"],["medium","Medium"],["high","High"],["xhigh","Extra high"],["max","Maximum"],["ultracode","Ultracode"]].map(([value,label]) => `<option value="${value}"${selectedReasoning === value ? " selected" : ""}>${label}</option>`).join("");
       return `<fieldset><legend>${phase[0].toUpperCase()}${phase.slice(1)}</legend><div class="grid two"><label class="field"><span>Model</span><select name="${phase}_model">${models}</select></label><label class="field"><span>Reasoning level</span><select name="${phase}_reasoning_level">${reasoning}</select></label></div></fieldset>`;
     };
