@@ -235,7 +235,7 @@ describe("health-gated release deployment", () => {
     expect(workflow.indexOf("git add config/agent-content.json prompts/global/code-reviewer.md skills/vendor/superpowers"))
       .toBeLessThan(workflow.indexOf("git diff --cached --quiet"));
     expect(workflow).toContain("gh pr create");
-    expect(ci).toContain("pnpm test:unit");
+    expect(ci).toContain("pnpm verify");
     expect(ci).not.toContain("|| echo");
   });
 });

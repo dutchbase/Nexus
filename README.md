@@ -68,6 +68,14 @@ corepack enable
 pnpm install
 ```
 
+## 1a. Verify setup
+
+```bash
+pnpm verify
+```
+
+This runs the root verification command, which combines TypeScript type-checking and the unit test suite. It must pass before deploying. Database-backed tests additionally require `DCC_TEST_DATABASE_URL` to be set.
+
 ## 2. Provision PostgreSQL
 
 ```bash

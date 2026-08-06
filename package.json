@@ -5,6 +5,7 @@
   "engines": { "node": ">=22" },
   "scripts": {
     "dev": "tsx scripts/dev.ts",
+    "verify": "tsc --noEmit && vitest run --config vitest.config.ts --reporter=verbose",
     "test:unit": "vitest run --config vitest.config.ts --reporter=verbose",
     "admin:create": "tsx scripts/create-admin.ts",
     "projects:import": "tsx scripts/import-projects.ts"
