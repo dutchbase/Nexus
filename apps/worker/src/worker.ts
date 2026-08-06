@@ -13,7 +13,7 @@ import {
   claimJob, completeJob, failJob, enqueueNotification, importGithubPullRequests, resumePrReviewPublication,
   claimNotificationDelivery, completeNotificationDelivery, failNotificationDelivery, renewJobLease,
   renewNotificationDeliveryLease, recordWorkerHeartbeat, WORKER_HEARTBEAT_INTERVAL_MS,
-  renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolveAiConfiguration, snapshotPrompt, syncOpenPullRequests,
+  planningPromptInputs, renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolvedPromptFor, snapshotPrompt, syncOpenPullRequests,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
@@ -26,8 +26,7 @@ import {
 } from "@dcc/github-provider";
 import { validateProject } from "@dcc/project-config";
 import {
-  materializeSkillBundle, resolveSkills, skillsForPhase, snapshotSkillSet,
-  type ResolutionSource, type SkillCandidate, type ResolvedSkill, type SnapshottedSkill,
+  materializeSkillBundle, skillsForPhase, snapshotSkillSet, type SnapshottedSkill,
 } from "@dcc/skill-registry";
 import { runPrivateExecution } from "./execution-handoff.ts";
 import { failExecutionPublication, handleExecutionPublicationFailure, prepareExecutionPublication, PublicationError, publishExternalResult, storePublishedPullRequest } from "./execution-publication.ts";
@@ -169,81 +168,10 @@ async function subscriptionPreflightOrRefuse() {
 await subscriptionPreflightOrRefuse();
 await reconcileArtifactRegistry().catch((error) => console.error(`artifact reconciliation failed: ${error instanceof Error ? error.message : "unknown error"}`));
 
-function ticketAiConfiguration(ticket: any) {
-  return {
-    default: { model: ticket.default_model, reasoning_level: ticket.default_reasoning_level },
-    planning: { model: ticket.planning_model, reasoning_level: ticket.planning_reasoning_level },
-    execution: { model: ticket.execution_model, reasoning_level: ticket.execution_reasoning_level },
-    repair: { model: ticket.repair_model, reasoning_level: ticket.repair_reasoning_level },
-  };
-}
-
-function projectAiConfiguration(project: any) {
-  const ai = project.config_json?.ai ?? {};
-  return {
-    default: { model: ai.default_model, reasoning_level: ai.default_reasoning_level },
-    planning: ai.planning,
-    execution: ai.execution,
-    repair: ai.repair,
-  };
-}
-
-async function resolvedSkillsFor(ticket: any, phase: "planning" | "execution" | "repair" = "planning") {
-  const rows = (await pool.query(
-    `SELECT resolved.* FROM (
-       SELECT s.*, 'global_mandatory'::text source, 1 source_order
-       FROM skills s WHERE COALESCE((s.configuration_json->>'mandatory')::boolean, false)
-       UNION ALL
-       SELECT s.*, 'project_automatic', 2
-       FROM project_skills ps JOIN skills s ON s.id=ps.skill_id
-       WHERE ps.project_id=$1 AND ps.attachment_type='automatic'
-       UNION ALL
-       SELECT s.*, 'ticket_selected', 3
-       FROM ticket_skills ts LEFT JOIN skills s ON s.id=ts.skill_id
-       WHERE ts.ticket_id=$2
-       UNION ALL
-       SELECT s.*, 'phase_required', 4
-       FROM skills s WHERE s.configuration_json->'required_phases' ? $3
-     ) resolved ORDER BY source_order,slug,id`,
-    [ticket.project_id, ticket.id, phase],
-  )).rows;
-  const candidates: SkillCandidate[] = rows.map((row: any) => ({
-    skill: row.id ? row : null, skillId: row.id, slug: row.slug, source: row.source as ResolutionSource,
-  }));
-  return resolveSkills(candidates, ticket.project_id, phase);
-}
-
-function unionSkills(...sets: ResolvedSkill[][]) {
-  const union = new Map<string, ResolvedSkill>();
-  for (const skill of sets.flat()) {
-    const existing = union.get(skill.id);
-    if (!existing) {
-      union.set(skill.id, { ...skill, resolution_sources: [...skill.resolution_sources] });
-      continue;
-    }
-    for (const source of skill.resolution_sources) {
-      if (!existing.resolution_sources.includes(source)) existing.resolution_sources.push(source);
-    }
-  }
-  return [...union.values()];
-}
-
 function isAgentToolEvent(eventType: string, event: any) {
   const toolUses = [event, event?.content_block, ...(Array.isArray(event?.message?.content) ? event.message.content : [])];
   return (eventType === "tool_use" || toolUses.some((item) => item?.type === "tool_use"))
     && toolUses.some((item) => item?.name === "Agent");
-}
-
-async function resolvedPrompt(promptType: string, projectId: string) {
-  return (await pool.query(
-    `SELECT pf.active_version_id,pv.content FROM prompt_files pf
-     LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id
-     WHERE pf.prompt_type=$1 AND pf.active_version_id IS NOT NULL
-       AND ((pf.scope='project' AND pf.project_id=$2) OR (pf.scope='global' AND pf.project_id IS NULL))
-     ORDER BY CASE pf.scope WHEN 'project' THEN 0 ELSE 1 END
-     LIMIT 1`,
-    [promptType, projectId],
-  )).rows[0] ?? { active_version_id: null, content: "" };
 }
 
 async function resolvedGlobalPrompt(promptType: string) {
@@ -253,67 +181,6 @@ async function resolvedGlobalPrompt(promptType: string) {
      WHERE pf.scope='global' AND pf.project_id IS NULL AND pf.prompt_type=$1 AND pf.active_version_id IS NOT NULL`,
     [promptType],
   )).rows[0] ?? { active_version_id: null, content: "" };
-}
-
-function renderTemplate(content: string, values: Record<string, unknown>) {
-  return content.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_match, key: string) => String(values[key] ?? ""));
-}
-
-async function planningInputs(ticket: any) {
-  const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
-  if (!project?.enabled) throw new Error("project is missing or disabled");
-  const [base, planning, skills, executionSkills, repairSkills] = await Promise.all([
-    resolvedPrompt("base", project.id), resolvedPrompt("planning", project.id),
-    resolvedSkillsFor(ticket), resolvedSkillsFor(ticket, "execution"), resolvedSkillsFor(ticket, "repair"),
-  ]);
-  const ai = resolveAiConfiguration({
-    phase: "planning",
-    system: { default: { model: "sonnet", reasoning_level: "high" } },
-    project: projectAiConfiguration(project),
-    ticket: ticketAiConfiguration(ticket),
-  });
-  const values = {
-    "project.slug": project.slug, "project.name": project.name,
-    "project.description": project.description,
-    "project.repository_path": project.repository_path, "project.agent_start_path": project.agent_start_path ?? project.repository_path, "project.default_branch": project.default_branch,
-    "ticket.title": ticket.title, "ticket.description": ticket.description,
-    "ticket.category": ticket.category, "ticket.priority": ticket.priority,
-  };
-  const promptVersionIds = Object.fromEntries([
-    // ponytail: a project override's version id is recorded under a global.* key;
-    // no consumer reads these keys, scoped keys if audit provenance ever matters.
-    ["global.base", base.active_version_id], ["global.planning", planning.active_version_id],
-  ].filter((entry): entry is [string, string] => Boolean(entry[1])));
-  const content = buildPlanningPrompt({
-    globalBaseInstructions: renderTemplate(base.content ?? "", values),
-    globalPlanningInstructions: renderTemplate(planning.content ?? "", values),
-    projectContext: "",
-    projectPlanningInstructions: "",
-    projectPathsAndRepositoryMetadata: {
-      default_branch: project.default_branch, github_owner: project.github_owner,
-      github_repository: project.github_repository, repository_path: project.repository_path, agent_start_path: project.agent_start_path ?? project.repository_path, slug: project.slug,
-    },
-    resolvedAiConfiguration: ai,
-    resolvedSkills: skills.map((skill) => ({
-      id: skill.id, slug: skill.slug, version: skill.version, resolution_sources: skill.resolution_sources,
-    })),
-    ticket: {
-      title: ticket.title, description: ticket.description, category: ticket.category, priority: ticket.priority,
-      environment: ticket.environment, expectedBehavior: ticket.expected_behavior,
-      actualBehavior: ticket.actual_behavior, reproductionSteps: ticket.reproduction_steps,
-      customValues: ticket.custom_values_json,
-    },
-    requiredPlanStructure: [
-      "# Implementation Plan", "## 1. Summary", "## 2. Problem Definition", "## 3. Current Behaviour",
-      "## 4. Expected Behaviour", "## 5. Relevant Architecture", "## 6. Relevant Files",
-      "## 7. Proposed Changes", "## 8. Implementation Steps", "## 9. Database or Migration Changes",
-      "## 10. Testing Strategy", "## 11. Security Considerations", "## 12. Performance Considerations",
-      "## 13. Risks and Edge Cases", "## 14. Rollback Strategy", "## 15. Acceptance Criteria Mapping",
-      "## 16. Out of Scope", "## 17. Open Questions", "Each execution task must use a ### Task N: heading.",
-    ].join("\n\n"),
-    outputConstraints: "Planning is read-only. Do not edit or write repository files, commit, push, create branches, or open pull requests.",
-  });
-  return { project, ai, skills, skillUnion: unionSkills(skills, executionSkills, repairSkills), promptVersionIds, content };
 }
 
 async function transitionToPlanning(client: any, ticketId: string, jobId: string, runId: string, lease: LeaseGuard) {
@@ -423,8 +290,8 @@ async function runPlanning(job: any, lease: LeaseGuard) {
     [job.payload_json.plan_id, job.payload_json.plan_version_id, job.payload_json.feedback_id],
   )).rows[0] : null;
   if (revising && !revision) throw new Error("revision inputs are no longer current");
-  const input = await planningInputs(ticket);
-  const revisionInstructions = revising ? await resolvedPrompt("plan-revision", ticket.project_id) : null;
+  const input = await planningPromptInputs(pool, ticket);
+  const revisionInstructions = revising ? await resolvedPromptFor(pool, "plan-revision", ticket.project_id) : null;
   if (revisionInstructions?.active_version_id) {
     input.promptVersionIds["global.plan-revision"] = revisionInstructions.active_version_id;
   }
@@ -1207,7 +1074,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     const reasoningLevel = payload.reasoning_level ?? settings.default_reasoning_level;
 
     const [promptRow, reviewRubric] = await Promise.all([
-      resolvedPrompt("pr-review", project.id), resolvedGlobalPrompt("code-reviewer"),
+      resolvedPromptFor(pool, "pr-review", project.id), resolvedGlobalPrompt("code-reviewer"),
     ]);
     if (!promptRow.active_version_id || !reviewRubric.active_version_id) throw new Error("pinned PR-review prompts are not synchronized");
 
@@ -1337,7 +1204,7 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
     if (!pullRequest) throw new Error("pull request not found");
     const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [pullRequest.project_id])).rows[0];
     if (!project) throw new Error("project not found");
-    const promptRow = await resolvedPrompt("follow-up-ticket", project.id);
+    const promptRow = await resolvedPromptFor(pool, "follow-up-ticket", project.id);
     const prompt = renderFollowUpTicketPrompt(promptRow.content ?? "", {
       project: { name: project.name, slug: project.slug, repository_path: project.repository_path },
       pr: {
@@ -1447,7 +1314,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
       content: await readFile(path.join(worktree.worktreePath, file), "utf8"),
     })));
 
-    const promptRow = await resolvedPrompt("pr-conflict-resolution", project.id);
+    const promptRow = await resolvedPromptFor(pool, "pr-conflict-resolution", project.id);
     const prompt = renderConflictResolutionPrompt(promptRow.content ?? "", {
       project: { name: project.name },
       pr: { title: pullRequest.title, headBranch: pullRequest.head_branch, baseBranch: pullRequest.base_branch },
