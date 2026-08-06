@@ -12,6 +12,7 @@ export * from "./pr-review.ts";
 export * from "./pr-review-publication.ts";
 export * from "./pr-conflict-resolution.ts";
 export * from "./follow-up-ticket.ts";
+export * from "./planning-inputs.ts";
 
 export const aiModels = ["fable", "opus", "sonnet", "haiku"] as const;
 export const reasoningLevels = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
