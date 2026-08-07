@@ -115,3 +115,10 @@ test("binds planning failure history's previous status and terminal references",
   expect(worker).toContain("VALUES ($1,$2,'Planning Failed',$3,'worker',$4,$5)");
   expect(worker).toContain("[ticket.id, current.status, `Planning job failed: ${message.slice(0, 500)}`, job.id, runId]");
 });
+
+test("captures truncated raw stdout from a failed planning invocation into agent_runs metadata", async () => {
+  const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
+
+  expect(worker).toContain("(error as any)?.stdout");
+  expect(worker).toContain("raw_stdout_on_failure");
+});

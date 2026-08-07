@@ -633,3 +633,29 @@ test("summarizes a Bash denial from Claude's max-turn payload", () => {
     "",
   )).toBe("Reached maximum number of turns (5) Bash access was denied; the review did not complete.");
 });
+
+test("attaches truncated raw stdout to the error thrown on a failed planning invocation", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-stdout-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const payload = JSON.stringify({
+    type: "result", subtype: "error_max_turns",
+    errors: ["Reached maximum number of turns (5)"],
+    permission_denials: [{ tool_name: "Bash" }],
+  });
+  await writeFile(executable, `#!/bin/sh
+printf '%s\\n' ${JSON.stringify(payload)}
+exit 1
+`);
+  await chmod(executable, 0o755);
+
+  const error = await invokePlanningClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root,
+  }).catch((thrown) => thrown);
+
+  expect(error).toMatchObject({
+    message: "Reached maximum number of turns (5) Bash access was denied; the review did not complete.",
+    exitCode: 1,
+  });
+  expect((error as { stdout: string }).stdout).toContain("error_max_turns");
+});

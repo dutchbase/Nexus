@@ -443,7 +443,13 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   });
   if (result.timedOut) throw new ClaudePlanningError("Claude planning timed out", 124, "planning_timeout");
   if (result.exitCode !== 0) {
-    throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), { exitCode: result.exitCode });
+    throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), {
+      exitCode: result.exitCode,
+      // Truncated so a runaway/verbose CLI failure can't blow up
+      // agent_runs.metadata_json — 4000 chars is enough to see which tool
+      // calls were denied without storing a full transcript.
+      stdout: result.stdout.slice(0, 4000),
+    });
   }
   let response: any;
   try { response = JSON.parse(result.stdout.trim()); } catch { throw new Error("Claude planning returned invalid JSON"); }
