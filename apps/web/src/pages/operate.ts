@@ -34,7 +34,7 @@ export function capabilityLabel(row: { status: string; can_read: boolean; can_wr
   return row.reason ? `${row.status} · ${row.reason} · ${checked}` : `${row.status} · ${checked}`;
 }
 
-function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: boolean; can_write: boolean; reason: string | null; checked_at: string | Date } | null): string {
+function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: boolean; can_write: boolean; reason: string | null; checked_at: string | Date } | null, systemAiSettings: any): string {
   const panel = (index: number, content: string) => `<div role="tabpanel" id="panel-${index}" aria-labelledby="tab-${index}"${index === 0 ? "" : " hidden"}>${content}</div>`;
   const field = (label: string, value: string) => `<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div class="eyebrow">${escapeHtml(label)}</div><div class="mono" style="font-size:13px;margin-top:4px">${escapeHtml(value)}</div></div>`;
   const check = (label: string) => `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:13px"><input type="checkbox" checked disabled>${escapeHtml(label)}</label>`;
@@ -96,9 +96,33 @@ function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: bo
     </form>
   </div></section>`;
 
+  const modelOptions = (selected: string | null) => aiModels.map((m) => `<option value="${m}" ${m === selected ? "selected" : ""}>${escapeHtml(m)}</option>`).join("");
+  const reasoningOptions = (selected: string | null) => [`<option value="">(none)</option>`, ...reasoningLevels.map((r) => `<option value="${r}" ${r === selected ? "selected" : ""}>${escapeHtml(r)}</option>`)].join("");
+  const phaseFieldset = (label: string, phase: string) => `<fieldset><legend>${escapeHtml(label)}</legend><div class="grid two">
+    <label class="field"><span>Model</span><select name="${phase}_model"><option value="">(none)</option>${modelOptions(systemAiSettings?.[`${phase}_model`] ?? null)}</select></label>
+    <label class="field"><span>Reasoning level</span><select name="${phase}_reasoning_level">${reasoningOptions(systemAiSettings?.[`${phase}_reasoning_level`] ?? null)}</select></label>
+  </div></fieldset>`;
+  const systemAi = `<section class="card"><div class="card-body">
+    <div class="card-head" style="margin:-18px -18px 14px;border-radius:6px 6px 0 0">System AI defaults</div>
+    <p style="font-size:13px;color:var(--text2)">Used for planning, execution, and repair when a project or ticket does not override it. Leave a phase's model blank to fall back to the default below.</p>
+    <form data-system-ai-settings-form style="display:flex;flex-direction:column;gap:12px;margin-top:10px">
+      <fieldset><legend>Default</legend><div class="grid two">
+        <label class="field"><span>Model</span><select name="default_model">${modelOptions(systemAiSettings?.default_model ?? null)}</select></label>
+        <label class="field"><span>Reasoning level</span><select name="default_reasoning_level">${reasoningLevels.map((r) => `<option value="${r}" ${r === (systemAiSettings?.default_reasoning_level ?? null) ? "selected" : ""}>${escapeHtml(r)}</option>`).join("")}</select></label>
+      </div></fieldset>
+      ${phaseFieldset("Planning", "planning")}
+      ${phaseFieldset("Execution", "execution")}
+      ${phaseFieldset("Repair", "repair")}
+      <div style="display:flex;gap:8px;margin-top:8px">
+        <button class="button primary" type="submit">Save</button>
+        <div class="error" style="flex:1;color:var(--t-danger);align-self:center;font-size:13px"></div>
+      </div>
+    </form>
+  </div></section>`;
+
   return `<div class="eyebrow">config / system.yaml</div><h1>Settings</h1>
-    <div class="tabs" role="tablist">${["General", "Authentication", "Claude runtime", "GitHub", "AI Review", "Retention"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
-    ${panel(0, general)}${panel(1, authentication)}${panel(2, claude)}${panel(3, github)}${panel(4, aiReview)}${panel(5, retention)}`;
+    <div class="tabs" role="tablist">${["General", "Authentication", "Claude runtime", "GitHub", "AI", "Retention"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
+    ${panel(0, general)}${panel(1, authentication)}${panel(2, claude)}${panel(3, github)}${panel(4, systemAi + aiReview)}${panel(5, retention)}`;
 }
 
 function statCard(label: string, value: string, detail: string, tone: string) {
@@ -209,11 +233,12 @@ async function systemBody(): Promise<string> {
 
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname === "/admin/settings") {
-    const [aiReviewSettings, capability] = await Promise.all([
+    const [aiReviewSettings, capability, systemAiSettings] = await Promise.all([
       pool.query("SELECT * FROM ai_review_settings WHERE id=1"),
       pool.query("SELECT * FROM github_capability WHERE id=1"),
+      pool.query("SELECT * FROM system_ai_settings WHERE id=1"),
     ]);
-    return { status: 200, title: "Settings", body: settingsBody(aiReviewSettings.rows[0], capability.rows[0] ?? null) };
+    return { status: 200, title: "Settings", body: settingsBody(aiReviewSettings.rows[0], capability.rows[0] ?? null, systemAiSettings.rows[0]) };
   }
   if (url.pathname === "/admin/system") return { status: 200, title: "System health", body: await systemBody() };
   return null;

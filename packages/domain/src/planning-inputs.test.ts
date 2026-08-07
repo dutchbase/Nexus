@@ -46,6 +46,7 @@ const fixtureClient = {
     if (sql.includes("FROM projects")) return { rows: [project] };
     if (sql.includes("FROM prompt_files")) return { rows: [prompts[values[0]]].filter(Boolean) };
     if (sql.includes("SELECT resolved.*")) return { rows: skillRows };
+    if (sql.includes("FROM system_ai_settings")) return { rows: [{ default_model: "sonnet", default_reasoning_level: "high", planning_model: null, planning_reasoning_level: null, execution_model: null, execution_reasoning_level: null, repair_model: null, repair_reasoning_level: null }] };
     throw new Error(`unexpected query: ${sql}`);
   },
 };
