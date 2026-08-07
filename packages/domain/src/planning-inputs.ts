@@ -26,7 +26,11 @@ export const requiredPlanStructure = [
 export const planningOutputConstraints =
   "Planning is read-only. Do not edit or write repository files, commit, push, create branches, or open pull requests.";
 
-function ticketAiConfiguration(ticket: any) {
+// Shapes any row with default_model/default_reasoning_level plus
+// planning_/execution_/repair_ model+reasoning_level columns into an
+// AiConfiguration. Ticket rows and the system_ai_settings singleton row
+// both use this exact column layout, so one function covers both.
+export function ticketAiConfiguration(ticket: any) {
   return {
     default: { model: ticket.default_model, reasoning_level: ticket.default_reasoning_level },
     planning: { model: ticket.planning_model, reasoning_level: ticket.planning_reasoning_level },
@@ -45,13 +49,15 @@ function projectAiConfiguration(project: any) {
   };
 }
 
-// ponytail: ticketAiConfiguration/projectAiConfiguration stay module-private —
-// every caller only ever needed the resolved selection, so one export instead
-// of three.
-export function resolvedAiFor(ticket: any, project: any, phase: AiPhase) {
+export async function getSystemAiSettings(client: QueryClient) {
+  const row = (await client.query("SELECT * FROM system_ai_settings WHERE id=1")).rows[0];
+  return ticketAiConfiguration(row);
+}
+
+export function resolvedAiFor(ticket: any, project: any, phase: AiPhase, systemAi: ReturnType<typeof ticketAiConfiguration>) {
   return resolveAiConfiguration({
     phase,
-    system: { default: { model: "sonnet", reasoning_level: "high" } },
+    system: systemAi,
     project: projectAiConfiguration(project),
     ticket: ticketAiConfiguration(ticket),
   });
@@ -151,7 +157,8 @@ export async function planningPromptInputs(client: QueryClient, ticket: any) {
     resolvedSkillsFor(client, ticket, "execution"),
     resolvedSkillsFor(client, ticket, "repair"),
   ]);
-  const ai = resolvedAiFor(ticket, project, "planning");
+  const systemAi = await getSystemAiSettings(client);
+  const ai = resolvedAiFor(ticket, project, "planning", systemAi);
   const values = promptTemplateValues(project, ticket);
   const promptVersionIds = Object.fromEntries([
     // ponytail: a project override's version id is recorded under a global.* key;
