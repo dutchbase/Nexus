@@ -359,6 +359,23 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const result=await response.json();
           if(response.ok)location.reload();else{button.disabled=false;alert(result.error)}
         });
+        const promptChecks=[...document.querySelectorAll("[data-prompt-check]")],selectedCount=document.querySelector("[data-prompt-selected-count]");
+        const updateCount=()=>{if(selectedCount)selectedCount.textContent=String(promptChecks.filter(c=>c.checked).length)};
+        promptChecks.forEach(checkbox=>checkbox.addEventListener("change",updateCount));
+        document.querySelector("[data-prompt-check-all]")?.addEventListener("change",event=>{
+          promptChecks.forEach(checkbox=>{checkbox.checked=event.target.checked});
+          updateCount();
+        });
+        document.querySelectorAll("[data-prompt-bulk]").forEach(button=>button.addEventListener("click",async()=>{
+          const ids=promptChecks.filter(c=>c.checked).map(c=>c.value);
+          if(!ids.length){alert("Select one or more prompts");return}
+          const action=button.dataset.promptBulk;
+          if(action==="delete"&&!confirm("Delete the selected prompt overrides?"))return;
+          button.disabled=true;
+          const response=await fetch("/api/admin/projects/"+projectId+"/prompts/bulk",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({action,ids})});
+          const result=await response.json();
+          if(response.ok)location.reload();else{button.disabled=false;alert(result.error)}
+        }));
       `:""}
       ${path==="/admin/forms/new"?`
         const csrf=sessionStorage.getItem("dccCsrf")||"",form=document.querySelector("[data-new-form-form]");
