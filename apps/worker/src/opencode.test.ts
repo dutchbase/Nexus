@@ -56,10 +56,9 @@ describe("parseOpenCodeEvents", () => {
 });
 
 describe("deepSeekModelFor", () => {
-  it("maps reasoning levels to deepseek models", () => {
-    expect(deepSeekModelFor("low")).toBe("deepseek/deepseek-chat");
-    expect(deepSeekModelFor("medium")).toBe("deepseek/deepseek-chat");
-    expect(deepSeekModelFor("high")).toBe("deepseek/deepseek-reasoner");
+  it("maps each deepseek model name to its OpenCode CLI model string", () => {
+    expect(deepSeekModelFor("deepseek-v4-flash")).toBe("deepseek/deepseek-v4-flash");
+    expect(deepSeekModelFor("deepseek-v4-pro")).toBe("deepseek/deepseek-v4-pro");
   });
 });
 
@@ -98,7 +97,7 @@ describe("invokeOpenCodePlanning", () => {
   it("spawns hermetically with read-only config and returns parsed output", async () => {
     const stub = await makeStub([textEvent]);
     const result = await invokeOpenCodePlanning({
-      task: "Plan ticket T-1", promptFile: "/tmp/prompt.md", reasoningLevel: "medium",
+      task: "Plan ticket T-1", promptFile: "/tmp/prompt.md", model: "deepseek-v4-flash",
       workingDirectory: tmpdir(), apiKey: "sk-ds", executable: stub.stubPath,
     });
     expect(result).toEqual({ markdown: "plan body", sessionId: "ses_test", exitCode: 0 });
@@ -106,7 +105,7 @@ describe("invokeOpenCodePlanning", () => {
     // Regression for C1: OpenCode's -f/--file is a yargs array option that
     // greedily consumes the following positional, so the task string MUST
     // come immediately after "run" or it gets parsed as a filename.
-    expect(captured.argv).toEqual(["run", "Plan ticket T-1", "--pure", "--format", "json", "-m", "deepseek/deepseek-chat", "-f", "/tmp/prompt.md"]);
+    expect(captured.argv).toEqual(["run", "Plan ticket T-1", "--pure", "--format", "json", "-m", "deepseek/deepseek-v4-flash", "-f", "/tmp/prompt.md"]);
     expect(captured.config.permission).toEqual({ "*": "allow", edit: "deny", bash: "deny", webfetch: "deny" });
     expect(captured.env.DEEPSEEK_API_KEY).toBe("sk-ds");
     expect(captured.env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
@@ -121,7 +120,7 @@ describe("invokeOpenCodePlanning", () => {
     await writeFileFs(stubPath, "#!/usr/bin/env node\nconsole.error('bad key');\nprocess.exit(2);\n");
     await chmod(stubPath, 0o755);
     await expect(invokeOpenCodePlanning({
-      task: "t", promptFile: "/tmp/p.md", reasoningLevel: "low",
+      task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
       workingDirectory: tmpdir(), apiKey: "k", executable: stubPath,
     })).rejects.toMatchObject({ code: "opencode_failed" });
   });
@@ -132,7 +131,7 @@ describe("invokeOpenCodePlanning", () => {
     await writeFileFs(stubPath, "#!/usr/bin/env node\nsetTimeout(() => {}, 60_000);\n");
     await chmod(stubPath, 0o755);
     await expect(invokeOpenCodePlanning({
-      task: "t", promptFile: "/tmp/p.md", reasoningLevel: "low",
+      task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
       workingDirectory: tmpdir(), apiKey: "k", executable: stubPath, timeoutMs: 300,
     })).rejects.toMatchObject({ code: "opencode_timeout" });
   });
@@ -150,7 +149,7 @@ describe("invokeOpenCodeExecution", () => {
     const logPath = path.join(logDir, "execution.log");
     const seen: Array<{ eventType: string }> = [];
     const result = await invokeOpenCodeExecution({
-      task: "Implement the plan", promptFile: "/tmp/p.md", reasoningLevel: "high",
+      task: "Implement the plan", promptFile: "/tmp/p.md", model: "deepseek-v4-pro",
       workingDirectory: tmpdir(), apiKey: "k", executable: stub.stubPath, logPath,
       onEvent: async (event) => { seen.push({ eventType: event.eventType }); },
     });
@@ -160,7 +159,7 @@ describe("invokeOpenCodeExecution", () => {
     const captured = await stub.capture();
     // Full-argv assertion (not just the model index) to keep argv order
     // unambiguous — see the C1 regression note in invokeOpenCodePlanning's test.
-    expect(captured.argv).toEqual(["run", "Implement the plan", "--pure", "--format", "json", "-m", "deepseek/deepseek-reasoner", "-f", "/tmp/p.md"]);
+    expect(captured.argv).toEqual(["run", "Implement the plan", "--pure", "--format", "json", "-m", "deepseek/deepseek-v4-pro", "-f", "/tmp/p.md"]);
     expect(captured.config.permission).toEqual({ "*": "allow" });
     expect(await readFile(logPath, "utf8")).toContain('"session.idle"');
   });
@@ -169,7 +168,7 @@ describe("invokeOpenCodeExecution", () => {
     const stub = await makeStub([{ type: "error", sessionID: "ses_e", error: { data: { message: "provider exploded" } } }]);
     const logDir = await mkdtemp(path.join(tmpdir(), "opencode-log-"));
     await expect(invokeOpenCodeExecution({
-      task: "t", promptFile: "/tmp/p.md", reasoningLevel: "low",
+      task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
       workingDirectory: tmpdir(), apiKey: "k", executable: stub.stubPath,
       logPath: path.join(logDir, "x.log"), onEvent: async () => undefined,
     })).rejects.toMatchObject({ code: "opencode_failed" });
@@ -198,7 +197,7 @@ describe("invokeOpenCodeExecution", () => {
     let thrownError: unknown;
     try {
       await invokeOpenCodeExecution({
-        task: "t", promptFile: "/tmp/p.md", reasoningLevel: "low",
+        task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
         workingDirectory: tmpdir(), apiKey: "k", executable: stubPath,
         logPath, onEvent: async (event) => { seen.push({ eventType: event.eventType }); },
       });
@@ -228,7 +227,7 @@ describe("invokeOpenCodeExecution", () => {
     await chmod(stubPath, 0o755);
     const logDir = await mkdtemp(path.join(tmpdir(), "opencode-log-"));
     await expect(invokeOpenCodeExecution({
-      task: "t", promptFile: "/tmp/p.md", reasoningLevel: "low",
+      task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
       workingDirectory: tmpdir(), apiKey: "k", executable: stubPath, timeoutMs: 300,
       logPath: path.join(logDir, "x.log"), onEvent: async () => undefined,
     })).rejects.toMatchObject({ code: "execution_timeout" });
@@ -243,7 +242,7 @@ describe("invokeOpenCodeExecution", () => {
     const controller = new AbortController();
     setTimeout(() => controller.abort(), 50);
     await expect(invokeOpenCodeExecution({
-      task: "t", promptFile: "/tmp/p.md", reasoningLevel: "low",
+      task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
       workingDirectory: tmpdir(), apiKey: "k", executable: stubPath, timeoutMs: 60_000,
       signal: controller.signal,
       logPath: path.join(logDir, "x.log"), onEvent: async () => undefined,
