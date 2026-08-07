@@ -674,6 +674,12 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const response=await fetch("/api/admin/skills/"+skillId,{method:"DELETE",headers:{"x-csrf-token":csrf}});
           if(response.ok){location.href="/admin/skills"}else{const result=await response.json();alert(result.error)}
         });
+        document.querySelector("[data-enable-skill]")?.addEventListener("click",async()=>{
+          if(!confirm("Enable this skill? It will start being offered on tickets again."))return;
+          const skillId=window.location.pathname.split("/").pop();
+          const response=await fetch("/api/admin/skills/"+skillId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({enabled:true})});
+          if(response.ok){location.reload()}else{const result=await response.json();alert(result.error)}
+        });
       `:""}
       ${/^\/admin\/runs\/[^/]+$/.test(path)?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";
