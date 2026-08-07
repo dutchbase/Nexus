@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
 import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
-  buildExecutionPrompt, checkPlanApprovalGate, enqueueJob,
+  buildExecutionPrompt, checkPlanApprovalGate, enqueueJob, getSystemAiSettings,
   globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
   unionSkills, validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
@@ -103,8 +103,9 @@ export async function approvalInputsFor(ticket: any, version: any, client: any) 
   const phases: AiPhase[] = ["planning", "execution", "repair"];
   const phaseSkills = await Promise.all(phases.map((phase) => resolvedSkillsFor(client, ticket, phase)));
   const snapshotted = await snapshotSkillSet(unionSkills(...phaseSkills), phases);
+  const systemAi = await getSystemAiSettings(client);
   const models = Object.fromEntries(phases.map((phase) => {
-    const resolved = resolvedAiFor(ticket, project, phase);
+    const resolved = resolvedAiFor(ticket, project, phase, systemAi);
     return [phase, { model: resolved.model, reasoningLevel: resolved.reasoning_level }];
   }));
   const values = promptTemplateValues(project, ticket);
@@ -811,6 +812,47 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       [selection.model, selection.reasoning_level, session.user_id],
     );
     return json(response, 200, { ok: true });
+  }
+  if (url.pathname === "/api/admin/settings/system-ai" && request.method === "POST") {
+    const body = await bodyOf(request);
+    const selection = validateAiSelection({
+      model: typeof body.default_model === "string" ? body.default_model : "",
+      reasoning_level: typeof body.default_reasoning_level === "string" ? body.default_reasoning_level : "",
+    });
+    const phaseValue = (phase: string, field: "model" | "reasoning_level") => {
+      const key = `${phase}_${field === "model" ? "model" : "reasoning_level"}`;
+      const value = body[key];
+      return typeof value === "string" && value.trim() ? value : null;
+    };
+    const phases = ["planning", "execution", "repair"] as const;
+    const phaseSelections = phases.map((phase) => {
+      const model = phaseValue(phase, "model");
+      const reasoningLevel = phaseValue(phase, "reasoning_level");
+      if (!model && !reasoningLevel) return { phase, model: null, reasoning_level: null };
+      if (!model || !reasoningLevel) {
+        throw new AiConfigurationError(`${phase} needs both a model and a reasoning level, or neither`);
+      }
+      const validated = validateAiSelection({ model, reasoning_level: reasoningLevel });
+      return { phase, model: validated.model, reasoning_level: validated.reasoning_level };
+    });
+    const byPhase = Object.fromEntries(phaseSelections.map((entry) => [entry.phase, entry]));
+    await pool.query(
+      `UPDATE system_ai_settings
+       SET default_model=$1,default_reasoning_level=$2,
+           planning_model=$3,planning_reasoning_level=$4,
+           execution_model=$5,execution_reasoning_level=$6,
+           repair_model=$7,repair_reasoning_level=$8,
+           updated_at=now(),updated_by=$9
+       WHERE id=1`,
+      [
+        selection.model, selection.reasoning_level,
+        byPhase.planning.model, byPhase.planning.reasoning_level,
+        byPhase.execution.model, byPhase.execution.reasoning_level,
+        byPhase.repair.model, byPhase.repair.reasoning_level,
+        session.user_id,
+      ],
+    );
+    return json(response, 200, {});
   }
   const followUpDescriptionMatch = url.pathname.match(/^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/follow-up-description$/i);
   if (followUpDescriptionMatch && request.method === "POST") {
@@ -1522,7 +1564,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false, agentStartPath: project.agent_start_path,
     });
     const commitMessage = typeof body.commit_message === "string" ? body.commit_message.trim() : "";
-    const selection = resolvedAiFor(ticket, project, "planning");
+    const systemAi = await getSystemAiSettings(pool);
+    const selection = resolvedAiFor(ticket, project, "planning", systemAi);
     validateAiSelection({
       model: typeof body.model === "string" ? body.model : selection.model,
       reasoning_level: typeof body.reasoning_level === "string" ? body.reasoning_level : selection.reasoning_level,
@@ -2153,9 +2196,10 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       }
       const candidate = { ...before, ...Object.fromEntries(entries) };
       const project = (await client.query("SELECT * FROM projects WHERE id=$1", [candidate.project_id])).rows[0];
+      const systemAi = await getSystemAiSettings(client);
       for (const phase of (candidate.ai_configuration_mode === "advanced"
         ? ["planning", "execution", "repair"] : ["planning"]) as AiPhase[]) {
-        resolvedAiFor(candidate, project, phase);
+        resolvedAiFor(candidate, project, phase, systemAi);
       }
       const updated = (await client.query(`UPDATE tickets SET ${entries.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now() WHERE id=$1 RETURNING *`, [before.id, ...entries.map(([, value]) => value)])).rows[0];
       if (body.status && body.status !== before.status) await client.query(

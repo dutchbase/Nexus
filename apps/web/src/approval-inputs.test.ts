@@ -53,6 +53,12 @@ test("preview and approval build the same canonical input hash through their tra
       source: "project_required", allow_ticket_override: false,
     }] };
     if (sql.includes("FROM project_skills ps")) return { rows: [] };
+    if (sql.includes("FROM system_ai_settings")) return { rows: [{
+      default_model: null, default_reasoning_level: null,
+      planning_model: null, planning_reasoning_level: null,
+      execution_model: null, execution_reasoning_level: null,
+      repair_model: null, repair_reasoning_level: null,
+    }] };
     throw new Error(`unexpected query: ${sql}`);
   } };
   const ticket = {

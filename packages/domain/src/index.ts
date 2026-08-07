@@ -70,6 +70,7 @@ export function resolveAiConfiguration(input: {
   ticket?: AiConfiguration;
 }) {
   let result = overlay({}, input.system.default);
+  result = overlay(result, input.system[input.phase]);
   result = overlay(result, input.project?.default);
   result = overlay(result, input.project?.[input.phase]);
   result = overlay(result, input.ticket?.default);
