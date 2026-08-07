@@ -302,8 +302,15 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
   const headSha = pullRequest.head.sha;
   if (!headSha) throw new GitHubProviderError("invalid_response", "GitHub pull request head SHA is missing");
 
-  const protectionResponse = await responseFor(`${apiBaseUrl()}${repoPath}/branches/${encodeURIComponent(pullRequest.base.ref)}/protection`, {}, [404]);
-  const protection = protectionResponse.status === 404 ? null : await jsonFor<any>(protectionResponse);
+  const protectionResponse = await responseFor(`${apiBaseUrl()}${repoPath}/branches/${encodeURIComponent(pullRequest.base.ref)}/protection`, {}, [404, 403]);
+  // Private repos without GitHub Pro/Team get a 403 "Upgrade to GitHub Pro" for this
+  // endpoint regardless of token scope -- branch protection cannot exist there, so
+  // this is equivalent to the 404 case. Any other 403 (e.g. real permission denial)
+  // still surfaces as an error, same as before.
+  const protectionPlanRestricted = protectionResponse.status === 403
+    && /upgrade to github (pro|team)/i.test(await protectionResponse.clone().text().catch(() => ""));
+  if (protectionResponse.status === 403 && !protectionPlanRestricted) throw await errorFor(protectionResponse);
+  const protection = protectionResponse.status === 404 || protectionPlanRestricted ? null : await jsonFor<any>(protectionResponse);
   const reviewsResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/pulls/${number}/reviews?per_page=100`, (page) => page);
   const checkRunsResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(headSha)}/check-runs?per_page=100`, (page) => page.check_runs ?? []);
   const statusesResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(headSha)}/status?per_page=100`, (page) => page.statuses ?? []);
