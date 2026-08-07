@@ -14,7 +14,7 @@ export * from "./pr-conflict-resolution.ts";
 export * from "./follow-up-ticket.ts";
 export * from "./planning-inputs.ts";
 
-export const aiModels = ["fable", "opus", "sonnet", "haiku", "deepseek"] as const;
+export const aiModels = ["fable", "opus", "sonnet", "haiku", "deepseek-v4-flash", "deepseek-v4-pro"] as const;
 export const reasoningLevels = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
 export type AiModel = typeof aiModels[number];
 export type ReasoningLevel = typeof reasoningLevels[number];
@@ -32,9 +32,15 @@ const supportedReasoning: Record<AiModel, readonly ReasoningLevel[]> = {
   sonnet: ["low", "medium", "high", "xhigh"],
   opus: ["low", "medium", "high", "xhigh", "max"],
   fable: reasoningLevels,
-  // deepseek runs via the OpenCode CLI; low/medium → deepseek-chat, high → deepseek-reasoner
-  deepseek: ["low", "medium", "high"],
+  // Both run via the OpenCode CLI — see apps/worker/src/opencode.ts.
+  "deepseek-v4-flash": ["low", "medium", "high"],
+  "deepseek-v4-pro": ["low", "medium", "high"],
 };
+
+export const deepSeekModels: readonly AiModel[] = ["deepseek-v4-flash", "deepseek-v4-pro"];
+export function isDeepSeekModel(model: string): boolean {
+  return (deepSeekModels as readonly string[]).includes(model);
+}
 
 export class AiConfigurationError extends Error {
   status = 422;
