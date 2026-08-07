@@ -179,13 +179,20 @@ describe("buildPlanningArguments", () => {
     expect(buildPlanningArguments({ ...invocation, tools: ["Read", "Glob", "Grep"] })).toContain("Read,Glob,Grep");
   });
 
-  test("keeps Bash in the default tool list", () => {
-    expect(buildPlanningArguments(invocation)).toContain("Read,Glob,Grep,Bash,Skill");
+  test("does not include Bash in the default tool list", () => {
+    // Planning never needed shell access — its job is to read the repo and
+    // write a markdown plan. Under --permission-mode dontAsk (no interactive
+    // approver), a denied Bash call can't be retried productively; the agent
+    // just burns turns until it hits --max-turns. See
+    // docs/superpowers/plans/2026-07-31-pr-ai-review-reliability.md for the
+    // same fix applied to PR review.
+    expect(buildPlanningArguments(invocation)).toContain("Read,Glob,Grep,Skill");
+    expect(buildPlanningArguments(invocation)).not.toContain("Bash");
   });
 
   test("loads the bundle layout and all materialized skills as session plugins without enabling Agent", () => {
     const args = buildPlanningArguments({ ...invocation, pluginDirectories: ["/plugin-a", "/plugin-b"] });
-    expect(args).toContain("Read,Glob,Grep,Bash,Skill");
+    expect(args).toContain("Read,Glob,Grep,Skill");
     expect(args).not.toContain("Agent");
     expect(args).toEqual(expect.arrayContaining(["--add-dir", "/skills"]));
     expect(args).toEqual(expect.arrayContaining(["--plugin-dir", "/plugin-a", "--plugin-dir", "/plugin-b"]));

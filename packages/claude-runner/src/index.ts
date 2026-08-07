@@ -406,7 +406,13 @@ export function buildPlanningArguments(input: PlanningInvocation) {
     // approver), so planning burned its turns on denied read-only commands.
     // "dontAsk" auto-allows read-only Bash and denies everything else —
     // read-only planning whose tools actually work.
-    "--permission-mode", "dontAsk", "--tools", input.tools?.join(",") ?? "Read,Glob,Grep,Bash,Skill",
+    // Bash itself is no longer in the default list at all: a denied Bash
+    // call under dontAsk has no escalation path, so the agent just retries
+    // until --max-turns is exhausted (see DCC-1014, three identical
+    // failures on 2026-08-07). Read/Glob/Grep cover everything planning's
+    // prompt actually asks for; PR review dropped Bash the same way in
+    // docs/superpowers/plans/2026-07-31-pr-ai-review-reliability.md.
+    "--permission-mode", "dontAsk", "--tools", input.tools?.join(",") ?? "Read,Glob,Grep,Skill",
     "--append-system-prompt-file", input.promptFile, ...skillDirectoryArguments(input),
     "--output-format", "json", "--max-turns", String(input.maxTurns),
   ];
