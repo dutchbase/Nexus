@@ -2,7 +2,7 @@ import { access, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promise
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, test } from "vitest";
-import { materializeSkillBundle, resolveSkills, SkillResolutionError, skillsForPhase, snapshotSkillSet, type ResolvedSkill } from "./index.ts";
+import { materializeSkillBundle, resolveSkills, SkillResolutionError, skillsForPhase, snapshotSkillSet, validateFilesystemPath, type ResolvedSkill } from "./index.ts";
 
 const directories: string[] = [];
 
@@ -125,5 +125,33 @@ describe("approval skill policy", () => {
     expect(() => resolveSkills([
       { skill: requiredSkill, skillId: skill.id, slug: skill.slug, source: "project_required" },
     ], "project", "planning")).toThrow(`Skill "secure" is ${reason}`);
+  });
+});
+
+describe("validateFilesystemPath", () => {
+  test.each(["workspace_global", "personal_claude", "external_directory"])(
+    "requires an absolute path for source type %s",
+    (sourceType) => {
+      expect(validateFilesystemPath(sourceType, "home/deploy/.claude/skills/example/SKILL.md")).toMatch(/must be an absolute path/);
+      expect(validateFilesystemPath(sourceType, "/home/deploy/.claude/skills/example/SKILL.md")).toBeNull();
+    },
+  );
+
+  test.each(["project_local", "repository"])(
+    "rejects an absolute path for source type %s",
+    (sourceType) => {
+      expect(validateFilesystemPath(sourceType, "/home/deploy/.claude/skills/example/SKILL.md")).toMatch(/must be relative/);
+      expect(validateFilesystemPath(sourceType, "skills/vendor/example/SKILL.md")).toBeNull();
+    },
+  );
+
+  test("allows an unset or empty path (validated later when the skill is actually resolved)", () => {
+    expect(validateFilesystemPath("workspace_global", null)).toBeNull();
+    expect(validateFilesystemPath("workspace_global", undefined)).toBeNull();
+    expect(validateFilesystemPath("workspace_global", "")).toBeNull();
+  });
+
+  test("treats an unrecognized source type as repo-relative", () => {
+    expect(validateFilesystemPath("some_future_type", "/absolute/path/SKILL.md")).toMatch(/must be relative/);
   });
 });
