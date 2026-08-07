@@ -116,6 +116,27 @@ describe("worker orchestration boundary", () => {
     expect(() => assertApprovedSkillSnapshot(approved, row)).toThrow("approved skill snapshot integrity check failed");
   });
 
+  test("accepts an approved snapshot whose keys were reordered by a jsonb round-trip", () => {
+    const assertApprovedSkillSnapshot = (workerBoundary as any).assertApprovedSkillSnapshot;
+    const stored = [skill("test-driven-development", ["execution", "repair"])];
+    // Postgres jsonb orders object keys by length, then bytewise — exactly
+    // what checkPlanApprovalGate hands the worker after reading
+    // approved_input_snapshots.material_input_json back from the database.
+    const jsonbOrder = (value: any): any => {
+      if (Array.isArray(value)) return value.map(jsonbOrder);
+      if (value && typeof value === "object") {
+        return Object.fromEntries(
+          Object.keys(value)
+            .sort((left, right) => left.length - right.length || (left < right ? -1 : 1))
+            .map((key) => [key, jsonbOrder(value[key])]),
+        );
+      }
+      return value;
+    };
+    const approved = [jsonbOrder(approvedSkill(stored[0]))];
+    expect(() => assertApprovedSkillSnapshot(approved, snapshotRow(stored))).not.toThrow();
+  });
+
   test.each([
     ["phases", (stored: SnapshottedSkill) => { stored.phases = ["planning"]; }],
     ["plugin", (stored: SnapshottedSkill) => { stored.plugin_name = "tampered-plugin"; }],

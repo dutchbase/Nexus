@@ -1,0 +1,11 @@
+# Runtime artifacts of run-e2e.sh — never commit.
+.results/
+.scenarios/
+.seed-patched/
+.pg-state/
+.stack.env
+.fixtures.env
+.app.stdout.log
+.mock-github.log
+.mock-github.stdout.log
+.mock-claude.log
