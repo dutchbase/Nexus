@@ -663,7 +663,8 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         document.querySelector("[data-save-skill]")?.addEventListener("click",async()=>{
           const skillId=window.location.pathname.split("/").pop();
           const description=document.querySelector("[data-skill-description]")?.value||"";
-          const payload={description};
+          const filesystem_path=document.querySelector("[data-skill-path]")?.value.trim()||"";
+          const payload={description,filesystem_path};
           const response=await fetch("/api/admin/skills/"+skillId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
           if(response.ok){alert("Skill saved")}else{const result=await response.json();alert(result.error)}
         });
