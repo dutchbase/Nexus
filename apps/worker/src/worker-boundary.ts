@@ -77,7 +77,16 @@ export function assertApprovedSkillSnapshot(
     phases: skill.phases ?? [skill.phase], pluginName: skill.plugin_name ?? null,
     invocationName: skill.invocation_name ?? null, configuration: skill.configuration_json ?? {},
   })));
-  if (JSON.stringify(normalize(approved)) !== JSON.stringify(actual)) {
+  // Key-order-insensitive comparison: `approved` has been round-tripped
+  // through Postgres jsonb (which reorders object keys), `actual` is built
+  // in code — plain JSON.stringify would reject every valid snapshot.
+  const canonical = (value: unknown): string =>
+    JSON.stringify(value, (_key, node) =>
+      node && typeof node === "object" && !Array.isArray(node)
+        ? Object.fromEntries(Object.keys(node).sort().map((key) => [key, (node as Record<string, unknown>)[key]]))
+        : node,
+    );
+  if (canonical(normalize(approved)) !== canonical(actual)) {
     fail();
   }
 }

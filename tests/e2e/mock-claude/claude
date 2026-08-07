@@ -1,0 +1,148 @@
+#!/usr/bin/env node
+// Self-contained mock `claude` CLI for the e2e journey suite.
+//
+// Why not reuse .lfd/dcc-build/harness/mock-claude directly?
+// 1. Its `auth status` output predates the app's preflight fix
+//    (packages/claude-runner/src/index.ts:106 expects {loggedIn, authMethod}).
+// 2. It lacks `--version`, which the execution sandbox preflight requires
+//    (requireClaudeSandboxVersion, claude-runner/src/index.ts:494).
+// 3. Scoped executions run inside bubblewrap where only /usr, the node root
+//    and the worktree are bound — the harness mock (under .lfd/) and any
+//    scenario FILE under tests/e2e/ are unreadable there. This mock therefore
+//    also accepts the scenario as inline JSON in MOCK_CLAUDE_SCENARIO.
+//
+// Scenario shapes and modes mirror harness/mock-claude/README.md.
+const fs = require("fs");
+
+const FORBIDDEN = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"];
+if (FORBIDDEN.some((name) => process.env[name])) {
+  console.error(JSON.stringify({ error: "api_key_authentication_detected" }));
+  process.exit(1);
+}
+
+const argv = process.argv.slice(2);
+const arg = (flag) => {
+  const index = argv.indexOf(flag);
+  return index >= 0 ? argv[index + 1] : null;
+};
+
+function log(entry) {
+  const logPath = process.env.MOCK_CLAUDE_LOG;
+  if (!logPath) return;
+  try {
+    fs.appendFileSync(logPath, JSON.stringify(entry) + "\n");
+  } catch {
+    /* unwritable inside the sandbox — fine */
+  }
+}
+log({
+  timestamp: new Date().toISOString(), argv, cwd: process.cwd(),
+  parsed: { model: arg("--model"), effort: arg("--effort"), output_format: arg("--output-format"), session_id: arg("--session-id"), max_turns: arg("--max-turns") },
+});
+
+if (argv.includes("--version")) {
+  console.log("2.1.230 (Claude Code)");
+  process.exit(0);
+}
+
+if (argv[0] === "auth" && argv[1] === "status") {
+  if (process.env.CLAUDE_CODE_OAUTH_TOKEN) {
+    console.log(JSON.stringify({ loggedIn: true, authMethod: "subscription", account: "mock-operator" }));
+    process.exit(0);
+  }
+  console.log(JSON.stringify({ loggedIn: false, authMethod: null }));
+  process.exit(1);
+}
+
+function loadScenario() {
+  const raw = process.env.MOCK_CLAUDE_SCENARIO;
+  const fallback = { mode: "plan_valid", plan_markdown: "# Implementation Plan\n\n## 1. Summary\n\nMock plan.\n" };
+  if (!raw) return fallback;
+  try {
+    return JSON.parse(fs.readFileSync(raw, "utf8"));
+  } catch {
+    /* not a readable file — try inline JSON */
+  }
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return fallback;
+  }
+}
+
+const scenario = loadScenario();
+const sessionId = arg("--session-id");
+const outputFormat = arg("--output-format");
+
+// PR AI reviews have no scenario-routing hook (worker.ts:1221 passes no
+// scenarioPath), so answer them from the task prompt: the worker demands
+// exactly one ```json block with {verdict, summary} (domain/pr-review.ts:49).
+if (!process.env.MOCK_CLAUDE_SCENARIO && (arg("-p") || "").includes("JSON verdict")) {
+  const markdown = [
+    "## AI review (mock)",
+    "Reviewed the immutable diff — no blocking issues found.",
+    "```json",
+    JSON.stringify({ verdict: "approved", summary: "Mock review: change is safe to merge." }),
+    "```",
+  ].join("\n");
+  console.log(JSON.stringify({ type: "result", subtype: "success", result: markdown, session_id: sessionId || "generated-session-id", exit_code: 0 }));
+  process.exit(0);
+}
+
+if (scenario.session_id_expected && scenario.session_id_expected !== sessionId) {
+  console.error(JSON.stringify({ error: "session_id_mismatch" }));
+  process.exit(3);
+}
+
+const sleep = (ms) => {
+  const end = Date.now() + ms;
+  while (Date.now() < end) { /* busy wait, matches harness mock */ }
+};
+
+switch (scenario.mode) {
+  case "plan_invalid":
+  case "plan_valid": {
+    console.log(JSON.stringify({
+      type: "result", subtype: "success",
+      result: scenario.mode === "plan_valid" ? scenario.plan_markdown : scenario.invalid_plan_text,
+      session_id: sessionId || "generated-session-id", exit_code: 0,
+    }));
+    process.exit(0);
+  }
+  case "invalid_model_combo": {
+    console.error(JSON.stringify({ error: "unsupported_model_reasoning_combination", model: arg("--model"), effort: arg("--effort") }));
+    process.exit(2);
+  }
+  case "timeout": {
+    const events = (scenario.events || []).slice(0, scenario.timeout_after_events ?? 2);
+    for (const event of events) {
+      console.log(JSON.stringify(event));
+      sleep(scenario.event_delay_ms ?? 50);
+    }
+    process.exit(124);
+  }
+  case "exec_stream": {
+    // Simulate the agent editing the repo: validation rejects executions
+    // with "no effective changes", so scenarios list files to write
+    // (relative to cwd, which is the execution worktree).
+    for (const file of scenario.write_files || []) {
+      try {
+        require("path").dirname(file.path) !== "." && fs.mkdirSync(require("path").dirname(file.path), { recursive: true });
+        fs.writeFileSync(file.path, file.content ?? "");
+      } catch (error) {
+        console.error(JSON.stringify({ error: "write_files_failed", path: file.path, message: String(error) }));
+        process.exit(1);
+      }
+    }
+    if (outputFormat === "stream-json") {
+      for (const event of scenario.events || []) console.log(JSON.stringify(event));
+      process.exit(scenario.exit_code || 0);
+    }
+    console.log(JSON.stringify({ type: "result", subtype: "success", result: "Execution complete", session_id: sessionId || "generated-session-id", exit_code: scenario.exit_code || 0 }));
+    process.exit(scenario.exit_code || 0);
+  }
+  default: {
+    console.log(JSON.stringify({ type: "result", subtype: "success", result: scenario.plan_markdown || "# Default Plan\n", session_id: sessionId || "generated-session-id", exit_code: 0 }));
+    process.exit(0);
+  }
+}
