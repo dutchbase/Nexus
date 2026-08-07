@@ -120,9 +120,11 @@ GITHUB_TOKEN=...
 GITHUB_API_BASE_URL=https://api.github.com
 DCC_NOTIFICATION_SECRET_<NAME>=...
 
-# DeepSeek API key — enables the "deepseek" model (runs via the OpenCode CLI)
-# for PR reviews, planning, execution, repair, and conflict resolution.
-# Jobs resolved to model=deepseek fail fast with a clear error if unset.
+# DeepSeek API key — enables the "deepseek-v4-flash" and "deepseek-v4-pro"
+# models (both run via the OpenCode CLI) for PR reviews, planning, execution,
+# repair, and conflict resolution.
+# Jobs resolved to model=deepseek-v4-flash or model=deepseek-v4-pro fail fast
+# with a clear error if unset.
 DEEPSEEK_API_KEY=
 
 # Absolute path to the OpenCode CLI binary (defaults to "opencode" on PATH).
