@@ -406,7 +406,13 @@ export function buildPlanningArguments(input: PlanningInvocation) {
     // approver), so planning burned its turns on denied read-only commands.
     // "dontAsk" auto-allows read-only Bash and denies everything else —
     // read-only planning whose tools actually work.
-    "--permission-mode", "dontAsk", "--tools", input.tools?.join(",") ?? "Read,Glob,Grep,Bash,Skill",
+    // Bash itself is no longer in the default list at all: a denied Bash
+    // call under dontAsk has no escalation path, so the agent just retries
+    // until --max-turns is exhausted (see DCC-1014, three identical
+    // failures on 2026-08-07). Read/Glob/Grep cover everything planning's
+    // prompt actually asks for; PR review dropped Bash the same way in
+    // docs/superpowers/plans/2026-07-31-pr-ai-review-reliability.md.
+    "--permission-mode", "dontAsk", "--tools", input.tools?.join(",") ?? "Read,Glob,Grep,Skill",
     "--append-system-prompt-file", input.promptFile, ...skillDirectoryArguments(input),
     "--output-format", "json", "--max-turns", String(input.maxTurns),
   ];
@@ -426,6 +432,15 @@ export function summarizeClaudeFailure(stdout: string, stderr: string) {
   return `${detail || "Claude planning failed."}${bashDenied ? " Bash access was denied; the review did not complete." : ""}`;
 }
 
+// Truncated so a runaway/verbose CLI failure can't blow up
+// agent_runs.metadata_json, while keeping both ends: real
+// `--output-format json` payloads put the model's partial `result` text
+// before `permission_denials`/`errors`, so a head-only truncation discards
+// the exact diagnostic payload this capture exists to preserve.
+export function truncateStdoutForCapture(stdout: string) {
+  return stdout.length > 4000 ? `${stdout.slice(0, 1500)}\n…truncated…\n${stdout.slice(-2500)}` : stdout;
+}
+
 export async function invokePlanningClaude(input: PlanningInvocation) {
   assertSubscriptionOnlyEnvironment();
   // Planning receives only locale/PATH, its subscription token, and runner
@@ -437,12 +452,17 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   });
   if (result.timedOut) throw new ClaudePlanningError("Claude planning timed out", 124, "planning_timeout");
   if (result.exitCode !== 0) {
-    throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), { exitCode: result.exitCode });
+    throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), {
+      exitCode: result.exitCode,
+      stdout: truncateStdoutForCapture(result.stdout),
+    });
   }
   let response: any;
-  try { response = JSON.parse(result.stdout.trim()); } catch { throw new Error("Claude planning returned invalid JSON"); }
+  try { response = JSON.parse(result.stdout.trim()); } catch {
+    throw Object.assign(new Error("Claude planning returned invalid JSON"), { stdout: truncateStdoutForCapture(result.stdout) });
+  }
   if (response?.type !== "result" || response?.subtype !== "success" || typeof response?.result !== "string") {
-    throw new Error("Claude planning response did not contain a successful Markdown result");
+    throw Object.assign(new Error("Claude planning response did not contain a successful Markdown result"), { stdout: truncateStdoutForCapture(result.stdout) });
   }
   return {
     markdown: response.result as string,

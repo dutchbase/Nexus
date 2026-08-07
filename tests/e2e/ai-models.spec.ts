@@ -10,7 +10,7 @@ test.beforeEach(async ({ page }) => {
 
 test("change the default AI review model in settings", async ({ page }) => {
   await page.goto("/admin/settings");
-  await page.getByRole("tab", { name: "AI Review" }).click();
+  await page.getByRole("tab", { name: "AI" }).click();
   const form = page.locator("[data-ai-review-settings-form]");
   await form.locator('select[name="default_model"]').selectOption("haiku");
   await form.locator('select[name="default_reasoning_level"]').selectOption("low");
@@ -18,13 +18,13 @@ test("change the default AI review model in settings", async ({ page }) => {
 
   // Submit reloads the page; the selection must survive it.
   await page.waitForLoadState("load");
-  await page.getByRole("tab", { name: "AI Review" }).click();
+  await page.getByRole("tab", { name: "AI" }).click();
   await expect(form.locator('select[name="default_model"]')).toHaveValue("haiku");
   const row = await queryOne("select default_model, default_reasoning_level from ai_review_settings where id = 1");
   expect(row).toMatchObject({ default_model: "haiku", default_reasoning_level: "low" });
 
   // Restore the seeded default so other journeys are unaffected.
-  await page.getByRole("tab", { name: "AI Review" }).click();
+  await page.getByRole("tab", { name: "AI" }).click();
   await form.locator('select[name="default_model"]').selectOption("sonnet");
   await form.locator('select[name="default_reasoning_level"]').selectOption("high");
   await form.locator('button[type="submit"]').click();

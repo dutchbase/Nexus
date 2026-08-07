@@ -179,14 +179,25 @@ describe("buildPlanningArguments", () => {
     expect(buildPlanningArguments({ ...invocation, tools: ["Read", "Glob", "Grep"] })).toContain("Read,Glob,Grep");
   });
 
-  test("keeps Bash in the default tool list", () => {
-    expect(buildPlanningArguments(invocation)).toContain("Read,Glob,Grep,Bash,Skill");
+  test("does not include Bash in the default tool list", () => {
+    // Planning never needed shell access — its job is to read the repo and
+    // write a markdown plan. Under --permission-mode dontAsk (no interactive
+    // approver), a denied Bash call can't be retried productively; the agent
+    // just burns turns until it hits --max-turns. See
+    // docs/superpowers/plans/2026-07-31-pr-ai-review-reliability.md for the
+    // same fix applied to PR review.
+    expect(buildPlanningArguments(invocation)).toContain("Read,Glob,Grep,Skill");
+    // args is an array, and toContain does element equality — a stray
+    // "Bash" substring inside a joined "--tools" value (e.g.
+    // "Read,Glob,Grep,Bash,Skill") would never match a bare "Bash" element,
+    // so this must check the joined string instead.
+    expect(buildPlanningArguments(invocation).join(" ")).not.toMatch(/Bash/);
   });
 
   test("loads the bundle layout and all materialized skills as session plugins without enabling Agent", () => {
     const args = buildPlanningArguments({ ...invocation, pluginDirectories: ["/plugin-a", "/plugin-b"] });
-    expect(args).toContain("Read,Glob,Grep,Bash,Skill");
-    expect(args).not.toContain("Agent");
+    expect(args).toContain("Read,Glob,Grep,Skill");
+    expect(args.join(" ")).not.toMatch(/Agent/);
     expect(args).toEqual(expect.arrayContaining(["--add-dir", "/skills"]));
     expect(args).toEqual(expect.arrayContaining(["--plugin-dir", "/plugin-a", "--plugin-dir", "/plugin-b"]));
   });
@@ -625,4 +636,81 @@ test("summarizes a Bash denial from Claude's max-turn payload", () => {
     '{"type":"result","subtype":"error_max_turns","errors":["Reached maximum number of turns (5)"],"permission_denials":[{"tool_name":"Bash"}]}',
     "",
   )).toBe("Reached maximum number of turns (5) Bash access was denied; the review did not complete.");
+});
+
+test("attaches truncated raw stdout to the error thrown on a failed planning invocation", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-stdout-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const payload = JSON.stringify({
+    type: "result", subtype: "error_max_turns",
+    errors: ["Reached maximum number of turns (5)"],
+    permission_denials: [{ tool_name: "Bash" }],
+  });
+  await writeFile(executable, `#!/bin/sh
+printf '%s\\n' ${JSON.stringify(payload)}
+exit 1
+`);
+  await chmod(executable, 0o755);
+
+  const error = await invokePlanningClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root,
+  }).catch((thrown) => thrown);
+
+  expect(error).toMatchObject({
+    message: "Reached maximum number of turns (5) Bash access was denied; the review did not complete.",
+    exitCode: 1,
+  });
+  expect((error as { stdout: string }).stdout).toContain("error_max_turns");
+});
+
+test("keeps the tail of an oversized failure payload, not just the head", async () => {
+  // Real `--output-format json` failures put the model's partial `result`
+  // text before `permission_denials`/`errors` — a head-only truncation
+  // (the previous `.slice(0, 4000)`) would discard exactly the diagnostic
+  // payload this capture exists to preserve. Build a payload large enough
+  // that the padding alone exceeds 4000 chars, with the denial marker only
+  // reachable from the end of the string.
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-stdout-tail-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const padding = "x".repeat(6000);
+  const payload = JSON.stringify({
+    type: "result", subtype: "error_max_turns",
+    result: padding,
+    errors: ["Reached maximum number of turns (5)"],
+    permission_denials: [{ tool_name: "Bash" }],
+  });
+  await writeFile(executable, `#!/bin/sh
+printf '%s\\n' ${JSON.stringify(payload)}
+exit 1
+`);
+  await chmod(executable, 0o755);
+
+  const error = await invokePlanningClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root,
+  }).catch((thrown) => thrown);
+
+  const stdout = (error as { stdout: string }).stdout;
+  expect(stdout.length).toBeLessThan(payload.length);
+  expect(stdout).toContain("permission_denials");
+  expect(stdout).toContain("tool_name");
+});
+
+test("attaches truncated raw stdout when planning's response is not a successful Markdown result", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-stdout-bad-result-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const payload = JSON.stringify({ type: "result", subtype: "error_max_turns", errors: ["Reached maximum number of turns (5)"] });
+  await writeFile(executable, `#!/bin/sh
+printf '%s\\n' ${JSON.stringify(payload)}
+`);
+  await chmod(executable, 0o755);
+
+  const error = await invokePlanningClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root,
+  }).catch((thrown) => thrown);
+
+  expect((error as Error).message).toBe("Claude planning response did not contain a successful Markdown result");
+  expect((error as { stdout: string }).stdout).toContain("error_max_turns");
 });

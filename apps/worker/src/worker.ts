@@ -407,14 +407,21 @@ async function runPlanning(job: any, lease: LeaseGuard) {
     // endpoints accept — reverting to "Planning Queued" (an active-queue
     // state that no longer exists) stranded tickets and blocked retries.
     await finalizePlanningFailure(inTransaction, lease, { jobId: job.id, workerId, message }, async (client) => {
+      const rawStdoutOnFailure = typeof (error as any)?.stdout === "string" ? (error as any).stdout : undefined;
       await lease.run(() => client.query(
         `UPDATE agent_runs SET status='failed',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4,metadata_json=metadata_json || $5::jsonb WHERE id=$1`,
         [runId, (error as any)?.exitCode ?? 1,
           error instanceof ClaudePlanningError ? error.code : error instanceof Error && error.message.startsWith("invalid_plan_structure") ? "invalid_plan_structure" : "planning_failed",
           message,
-          // ponytail: capture the raw markdown so an invalid_plan_structure
-          // failure is diagnosable without re-running the costly CLI call.
-          JSON.stringify(rawMarkdownForDebug ? { raw_markdown: rawMarkdownForDebug.slice(0, 8000) } : {})],
+          // ponytail: capture the raw markdown (success/invalid-structure)
+          // or raw stdout (hard CLI failure — e.g. denied-tool max-turns) so
+          // a future failure is diagnosable without re-running the costly
+          // CLI call. See DCC-1014, 2026-08-07: three failures in a row
+          // left nothing but a one-line summary to investigate from.
+          JSON.stringify({
+            ...(rawMarkdownForDebug ? { raw_markdown: rawMarkdownForDebug.slice(0, 8000) } : {}),
+            ...(rawStdoutOnFailure ? { raw_stdout_on_failure: rawStdoutOnFailure } : {}),
+          })],
       ));
       const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
       if (!current || !["Planning", expectedStatus].includes(current.status)) return;

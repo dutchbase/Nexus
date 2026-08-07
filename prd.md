@@ -1533,7 +1533,7 @@ claude -p \
   --model "$MODEL" \
   --effort "$REASONING_LEVEL" \
   --permission-mode dontAsk \
-  --tools "Read,Glob,Grep,Bash" \
+  --tools "Read,Glob,Grep,Skill" \
   --append-system-prompt-file "$PROMPT_FILE" \
   --add-dir "$SKILL_BUNDLE_DIR" \
   --output-format json \
