@@ -100,6 +100,29 @@ function withinRoot(root: string, target: string) {
   return relative !== ".." && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
 }
 
+function classifySkillSourceType(sourceType: string): "absolute" | "workspace_global" | "relative" {
+  if (sourceType === "personal_claude" || sourceType === "external_directory") return "absolute";
+  if (sourceType === "workspace_global") return "workspace_global";
+  return "relative";
+}
+
+export function validateFilesystemPath(sourceType: string, filesystemPath: string | null | undefined): string | null {
+  if (!filesystemPath) return null;
+  if (typeof filesystemPath !== "string") return `filesystem_path must be a string — got ${typeof filesystemPath}`;
+  const kind = classifySkillSourceType(sourceType);
+  const absolute = path.isAbsolute(filesystemPath);
+  if (kind === "absolute" && !absolute) {
+    return `filesystem_path must be an absolute path for source type "${sourceType}" (e.g. /home/user/.claude/skills/<slug>/SKILL.md) — got "${filesystemPath}"`;
+  }
+  if (kind === "relative" && absolute) {
+    return `filesystem_path must be relative to the skills root for source type "${sourceType}" (e.g. skills/vendor/<name>/SKILL.md) — got "${filesystemPath}"`;
+  }
+  if (kind === "workspace_global" && !absolute && !filesystemPath.startsWith("skills/")) {
+    return `filesystem_path for source type "workspace_global" must be either an absolute path (e.g. /home/user/.claude/skills/<slug>/SKILL.md) or a repo-relative path under "skills/" (e.g. skills/global/<slug>/SKILL.md) — got "${filesystemPath}"`;
+  }
+  return null;
+}
+
 async function filesUnderSkill(skillPath: string, skillsRoot: string) {
   const absoluteRoot = path.resolve(REPO_ROOT, skillsRoot);
   const absoluteFile = path.isAbsolute(skillPath) ? path.normalize(skillPath) : path.resolve(absoluteRoot, skillPath);
