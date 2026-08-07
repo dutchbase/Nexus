@@ -19,7 +19,7 @@ import {
   safeNotificationProvider,
 } from "../../../packages/notification-provider/src/index.ts";
 import {
-  resolveSkills, snapshotSkillSet, snapshotSkills, SkillResolutionError,
+  resolveSkills, snapshotSkillSet, snapshotSkills, SkillResolutionError, validateFilesystemPath,
 } from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
 import { normalizeAgentStartPath, validateAgentStartPath, validateProject } from "@dcc/project-config";
@@ -1334,6 +1334,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (typeof body.slug !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(body.slug)) return json(response, 400, { error: "invalid skill slug" });
     if (typeof body.name !== "string" || !body.name.trim()) return json(response, 400, { error: "skill name is required" });
     if (!skillSourceTypes.has(body.source_type)) return json(response, 400, { error: "unsupported skill source type" });
+    const pathError = validateFilesystemPath(body.source_type, body.filesystem_path);
+    if (pathError) return json(response, 400, { error: pathError });
     const skill = (await pool.query(
       `INSERT INTO skills
        (slug,name,description,category,source_type,filesystem_path,enabled,risk_level,version,content_hash,configuration_json)
@@ -1370,11 +1372,17 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (skillMatch && request.method === "PATCH") {
     const body = await bodyOf(request);
     if (body.source_type !== undefined && !skillSourceTypes.has(body.source_type)) return json(response, 400, { error: "unsupported skill source type" });
+    const before = (await pool.query("SELECT * FROM skills WHERE id=$1", [skillMatch[1]])).rows[0];
+    if (!before) return json(response, 404, { error: "skill not found" });
+    if (body.filesystem_path !== undefined || body.source_type !== undefined) {
+      const effectiveSourceType = body.source_type ?? before.source_type;
+      const effectivePath = body.filesystem_path !== undefined ? body.filesystem_path : before.filesystem_path;
+      const pathError = validateFilesystemPath(effectiveSourceType, effectivePath);
+      if (pathError) return json(response, 400, { error: pathError });
+    }
     const allowed = ["name", "description", "category", "source_type", "filesystem_path", "enabled", "risk_level", "version", "configuration_json"];
     const entries = Object.entries(body).filter(([key]) => allowed.includes(key));
     if (!entries.length) return json(response, 400, { error: "no supported fields" });
-    const before = (await pool.query("SELECT * FROM skills WHERE id=$1", [skillMatch[1]])).rows[0];
-    if (!before) return json(response, 404, { error: "skill not found" });
     const skill = (await pool.query(
       `UPDATE skills SET ${entries.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now() WHERE id=$1 RETURNING *`,
       [skillMatch[1], ...entries.map(([, value]) => value)],
