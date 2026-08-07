@@ -13,8 +13,8 @@ export class OpenCodeError extends Error {
   }
 }
 
-export function deepSeekModelFor(reasoningLevel: string): string {
-  return reasoningLevel === "high" ? "deepseek/deepseek-reasoner" : "deepseek/deepseek-chat";
+export function deepSeekModelFor(model: string): string {
+  return model === "deepseek-v4-pro" ? "deepseek/deepseek-v4-pro" : "deepseek/deepseek-v4-flash";
 }
 
 export function openCodeConfig(mode: "read-only" | "write") {
@@ -197,7 +197,7 @@ async function runOpenCode(input: {
 export async function invokeOpenCodePlanning(input: {
   task: string;
   promptFile: string;
-  reasoningLevel: string;
+  model: string;
   workingDirectory: string;
   apiKey: string;
   signal?: AbortSignal;
@@ -205,7 +205,7 @@ export async function invokeOpenCodePlanning(input: {
   executable?: string;
 }): Promise<{ markdown: string; sessionId: string | null; exitCode: number }> {
   const result = await runOpenCode({
-    args: openCodeArgs(input.task, deepSeekModelFor(input.reasoningLevel), input.promptFile),
+    args: openCodeArgs(input.task, deepSeekModelFor(input.model), input.promptFile),
     mode: "read-only",
     workingDirectory: input.workingDirectory,
     apiKey: input.apiKey,
@@ -219,7 +219,7 @@ export async function invokeOpenCodePlanning(input: {
 export async function invokeOpenCodeExecution(input: {
   task: string;
   promptFile: string;
-  reasoningLevel: string;
+  model: string;
   workingDirectory: string;
   apiKey: string;
   logPath: string;
@@ -256,7 +256,7 @@ export async function invokeOpenCodeExecution(input: {
   let caught: unknown;
   try {
     result = await runOpenCode({
-      args: openCodeArgs(input.task, deepSeekModelFor(input.reasoningLevel), input.promptFile),
+      args: openCodeArgs(input.task, deepSeekModelFor(input.model), input.promptFile),
       mode: "write",
       workingDirectory: input.workingDirectory,
       apiKey: input.apiKey,
