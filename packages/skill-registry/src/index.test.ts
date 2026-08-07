@@ -129,7 +129,7 @@ describe("approval skill policy", () => {
 });
 
 describe("validateFilesystemPath", () => {
-  test.each(["workspace_global", "personal_claude", "external_directory"])(
+  test.each(["personal_claude", "external_directory"])(
     "requires an absolute path for source type %s",
     (sourceType) => {
       expect(validateFilesystemPath(sourceType, "home/deploy/.claude/skills/example/SKILL.md")).toMatch(/must be an absolute path/);
@@ -145,6 +145,20 @@ describe("validateFilesystemPath", () => {
     },
   );
 
+  describe("workspace_global (ambiguous: may live in-repo under skills/, or be a truly external path)", () => {
+    test("accepts an absolute path", () => {
+      expect(validateFilesystemPath("workspace_global", "/home/deploy/.claude/skills/example/SKILL.md")).toBeNull();
+    });
+
+    test("accepts a repo-relative path under skills/ (matches this repo's skills/global/ convention)", () => {
+      expect(validateFilesystemPath("workspace_global", "skills/global/ponytail/SKILL.md")).toBeNull();
+    });
+
+    test("rejects a relative path outside skills/ — the exact shape of the real incident", () => {
+      expect(validateFilesystemPath("workspace_global", "home/deploy/.claude/skills/localos-skeleton-management/SKILL.md")).toMatch(/must be either an absolute path/);
+    });
+  });
+
   test("allows an unset or empty path (validated later when the skill is actually resolved)", () => {
     expect(validateFilesystemPath("workspace_global", null)).toBeNull();
     expect(validateFilesystemPath("workspace_global", undefined)).toBeNull();
@@ -153,5 +167,9 @@ describe("validateFilesystemPath", () => {
 
   test("treats an unrecognized source type as repo-relative", () => {
     expect(validateFilesystemPath("some_future_type", "/absolute/path/SKILL.md")).toMatch(/must be relative/);
+  });
+
+  test("rejects a non-string filesystem_path instead of throwing", () => {
+    expect(validateFilesystemPath("workspace_global", 123 as unknown as string)).toMatch(/must be a string/);
   });
 });
