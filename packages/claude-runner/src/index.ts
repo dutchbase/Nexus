@@ -432,6 +432,15 @@ export function summarizeClaudeFailure(stdout: string, stderr: string) {
   return `${detail || "Claude planning failed."}${bashDenied ? " Bash access was denied; the review did not complete." : ""}`;
 }
 
+// Truncated so a runaway/verbose CLI failure can't blow up
+// agent_runs.metadata_json, while keeping both ends: real
+// `--output-format json` payloads put the model's partial `result` text
+// before `permission_denials`/`errors`, so a head-only truncation discards
+// the exact diagnostic payload this capture exists to preserve.
+export function truncateStdoutForCapture(stdout: string) {
+  return stdout.length > 4000 ? `${stdout.slice(0, 1500)}\n…truncated…\n${stdout.slice(-2500)}` : stdout;
+}
+
 export async function invokePlanningClaude(input: PlanningInvocation) {
   assertSubscriptionOnlyEnvironment();
   // Planning receives only locale/PATH, its subscription token, and runner
@@ -445,16 +454,15 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   if (result.exitCode !== 0) {
     throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), {
       exitCode: result.exitCode,
-      // Truncated so a runaway/verbose CLI failure can't blow up
-      // agent_runs.metadata_json — 4000 chars is enough to see which tool
-      // calls were denied without storing a full transcript.
-      stdout: result.stdout.slice(0, 4000),
+      stdout: truncateStdoutForCapture(result.stdout),
     });
   }
   let response: any;
-  try { response = JSON.parse(result.stdout.trim()); } catch { throw new Error("Claude planning returned invalid JSON"); }
+  try { response = JSON.parse(result.stdout.trim()); } catch {
+    throw Object.assign(new Error("Claude planning returned invalid JSON"), { stdout: truncateStdoutForCapture(result.stdout) });
+  }
   if (response?.type !== "result" || response?.subtype !== "success" || typeof response?.result !== "string") {
-    throw new Error("Claude planning response did not contain a successful Markdown result");
+    throw Object.assign(new Error("Claude planning response did not contain a successful Markdown result"), { stdout: truncateStdoutForCapture(result.stdout) });
   }
   return {
     markdown: response.result as string,
