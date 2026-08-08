@@ -15,9 +15,6 @@ const protectedSha = sha("a");
 const config = (dir: string, overrides: Record<string, unknown> = {}) => ({
   secret: "webhook-secret",
   protectedBranch: "master",
-  repo: "owner/repo",
-  githubApiBaseUrl: "https://github.test",
-  requiredCiCheck: "ci",
   deployShPath: join(dir, "deploy;not-a-shell"),
   completionsDir: join(dir, "completions"),
   logsDir: join(dir, "logs"),
@@ -54,21 +51,15 @@ function fakeStore(overrides: Record<string, unknown> = {}) {
   };
 }
 
-function githubFetch(head = protectedSha) {
-  return vi.fn(async (url: string) => {
-    if (url.includes("/git/ref/heads/")) return { ok: true, json: async () => ({ object: { sha: head } }) };
-    return { ok: true, json: async () => ({ check_runs: [{ name: "ci", status: "completed", conclusion: "success", started_at: "2026-01-01" }] }) };
-  });
-}
-
 async function webhook(overrides: Record<string, unknown> = {}) {
   const dir = await mkdtemp(join(tmpdir(), "webhook-server-"));
   const store = fakeStore(overrides.store as Record<string, unknown>);
-  const fetchFn = overrides.fetchFn ?? githubFetch(overrides.head as string | undefined);
-  const spawnFn = overrides.spawnFn ?? vi.fn(() => ({ pid: 42, unref() {} }));
+  const fetchFn = overrides.fetchFn ?? vi.fn(async () => { throw new Error("GitHub API must not be called"); });
+  const notificationFetchFn = overrides.notificationFetchFn ?? vi.fn(async () => ({ ok: true }));
+  const spawnFn = overrides.spawnFn ?? vi.fn(() => ({ pid: 42, stdio: [null, null, null, { end() {}, unref() {} }], unref() {} }));
   const logs: string[] = [];
-  const app = api.createWebhook({ config: config(dir, overrides.config as Record<string, unknown>), store, fetchFn, spawnFn, isAliveFn: overrides.isAliveFn, isCurrentReleaseFn: overrides.isCurrentReleaseFn, logger: { info: (line: string) => logs.push(line), warn: (line: string) => logs.push(line), error: (line: string) => logs.push(line) } });
-  return { app, dir, store, fetchFn, spawnFn, logs };
+  const app = api.createWebhook({ config: config(dir, overrides.config as Record<string, unknown>), store, notificationFetchFn, spawnFn, isAliveFn: overrides.isAliveFn, isCurrentReleaseFn: overrides.isCurrentReleaseFn, logger: { info: (line: string) => logs.push(line), warn: (line: string) => logs.push(line), error: (line: string) => logs.push(line) } });
+  return { app, dir, store, fetchFn, notificationFetchFn, spawnFn, logs };
 }
 
 const dirs: string[] = [];
@@ -79,46 +70,42 @@ describe("deployment webhook", () => {
     expect(() => api.createWebhook({ config: { ...config(tmpdir()), protectedBranch: "" } })).toThrow("DEPLOY_PROTECTED_BRANCH");
   });
 
-  it("durably records a rejected feature or stale SHA before returning 409", async () => {
-    const ctx = await webhook({ head: protectedSha }); dirs.push(ctx.dir);
-    const body = JSON.stringify({ action: "completed", check_run: { name: "ci", conclusion: "success", head_sha: sha("b") } });
+  it("ignores a signed feature-branch push", async () => {
+    const ctx = await webhook(); dirs.push(ctx.dir);
+    const body = JSON.stringify({ ref: "refs/heads/feature", head_commit: { id: protectedSha } });
     const res = response();
 
-    await ctx.app.handleRequest({ headers: { "x-hub-signature-256": signature(body), "x-github-event": "check_run", "x-github-delivery": "feature" } }, res, body);
+    await ctx.app.handleRequest({ headers: { "x-hub-signature-256": signature(body), "x-github-event": "push", "x-github-delivery": "feature" } }, res, body);
 
-    expect(res).toMatchObject({ statusCode: 409, body: "protected_head_mismatch" });
-    expect(ctx.store.enqueueDeploymentAttempt).toHaveBeenCalledWith(null, {
-      deliveryId: "feature",
-      eventType: "check_run",
-      targetRef: "refs/heads/master",
-      targetSha: sha("b"),
-      protectedBranch: "master",
-      protectedHeadSha: protectedSha,
-      checkEvidence: { requiredCheck: "ci", conclusion: "success", rejectionReason: "protected_head_mismatch" },
-      state: "rejected",
-    });
-    expect(JSON.stringify(ctx.store.enqueueDeploymentAttempt.mock.calls)).not.toMatch(/webhook-secret|x-hub-signature|check_run.*action/);
+    expect(res).toMatchObject({ statusCode: 200, body: "Ignored" });
+    expect(ctx.store.enqueueDeploymentAttempt).not.toHaveBeenCalled();
   });
 
-  it("queues only the exact protected branch head", async () => {
-    const ctx = await webhook(); dirs.push(ctx.dir);
+  it("queues a signed protected push without GitHub API access", async () => {
+    const fetchFn = vi.fn(async () => { throw new Error("GitHub API must not be called"); });
+    const ctx = await webhook({ fetchFn }); dirs.push(ctx.dir);
     const body = JSON.stringify({ ref: "refs/heads/master", head_commit: { id: protectedSha } });
     const res = response();
 
     await ctx.app.handleRequest({ headers: { "x-hub-signature-256": signature(body), "x-github-event": "push", "x-github-delivery": "protected" } }, res, body);
 
-    expect(res.statusCode).toBe(202);
-    expect(ctx.store.enqueueDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ targetSha: protectedSha, protectedBranch: "master", protectedHeadSha: protectedSha }));
+    expect(res).toMatchObject({ statusCode: 202, body: "queued" });
+    expect(fetchFn).not.toHaveBeenCalled();
+    expect(ctx.store.enqueueDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({
+      eventType: "push", targetRef: "refs/heads/master", targetSha: protectedSha,
+      protectedBranch: "master", protectedHeadSha: protectedSha,
+      checkEvidence: { trigger: "signed_push" },
+    }));
   });
 
-  it("revalidates a queued attempt immediately before launch", async () => {
+  it("does not launch a claimed attempt only because GitHub is unavailable", async () => {
     const attempt = { id: "attempt-queued", target_sha: protectedSha, protected_branch: "master", owner: "webhook" };
-    const ctx = await webhook({ head: sha("b"), store: { claimDeploymentAttempt: vi.fn(async () => ({ kind: "claimed", attempt })) } }); dirs.push(ctx.dir);
+    const ctx = await webhook({ fetchFn: vi.fn(async () => { throw new Error("offline"); }), store: { claimDeploymentAttempt: vi.fn(async () => ({ kind: "claimed", attempt })) } }); dirs.push(ctx.dir);
 
-    await ctx.app.processNext();
+    await expect(ctx.app.processNext()).resolves.toBe(true);
 
-    expect(ctx.spawnFn).not.toHaveBeenCalled();
-    expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ attemptId: "attempt-queued", state: "blocked" }));
+    expect(ctx.spawnFn).toHaveBeenCalledTimes(1);
+    expect(ctx.store.completeDeploymentAttempt).not.toHaveBeenCalled();
   });
 
   it("treats a duplicate delivery as already processed without launching", async () => {
@@ -227,7 +214,7 @@ describe("deployment webhook", () => {
     await mkdir(releaseDir, { recursive: true });
     const currentReleaseLink = join(ctx.dir, "deploy-current");
     await symlink(releaseDir, currentReleaseLink);
-    const app = api.createWebhook({ config: config(ctx.dir, { currentReleaseLink }), store: ctx.store, fetchFn: ctx.fetchFn, spawnFn: ctx.spawnFn, logger: { info() {}, warn() {}, error() {} } });
+    const app = api.createWebhook({ config: config(ctx.dir, { currentReleaseLink }), store: ctx.store, notificationFetchFn: ctx.notificationFetchFn, spawnFn: ctx.spawnFn, logger: { info() {}, warn() {}, error() {} } });
     const marker = join(ctx.dir, "release-current.done");
     await writeFile(marker, JSON.stringify({ attemptId: "attempt-1", sha: protectedSha, exitCode: 0, reloadPending: true }));
 
@@ -242,7 +229,7 @@ describe("deployment webhook", () => {
     await mkdir(releaseDir, { recursive: true });
     const currentReleaseLink = join(ctx.dir, "deploy-current");
     await symlink(releaseDir, currentReleaseLink);
-    const app = api.createWebhook({ config: config(ctx.dir, { currentReleaseLink }), store: ctx.store, fetchFn: ctx.fetchFn, spawnFn: ctx.spawnFn, logger: { info() {}, warn() {}, error() {} } });
+    const app = api.createWebhook({ config: config(ctx.dir, { currentReleaseLink }), store: ctx.store, notificationFetchFn: ctx.notificationFetchFn, spawnFn: ctx.spawnFn, logger: { info() {}, warn() {}, error() {} } });
     const marker = join(ctx.dir, "release-mismatch.done");
     await writeFile(marker, JSON.stringify({ attemptId: "attempt-1", sha: protectedSha, exitCode: 0, reloadPending: true }));
 
@@ -441,7 +428,7 @@ describe("deployment webhook", () => {
   });
 
   it("records bounded notification outcomes without leaking secrets", async () => {
-    const ctx = await webhook({ fetchFn: vi.fn()
+    const ctx = await webhook({ notificationFetchFn: vi.fn()
       .mockResolvedValueOnce({ ok: true })
       .mockResolvedValueOnce({ ok: false, text: async () => "provider response body" })
       .mockRejectedValueOnce(new Error("network recipient-secret notify-secret")) }); dirs.push(ctx.dir);
@@ -457,7 +444,7 @@ describe("deployment webhook", () => {
     const order: string[] = [];
     const completeDeploymentAttempt = vi.fn(async () => { order.push("complete"); return {}; });
     const ctx = await webhook({
-      fetchFn: vi.fn(async () => { order.push("notify"); return { ok: false, status: 503 }; }),
+      notificationFetchFn: vi.fn(async () => { order.push("notify"); return { ok: false, status: 503 }; }),
       store: { completeDeploymentAttempt },
     }); dirs.push(ctx.dir);
     const marker = join(ctx.dir, "failed-notified.done");
