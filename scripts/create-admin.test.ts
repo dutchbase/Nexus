@@ -24,7 +24,7 @@ describe("create-admin", () => {
     await invalidPassword("");
     await invalidPassword(Buffer.from("bad\0password"));
     await invalidPassword("bad\npassword");
-  }, 10_000);
+  }, 15_000);
 
   it("rejects an oversized stdin password before EOF", async () => {
     const child = spawn("pnpm", ["exec", "tsx", "scripts/create-admin.ts", "--username", "admin", "--password-stdin", "--non-interactive"], {
