@@ -34,7 +34,7 @@ export function capabilityLabel(row: { status: string; can_read: boolean; can_wr
   return row.reason ? `${row.status} · ${row.reason} · ${checked}` : `${row.status} · ${checked}`;
 }
 
-function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: boolean; can_write: boolean; reason: string | null; checked_at: string | Date } | null, systemAiSettings: any): string {
+function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: boolean; can_write: boolean; reason: string | null; checked_at: string | Date } | null, systemAiSettings: any, modelPrices: any[]): string {
   const panel = (index: number, content: string) => `<div role="tabpanel" id="panel-${index}" aria-labelledby="tab-${index}"${index === 0 ? "" : " hidden"}>${content}</div>`;
   const field = (label: string, value: string) => `<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div class="eyebrow">${escapeHtml(label)}</div><div class="mono" style="font-size:13px;margin-top:4px">${escapeHtml(value)}</div></div>`;
   const check = (label: string) => `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:13px"><input type="checkbox" checked disabled>${escapeHtml(label)}</label>`;
@@ -120,9 +120,29 @@ function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: bo
     </form>
   </div></section>`;
 
+  const rate = (value: unknown) => `$${Number(value).toLocaleString("en-US", { maximumFractionDigits: 8 })}`;
+  const priceRows = modelPrices.length ? modelPrices.map((price) => `<tr>
+    <td>${escapeHtml(price.model)}</td><td>${escapeHtml(new Date(price.effective_from).toLocaleString())}</td>
+    <td>${escapeHtml(rate(price.input_usd_per_million))}</td><td>${escapeHtml(rate(price.output_usd_per_million))}</td>
+    <td>${escapeHtml(rate(price.cache_write_usd_per_million))}</td><td>${escapeHtml(rate(price.cache_read_usd_per_million))}</td>
+    <td><a href="${escapeHtml(price.source_url)}" target="_blank" rel="noreferrer">Source</a></td>
+    <td>${escapeHtml(price.creator ?? "System")}</td><td><span class="status">${price.is_active ? "Active" : "Historic"}</span></td>
+  </tr>`).join("") : `<tr><td colspan="9" style="color:var(--text3)">No model prices recorded.</td></tr>`;
+  const modelPricesPanel = `<section class="card"><div class="card-body">
+    <div class="card-head" style="margin:-18px -18px 14px;border-radius:6px 6px 0 0">Model pricing</div>
+    <p style="font-size:13px;color:var(--text2)">Rates are USD per million tokens. Prices are append-only; create a new effective date to preserve history.</p>
+    <div style="overflow:auto"><table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr><th>Model</th><th>Effective from</th><th>Input</th><th>Output</th><th>Cache write</th><th>Cache read</th><th>Source</th><th>Creator</th><th>Status</th></tr></thead><tbody>${priceRows}</tbody></table></div>
+    <form data-ai-model-price-form style="display:flex;flex-direction:column;gap:12px;margin-top:18px">
+      <div class="grid two"><label class="field"><span>Model</span><select name="model">${modelOptions(null)}</select></label><label class="field"><span>Effective from</span><input name="effective_from" type="datetime-local" required></label></div>
+      <div class="grid two"><label class="field"><span>Input rate</span><input name="input_usd_per_million" type="number" min="0" step="any" required></label><label class="field"><span>Output rate</span><input name="output_usd_per_million" type="number" min="0" step="any" required></label><label class="field"><span>Cache write rate</span><input name="cache_write_usd_per_million" type="number" min="0" step="any" required></label><label class="field"><span>Cache read rate</span><input name="cache_read_usd_per_million" type="number" min="0" step="any" required></label></div>
+      <label class="field"><span>HTTPS pricing source</span><input name="source_url" type="url" placeholder="https://…" required></label>
+      <div style="display:flex;gap:8px"><button class="button primary" type="submit">Add price</button><div class="error" style="flex:1;color:var(--t-danger);align-self:center;font-size:13px"></div></div>
+    </form>
+  </div></section>`;
+
   return `<div class="eyebrow">config / system.yaml</div><h1>Settings</h1>
     <div class="tabs" role="tablist">${["General", "Authentication", "Claude runtime", "GitHub", "AI", "Retention"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
-    ${panel(0, general)}${panel(1, authentication)}${panel(2, claude)}${panel(3, github)}${panel(4, systemAi + aiReview)}${panel(5, retention)}`;
+    ${panel(0, general)}${panel(1, authentication)}${panel(2, claude)}${panel(3, github)}${panel(4, systemAi + aiReview + modelPricesPanel)}${panel(5, retention)}`;
 }
 
 function statCard(label: string, value: string, detail: string, tone: string) {
@@ -233,12 +253,15 @@ async function systemBody(): Promise<string> {
 
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname === "/admin/settings") {
-    const [aiReviewSettings, capability, systemAiSettings] = await Promise.all([
+    const [aiReviewSettings, capability, systemAiSettings, modelPrices] = await Promise.all([
       pool.query("SELECT * FROM ai_review_settings WHERE id=1"),
       pool.query("SELECT * FROM github_capability WHERE id=1"),
       pool.query("SELECT * FROM system_ai_settings WHERE id=1"),
+      pool.query(`SELECT p.*,u.username creator,
+        p.effective_from=(SELECT max(current.effective_from) FROM ai_model_prices current WHERE current.model=p.model AND current.effective_from<=now()) is_active
+        FROM ai_model_prices p LEFT JOIN users u ON u.id=p.created_by ORDER BY p.model,p.effective_from DESC`),
     ]);
-    return { status: 200, title: "Settings", body: settingsBody(aiReviewSettings.rows[0], capability.rows[0] ?? null, systemAiSettings.rows[0]) };
+    return { status: 200, title: "Settings", body: settingsBody(aiReviewSettings.rows[0], capability.rows[0] ?? null, systemAiSettings.rows[0], modelPrices.rows) };
   }
   if (url.pathname === "/admin/system") return { status: 200, title: "System health", body: await systemBody() };
   return null;

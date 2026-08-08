@@ -12,7 +12,7 @@ import {
   buildExecutionPrompt, checkPlanApprovalGate, enqueueJob, getSystemAiSettings,
   globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
-  unionSkills, validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
+  unionSkills, validateAiSelection, providerForModel, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
 import {
   mergeNotificationConfiguration, parseNotificationConfiguration, parseNotificationConfigurationPatch,
@@ -853,6 +853,28 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       ],
     );
     return json(response, 200, {});
+  }
+  if (url.pathname === "/api/admin/ai-model-prices" && request.method === "POST") {
+    const body = await bodyOf(request);
+    const model = typeof body.model === "string" ? body.model : "";
+    const rates = ["input_usd_per_million", "output_usd_per_million", "cache_write_usd_per_million", "cache_read_usd_per_million"]
+      .map((field) => body[field]);
+    if (!rates.every((rate) => typeof rate === "number" && Number.isFinite(rate) && rate >= 0)) {
+      throw Object.assign(new Error("rates must be finite non-negative numbers"), { status: 422 });
+    }
+    const effectiveFrom = typeof body.effective_from === "string" ? new Date(body.effective_from) : new Date("");
+    if (Number.isNaN(effectiveFrom.getTime())) throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });
+    let sourceUrl: URL;
+    try { sourceUrl = new URL(typeof body.source_url === "string" ? body.source_url : ""); } catch { throw Object.assign(new Error("source_url must be an HTTPS URL"), { status: 422 }); }
+    if (sourceUrl.protocol !== "https:") throw Object.assign(new Error("source_url must be an HTTPS URL"), { status: 422 });
+    const price = (await pool.query(
+      `INSERT INTO ai_model_prices
+       (model,provider,effective_from,input_usd_per_million,output_usd_per_million,cache_write_usd_per_million,cache_read_usd_per_million,source_url,created_by)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+      [model, providerForModel(model), effectiveFrom.toISOString(), ...rates, sourceUrl.toString(), session.user_id],
+    )).rows[0];
+    await audit({ actorType: "admin", actorId: session.user_id, action: "ai_model_price.create", entityType: "ai_model_price", entityId: price.id, after: price, ip: ipOf(request) });
+    return json(response, 201, { price });
   }
   const followUpDescriptionMatch = url.pathname.match(/^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/follow-up-description$/i);
   if (followUpDescriptionMatch && request.method === "POST") {
@@ -2284,7 +2306,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   return json(response, 404, { error: "not found" });
 }
 
-async function route(request: IncomingMessage, response: ServerResponse) {
+export async function route(request: IncomingMessage, response: ServerResponse) {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/api/health")) {
     if (url.pathname === "/") { response.writeHead(302, { location: "/login" }); return response.end(); }

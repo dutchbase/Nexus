@@ -516,6 +516,15 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             if(response.ok)location.reload();else{const result=await response.json();systemForm.querySelector(".error").textContent=result.error}
           });
         }
+        const priceForm=document.querySelector("[data-ai-model-price-form]");
+        if(priceForm){
+          priceForm.addEventListener("submit",async(event)=>{
+            event.preventDefault();
+            const data=new FormData(priceForm),rate=(name)=>Number(data.get(name));
+            const response=await fetch("/api/admin/ai-model-prices",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({model:data.get("model"),effective_from:data.get("effective_from"),input_usd_per_million:rate("input_usd_per_million"),output_usd_per_million:rate("output_usd_per_million"),cache_write_usd_per_million:rate("cache_write_usd_per_million"),cache_read_usd_per_million:rate("cache_read_usd_per_million"),source_url:data.get("source_url")})});
+            if(response.ok)location.reload();else{const result=await response.json();priceForm.querySelector(".error").textContent=result.error}
+          });
+        }
       `:""}
       ${path==="/admin/pull-requests"?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";
