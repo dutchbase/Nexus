@@ -223,6 +223,20 @@ async function bodyOf(request: IncomingMessage) {
   }
 }
 
+function effectiveTimestamp(value: unknown): Date {
+  if (typeof value !== "string") throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?$/);
+  if (!match) throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });
+  const [, year, month, day, hour, minute, second = "0"] = match.map(Number);
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59) {
+    throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });
+  return date;
+}
+
 function cookieValue(request: IncomingMessage, name: string) {
   const part = request.headers.cookie?.split(";").map((item) => item.trim()).find((item) => item.startsWith(`${name}=`));
   return part?.slice(name.length + 1);
@@ -862,18 +876,20 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (!rates.every((rate) => typeof rate === "number" && Number.isFinite(rate) && rate >= 0)) {
       throw Object.assign(new Error("rates must be finite non-negative numbers"), { status: 422 });
     }
-    const effectiveFrom = typeof body.effective_from === "string" ? new Date(body.effective_from) : new Date("");
-    if (Number.isNaN(effectiveFrom.getTime())) throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });
+    const effectiveFrom = effectiveTimestamp(body.effective_from);
     let sourceUrl: URL;
     try { sourceUrl = new URL(typeof body.source_url === "string" ? body.source_url : ""); } catch { throw Object.assign(new Error("source_url must be an HTTPS URL"), { status: 422 }); }
     if (sourceUrl.protocol !== "https:") throw Object.assign(new Error("source_url must be an HTTPS URL"), { status: 422 });
-    const price = (await pool.query(
-      `INSERT INTO ai_model_prices
-       (model,provider,effective_from,input_usd_per_million,output_usd_per_million,cache_write_usd_per_million,cache_read_usd_per_million,source_url,created_by)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
-      [model, providerForModel(model), effectiveFrom.toISOString(), ...rates, sourceUrl.toString(), session.user_id],
-    )).rows[0];
-    await audit({ actorType: "admin", actorId: session.user_id, action: "ai_model_price.create", entityType: "ai_model_price", entityId: price.id, after: price, ip: ipOf(request) });
+    const price = await inTransaction(async (client) => {
+      const price = (await client.query(
+        `INSERT INTO ai_model_prices
+         (model,provider,effective_from,input_usd_per_million,output_usd_per_million,cache_write_usd_per_million,cache_read_usd_per_million,source_url,created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+        [model, providerForModel(model), effectiveFrom.toISOString(), ...rates, sourceUrl.toString(), session.user_id],
+      )).rows[0];
+      await audit({ actorType: "admin", actorId: session.user_id, action: "ai_model_price.create", entityType: "ai_model_price", entityId: price.id, after: price, ip: ipOf(request) }, client);
+      return price;
+    });
     return json(response, 201, { price });
   }
   const followUpDescriptionMatch = url.pathname.match(/^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/follow-up-description$/i);

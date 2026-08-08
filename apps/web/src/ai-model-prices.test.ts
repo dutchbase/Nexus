@@ -3,9 +3,11 @@ import { beforeEach, expect, test, vi } from "vitest";
 process.env.DCC_PROCESS_ROLE = "web";
 
 const pool = { query: vi.fn() };
+let transactionClient: any;
+const inTransaction = vi.fn(async (callback: (client: any) => unknown) => callback(transactionClient));
 vi.mock("@dcc/database", () => ({
   artifactDataRoot: () => "/primary", legacyArtifactDataRoot: () => "/legacy",
-  finalizeArtifact: vi.fn(), inTransaction: vi.fn(), pool,
+  finalizeArtifact: vi.fn(), inTransaction, pool,
   readArtifact: vi.fn(), readStagedArtifact: vi.fn(), stageArtifact: vi.fn(),
 }));
 
@@ -29,22 +31,28 @@ const validPrice = {
   source_url: "https://example.test/pricing",
 };
 
-beforeEach(() => pool.query.mockReset());
+beforeEach(() => {
+  pool.query.mockReset();
+  inTransaction.mockClear();
+  transactionClient = { query: vi.fn() };
+});
 
 test("creates an append-only model price with the derived provider and audit event", async () => {
   const price = { id: "price-1", ...validPrice, provider: "deepseek", created_by: "admin" };
-  pool.query.mockResolvedValue({ rows: [price], rowCount: 1 });
+  transactionClient.query.mockResolvedValueOnce({ rows: [price] }).mockResolvedValueOnce({ rows: [] });
   const res = response();
 
   await adminApi(request(validPrice), res, new URL("http://test/api/admin/ai-model-prices"), { user_id: "admin" });
 
-  const insert = pool.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO ai_model_prices"));
+  const insert = transactionClient.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO ai_model_prices"));
   expect(insert?.[1]).toEqual([
     "deepseek-v4-pro", "deepseek", "2026-09-01T00:00:00.000Z", 1, 2, 3, 4,
     "https://example.test/pricing", "admin",
   ]);
-  const audit = pool.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO audit_events"));
+  const audit = transactionClient.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO audit_events"));
   expect(audit?.[1]).toContain("ai_model_price.create");
+  expect(inTransaction).toHaveBeenCalledTimes(1);
+  expect(pool.query).not.toHaveBeenCalled();
   expect(res.writeHead).toHaveBeenCalledWith(201, expect.anything());
 });
 
@@ -53,6 +61,7 @@ test.each([
   [{ ...validPrice, input_usd_per_million: -1 }, "negative rate"],
   [{ ...validPrice, output_usd_per_million: "2" }, "string rate"],
   [{ ...validPrice, effective_from: "not-a-date" }, "invalid timestamp"],
+  [{ ...validPrice, effective_from: "2026-02-30T00:00:00Z" }, "impossible calendar timestamp"],
   [{ ...validPrice, source_url: "http://example.test/pricing" }, "non-HTTPS source"],
 ])("rejects %s without inserting a price", async (body, _label) => {
   const res = response();
@@ -60,6 +69,15 @@ test.each([
   await expect(adminApi(request(body), res, new URL("http://test/api/admin/ai-model-prices"), { user_id: "admin" })).rejects.toMatchObject({ status: 422 });
 
   expect(pool.query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO ai_model_prices"))).toBe(false);
+});
+
+test("propagates an audit failure from the price transaction", async () => {
+  const price = { id: "price-1", ...validPrice, provider: "deepseek", created_by: "admin" };
+  transactionClient.query.mockResolvedValueOnce({ rows: [price] }).mockRejectedValueOnce(new Error("audit unavailable"));
+
+  await expect(adminApi(request(validPrice), response(), new URL("http://test/api/admin/ai-model-prices"), { user_id: "admin" })).rejects.toThrow("audit unavailable");
+
+  expect(inTransaction).toHaveBeenCalledTimes(1);
 });
 
 test("does not expose mutation or deletion routes for model prices", async () => {
