@@ -265,5 +265,6 @@ describe("health-gated release deployment", () => {
     expect(readme).toContain("signed protected-branch push");
     expect(readme).toContain("pnpm verify locally before migrations");
     expect(readme).toContain("GitHub Actions are not a deployment prerequisite");
+    expect(readme).toContain("A fetched SHA mismatch fails before staging, writes a nonzero marker, and the webhook finalizes the attempt as failed.");
   });
 });

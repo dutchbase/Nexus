@@ -285,10 +285,7 @@ with `DCC_DEPLOY_RELEASES_DIR`). The script keeps `.env`, `.env.worker`, and
 It installs locked dependencies, migrates, synchronizes content, reloads web
 and worker, health-checks them, writes its atomic JSON completion marker, and
 only then reloads the webhook. Stage evidence is appended to
-`deployment_events` for the supplied attempt. A protected-head mismatch is
-also retained as a rejected attempt with only delivery identity, target/head
-SHAs, branch/ref, and check/rejection evidence; request bodies and credentials
-are never deployment history.
+`deployment_events` for the supplied attempt. A fetched SHA mismatch fails before staging, writes a nonzero marker, and the webhook finalizes the attempt as failed. Request bodies and credentials are never deployment history.
 
 A successful marker carries `reloadPending: true`. The old webhook must leave
 that marker alone; only a webhook whose working directory is the atomically
