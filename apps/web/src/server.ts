@@ -575,6 +575,29 @@ async function transitionTicket(ticketRef: string, status: string, reason: strin
       )).rows[0];
     } else {
       after = (await client.query("UPDATE tickets SET status = $2, updated_at = now() WHERE id = $1 RETURNING *", [before.id, status])).rows[0];
+      if (status === "Cancelled") {
+        // A ticket can only reach "Cancelled" from an in-progress state
+        // (apps/web/src/pages/tickets.ts:398's data-cancel-ticket eligibility
+        // list), so there may be a queued job, a queued execution attempt,
+        // or a running agent run to actually stop — otherwise this action
+        // only ever changed tickets.status while work kept running.
+        await client.query(
+          `UPDATE jobs SET status='cancelled',completed_at=now(),claimed_by=NULL,lease_expires_at=NULL,updated_at=now()
+           WHERE type IN ('planning.generate','planning.revise','execution.run','execution.repair')
+             AND payload_json->>'ticket_id'=$1 AND status='queued'`,
+          [before.id],
+        );
+        await client.query(
+          `UPDATE execution_attempts SET validation_status='cancelled',completed_at=now()
+           WHERE ticket_id=$1 AND validation_status='queued'`,
+          [before.id],
+        );
+        await client.query(
+          `UPDATE agent_runs SET status='cancellation_requested'
+           WHERE ticket_id=$1 AND status='running'`,
+          [before.id],
+        );
+      }
     }
     await client.query(
       `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)

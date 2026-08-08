@@ -365,7 +365,10 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan"}'
   }
   controller.abort();
 
-  await expect(running).rejects.toMatchObject({ name: "AbortError" });
+  await expect(running).rejects.toMatchObject({
+    constructor: ClaudePlanningError,
+    code: "planning_cancelled",
+  });
 });
 
 test("returns a typed timeout when planning exceeds its deadline", async () => {
