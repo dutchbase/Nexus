@@ -1208,7 +1208,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
       reviewedBaseBranch: pullRequest.base_branch,
       reviewedBaseSha,
     })));
-    await createAiInvocation({ id: newRunId, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_ai_review", model, reasoningLevel, taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
+    await createAiInvocation({ id: newRunId, ticketId: pullRequest.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_ai_review", model, reasoningLevel, taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
     await lease.run(() => pool.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [newRunId, immutableReview.worktreePath, { job_id: job.id, pr_ai_review_id: payload.pr_ai_review_id }]));
     runId = newRunId;
     await lease.run(() => pool.query("UPDATE pr_ai_reviews SET agent_run_id=$1 WHERE id=$2", [runId, payload.pr_ai_review_id]));
@@ -1312,10 +1312,10 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
     runId = randomUUID();
     const sessionId = randomUUID();
     const promptSnapshot = await lease.run(() => snapshotPrompt({
-      ticketId: payload.ticket_id ?? null, projectId: project.id, phase: "pr_follow_up_description", content: prompt,
+      ticketId: pullRequest.ticket_id ?? null, projectId: project.id, phase: "pr_follow_up_description", content: prompt,
       model: "haiku", reasoningLevel: "low", metadata: { pullRequestId: pullRequest.id, promptVersionIds: { "global.follow-up-ticket": promptRow.active_version_id } },
     }));
-    await createAiInvocation({ id: runId, ticketId: payload.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_follow_up_description", model: "haiku", reasoningLevel: "low", taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
+    await createAiInvocation({ id: runId, ticketId: pullRequest.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_follow_up_description", model: "haiku", reasoningLevel: "low", taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
     await lease.run(() => pool.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [runId, project.repository_path, { job_id: job.id, pull_request_id: pullRequest.id }]));
     const temporary = await mkdtemp(path.join(tmpdir(), "dcc-follow-up-description-"));
     try {
@@ -1427,10 +1427,10 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
     const sessionId = randomUUID();
     await lease.assertOwned();
     const promptSnapshot = await snapshotPrompt({
-      ticketId: null, projectId: project.id, phase: "pr_conflict_resolution", content: prompt,
+      ticketId: pullRequest.ticket_id ?? null, projectId: project.id, phase: "pr_conflict_resolution", content: prompt,
       model, reasoningLevel, metadata: { pullRequestId: pullRequest.id, promptVersionIds: { "global.pr-conflict-resolution": promptRow.active_version_id } },
     });
-    await createAiInvocation({ id: newRunId, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_conflict_resolution", model, reasoningLevel, taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
+    await createAiInvocation({ id: newRunId, ticketId: pullRequest.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_conflict_resolution", model, reasoningLevel, taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
     await pool.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [newRunId, worktree.worktreePath, {
       job_id: job.id, pr_conflict_resolution_id: payload.pr_conflict_resolution_id,
       authority_profile: "conflict-resolution", allowed_write_paths: conflicts,
