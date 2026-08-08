@@ -271,7 +271,7 @@ the worker.
 
 ## Updating
 
-The webhook invokes `deploy.sh <40-char-sha> <absolute-marker-path>
+A signed protected-branch push queues a deployment; GitHub Actions are not a deployment prerequisite. Before staging or migrating, `deploy.sh` fetches the protected branch and requires its SHA to equal the queued SHA. After installing locked dependencies in the detached release worktree, it runs pnpm verify locally before migrations. The webhook invokes `deploy.sh <40-char-sha> <absolute-marker-path>
 <attempt-uuid> <protected-branch>`. Its environment must provide
 `DATABASE_URL` and `DCC_DEPLOY_HEALTH_URL`; the latter is a URL that returns a
 successful response only when the new web and worker release is healthy. The

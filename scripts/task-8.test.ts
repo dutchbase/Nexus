@@ -251,6 +251,7 @@ describe("health-gated release deployment", () => {
 
   it("stages all imported artifacts before detecting Superpowers updates", async () => {
     const workflow = await readFile(join(root, ".github/workflows/superpowers-update.yml"), "utf8");
+    const readme = await readFile(join(root, "README.md"), "utf8");
 
     expect(workflow).toContain('cron: "17 4 * * *"');
     expect(workflow).toContain("workflow_dispatch:");
@@ -261,5 +262,8 @@ describe("health-gated release deployment", () => {
     expect(workflow.indexOf("git add config/agent-content.json prompts/global/code-reviewer.md skills/vendor/superpowers"))
       .toBeLessThan(workflow.indexOf("git diff --cached --quiet"));
     expect(workflow).toContain("gh pr create");
+    expect(readme).toContain("signed protected-branch push");
+    expect(readme).toContain("pnpm verify locally before migrations");
+    expect(readme).toContain("GitHub Actions are not a deployment prerequisite");
   });
 });
