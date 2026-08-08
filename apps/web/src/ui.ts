@@ -508,6 +508,14 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             if(response.ok)location.reload();else{const result=await response.json();form.querySelector(".error").textContent=result.error}
           });
         }
+        const systemForm=document.querySelector("[data-system-ai-settings-form]");
+        if(systemForm){
+          systemForm.addEventListener("submit",async(event)=>{
+            event.preventDefault();
+            const response=await fetch("/api/admin/settings/system-ai",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(Object.fromEntries(new FormData(systemForm)))});
+            if(response.ok)location.reload();else{const result=await response.json();systemForm.querySelector(".error").textContent=result.error}
+          });
+        }
       `:""}
       ${path==="/admin/pull-requests"?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";
