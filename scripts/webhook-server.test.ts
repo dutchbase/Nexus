@@ -55,6 +55,7 @@ async function webhook(overrides: Record<string, unknown> = {}) {
   const dir = await mkdtemp(join(tmpdir(), "webhook-server-"));
   const store = fakeStore(overrides.store as Record<string, unknown>);
   const fetchFn = overrides.fetchFn ?? vi.fn(async () => { throw new Error("GitHub API must not be called"); });
+  vi.stubGlobal("fetch", fetchFn);
   const notificationFetchFn = overrides.notificationFetchFn ?? vi.fn(async () => ({ ok: true }));
   const spawnFn = overrides.spawnFn ?? vi.fn(() => ({ pid: 42, stdio: [null, null, null, { end() {}, unref() {} }], unref() {} }));
   const logs: string[] = [];
@@ -63,7 +64,7 @@ async function webhook(overrides: Record<string, unknown> = {}) {
 }
 
 const dirs: string[] = [];
-afterEach(async () => { await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
+afterEach(async () => { vi.unstubAllGlobals(); await Promise.all(dirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true }))); });
 
 describe("deployment webhook", () => {
   it("requires an explicit protected branch", () => {
