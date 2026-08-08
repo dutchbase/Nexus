@@ -21,17 +21,13 @@ function readConfig(env = process.env) {
     currentReleaseLink: env.DCC_DEPLOY_CURRENT_LINK || path.join(env.DCC_ROOT || '/home/deploy/projects/dev-control', '.deploy-current'),
     completionsDir: path.join(stateDir, 'completions'),
     logsDir: path.join(stateDir, 'logs'),
-    requiredCiCheck: env.REQUIRED_CI_CHECK || 'ci',
-    repo: env.GITHUB_REPO || 'dutchbase/dev-control',
-    githubApiBaseUrl: env.GITHUB_API_BASE_URL || 'https://api.github.com',
-    githubToken: env.GITHUB_TOKEN,
     leaseMs: Number(env.DEPLOY_STUCK_TIMEOUT_MS || 1800000),
     owner: `webhook-${process.pid}`,
     notification: { url: env.WHATSAPP_API_URL, secret: env.WHATSAPP_API_SECRET, phone: env.WHATSAPP_PHONE },
   };
 }
 
-function createWebhook({ config = readConfig(), store = deployments, pool = null, fetchFn = fetch, spawnFn = spawn, fsModule = fs, isAliveFn = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } }, isCurrentReleaseFn = (markerSha) => {
+function createWebhook({ config = readConfig(), store = deployments, pool = null, notificationFetchFn = fetch, spawnFn = spawn, fsModule = fs, isAliveFn = (pid) => { try { process.kill(pid, 0); return true; } catch { return false; } }, isCurrentReleaseFn = (markerSha) => {
   try {
     return path.basename(fsModule.realpathSync(config.currentReleaseLink)) === markerSha;
   } catch { return false; }
@@ -41,37 +37,10 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
   fsModule.mkdirSync(config.logsDir, { recursive: true });
   const activePolls = new Set();
 
-  async function requestJson(url) {
-    try {
-      const response = await fetchFn(url, {
-        headers: { 'User-Agent': 'dev-control-webhook', Accept: 'application/vnd.github+json', ...(config.githubToken ? { Authorization: `Bearer ${config.githubToken}` } : {}) },
-        signal: AbortSignal.timeout(5000),
-      });
-      return response.ok ? await response.json() : null;
-    } catch { return null; }
-  }
-
-  async function protectedHead() {
-    const body = await requestJson(`${config.githubApiBaseUrl}/repos/${config.repo}/git/ref/heads/${encodeURIComponent(config.protectedBranch)}`);
-    const head = body?.object?.sha;
-    return SHA.test(head || '') ? head : null;
-  }
-
-  async function isCurrentProtectedHead(sha) {
-    return (await protectedHead()) === sha;
-  }
-
-  async function checkRequiredCiStatus(sha) {
-    const body = await requestJson(`${config.githubApiBaseUrl}/repos/${config.repo}/commits/${sha}/check-runs`);
-    const latest = body?.check_runs?.filter((run) => run.name === config.requiredCiCheck)
-      .sort((a, b) => new Date(b.started_at) - new Date(a.started_at))[0];
-    return latest?.status === 'completed' && latest?.conclusion === 'success';
-  }
-
   async function sendNotification(message, notification = config.notification) {
     if (!notification?.url || !notification.secret || !notification.phone) return { status: 'disabled_config', errorCode: 'missing_config' };
     try {
-      const response = await fetchFn(`${notification.url}/send/text`, {
+      const response = await notificationFetchFn(`${notification.url}/send/text`, {
         method: 'POST', headers: { Authorization: `Bearer ${notification.secret}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({ to: notification.phone, message }), signal: AbortSignal.timeout(5000),
       });
@@ -178,10 +147,6 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
   }
 
   async function launchAttempt(attempt) {
-    if (!await isCurrentProtectedHead(attempt.target_sha)) {
-      await complete(attempt, 'blocked', null);
-      return false;
-    }
     const markerPath = path.join(config.completionsDir, `${attempt.id}.done`);
     const owner = attempt.owner || config.owner;
     if (!await store.recordDeploymentLaunchIntent(pool, { attemptId: attempt.id, owner, markerPath })) {
@@ -261,24 +226,9 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
     return false;
   }
 
-  async function handleDeploy(res, { sha, deliveryId, eventType, targetRef, checkEvidence }) {
-    const head = await protectedHead();
-    if (head !== sha) {
-      if (SHA.test(head || '')) await store.enqueueDeploymentAttempt(pool, {
-        deliveryId,
-        eventType,
-        targetRef,
-        targetSha: sha,
-        protectedBranch: config.protectedBranch,
-        protectedHeadSha: head,
-        checkEvidence: { ...checkEvidence, rejectionReason: 'protected_head_mismatch' },
-        state: 'rejected',
-      });
-      respond(res, 409, 'protected_head_mismatch');
-      return;
-    }
+  async function handleDeploy(res, { sha, deliveryId, targetRef }) {
     const queued = await store.enqueueDeploymentAttempt(pool, {
-      deliveryId, eventType, targetRef, targetSha: sha, protectedBranch: config.protectedBranch, protectedHeadSha: head, checkEvidence,
+      deliveryId, eventType: 'push', targetRef, targetSha: sha, protectedBranch: config.protectedBranch, protectedHeadSha: sha, checkEvidence: { trigger: 'signed_push' },
     });
     if (!queued.created) { respond(res, 200, 'already_processed'); return; }
     await processNext();
@@ -296,16 +246,8 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
     const deliveryId = req.headers['x-github-delivery'] || '';
     if (!deliveryId) { respond(res, 400, 'Bad Request'); return; }
 
-    if (eventType === 'check_run') {
-      const run = payload.check_run;
-      if (payload.action !== 'completed' || run?.name !== config.requiredCiCheck || run?.conclusion !== 'success' || !SHA.test(run?.head_sha || '')) { respond(res, 200, 'Ignored'); return; }
-      await handleDeploy(res, { sha: run.head_sha, deliveryId, eventType, targetRef: `refs/heads/${config.protectedBranch}`, checkEvidence: { requiredCheck: config.requiredCiCheck, conclusion: 'success' } });
-      return;
-    }
     if (eventType !== 'push' || payload.ref !== `refs/heads/${config.protectedBranch}` || !SHA.test(payload.head_commit?.id || '')) { respond(res, 200, 'Ignored'); return; }
-    const sha = payload.head_commit.id;
-    if (!await checkRequiredCiStatus(sha)) { respond(res, 409, 'ci_not_successful'); return; }
-    await handleDeploy(res, { sha, deliveryId, eventType, targetRef: payload.ref, checkEvidence: { requiredCheck: config.requiredCiCheck, conclusion: 'success' } });
+    await handleDeploy(res, { sha: payload.head_commit.id, deliveryId, targetRef: payload.ref });
   }
 
   function handleHttp(req, res) {

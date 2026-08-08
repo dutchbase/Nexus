@@ -271,7 +271,7 @@ the worker.
 
 ## Updating
 
-The webhook invokes `deploy.sh <40-char-sha> <absolute-marker-path>
+A signed protected-branch push queues a deployment; GitHub Actions are not a deployment prerequisite. Before staging or migrating, `deploy.sh` fetches the protected branch and requires its SHA to equal the queued SHA. After installing locked dependencies in the detached release worktree, it runs pnpm verify locally before migrations. The webhook invokes `deploy.sh <40-char-sha> <absolute-marker-path>
 <attempt-uuid> <protected-branch>`. Its environment must provide
 `DATABASE_URL` and `DCC_DEPLOY_HEALTH_URL`; the latter is a URL that returns a
 successful response only when the new web and worker release is healthy. The
@@ -285,10 +285,7 @@ with `DCC_DEPLOY_RELEASES_DIR`). The script keeps `.env`, `.env.worker`, and
 It installs locked dependencies, migrates, synchronizes content, reloads web
 and worker, health-checks them, writes its atomic JSON completion marker, and
 only then reloads the webhook. Stage evidence is appended to
-`deployment_events` for the supplied attempt. A protected-head mismatch is
-also retained as a rejected attempt with only delivery identity, target/head
-SHAs, branch/ref, and check/rejection evidence; request bodies and credentials
-are never deployment history.
+`deployment_events` for the supplied attempt. A fetched SHA mismatch fails before staging, writes a nonzero marker, and the webhook finalizes the attempt as failed. Request bodies and credentials are never deployment history.
 
 A successful marker carries `reloadPending: true`. The old webhook must leave
 that marker alone; only a webhook whose working directory is the atomically
