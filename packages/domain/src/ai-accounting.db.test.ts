@@ -78,16 +78,18 @@ integration("AI invocation accounting persistence", () => {
 
   it("returns the terminal row when a concurrent caller wins the row lock", async () => {
     const client = new pg.Client({ connectionString: testDatabaseUrl });
+    const contender = new pg.Client({ connectionString: testDatabaseUrl });
     await client.connect();
+    await contender.connect();
     try {
       const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ('concurrent','Concurrent','/tmp') RETURNING id")).rows[0].id;
       await createAiInvocation({ id: "contended", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high" }, client);
       await client.query("BEGIN");
       await client.query("SELECT id FROM agent_runs WHERE id='contended' FOR UPDATE");
-      const loser = recordAiUsage({ runId: "contended", inputTokens: 1, outputTokens: 1, rawUsage: {} });
+      const loser = recordAiUsage({ runId: "contended", inputTokens: 1, outputTokens: 1, rawUsage: {} }, contender);
       await client.query("UPDATE agent_runs SET ai_usage_status='unavailable' WHERE id='contended'");
       await client.query("COMMIT");
       await expect(loser).resolves.toMatchObject({ id: "contended", ai_usage_status: "unavailable" });
-    } finally { await client.query("ROLLBACK").catch(() => undefined); await client.end(); }
+    } finally { await client.query("ROLLBACK").catch(() => undefined); await contender.end(); await client.end(); }
   });
 });

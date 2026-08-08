@@ -52,3 +52,21 @@ GREEN: `pnpm exec vitest run packages/domain/src/ai-accounting.test.ts packages/
 ### Concern
 
 The four database integration tests remain skipped without `DCC_TEST_DATABASE_URL`; they exercise the real concurrent/idempotent persistence and SQL constraints in a PostgreSQL-enabled environment.
+
+## Review fix round 2
+
+### Changes
+
+- Replaced the supplied-client lock/read/update sequence with a single pending-only `UPDATE ... RETURNING`, followed only on a lost race by a fresh `SELECT`. PostgreSQL rechecks the pending predicate after a concurrent update releases its row lock, and the separate fallback statement sees the terminal row under a new snapshot.
+- This has no transaction-ownership assumption, so it is equally correct for the default pool, an explicit `pg.Client`, and an explicit `pg.Pool`.
+- Updated the real contention integration case to call the helper through an explicit second `pg.Client`.
+
+### RED/GREEN evidence
+
+RED: `pnpm exec vitest run packages/domain/src/ai-accounting.test.ts --exclude '.worktrees/**'` failed because the former supplied-client path issued only the initial read/lock instead of an atomic pending-only update and fresh fallback read.
+
+GREEN: `pnpm exec vitest run packages/domain/src/ai-accounting.test.ts packages/domain/src/ai-accounting.db.test.ts packages/domain/src/prompts.test.ts packages/database/src/migrate.test.ts --exclude '.worktrees/**'` passed with 25 tests passed, 26 skipped, and 0 failed. `pnpm exec tsc --noEmit` and `git diff --check` passed.
+
+### Concern
+
+The explicit-client PostgreSQL contention test remains skipped here without `DCC_TEST_DATABASE_URL`; it runs in database-enabled CI.
