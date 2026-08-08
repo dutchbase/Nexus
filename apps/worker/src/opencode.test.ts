@@ -72,6 +72,7 @@ describe("parseOpenCodeFinalUsage", () => {
     expect(parseOpenCodeFinalUsage([{ type: "message.part.updated", properties: { part: { id: "step-1", type: "step-finish", tokens: { input: "1", output: 2 } } } }])).toBeNull();
     expect(parseOpenCodeFinalUsage([{ type: "message.part.updated", properties: { part: { id: "step-1", type: "step-finish", tokens: { input: 1, output: 2, reasoning: 3 } } } }])).toBeNull();
     expect(parseOpenCodeFinalUsage([{ type: "message.part.updated", properties: { part: { id: "step-1", type: "step-finish", tokens: { input: 1, output: 2, cache: "invalid" } } } }])).toBeNull();
+    expect(parseOpenCodeFinalUsage([{ type: "message.part.updated", properties: { part: { id: "step-1", type: "step-finish", tokens: { input: 1, output: 2, cache: [] } } } }])).toBeNull();
   });
 });
 

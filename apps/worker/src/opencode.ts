@@ -77,7 +77,7 @@ export function parseOpenCodeFinalUsage(events: readonly unknown[]): AiUsage | n
     const output = tokenCount(raw.output);
     const reasoning = raw.reasoning === undefined ? undefined : tokenCount(raw.reasoning);
     const cache = raw.cache;
-    if (cache !== undefined && (!cache || typeof cache !== "object")) return null;
+    if (cache !== undefined && (!cache || typeof cache !== "object" || Array.isArray(cache))) return null;
     const cacheRead = cache && (cache as Record<string, unknown>).read !== undefined
       ? tokenCount((cache as Record<string, unknown>).read) : undefined;
     const cacheWrite = cache && (cache as Record<string, unknown>).write !== undefined
