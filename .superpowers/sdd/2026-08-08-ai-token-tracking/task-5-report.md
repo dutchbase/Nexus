@@ -37,3 +37,9 @@ npx tsc --noEmit
 ```
 
 Result: blocked by pre-existing workspace errors in `apps/web/src/ai-model-prices.test.ts`, `apps/web/src/server.ts`, and `packages/claude-runner/src/index.ts`; Task 5's own test typing errors were corrected before the final test run.
+
+## Fix round 1
+
+RED: `npx vitest run apps/web/src/pages/ai-usage.test.ts` failed for all three lifecycle groups because the query only had direct `run_type = $n` filtering, and failed because ticket/PR values were plain row text.
+
+GREEN: `npx vitest run apps/web/src/pages/ai-usage.test.ts apps/web/src/ai-usage-route.test.ts` passed 7 tests. Lifecycle filters now use the domain lifecycle mapping with parameterized type arrays; ticket and PR cells are distinct escaped admin links, with the row no longer an enclosing anchor. `git diff --check` passed.

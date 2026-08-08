@@ -37,6 +37,19 @@ describe("AI usage dashboard", () => {
     expect(values).toEqual(expect.arrayContaining(["%alpha%", "execution", "sonnet", "captured", "%T-12%", "2026-08-03T00:00:00Z", "r1"]));
   });
 
+  it.each([
+    ["planning", ["planning", "plan_revision"]],
+    ["execution", ["execution", "execution.repair"]],
+    ["pr_work", ["pr_ai_review", "pr_follow_up_description", "pr_conflict_resolution"]],
+  ])("filters lifecycle group %s by its run types", async (lifecycle, types) => {
+    responses();
+    await usage.render(new URL(`http://test/admin/ai-usage?all_time=1&lifecycle=${lifecycle}&run_type=${types[0]}`), session, {});
+
+    const [sql, values] = query.mock.calls.find(([sql]) => String(sql).includes("ORDER BY ar.started_at DESC"))!;
+    expect(sql).toContain("ar.run_type = ANY($");
+    expect(values).toEqual(expect.arrayContaining([types, types[0]]));
+  });
+
   it("keeps coverage exceptions visible and labels legacy usage as not captured", async () => {
     responses([{ ...row, ai_usage_status: null, input_tokens: null, total_tokens: null, estimated_cost_usd: null }]);
     const page = await usage.render(new URL("http://test/admin/ai-usage?all_time=1"), session, {});
@@ -47,11 +60,14 @@ describe("AI usage dashboard", () => {
   });
 
   it("renders compact accounting without exposing prompt content in the list", async () => {
-    responses([{ ...row, task_prompt: "<script>secret</script>" }]);
+    responses([{ ...row, task_prompt: "<script>secret</script>", ticket_number: "T-12", pr_id: "pr-1" }]);
     const page = await usage.render(new URL("http://test/admin/ai-usage"), session, {});
 
     expect(page?.body).toContain("10 in · 20 out");
     expect(page?.body).toContain("$0.00001234");
     expect(page?.body).not.toContain("secret");
+    expect(page?.body).toContain('href="/admin/tickets/T-12"');
+    expect(page?.body).toContain('href="/admin/pull-requests/pr-1"');
+    expect(page?.body).not.toContain('<a class="ticket-row"');
   });
 });
