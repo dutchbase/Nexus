@@ -374,7 +374,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
           task: planningTask,
           sessionId, model: input.ai.model, effort: input.ai.reasoning_level, promptFile,
           skillBundleDir: skillBundle.additionalDirectory, pluginDirectories: skillBundle.pluginDirectories, workingDirectory: planningStartPath,
-          maxTurns: Number(input.project.config_json?.planning_max_turns ?? 40),
+          maxTurns: Number(input.project.config_json?.planning_max_turns ?? 80),
           oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
           scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
           signal: lease.signal,
