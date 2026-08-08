@@ -9,10 +9,13 @@ describe("planning cancellation poll", () => {
     expect(worker).toContain("let activePlanningCancellation: AbortController | null = null;");
     expect(worker).toContain("activeExecutionCancellation?.abort(); activePlanningCancellation?.abort();");
 
-    expect(planning).toContain("const cancellation = new AbortController();");
+    // `cancellation` is declared with the other `let`s above the try block (rather than `const` at
+    // its assignment) so runPlanning's catch can ask whether this controller specifically fired.
+    expect(planning).toContain("let cancellation: AbortController | undefined;");
+    expect(planning).toContain("cancellation = new AbortController();");
     expect(planning).toContain("activePlanningCancellation = cancellation;");
     expect(planning.indexOf("cancellationPoll = setInterval")).toBeLessThan(planning.indexOf("cancellation_requested"));
-    expect(planning).toContain("cancellation.abort()");
+    expect(planning).toContain("cancellation?.abort()");
 
     // Both invocation branches must listen on the poll's controller, not just the lease signal.
     expect(planning).toContain("signal: AbortSignal.any([cancellation.signal, lease.signal])");

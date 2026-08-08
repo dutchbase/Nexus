@@ -195,6 +195,13 @@ async function resolvedGlobalPrompt(promptType: string) {
 async function transitionToPlanning(client: any, ticketId: string, jobId: string, runId: string, lease: LeaseGuard) {
   const ticket = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticketId])).rows[0];
   if (!ticket) throw new Error("ticket not found");
+  // Closes the same silent-un-cancel hole storePlan/storeRevisedPlan already guard against
+  // (see the `if (ticket.status !== "Cancelled")` checks in those functions): if the ticket was
+  // cancelled in the window between the worker claiming this job and this transition running,
+  // throwing here — before the UPDATE below — rolls back the whole initializePlanningAttempt
+  // transaction (including the agent_runs INSERT that precedes this call), so no run ever starts
+  // and the ticket stays Cancelled instead of silently flipping back to Planning.
+  if (ticket.status === "Cancelled") throw Object.assign(new Error("ticket was cancelled before planning started"), { code: "ticket_cancelled_before_planning" });
   await lease.run(() => client.query("UPDATE tickets SET status='Planning',updated_at=now() WHERE id=$1", [ticketId]));
   await lease.run(() => client.query(
     `INSERT INTO ticket_status_history
@@ -325,6 +332,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
   const runType = revising ? "plan_revision" : "planning";
   let rawMarkdownForDebug: string | undefined;
   let temporary: string | undefined;
+  let cancellation: AbortController | undefined;
   try {
     await initializePlanningAttempt(inTransaction, lease, async (client) => {
       await lease.run(() => client.query(
@@ -362,11 +370,15 @@ async function runPlanning(job: any, lease: LeaseGuard) {
     const skillBundle = await materializeSkillBundle(runId, skillsForPhase(copied.skills, "planning"), temporary);
     const scenarioKey = ["mock", "scenario", "path"].join("_");
     await lease.assertOwned();
-    const cancellation = new AbortController();
+    cancellation = new AbortController();
     activePlanningCancellation = cancellation;
     const cancellationPoll = setInterval(async () => {
-      const row = (await pool.query("SELECT status FROM agent_runs WHERE id=$1", [runId])).rows[0];
-      if (row?.status === "cancellation_requested") cancellation.abort();
+      try {
+        const row = (await pool.query("SELECT status FROM agent_runs WHERE id=$1", [runId])).rows[0];
+        if (row?.status === "cancellation_requested") cancellation?.abort();
+      } catch (error) {
+        console.error(`planning cancellation poll failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
     }, 250);
     const planningTask = revising
       ? `Return a complete revised implementation plan for ticket ${ticket.ticket_number}, applying the administrator feedback.`
@@ -419,11 +431,42 @@ async function runPlanning(job: any, lease: LeaseGuard) {
   } catch (error) {
     await lease.assertOwned();
     const message = error instanceof Error ? error.message : "planning failed";
-    const errorCode = error instanceof ClaudePlanningError ? error.code
-      : error instanceof OpenCodeError ? error.code
+    const cancelledBeforeStart = (error as any)?.code === "ticket_cancelled_before_planning";
+    const invocationCancelled = (error instanceof ClaudePlanningError && error.code === "planning_cancelled")
+      || (error instanceof OpenCodeError && error.code === "planning_cancelled");
+    // "planning_cancelled" from the invocation is ambiguous on its own: it means
+    // AbortSignal.any([cancellation.signal, lease.signal]) fired, and neither
+    // invokePlanningClaude nor invokeOpenCodePlanning can say which constituent
+    // signal did it. Three different events reach this point as that same code:
+    //   - a real admin cancellation  -> the 250ms poll sees
+    //     agent_runs.status='cancellation_requested' and aborts `cancellation`
+    //   - a lost/expired lease       -> aborts only lease.signal
+    //   - a worker shutdown          -> SIGTERM/SIGINT abort
+    //     activePlanningCancellation, which IS this same `cancellation` object,
+    //     so cancellation.signal.aborted alone cannot rule a shutdown out
+    // Requiring `cancellation` to have fired excludes the lease case, and
+    // excluding `stopping` (set synchronously by those same handlers, before the
+    // abort propagates through the invocation and throws) excludes the shutdown
+    // case — leaving only a genuine cancellation_requested-driven abort classified
+    // as cancelled. A shutdown mid-planning therefore falls through to the
+    // recoverable Planning Failed / requeue path instead of burning the ticket's
+    // retry and falsely telling the admin that someone cancelled it.
+    const cancelled = cancelledBeforeStart || (invocationCancelled && cancellation?.signal.aborted === true && !stopping);
+    // errorCode is derived FROM `cancelled` so the two can never disagree: whenever an abort is
+    // not being treated as a cancellation, the ambiguous "planning_cancelled" code must not reach
+    // agent_runs.error_code, or the ticket page's failure banner (gated on "planning_failed" /
+    // "invalid_plan_structure") silently vanishes for a run the admin still has to act on.
+    const errorCode = cancelled ? "planning_cancelled"
+      // Claude keeps its other codes — "planning_timeout" is meaningful and reported separately;
+      // only its ambiguous "planning_cancelled" is remapped when this was not a real cancellation.
+      : error instanceof ClaudePlanningError ? (error.code === "planning_cancelled" ? "planning_failed" : error.code)
+      // Every OpenCode code (opencode_failed / opencode_no_output / opencode_timeout, plus a
+      // shutdown-induced "planning_cancelled") misses that banner gate, so a non-cancelled OpenCode
+      // failure collapses to the generic code, exactly as it did before this branch added an
+      // OpenCodeError arm here.
+      : error instanceof OpenCodeError ? "planning_failed"
       : error instanceof Error && error.message.startsWith("invalid_plan_structure") ? "invalid_plan_structure"
       : "planning_failed";
-    const cancelled = errorCode === "planning_cancelled";
     const rawStdoutOnFailure = typeof (error as any)?.stdout === "string" ? (error as any).stdout : undefined;
     if (cancelled) {
       // Mirrors runExecution's cancelled branch: best-effort terminal-state
@@ -1707,8 +1750,9 @@ while (!stopping) {
       if (error instanceof LeaseLostError) return;
       if (error instanceof ClaudeAuthError) console.error(`${error.code}: ${error.message}`);
       else console.error(error instanceof Error ? error.message : "job failed");
-      if ((error instanceof ClaudeExecutionError || error instanceof ClaudePlanningError || error instanceof OpenCodeError)
-        && (error.code === "execution_cancelled" || error.code === "planning_cancelled")) {
+      if (((error instanceof ClaudeExecutionError || error instanceof ClaudePlanningError || error instanceof OpenCodeError)
+        && (error.code === "execution_cancelled" || error.code === "planning_cancelled"))
+        || (error as any)?.code === "ticket_cancelled_before_planning") {
         await lease.run(() => pool.query(
           `UPDATE jobs SET status='cancelled',completed_at=now(),claimed_by=NULL,lease_expires_at=NULL,updated_at=now()
            WHERE id=$1 AND status='running' AND claimed_by=$2 AND lease_expires_at > now()`,
