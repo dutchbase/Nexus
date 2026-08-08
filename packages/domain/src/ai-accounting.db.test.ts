@@ -6,7 +6,7 @@ import pg from "pg";
 
 process.env.DATABASE_URL = process.env.DCC_TEST_DATABASE_URL ?? "postgres://unused:unused@127.0.0.1:1/unused";
 const { migrate } = await import("../../database/src/migrate.ts");
-const { createAiInvocation, recordAiUsage } = await import("./index.ts");
+const { createAiInvocation, recordAiUnavailable, recordAiUsage } = await import("./index.ts");
 
 const testDatabaseUrl = process.env.DCC_TEST_DATABASE_URL;
 const integration = testDatabaseUrl ? describe : describe.skip;
@@ -46,6 +46,18 @@ integration("AI invocation accounting persistence", () => {
       expect(unpriced.ai_model_price_id).toBeNull();
       expect(unpriced.estimated_cost_usd).toBeNull();
       expect((await client.query("INSERT INTO agent_runs (status) VALUES ('completed') RETURNING ai_usage_status,total_tokens")).rows[0]).toEqual({ ai_usage_status: null, total_tokens: null });
+    } finally { await client.end(); }
+  });
+
+  it("does not replace terminal captured accounting", async () => {
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ('idempotent','Idempotent','/tmp') RETURNING id")).rows[0].id;
+      await createAiInvocation({ id: "once", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high", startedAt: new Date("2026-09-01T00:00:00Z") }, client);
+      await recordAiUsage({ runId: "once", inputTokens: 10, outputTokens: 20, rawUsage: { attempt: 1 } }, client);
+      expect((await recordAiUsage({ runId: "once", inputTokens: 100, outputTokens: 200, rawUsage: { attempt: 2 } }, client)).total_tokens).toBe("30");
+      expect((await recordAiUnavailable("once", client)).usage_status).toBe("captured");
     } finally { await client.end(); }
   });
 });
