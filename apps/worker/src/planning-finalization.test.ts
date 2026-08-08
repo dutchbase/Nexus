@@ -139,3 +139,13 @@ test("classifies a cancelled planning run separately from a failed one", async (
   const jobLoop = worker.slice(worker.indexOf("if (job.type === \"project.validate\")"));
   expect(jobLoop).toContain("error.code === \"execution_cancelled\" || error.code === \"planning_cancelled\"");
 });
+
+test("storePlan and storeRevisedPlan never overwrite a ticket that was cancelled mid-flight", async () => {
+  const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
+  const storePlan = worker.slice(worker.indexOf("async function storePlan"), worker.indexOf("async function storeRevisedPlan"));
+  const storeRevisedPlan = worker.slice(worker.indexOf("async function storeRevisedPlan"), worker.indexOf("async function runPlanning"));
+
+  for (const fn of [storePlan, storeRevisedPlan]) {
+    expect(fn).toContain('if (ticket.status !== "Cancelled") {');
+  }
+});

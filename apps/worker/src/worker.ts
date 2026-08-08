@@ -222,14 +222,16 @@ async function storePlan(input: {
     ))).rows[0];
     await lease.run(() => client.query("UPDATE plans SET current_version_id=$2,updated_at=now() WHERE id=$1", [plan.id, version.id]));
     const ticket = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
-    await lease.run(() => client.query("UPDATE tickets SET status='Plan Ready for Review',updated_at=now() WHERE id=$1", [input.ticket.id]));
-    await lease.run(() => client.query(
-      `INSERT INTO ticket_status_history
-       (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
-       VALUES ($1,$2,'Plan Ready for Review','Planning completed','worker',$3,$4,$5)`,
-      [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
-    ));
-    await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId }, lease.assertOwned);
+    if (ticket.status !== "Cancelled") {
+      await lease.run(() => client.query("UPDATE tickets SET status='Plan Ready for Review',updated_at=now() WHERE id=$1", [input.ticket.id]));
+      await lease.run(() => client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
+         VALUES ($1,$2,'Plan Ready for Review','Planning completed','worker',$3,$4,$5)`,
+        [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
+      ));
+      await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId }, lease.assertOwned);
+    }
     await lease.run(() => client.query(
       "UPDATE agent_runs SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3,metadata_json=metadata_json || $4::jsonb WHERE id=$1",
       [input.runId, input.sessionId, input.exitCode, JSON.stringify({ response: input.raw })],
@@ -259,21 +261,23 @@ async function storeRevisedPlan(input: {
       [locked.id, version.id],
     ));
     const ticket = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
-    await lease.run(() => client.query(
-      `UPDATE tickets SET status='Plan Ready for Review',approved_plan_version_id=NULL,
-       approved_plan_hash=NULL,approved_ticket_version=NULL,approved_project_config_version=NULL,
-       approved_model_config_json=NULL,approved_skill_snapshot_id=NULL,
-       approved_prompt_versions_json=NULL,plan_approved_at=NULL,updated_at=now()
-       WHERE id=$1`,
-      [input.ticket.id],
-    ));
-    await lease.run(() => client.query(
-      `INSERT INTO ticket_status_history
-       (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
-       VALUES ($1,$2,'Plan Ready for Review','Plan revision completed','worker',$3,$4,$5)`,
-      [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
-    ));
-    await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId }, lease.assertOwned);
+    if (ticket.status !== "Cancelled") {
+      await lease.run(() => client.query(
+        `UPDATE tickets SET status='Plan Ready for Review',approved_plan_version_id=NULL,
+         approved_plan_hash=NULL,approved_ticket_version=NULL,approved_project_config_version=NULL,
+         approved_model_config_json=NULL,approved_skill_snapshot_id=NULL,
+         approved_prompt_versions_json=NULL,plan_approved_at=NULL,updated_at=now()
+         WHERE id=$1`,
+        [input.ticket.id],
+      ));
+      await lease.run(() => client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
+         VALUES ($1,$2,'Plan Ready for Review','Plan revision completed','worker',$3,$4,$5)`,
+        [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
+      ));
+      await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId }, lease.assertOwned);
+    }
     await lease.run(() => client.query(
       "UPDATE agent_runs SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3,metadata_json=metadata_json || $4::jsonb WHERE id=$1",
       [input.runId, input.sessionId, input.exitCode, JSON.stringify({ response: input.raw })],
