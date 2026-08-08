@@ -171,6 +171,21 @@ describe("invokeOpenCodePlanning", () => {
       workingDirectory: tmpdir(), apiKey: "k", executable: stubPath, timeoutMs: 300,
     })).rejects.toMatchObject({ code: "opencode_timeout" });
   });
+
+  it("preserves final provider usage when planning times out", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "opencode-stub-"));
+    const stubPath = path.join(dir, "timeout-with-usage.mjs");
+    const usage = { type: "message.part.updated", properties: { part: {
+      id: "step-1", type: "step-finish", tokens: { input: 10, output: 20 },
+    } } };
+    await writeFileFs(stubPath, `#!/usr/bin/env node\nconsole.log(${JSON.stringify(JSON.stringify(usage))});\nsetTimeout(() => {}, 60_000);\n`);
+    await chmod(stubPath, 0o755);
+
+    await expect(invokeOpenCodePlanning({
+      task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
+      workingDirectory: tmpdir(), apiKey: "k", executable: stubPath, timeoutMs: 300,
+    })).rejects.toMatchObject({ code: "opencode_timeout", usage: { inputTokens: 10, outputTokens: 20 } });
+  });
 });
 
 describe("invokeOpenCodeExecution", () => {

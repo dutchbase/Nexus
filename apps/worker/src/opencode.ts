@@ -190,6 +190,7 @@ async function runOpenCode(input: {
     let stderr = "";
     child.stdout.on("data", (chunk: string) => { stdout += chunk; input.onStdoutChunk?.(chunk); });
     child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    const bufferedUsage = () => parseOpenCodeFinalUsage(stdout.split("\n").map(extractEvent).filter(Boolean)) ?? undefined;
     const terminate = (killSignal: NodeJS.Signals) => {
       if (!child.pid) return child.kill(killSignal);
       if (process.platform === "win32") {
@@ -220,19 +221,19 @@ async function runOpenCode(input: {
       };
       child.on("error", (error: NodeJS.ErrnoException) => {
         settle(() => reject(timedOutNotCancelled()
-          ? new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, timeoutErrorCode)
+          ? new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, timeoutErrorCode, bufferedUsage())
           : callerCancelled()
-            ? new OpenCodeError(`OpenCode was cancelled: ${error.message}`, cancelledErrorCode)
-            : new OpenCodeError(`failed to launch OpenCode: ${error.message}`, "opencode_failed")));
+            ? new OpenCodeError(`OpenCode was cancelled: ${error.message}`, cancelledErrorCode, bufferedUsage())
+            : new OpenCodeError(`failed to launch OpenCode: ${error.message}`, "opencode_failed", bufferedUsage())));
       });
       child.on("close", (code, killSignal) => {
         settle(() => {
           if (timedOutNotCancelled()) {
-            reject(new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, timeoutErrorCode));
+            reject(new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, timeoutErrorCode, bufferedUsage()));
           } else if (callerCancelled()) {
-            reject(new OpenCodeError("OpenCode was cancelled", cancelledErrorCode));
+            reject(new OpenCodeError("OpenCode was cancelled", cancelledErrorCode, bufferedUsage()));
           } else if (killSignal || code === null) {
-            reject(new OpenCodeError(`OpenCode terminated by signal ${killSignal}`, "opencode_failed"));
+            reject(new OpenCodeError(`OpenCode terminated by signal ${killSignal}`, "opencode_failed", bufferedUsage()));
           } else {
             resolve(code);
           }
@@ -240,9 +241,8 @@ async function runOpenCode(input: {
       });
     });
     if (exitCode !== 0) {
-      const usage = parseOpenCodeFinalUsage(stdout.split("\n").map(extractEvent).filter(Boolean)) ?? undefined;
       throw new OpenCodeError(
-        `OpenCode exited with code ${exitCode}: ${stderr.trim().slice(0, 500) || "no stderr"}`, "opencode_failed", usage);
+        `OpenCode exited with code ${exitCode}: ${stderr.trim().slice(0, 500) || "no stderr"}`, "opencode_failed", bufferedUsage());
     }
     return { exitCode, stdout, stderr };
   } finally {
