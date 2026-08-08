@@ -203,6 +203,7 @@ export async function invokeOpenCodePlanning(input: {
   signal?: AbortSignal;
   timeoutMs?: number;
   executable?: string;
+  cancelledErrorCode?: string;
 }): Promise<{ markdown: string; sessionId: string | null; exitCode: number }> {
   const result = await runOpenCode({
     args: openCodeArgs(input.task, deepSeekModelFor(input.model), input.promptFile),
@@ -212,6 +213,7 @@ export async function invokeOpenCodePlanning(input: {
     signal: input.signal,
     timeoutMs: input.timeoutMs,
     executable: input.executable,
+    cancelledErrorCode: input.cancelledErrorCode,
   });
   return { ...parseOpenCodeEvents(result.stdout), exitCode: result.exitCode };
 }
