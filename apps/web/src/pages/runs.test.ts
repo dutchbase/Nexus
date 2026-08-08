@@ -63,7 +63,7 @@ test("run detail escapes and retains captured prompts and accounting", async () 
   query.mockImplementation(async (sql: string) => {
     if (String(sql).includes("FROM agent_runs ar")) return { rows: [{ ...run,
       ai_usage_status: "captured", input_tokens: 10, output_tokens: 20, reasoning_tokens: 8, cache_read_tokens: 2, cache_write_tokens: 3, total_tokens: 35,
-      estimated_cost_usd: "0.00001234", task_prompt: "<task>", rendered_prompt: "<rendered>", prompt_name: "execution", prompt_version: 3,
+      estimated_cost_usd: "0.00001234", task_prompt: "<task>", rendered_prompt: "<rendered>", prompt_name: "execution", prompt_versions: { "global.execution": "pv-execution" },
       price_source_url: "https://example.test/prices", input_usd_per_million: "3", output_usd_per_million: "15", cache_read_usd_per_million: "0.3", cache_write_usd_per_million: "3.75",
     }] };
     if (String(sql).includes("FROM artifacts a JOIN execution_attempts ea")) return { rows: [] };
@@ -77,4 +77,8 @@ test("run detail escapes and retains captured prompts and accounting", async () 
   expect(page?.body).toContain("&lt;task&gt;");
   expect(page?.body).toContain("&lt;rendered&gt;");
   expect(page?.body).toContain("<details>");
+  expect(page?.body).toContain("global.execution: pv-execution");
+  const [sql] = query.mock.calls.find(([sql]) => String(sql).includes("FROM agent_runs ar"))!;
+  expect(sql).toContain("ps.metadata_json->'promptVersionIds' prompt_versions");
+  expect(sql).not.toContain("prompt_version'");
 });

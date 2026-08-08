@@ -146,6 +146,21 @@ describe("invokeOpenCodePlanning", () => {
     })).rejects.toMatchObject({ code: "opencode_failed" });
   });
 
+  it("preserves final provider usage when planning exits non-zero", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "opencode-stub-"));
+    const stubPath = path.join(dir, "fail-with-usage.mjs");
+    const usage = { type: "message.part.updated", properties: { part: {
+      id: "step-1", type: "step-finish", tokens: { input: 10, output: 20 },
+    } } };
+    await writeFileFs(stubPath, `#!/usr/bin/env node\nconsole.log(${JSON.stringify(JSON.stringify(usage))});\nprocess.exit(2);\n`);
+    await chmod(stubPath, 0o755);
+
+    await expect(invokeOpenCodePlanning({
+      task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
+      workingDirectory: tmpdir(), apiKey: "k", executable: stubPath,
+    })).rejects.toMatchObject({ code: "opencode_failed", usage: { inputTokens: 10, outputTokens: 20 } });
+  });
+
   it("throws opencode_timeout when the CLI exceeds timeoutMs", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "opencode-stub-"));
     const stubPath = path.join(dir, "hang.mjs");
@@ -186,13 +201,16 @@ describe("invokeOpenCodeExecution", () => {
   });
 
   it("rejects with opencode_failed when the stream contains an error event", async () => {
-    const stub = await makeStub([{ type: "error", sessionID: "ses_e", error: { data: { message: "provider exploded" } } }]);
+    const stub = await makeStub([
+      { type: "message.part.updated", properties: { part: { id: "step-1", type: "step-finish", tokens: { input: 10, output: 20 } } } },
+      { type: "error", sessionID: "ses_e", error: { data: { message: "provider exploded" } } },
+    ]);
     const logDir = await mkdtemp(path.join(tmpdir(), "opencode-log-"));
     await expect(invokeOpenCodeExecution({
       task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
       workingDirectory: tmpdir(), apiKey: "k", executable: stub.stubPath,
       logPath: path.join(logDir, "x.log"), onEvent: async () => undefined,
-    })).rejects.toMatchObject({ code: "opencode_failed" });
+    })).rejects.toMatchObject({ code: "opencode_failed", usage: { inputTokens: 10, outputTokens: 20 } });
   });
 
   it("flushes events and logs on nonzero exit with error event in stream", async () => {

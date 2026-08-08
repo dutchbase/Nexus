@@ -14,7 +14,7 @@ import {
   claimNotificationDelivery, completeNotificationDelivery, failNotificationDelivery, renewJobLease,
   renewNotificationDeliveryLease, recordWorkerHeartbeat, WORKER_HEARTBEAT_INTERVAL_MS,
   planningPromptInputs, renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolvedPromptFor, snapshotPrompt, syncOpenPullRequests,
-  createAiInvocation, isDeepSeekModel, recordAiUnavailable, recordAiUsage,
+  createAiInvocation, isDeepSeekModel,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
@@ -35,7 +35,7 @@ import { failExecutionPublication, handleExecutionPublicationFailure, prepareExe
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
 import {
-  approvedExecutionInput, approvedPhaseSkills, assertApprovedSkillSnapshot, assertExecutionPublicationGate, prReviewSnapshotInput, shouldRetryPrReview,
+  approvedExecutionInput, approvedPhaseSkills, assertApprovedSkillSnapshot, assertExecutionPublicationGate, finalizeAiUsage, prReviewSnapshotInput, shouldRetryPrReview,
 } from "./worker-boundary.ts";
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
@@ -89,11 +89,6 @@ process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort
 
 function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");
-}
-
-async function finalizeAiUsage(runId: string, result: { usage?: any }) {
-  if (result.usage) await recordAiUsage({ runId, ...result.usage });
-  else await recordAiUnavailable(runId);
 }
 
 async function finalizeRegisteredArtifact(staged: StagedArtifact) {
@@ -404,7 +399,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
     await store();
   } catch (error) {
     await lease.assertOwned();
-    await recordAiUnavailable(runId);
+    await finalizeAiUsage(runId, error as { usage?: any });
     const message = error instanceof Error ? error.message : "planning failed";
     // ponytail: transitionToPlanning() moves the ticket to Planning before
     // invocation; on failure it must land on a state the admin can recover
@@ -690,11 +685,11 @@ async function runExecution(job: any, lease: LeaseGuard) {
           invoke: invokeExecutionClaude,
         });
     await lease.assertOwned();
+    await finalizeAiUsage(runId, result);
     // ponytail: the Agent-tool publication gate encodes a Claude-specific
     // quality bar (forced subagent use); OpenCode runs are gated by the same
     // downstream validation (worktree checks + validation commands) instead.
     if (!executionIsDeepSeek) assertExecutionPublicationGate(repairing, usedAgent);
-    await finalizeAiUsage(runId, result);
     await pool.query(
       `UPDATE agent_runs
        SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3 WHERE id=$1`,
@@ -794,7 +789,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
   } catch (error) {
     if (error instanceof PublicationError) throw error;
     await lease.assertOwned();
-    await recordAiUnavailable(runId);
+    await finalizeAiUsage(runId, error as { usage?: any });
     // Match on the error code regardless of concrete error class: DeepSeek
     // executions throw OpenCodeError (not ClaudeExecutionError), but both
     // taxonomies use the same "execution_cancelled"/"execution_timeout"
@@ -1272,7 +1267,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     }
   } catch (error: any) {
     await lease.assertOwned();
-    if (runId) await recordAiUnavailable(runId);
+    if (runId) await finalizeAiUsage(runId, error);
     const storedReview = (await pool.query("SELECT * FROM pr_ai_reviews WHERE id=$1", [payload.pr_ai_review_id])).rows[0];
     if (storedReview?.status !== "running") return;
     const retryablePublication = Boolean(storedReview?.raw_output && storedReview.publication_status === "pending");
@@ -1347,7 +1342,7 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
   } catch (error) {
     await lease.assertOwned();
     if (runId) {
-      await recordAiUnavailable(runId);
+      await finalizeAiUsage(runId, error as { usage?: any });
       await lease.run(() => pool.query("UPDATE agent_runs SET status=$2,finished_at=now(),error_message=$3 WHERE id=$1", [runId, "failed", error instanceof Error ? error.message : "follow-up description failed"]));
     }
     throw error;
@@ -1535,7 +1530,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
   } catch (error: any) {
     await lease.assertOwned();
     if (runId) {
-      await recordAiUnavailable(runId);
+      await finalizeAiUsage(runId, error);
       await pool.query(
         "UPDATE agent_runs SET status='failed',finished_at=now(),error_message=$2 WHERE id=$1",
         [runId, error.message],

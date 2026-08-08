@@ -1,6 +1,7 @@
 import { skillsForPhase, type SkillPhase, type SnapshottedSkill } from "@dcc/skill-registry";
 import { GitHubProviderError } from "@dcc/github-provider";
-import { PrReviewDestinationError } from "@dcc/domain";
+import { PrReviewDestinationError, recordAiUnavailable, recordAiUsage } from "@dcc/domain";
+import type { AiQueryClient, AiUsage } from "@dcc/domain";
 import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -142,6 +143,12 @@ export function approvedExecutionInput(snapshot: {
 
 export function assertExecutionPublicationGate(repairing: boolean, usedAgent: boolean) {
   if (!repairing && !usedAgent) throw new Error("execution did not invoke Agent tool");
+}
+
+export async function finalizeAiUsage(runId: string, result: { usage?: AiUsage }, client?: AiQueryClient) {
+  return result.usage
+    ? recordAiUsage({ runId, ...result.usage }, client)
+    : recordAiUnavailable(runId, client);
 }
 
 export function shouldRetryPrReview(error: unknown, rawOutput: string | null, attempt: number, maxAttempts: number) {

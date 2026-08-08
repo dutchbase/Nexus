@@ -34,6 +34,8 @@ describe("AI usage dashboard", () => {
     expect(sql).toContain("ar.started_at < $");
     expect(sql).toContain("(ar.started_at, ar.id) < ($");
     expect(sql).toMatch(/ORDER BY ar\.started_at DESC, ar\.id DESC LIMIT \$\d+/);
+    expect(sql).toContain("ar.run_type = ANY($1::text[])");
+    expect(values[0]).toEqual(["planning", "plan_revision", "execution", "execution.repair", "pr_ai_review", "pr_follow_up_description", "pr_conflict_resolution"]);
     expect(values).toEqual(expect.arrayContaining(["%alpha%", "execution", "sonnet", "captured", "%T-12%", "2026-08-03T00:00:00Z", "r1"]));
   });
 
@@ -57,10 +59,12 @@ describe("AI usage dashboard", () => {
     expect(page?.body).toContain("Coverage exceptions");
     expect(page?.body).toContain(">2<");
     expect(page?.body).toContain("Not captured");
+    const [summarySql] = query.mock.calls.find(([sql]) => String(sql).includes("coverage_exceptions"))!;
+    expect(summarySql).toContain("ar.ai_usage_status='captured' AND ar.estimated_cost_usd IS NULL");
   });
 
   it("renders compact accounting without exposing prompt content in the list", async () => {
-    responses([{ ...row, task_prompt: "<script>secret</script>", ticket_number: "T-12", pr_id: "pr-1" }]);
+    responses([{ ...row, task_prompt: "<script>secret</script>", ticket_number: "T-12", pr_id: "pr-1", prompt_versions: { "global.execution": "pv-execution" } }]);
     const page = await usage.render(new URL("http://test/admin/ai-usage"), session, {});
 
     expect(page?.body).toContain("10 in · 20 out");
@@ -69,5 +73,9 @@ describe("AI usage dashboard", () => {
     expect(page?.body).toContain('href="/admin/tickets/T-12"');
     expect(page?.body).toContain('href="/admin/pull-requests/pr-1"');
     expect(page?.body).not.toContain('<a class="ticket-row"');
+    expect(page?.body).toContain("global.execution: pv-execution");
+    const [sql] = query.mock.calls.find(([sql]) => String(sql).includes("ORDER BY ar.started_at DESC"))!;
+    expect(sql).toContain("ps.metadata_json->'promptVersionIds' prompt_versions");
+    expect(sql).not.toContain("prompt_version'");
   });
 });

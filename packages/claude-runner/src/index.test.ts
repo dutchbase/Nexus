@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
-import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, ClaudePlanningError, createExecutionSandboxSettings, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parseClaudeFinalUsage, parsePlanMarkdown, preflightClaudeAuthentication, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
+import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, ClaudeExecutionError, ClaudePlanningError, createExecutionSandboxSettings, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parseClaudeFinalUsage, parsePlanMarkdown, preflightClaudeAuthentication, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -359,6 +359,21 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan","session_
   })).resolves.toMatchObject({ markdown: "# Plan", usage: { inputTokens: 10, outputTokens: 20 } });
 });
 
+test("preserves final provider usage when planning fails", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-usage-error-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  await writeFile(executable, `#!/bin/sh
+printf '%s\\n' '{"type":"result","subtype":"error","usage":{"input_tokens":10,"output_tokens":20}}'
+exit 2
+`);
+  await chmod(executable, 0o755);
+
+  await expect(invokePlanningClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root,
+  })).rejects.toMatchObject({ exitCode: 2, usage: { inputTokens: 10, outputTokens: 20 } });
+});
+
 test("cancels an in-flight planning process when its ownership signal aborts", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "claude-planning-abort-"));
   directories.push(root);
@@ -526,6 +541,35 @@ printf '%s' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}'
   await expect((await import("node:fs/promises")).access(path.join(root, ".git"))).resolves.toBeUndefined();
   expect(settings.sandbox).toMatchObject({
     enabled: true, failIfUnavailable: true, allowUnsandboxedCommands: false,
+  });
+});
+
+test("preserves final provider usage when execution exits unsuccessfully", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-execution-usage-error-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  await mkdir(path.join(root, ".git"));
+  await writeFile(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '%s\\n' '2.1.220 (Claude Code)'; exit 0; fi
+printf '%s\\n' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}'
+exit 2
+`);
+  await chmod(executable, 0o755);
+
+  await expect(invokeExecutionClaude({
+    ...invocation,
+    claudeExecutable: executable,
+    workingDirectory: root,
+    executionDirectory: root,
+    gitMetadataPaths: [path.join(root, ".git")],
+    logPath: path.join(root, "run.log"),
+    timeoutMs: 1_000,
+    onEvent: async () => undefined,
+  })).rejects.toMatchObject({
+    constructor: ClaudeExecutionError,
+    code: "execution_failed",
+    exitCode: 2,
+    usage: { inputTokens: 10, outputTokens: 20 },
   });
 });
 

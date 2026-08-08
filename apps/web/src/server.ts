@@ -228,7 +228,7 @@ function effectiveTimestamp(value: unknown): Date {
   if (typeof value !== "string") throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });
   const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?$/);
   if (!match) throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });
-  const [, year, month, day, hour, minute, second = "0"] = match.map(Number);
+  const [, year, month, day, hour, minute, second = 0] = match.map((part) => Number(part ?? 0));
   const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
   if (month < 1 || month > 12 || day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59) {
     throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });

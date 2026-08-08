@@ -9,7 +9,7 @@ import path from "node:path";
 import type { AiUsage } from "@dcc/domain";
 
 export class OpenCodeError extends Error {
-  constructor(message: string, readonly code: string) {
+  constructor(message: string, readonly code: string, public usage?: AiUsage) {
     super(message);
   }
 }
@@ -240,8 +240,9 @@ async function runOpenCode(input: {
       });
     });
     if (exitCode !== 0) {
+      const usage = parseOpenCodeFinalUsage(stdout.split("\n").map(extractEvent).filter(Boolean)) ?? undefined;
       throw new OpenCodeError(
-        `OpenCode exited with code ${exitCode}: ${stderr.trim().slice(0, 500) || "no stderr"}`, "opencode_failed");
+        `OpenCode exited with code ${exitCode}: ${stderr.trim().slice(0, 500) || "no stderr"}`, "opencode_failed", usage);
     }
     return { exitCode, stdout, stderr };
   } finally {
@@ -269,7 +270,12 @@ export async function invokeOpenCodePlanning(input: {
     executable: input.executable,
   });
   const usage = parseOpenCodeFinalUsage(result.stdout.split("\n").map(extractEvent).filter(Boolean));
-  return { ...parseOpenCodeEvents(result.stdout), exitCode: result.exitCode, ...(usage ? { usage } : {}) };
+  try {
+    return { ...parseOpenCodeEvents(result.stdout), exitCode: result.exitCode, ...(usage ? { usage } : {}) };
+  } catch (error) {
+    if (usage && error instanceof OpenCodeError) error.usage = usage;
+    throw error;
+  }
 }
 
 export async function invokeOpenCodeExecution(input: {
@@ -350,9 +356,15 @@ export async function invokeOpenCodeExecution(input: {
     await eventWrites.catch(() => undefined);
     await logWrites.catch(() => undefined);
   }
-  // Prefer streamError over generic exit error; otherwise throw caught exception
-  if (streamError) throw streamError;
-  if (caught) throw caught;
   const usage = parseOpenCodeFinalUsage(usageEvents);
+  // Prefer streamError over generic exit error; otherwise throw caught exception.
+  if (streamError) {
+    if (usage) streamError.usage = usage;
+    throw streamError;
+  }
+  if (caught) {
+    if (usage && caught instanceof OpenCodeError) caught.usage ??= usage;
+    throw caught;
+  }
   return { exitCode: result!.exitCode, stderr: result!.stderr, ...(usage ? { usage } : {}) };
 }

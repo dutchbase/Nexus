@@ -44,12 +44,12 @@ test("creates an append-only model price with the derived provider and audit eve
 
   await adminApi(request(validPrice), res, new URL("http://test/api/admin/ai-model-prices"), { user_id: "admin" });
 
-  const insert = transactionClient.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO ai_model_prices"));
+  const insert = transactionClient.query.mock.calls.find(([sql]: [unknown, ...unknown[]]) => String(sql).includes("INSERT INTO ai_model_prices"));
   expect(insert?.[1]).toEqual([
     "deepseek-v4-pro", "deepseek", "2026-09-01T00:00:00.000Z", 1, 2, 3, 4,
     "https://example.test/pricing", "admin",
   ]);
-  const audit = transactionClient.query.mock.calls.find(([sql]) => String(sql).includes("INSERT INTO audit_events"));
+  const audit = transactionClient.query.mock.calls.find(([sql]: [unknown, ...unknown[]]) => String(sql).includes("INSERT INTO audit_events"));
   expect(audit?.[1]).toContain("ai_model_price.create");
   expect(inTransaction).toHaveBeenCalledTimes(1);
   expect(pool.query).not.toHaveBeenCalled();

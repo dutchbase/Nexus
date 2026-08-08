@@ -69,6 +69,7 @@ export class ClaudeExecutionError extends Error {
     message: string,
     public exitCode: number,
     public code: "execution_failed" | "execution_timeout" | "execution_cancelled",
+    public usage?: AiUsage,
   ) {
     super(message);
   }
@@ -79,6 +80,7 @@ export class ClaudePlanningError extends Error {
     message: string,
     public exitCode: number,
     public code: "planning_timeout",
+    public usage?: AiUsage,
   ) {
     super(message);
   }
@@ -480,21 +482,26 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   const result = await runClaude(buildPlanningArguments(input), {
     cwd: input.workingDirectory, env, executable: input.claudeExecutable, signal: input.signal, timeoutMs: input.timeoutMs,
   });
-  if (result.timedOut) throw new ClaudePlanningError("Claude planning timed out", 124, "planning_timeout");
+  let response: any;
+  try { response = JSON.parse(result.stdout.trim()); } catch { /* handled below */ }
+  const usage = parseClaudeFinalUsage(response) ?? undefined;
+  if (result.timedOut) throw new ClaudePlanningError("Claude planning timed out", 124, "planning_timeout", usage);
   if (result.exitCode !== 0) {
     throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), {
       exitCode: result.exitCode,
       stdout: truncateStdoutForCapture(result.stdout),
+      ...(usage ? { usage } : {}),
     });
   }
-  let response: any;
-  try { response = JSON.parse(result.stdout.trim()); } catch {
+  if (!response) {
     throw Object.assign(new Error("Claude planning returned invalid JSON"), { stdout: truncateStdoutForCapture(result.stdout) });
   }
   if (response?.type !== "result" || response?.subtype !== "success" || typeof response?.result !== "string") {
-    throw Object.assign(new Error("Claude planning response did not contain a successful Markdown result"), { stdout: truncateStdoutForCapture(result.stdout) });
+    throw Object.assign(new Error("Claude planning response did not contain a successful Markdown result"), {
+      stdout: truncateStdoutForCapture(result.stdout),
+      ...(usage ? { usage } : {}),
+    });
   }
-  const usage = parseClaudeFinalUsage(response);
   return {
     markdown: response.result as string,
     sessionId: typeof response.session_id === "string" ? response.session_id : input.sessionId,
@@ -653,19 +660,20 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
       input.signal?.removeEventListener("abort", abort);
       Promise.all([eventWrites, logWrites]).then(() => {
         if (outcome === "cancelled") {
-          reject(new ClaudeExecutionError("Claude execution was cancelled", code ?? 1, "execution_cancelled"));
+          reject(new ClaudeExecutionError("Claude execution was cancelled", code ?? 1, "execution_cancelled", usage));
         } else if (outcome === "timeout" || code === 124) {
-          reject(new ClaudeExecutionError("Claude execution timed out", 124, "execution_timeout"));
+          reject(new ClaudeExecutionError("Claude execution timed out", 124, "execution_timeout", usage));
         } else if (code !== 0) {
           reject(new ClaudeExecutionError(
             `Claude execution exited ${code}: ${stderr.trim() || "no error output"}`,
             code ?? 1,
             "execution_failed",
+            usage,
           ));
         } else {
           resolve({ exitCode: code ?? 0, stderr, ...(usage ? { usage } : {}) });
         }
-      }, reject);
+      }, (error) => reject(Object.assign(error instanceof Error ? error : new Error(String(error)), usage ? { usage } : {})));
     });
   });
   } finally {

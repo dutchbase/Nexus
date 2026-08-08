@@ -42,7 +42,7 @@ ALTER TABLE agent_runs
   );
 
 INSERT INTO ai_model_prices (model,provider,effective_from,input_usd_per_million,output_usd_per_million,cache_write_usd_per_million,cache_read_usd_per_million,source_url) VALUES
-  ('fable','anthropic','2026-08-08T00:00:00Z',5,25,6.25,0.5,'https://platform.claude.com/docs/en/about-claude/pricing'),
+  ('fable','anthropic','2026-08-08T00:00:00Z',10,50,12.5,1,'https://platform.claude.com/docs/en/about-claude/pricing'),
   ('opus','anthropic','2026-08-08T00:00:00Z',5,25,6.25,0.5,'https://platform.claude.com/docs/en/about-claude/pricing'),
   ('sonnet','anthropic','2026-08-08T00:00:00Z',3,15,3.75,0.3,'https://platform.claude.com/docs/en/about-claude/pricing'),
   ('haiku','anthropic','2026-08-08T00:00:00Z',1,5,1.25,0.1,'https://platform.claude.com/docs/en/about-claude/pricing'),

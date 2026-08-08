@@ -1,6 +1,6 @@
 import { expect, test } from "vitest";
 import { createAiInvocation, recordAiUnavailable, recordAiUsage } from "@dcc/domain";
-import { prReviewSnapshotInput } from "./worker-boundary.ts";
+import { finalizeAiUsage, prReviewSnapshotInput } from "./worker-boundary.ts";
 
 function lifecycleDb() {
   const rows = new Map<string, any>();
@@ -51,6 +51,18 @@ test("persists unavailable usage when a provider returns no normalized usage", a
   await recordAiUnavailable("run-2", db);
 
   expect(db.rows.get("run-2")).toMatchObject({ status: "running", ai_usage_status: "unavailable", provider: "anthropic" });
+});
+
+test("persists reported usage carried by a failed provider invocation", async () => {
+  const db = lifecycleDb();
+  await createAiInvocation({ id: "run-3", projectId: "project-1", runType: "execution", model: "sonnet", reasoningLevel: "high" }, db);
+  const error = Object.assign(new Error("provider failed"), {
+    usage: { inputTokens: 12, outputTokens: 8, rawUsage: { input_tokens: 12, output_tokens: 8 } },
+  });
+
+  await finalizeAiUsage("run-3", error, db);
+
+  expect(db.rows.get("run-3")).toMatchObject({ ai_usage_status: "captured", input_tokens: 12, output_tokens: 8, total_tokens: 20 });
 });
 
 test("builds a PR review snapshot with its durable ticket context", () => {
