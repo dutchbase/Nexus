@@ -460,7 +460,8 @@ export function parseClaudeFinalUsage(event: unknown): AiUsage | null {
   const cacheReadTokens = optional(raw.cache_read_input_tokens);
   const cacheWriteTokens = optional(raw.cache_creation_input_tokens);
   const reasoningTokens = optional(raw.reasoning_output_tokens ?? raw.reasoning_tokens);
-  if (cacheReadTokens === null || cacheWriteTokens === null || reasoningTokens === null) return null;
+  if (cacheReadTokens === null || cacheWriteTokens === null || reasoningTokens === null
+    || (reasoningTokens !== undefined && reasoningTokens > outputTokens)) return null;
   return {
     inputTokens, outputTokens,
     ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
@@ -607,6 +608,16 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     const appendLog = (text: string) => {
       logWrites = logWrites.then(() => appendFile(input.logPath, text));
     };
+    const queueEvent = (raw: string) => {
+      if (!raw.trim()) return;
+      eventWrites = eventWrites.then(async () => {
+        let event: any;
+        try { event = JSON.parse(raw); } catch { event = { type: "unparsed", text: raw }; }
+        usage = parseClaudeFinalUsage(event) ?? usage;
+        await input.onEvent({ eventType: String(event?.type ?? "event"), event, raw });
+      });
+      void eventWrites.catch(() => undefined);
+    };
     let terminationTimer: NodeJS.Timeout | undefined;
     let outcome: "running" | "timeout" | "cancelled" = "running";
     const stop = (reason: "timeout" | "cancelled") => {
@@ -625,14 +636,7 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
       const lines = pending.split(/\r?\n/);
       pending = lines.pop() ?? "";
       for (const raw of lines) {
-        if (!raw.trim()) continue;
-        eventWrites = eventWrites.then(async () => {
-          let event: any;
-          try { event = JSON.parse(raw); } catch { event = { type: "unparsed", text: raw }; }
-          usage = parseClaudeFinalUsage(event) ?? usage;
-          await input.onEvent({ eventType: String(event?.type ?? "event"), event, raw });
-        });
-        void eventWrites.catch(() => undefined);
+        queueEvent(raw);
       }
     });
     child.stderr.on("data", (chunk: Buffer) => {
@@ -642,6 +646,8 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     });
     child.on("error", reject);
     child.on("close", (code) => {
+      queueEvent(pending);
+      pending = "";
       clearTimeout(timeout);
       if (terminationTimer) clearTimeout(terminationTimer);
       input.signal?.removeEventListener("abort", abort);

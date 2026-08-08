@@ -23,3 +23,9 @@
 ## Concerns
 
 - `npx tsc --noEmit` currently cannot resolve `@dcc/domain` from the runner because this checkout's pre-existing pnpm modules directory was not relinked after the new workspace dependency. `pnpm install --lockfile-only --offline` updated the lockfile successfully; a full install requires clearing the shared modules directory and was not performed.
+
+## Fix round 1
+
+- RED: the focused suite failed three reviewed regressions: Claude accepted reasoning above output, OpenCode accepted reasoning above output, and a non-newline-terminated Claude final result was not returned or delivered to `onEvent` (the cache regression is asserted in the same OpenCode malformed-usage test).
+- GREEN: `npx vitest run packages/claude-runner/src/index.test.ts apps/worker/src/opencode.test.ts` — 49 passed; `git diff --check` — passed.
+- Typecheck: `npx tsc --noEmit` still exits non-zero with `TS2307: Cannot find module '@dcc/domain'` in `packages/claude-runner/src/index.ts`, due to the existing unlinked workspace modules state above.

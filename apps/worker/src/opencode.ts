@@ -77,11 +77,13 @@ export function parseOpenCodeFinalUsage(events: readonly unknown[]): AiUsage | n
     const output = tokenCount(raw.output);
     const reasoning = raw.reasoning === undefined ? undefined : tokenCount(raw.reasoning);
     const cache = raw.cache;
-    const cacheRead = cache && typeof cache === "object" && (cache as Record<string, unknown>).read !== undefined
+    if (cache !== undefined && (!cache || typeof cache !== "object")) return null;
+    const cacheRead = cache && (cache as Record<string, unknown>).read !== undefined
       ? tokenCount((cache as Record<string, unknown>).read) : undefined;
-    const cacheWrite = cache && typeof cache === "object" && (cache as Record<string, unknown>).write !== undefined
+    const cacheWrite = cache && (cache as Record<string, unknown>).write !== undefined
       ? tokenCount((cache as Record<string, unknown>).write) : undefined;
-    if (input === null || output === null || reasoning === null || cacheRead === null || cacheWrite === null) return null;
+    if (input === null || output === null || reasoning === null || cacheRead === null || cacheWrite === null
+      || (reasoning !== undefined && reasoning > output)) return null;
     inputTokens += input;
     outputTokens += output;
     if (reasoning !== undefined) { reasoningTokens += reasoning; hasReasoning = true; }

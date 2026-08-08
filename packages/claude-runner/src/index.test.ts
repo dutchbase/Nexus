@@ -57,6 +57,7 @@ describe("parseClaudeFinalUsage", () => {
   test("returns unavailable for non-final or malformed Claude usage", () => {
     expect(parseClaudeFinalUsage({ type: "assistant", message: { usage: { input_tokens: 1, output_tokens: 2 } } })).toBeNull();
     expect(parseClaudeFinalUsage({ type: "result", usage: { input_tokens: "1", output_tokens: 2 } })).toBeNull();
+    expect(parseClaudeFinalUsage({ type: "result", usage: { input_tokens: 1, output_tokens: 2, reasoning_output_tokens: 3 } })).toBeNull();
   });
 });
 
@@ -490,11 +491,12 @@ for arg in "$@"; do
   previous="$arg"
 done
 node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1], JSON.stringify({ settings: JSON.parse(fs.readFileSync(process.argv[2], "utf8")), settingsFile: process.argv[2], configDir: process.env.CLAUDE_CONFIG_DIR, scrub: process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, autoMemory: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, publicationCredential: process.env.GITHUB_TOKEN }))' ${JSON.stringify(capture)} "$settings"
-printf '%s\\n' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}'
+printf '%s' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}'
 `);
   await chmod(executable, 0o755);
   const previousGithubToken = process.env.GITHUB_TOKEN;
   process.env.GITHUB_TOKEN = "publication-token";
+  const seen: string[] = [];
   try {
     await expect(invokeExecutionClaude({
       ...invocation,
@@ -504,7 +506,7 @@ printf '%s\\n' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}
       gitMetadataPaths: [path.join(root, ".git")],
       logPath: path.join(root, "run.log"),
       timeoutMs: 1_000,
-      onEvent: async () => undefined,
+      onEvent: async (event) => { seen.push(event.eventType); },
     })).resolves.toMatchObject({ exitCode: 0, usage: { inputTokens: 10, outputTokens: 20 } });
   } finally {
     if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
@@ -518,6 +520,7 @@ printf '%s\\n' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}
   expect(captured.scrub).toBe("1");
   expect(captured.autoMemory).toBe("1");
   expect(captured.publicationCredential).toBeUndefined();
+  expect(seen).toEqual(["result"]);
   await expect(access(captured.settingsFile)).rejects.toThrow();
   await expect(access(captured.configDir)).rejects.toThrow();
   await expect((await import("node:fs/promises")).access(path.join(root, ".git"))).resolves.toBeUndefined();
