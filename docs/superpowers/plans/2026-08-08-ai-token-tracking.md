@@ -86,4 +86,3 @@ Record one durable `agent_runs` row for every top-level AI invocation, with norm
 2. Add a focused migration/database integration path proving a known price is selected by run time and is unchanged after a later price entry.
 3. Run focused suites while implementing, then `pnpm verify` and the relevant E2E/database checks available in this environment.
 4. Review the final diff for scope: no unauthenticated prompt exposure, no price mutation, no fabricated usage, no unrequested feature.
-
