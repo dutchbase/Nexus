@@ -415,39 +415,62 @@ async function runPlanning(job: any, lease: LeaseGuard) {
   } catch (error) {
     await lease.assertOwned();
     const message = error instanceof Error ? error.message : "planning failed";
-    // ponytail: transitionToPlanning() moves the ticket to Planning before
-    // invocation; on failure it must land on a state the admin can recover
-    // from. "Planning Failed" is a valid status the approve/revision
-    // endpoints accept — reverting to "Planning Queued" (an active-queue
-    // state that no longer exists) stranded tickets and blocked retries.
-    await finalizePlanningFailure(inTransaction, lease, { jobId: job.id, workerId, message }, async (client) => {
-      const rawStdoutOnFailure = typeof (error as any)?.stdout === "string" ? (error as any).stdout : undefined;
-      await lease.run(() => client.query(
-        `UPDATE agent_runs SET status='failed',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4,metadata_json=metadata_json || $5::jsonb WHERE id=$1`,
-        [runId, (error as any)?.exitCode ?? 1,
-          error instanceof ClaudePlanningError ? error.code : error instanceof Error && error.message.startsWith("invalid_plan_structure") ? "invalid_plan_structure" : "planning_failed",
-          message,
-          // ponytail: capture the raw markdown (success/invalid-structure)
-          // or raw stdout (hard CLI failure — e.g. denied-tool max-turns) so
-          // a future failure is diagnosable without re-running the costly
-          // CLI call. See DCC-1014, 2026-08-07: three failures in a row
-          // left nothing but a one-line summary to investigate from.
-          JSON.stringify({
-            ...(rawMarkdownForDebug ? { raw_markdown: rawMarkdownForDebug.slice(0, 8000) } : {}),
-            ...(rawStdoutOnFailure ? { raw_stdout_on_failure: rawStdoutOnFailure } : {}),
-          })],
-      ));
-      const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
-      if (!current || !["Planning", expectedStatus].includes(current.status)) return;
-      await lease.run(() => client.query("UPDATE tickets SET status='Planning Failed',updated_at=now() WHERE id=$1", [ticket.id]));
-      await lease.run(() => client.query(
-        `INSERT INTO ticket_status_history
-         (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
-         VALUES ($1,$2,'Planning Failed',$3,'worker',$4,$5)`,
-        [ticket.id, current.status, `Planning job failed: ${message.slice(0, 500)}`, job.id, runId],
-      ));
-      await enqueueNotification(client, "planning.failed", ticket.id, runId, { runId }, lease.assertOwned);
-    });
+    const errorCode = error instanceof ClaudePlanningError ? error.code
+      : error instanceof OpenCodeError ? error.code
+      : error instanceof Error && error.message.startsWith("invalid_plan_structure") ? "invalid_plan_structure"
+      : "planning_failed";
+    const cancelled = errorCode === "planning_cancelled";
+    const rawStdoutOnFailure = typeof (error as any)?.stdout === "string" ? (error as any).stdout : undefined;
+    if (cancelled) {
+      // Mirrors runExecution's cancelled branch: best-effort terminal-state
+      // cleanup via pool.query/inTransaction directly, not lease.run — the
+      // lease may already be lost by the time cancellation has fully unwound.
+      await pool.query(
+        `UPDATE agent_runs SET status='cancelled',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4 WHERE id=$1`,
+        [runId, (error as any)?.exitCode ?? 1, errorCode, message],
+      );
+      await inTransaction(async (client) => {
+        const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
+        await client.query("UPDATE tickets SET status='Cancelled',updated_at=now() WHERE id=$1", [ticket.id]);
+        await client.query(
+          `INSERT INTO ticket_status_history
+           (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
+           VALUES ($1,$2,'Cancelled',$3,'worker',$4,$5)`,
+          [ticket.id, current.status, "Planning cancelled", job.id, runId],
+        );
+      });
+    } else {
+      // ponytail: transitionToPlanning() moves the ticket to Planning before
+      // invocation; on failure it must land on a state the admin can recover
+      // from. "Planning Failed" is a valid status the approve/revision
+      // endpoints accept — reverting to "Planning Queued" (an active-queue
+      // state that no longer exists) stranded tickets and blocked retries.
+      await finalizePlanningFailure(inTransaction, lease, { jobId: job.id, workerId, message }, async (client) => {
+        await lease.run(() => client.query(
+          `UPDATE agent_runs SET status='failed',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4,metadata_json=metadata_json || $5::jsonb WHERE id=$1`,
+          [runId, (error as any)?.exitCode ?? 1, errorCode, message,
+            // ponytail: capture the raw markdown (success/invalid-structure)
+            // or raw stdout (hard CLI failure — e.g. denied-tool max-turns) so
+            // a future failure is diagnosable without re-running the costly
+            // CLI call. See DCC-1014, 2026-08-07: three failures in a row
+            // left nothing but a one-line summary to investigate from.
+            JSON.stringify({
+              ...(rawMarkdownForDebug ? { raw_markdown: rawMarkdownForDebug.slice(0, 8000) } : {}),
+              ...(rawStdoutOnFailure ? { raw_stdout_on_failure: rawStdoutOnFailure } : {}),
+            })],
+        ));
+        const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
+        if (!current || !["Planning", expectedStatus].includes(current.status)) return;
+        await lease.run(() => client.query("UPDATE tickets SET status='Planning Failed',updated_at=now() WHERE id=$1", [ticket.id]));
+        await lease.run(() => client.query(
+          `INSERT INTO ticket_status_history
+           (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
+           VALUES ($1,$2,'Planning Failed',$3,'worker',$4,$5)`,
+          [ticket.id, current.status, `Planning job failed: ${message.slice(0, 500)}`, job.id, runId],
+        ));
+        await enqueueNotification(client, "planning.failed", ticket.id, runId, { runId }, lease.assertOwned);
+      });
+    }
     throw error;
   } finally {
     if (temporary) await rm(temporary, { recursive: true, force: true });
@@ -1680,7 +1703,8 @@ while (!stopping) {
       if (error instanceof LeaseLostError) return;
       if (error instanceof ClaudeAuthError) console.error(`${error.code}: ${error.message}`);
       else console.error(error instanceof Error ? error.message : "job failed");
-      if ((error instanceof ClaudeExecutionError || error instanceof OpenCodeError) && error.code === "execution_cancelled") {
+      if ((error instanceof ClaudeExecutionError || error instanceof ClaudePlanningError || error instanceof OpenCodeError)
+        && (error.code === "execution_cancelled" || error.code === "planning_cancelled")) {
         await lease.run(() => pool.query(
           `UPDATE jobs SET status='cancelled',completed_at=now(),claimed_by=NULL,lease_expires_at=NULL,updated_at=now()
            WHERE id=$1 AND status='running' AND claimed_by=$2 AND lease_expires_at > now()`,

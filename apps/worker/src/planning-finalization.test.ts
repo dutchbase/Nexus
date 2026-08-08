@@ -122,3 +122,20 @@ test("captures truncated raw stdout from a failed planning invocation into agent
   expect(worker).toContain("(error as any)?.stdout");
   expect(worker).toContain("raw_stdout_on_failure");
 });
+
+test("classifies a cancelled planning run separately from a failed one", async () => {
+  const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
+  const planning = worker.slice(worker.indexOf("async function runPlanning"), worker.indexOf("async function runExecution"));
+
+  // Cancellation must not route through finalizePlanningFailure (which hard-codes jobs.status='failed');
+  // it must instead mirror runExecution's cancelled branch: agent_runs -> 'cancelled', tickets -> 'Cancelled'.
+  expect(planning).toContain("const cancelled = errorCode === \"planning_cancelled\";");
+  expect(planning).toContain("UPDATE agent_runs SET status='cancelled'");
+  expect(planning).toContain("UPDATE tickets SET status='Cancelled',updated_at=now() WHERE id=$1");
+  expect(planning).toContain("\"Planning cancelled\"");
+
+  // The outer job-loop catch must recognize planning_cancelled the same way it already
+  // recognizes execution_cancelled, so the job row lands on 'cancelled' not 'failed'.
+  const jobLoop = worker.slice(worker.indexOf("if (job.type === \"project.validate\")"));
+  expect(jobLoop).toContain("error.code === \"execution_cancelled\" || error.code === \"planning_cancelled\"");
+});
