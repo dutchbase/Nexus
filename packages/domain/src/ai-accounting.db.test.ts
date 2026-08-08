@@ -33,13 +33,17 @@ integration("AI invocation accounting persistence", () => {
       const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ('prices','Prices','/tmp') RETURNING id")).rows[0].id;
       await client.query(`INSERT INTO ai_model_prices
         (model,provider,effective_from,input_usd_per_million,output_usd_per_million,cache_write_usd_per_million,cache_read_usd_per_million,source_url)
-        VALUES ('sonnet','anthropic','2026-01-01',10,20,30,40,'https://example.test/old'),
-               ('sonnet','anthropic','2027-01-01',100,200,300,400,'https://example.test/new')`);
+        VALUES ('sonnet','anthropic','2026-01-01',10,20,30,40,'https://example.test/old')`);
       await createAiInvocation({ id: "priced", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high", startedAt: new Date("2026-06-01T00:00:00Z") }, client);
       const priced = await recordAiUsage({ runId: "priced", inputTokens: 1_000_000, outputTokens: 1_000_000, cacheWriteTokens: 1_000_000, cacheReadTokens: 1_000_000, rawUsage: {} }, client);
       expect(priced.total_tokens).toBe("4000000");
       expect(priced.estimated_cost_usd).toBe("100.0000000000");
       expect((await client.query("SELECT source_url FROM ai_model_prices WHERE id=$1", [priced.ai_model_price_id])).rows[0].source_url).toBe("https://example.test/old");
+      await client.query(`INSERT INTO ai_model_prices
+        (model,provider,effective_from,input_usd_per_million,output_usd_per_million,cache_write_usd_per_million,cache_read_usd_per_million,source_url)
+        VALUES ('sonnet','anthropic','2027-01-01',100,200,300,400,'https://example.test/new')`);
+      expect((await client.query("SELECT ai_model_price_id,estimated_cost_usd FROM agent_runs WHERE id='priced' ")).rows[0])
+        .toEqual({ ai_model_price_id: priced.ai_model_price_id, estimated_cost_usd: "100.0000000000" });
 
       await createAiInvocation({ id: "unpriced", projectId, runType: "planning", model: "haiku", reasoningLevel: "low", startedAt: new Date("2020-01-01T00:00:00Z") }, client);
       const unpriced = await recordAiUsage({ runId: "unpriced", inputTokens: 1, outputTokens: 1, rawUsage: {} }, client);

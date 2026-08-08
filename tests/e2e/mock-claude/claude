@@ -106,6 +106,7 @@ switch (scenario.mode) {
       type: "result", subtype: "success",
       result: scenario.mode === "plan_valid" ? scenario.plan_markdown : scenario.invalid_plan_text,
       session_id: sessionId || "generated-session-id", exit_code: 0,
+      ...(scenario.usage ? { usage: scenario.usage } : {}),
     }));
     process.exit(0);
   }
