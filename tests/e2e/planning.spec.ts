@@ -54,6 +54,31 @@ test("approve for planning produces a reviewable plan and the UI tracks it", asy
   await expect(page.locator("[data-open-approve-dialog]")).toHaveText("Approved");
 });
 
+test("planning captures valid provider usage emitted by the mock", async ({ page }) => {
+  const title = `E2E planning usage ${Date.now()}`;
+  const ticketNumber = await createTicketViaUI(page, title);
+  await injectScenarioOnce(page, "/approve-planning", scenarioRef({
+    mode: "plan_valid", plan_markdown: DEFAULT_PLAN_MARKDOWN,
+    usage: { input_tokens: 12, output_tokens: 8, cache_read_input_tokens: 3, cache_creation_input_tokens: 4 },
+  } as any));
+  await page.locator("[data-approve-planning]").click();
+
+  const ticket = await queryOne("select id from tickets where ticket_number = $1", [ticketNumber]);
+  await waitForTicketStatus(ticket.id, ["Plan Ready for Review", "Planning Failed"]);
+  await expect.poll(() => queryOne(
+    "select ai_usage_status,input_tokens,output_tokens,cache_read_tokens,cache_write_tokens,total_tokens from agent_runs where ticket_id=$1 and run_type='planning' order by created_at desc limit 1",
+    [ticket.id],
+  )).toEqual({ ai_usage_status: "captured", input_tokens: "12", output_tokens: "8", cache_read_tokens: "3", cache_write_tokens: "4", total_tokens: "27" });
+});
+
+test("planning marks usage unavailable when the mock result omits it", async ({ page }) => {
+  const { ticketId } = await generatePlan(page, `E2E planning no usage ${Date.now()}`);
+  await expect.poll(() => queryOne(
+    "select ai_usage_status,input_tokens,raw_usage_json from agent_runs where ticket_id=$1 and run_type='planning' order by created_at desc limit 1",
+    [ticketId],
+  )).toEqual({ ai_usage_status: "unavailable", input_tokens: null, raw_usage_json: null });
+});
+
 test("request revision produces plan v2, which can then be approved", async ({ page }) => {
   const { ticketNumber, ticketId } = await generatePlan(page, `E2E revision ${Date.now()}`);
 

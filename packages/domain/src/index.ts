@@ -42,6 +42,96 @@ export function isDeepSeekModel(model: string): boolean {
   return (deepSeekModels as readonly string[]).includes(model);
 }
 
+export const aiProviders = ["anthropic", "deepseek"] as const;
+export type AiProvider = typeof aiProviders[number];
+export const aiInvocationPhases = ["planning", "plan_revision", "execution", "execution.repair", "pr_ai_review", "pr_follow_up_description", "pr_conflict_resolution"] as const;
+export type AiInvocationPhase = typeof aiInvocationPhases[number];
+export type AiLifecycleGroup = "planning" | "execution" | "pr_work";
+export type AiUsageStatus = "pending" | "captured" | "unavailable";
+export type AiUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  reasoningTokens?: number;
+  cacheReadTokens?: number;
+  cacheWriteTokens?: number;
+  rawUsage: unknown;
+};
+export type AiQueryClient = { query: (sql: string, values?: unknown[]) => Promise<{ rows: any[] }> };
+
+export function providerForModel(model: string): AiProvider {
+  if ((deepSeekModels as readonly string[]).includes(model)) return "deepseek";
+  if ((aiModels as readonly string[]).includes(model)) return "anthropic";
+  throw new AiConfigurationError(`Unsupported model "${model}"`);
+}
+
+export function aiLifecycleGroup(runType: string): AiLifecycleGroup {
+  if (runType === "planning" || runType === "plan_revision") return "planning";
+  if (runType === "execution" || runType === "execution.repair") return "execution";
+  return "pr_work";
+}
+
+export async function createAiInvocation(input: {
+  id: string;
+  ticketId?: string | null;
+  projectId: string;
+  pullRequestId?: string | null;
+  runType: AiInvocationPhase;
+  model: AiModel;
+  reasoningLevel: ReasoningLevel;
+  taskPrompt?: string | null;
+  promptSnapshotId?: string | null;
+  startedAt?: Date;
+}, client: AiQueryClient = pool) {
+  const result = await client.query(
+    `INSERT INTO agent_runs
+       (id,ticket_id,project_id,pull_request_id,run_type,status,model,reasoning_level,provider,task_prompt,prompt_snapshot_id,started_at,ai_usage_status)
+     VALUES ($1,$2,$3,$4,$5,'running',$6,$7,$8,$9,$10,COALESCE($11,now()),'pending')
+     RETURNING *`,
+    [input.id, input.ticketId ?? null, input.projectId, input.pullRequestId ?? null, input.runType,
+      input.model, input.reasoningLevel, providerForModel(input.model), input.taskPrompt ?? null,
+      input.promptSnapshotId ?? null, input.startedAt ?? null],
+  );
+  return result.rows[0];
+}
+
+export async function recordAiUsage(input: { runId: string } & AiUsage, client?: AiQueryClient) {
+  const inputTokens = input.inputTokens;
+  const outputTokens = input.outputTokens;
+  const reasoningTokens = input.reasoningTokens ?? 0;
+  const cacheReadTokens = input.cacheReadTokens ?? 0;
+  const cacheWriteTokens = input.cacheWriteTokens ?? 0;
+  const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
+  const db = client ?? pool;
+  const result = await db.query(
+    `WITH price AS (
+       SELECT p.* FROM ai_model_prices p JOIN agent_runs ar ON ar.id=$1
+       WHERE p.model=ar.model AND p.effective_from<=ar.started_at
+       ORDER BY p.effective_from DESC LIMIT 1
+     )
+     UPDATE agent_runs ar SET
+       ai_usage_status='captured', input_tokens=$2, output_tokens=$3, reasoning_tokens=$4,
+       cache_read_tokens=$5, cache_write_tokens=$6, total_tokens=$7, raw_usage_json=$8,
+       ai_model_price_id=(SELECT id FROM price),
+       estimated_cost_usd=(SELECT
+         ($2 * input_usd_per_million + $3 * output_usd_per_million +
+          $5 * cache_read_usd_per_million + $6 * cache_write_usd_per_million) / 1000000
+         FROM price)
+     WHERE ar.id=$1 AND ar.ai_usage_status='pending'
+     RETURNING ar.*`,
+    [input.runId, inputTokens, outputTokens, reasoningTokens, cacheReadTokens, cacheWriteTokens, totalTokens, input.rawUsage],
+  );
+  return result.rows[0] ?? (await db.query("SELECT * FROM agent_runs WHERE id=$1", [input.runId])).rows[0];
+}
+
+export async function recordAiUnavailable(runId: string, client?: AiQueryClient) {
+  const db = client ?? pool;
+  const result = await db.query(
+    "UPDATE agent_runs SET ai_usage_status='unavailable' WHERE id=$1 AND ai_usage_status='pending' RETURNING *",
+    [runId],
+  );
+  return result.rows[0] ?? (await db.query("SELECT * FROM agent_runs WHERE id=$1", [runId])).rows[0];
+}
+
 export class AiConfigurationError extends Error {
   status = 422;
   code = "invalid_ai_configuration";

@@ -21,6 +21,11 @@ describe("validateMigrations", () => {
     await expect(readdir(new URL("../migrations/", import.meta.url))).resolves.toContain("042_deployment_safety.sql");
   });
 
+  it("seeds the approved Fable token rates", async () => {
+    const migration = await readFile(new URL("../migrations/050_ai_invocation_accounting.sql", import.meta.url), "utf8");
+    expect(migration).toContain("('fable','anthropic','2026-08-08T00:00:00Z',10,50,12.5,1,'https://platform.claude.com/docs/en/about-claude/pricing')");
+  });
+
   it("includes rejected deployment history without weakening active SHA deduplication", async () => {
     await expect(readdir(new URL("../migrations/", import.meta.url))).resolves.toContain("044_deployment_rejection_history.sql");
   });

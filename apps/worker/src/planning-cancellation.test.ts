@@ -1,28 +1,43 @@
-import { readFile } from "node:fs/promises";
-import { describe, expect, it } from "vitest";
+import { expect, test } from "vitest";
 
-describe("planning cancellation poll", () => {
-  it("mirrors runExecution's cancellationPoll inside runPlanning", async () => {
-    const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
-    const planning = worker.slice(worker.indexOf("async function runPlanning"), worker.indexOf("async function runExecution"));
+import { finalizePlanningCancellation, isPlanningCancellation } from "./workflow-state.ts";
 
-    expect(worker).toContain("let activePlanningCancellation: AbortController | null = null;");
-    expect(worker).toContain("activeExecutionCancellation?.abort(); activePlanningCancellation?.abort();");
-
-    // `cancellation` is declared with the other `let`s above the try block (rather than `const` at
-    // its assignment) so runPlanning's catch can ask whether this controller specifically fired.
-    expect(planning).toContain("let cancellation: AbortController | undefined;");
-    expect(planning).toContain("cancellation = new AbortController();");
-    expect(planning).toContain("activePlanningCancellation = cancellation;");
-    expect(planning.indexOf("cancellationPoll = setInterval")).toBeLessThan(planning.indexOf("cancellation_requested"));
-    expect(planning).toContain("cancellation?.abort()");
-
-    // Both invocation branches must listen on the poll's controller, not just the lease signal.
-    expect(planning).toContain("signal: AbortSignal.any([cancellation.signal, lease.signal])");
-    expect(planning).toContain('cancelledErrorCode: "planning_cancelled"');
-
-    // Cleanup must use the identity guard, matching activeExecutionCancellation's finally block.
-    expect(planning).toContain("clearInterval(cancellationPoll);");
-    expect(planning).toContain("if (activePlanningCancellation === cancellation) activePlanningCancellation = null;");
+test("terminalizes a cancelled planning invocation as cancelled", async () => {
+  let runStatus = "running";
+  let ticketStatus = "Planning";
+  const history: Array<{ previous: string; next: string; reason: string }> = [];
+  const pool = {
+    query: async (sql: string, values: unknown[]) => {
+      expect(sql).toContain("UPDATE agent_runs SET status='cancelled'");
+      expect(values).toEqual(["run-1", 1, "planning_cancelled", "Claude planning was cancelled"]);
+      runStatus = "cancelled";
+      return { rows: [], rowCount: 1 };
+    },
+  };
+  const inTransaction = async (callback: (client: { query: (sql: string, values: unknown[]) => Promise<{ rows: any[]; rowCount: number }> }) => Promise<void>) => callback({
+    query: async (sql, values) => {
+      if (sql.includes("SELECT status FROM tickets")) return { rows: [{ status: ticketStatus }], rowCount: 1 };
+      if (sql.includes("UPDATE tickets SET status='Cancelled'")) {
+        ticketStatus = "Cancelled";
+        return { rows: [], rowCount: 1 };
+      }
+      if (sql.includes("INSERT INTO ticket_status_history")) {
+        history.push({ previous: values[1] as string, next: "Cancelled", reason: values[2] as string });
+        return { rows: [], rowCount: 1 };
+      }
+      throw new Error(`unexpected query: ${sql}`);
+    },
   });
+
+  if (isPlanningCancellation({ cancelledBeforeStart: false, invocationCancelled: true, cancellationAborted: true, stopping: false })) {
+    await finalizePlanningCancellation(pool as any, inTransaction as any, {
+      runId: "run-1", ticketId: "ticket-1", jobId: "job-1", exitCode: 1,
+      errorCode: "planning_cancelled", message: "Claude planning was cancelled",
+    });
+  }
+
+  expect(runStatus).toBe("cancelled");
+  expect(ticketStatus).toBe("Cancelled");
+  expect(history).toEqual([{ previous: "Planning", next: "Cancelled", reason: "Planning cancelled" }]);
+  expect(isPlanningCancellation({ cancelledBeforeStart: false, invocationCancelled: true, cancellationAborted: true, stopping: true })).toBe(false);
 });

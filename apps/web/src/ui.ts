@@ -35,7 +35,7 @@ const groups = [
   ["Overview", [["Dashboard", "/admin", ""]]],
   ["Work", [["Tickets", "/admin/tickets", "tickets"], ["Runs", "/admin/runs", "runs"], ["Queue", "/admin/queue", "jobs"], ["Pull requests", "/admin/pull-requests", "prs"]]],
   ["Configure", [["Projects", "/admin/projects", "projects"], ["Forms", "/admin/forms", "forms"], ["Prompts", "/admin/prompts", ""], ["Skills", "/admin/skills", "skills"]]],
-  ["Operate", [["Notifications", "/admin/notifications", "notifications"], ["Audit log", "/admin/audit", ""], ["Settings", "/admin/settings", ""], ["System", "/admin/system", ""]]],
+  ["Operate", [["Notifications", "/admin/notifications", "notifications"], ["AI usage", "/admin/ai-usage", ""], ["Audit log", "/admin/audit", ""], ["Settings", "/admin/settings", ""], ["System", "/admin/system", ""]]],
 ] as const;
 
 export function adminPage(path: string, title: string, body: string, counts: Record<string, number>, username: string) {
@@ -514,6 +514,15 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             event.preventDefault();
             const response=await fetch("/api/admin/settings/system-ai",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(Object.fromEntries(new FormData(systemForm)))});
             if(response.ok)location.reload();else{const result=await response.json();systemForm.querySelector(".error").textContent=result.error}
+          });
+        }
+        const priceForm=document.querySelector("[data-ai-model-price-form]");
+        if(priceForm){
+          priceForm.addEventListener("submit",async(event)=>{
+            event.preventDefault();
+            const data=new FormData(priceForm),rate=(name)=>Number(data.get(name));
+            const response=await fetch("/api/admin/ai-model-prices",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({model:data.get("model"),effective_from:data.get("effective_from"),input_usd_per_million:rate("input_usd_per_million"),output_usd_per_million:rate("output_usd_per_million"),cache_write_usd_per_million:rate("cache_write_usd_per_million"),cache_read_usd_per_million:rate("cache_read_usd_per_million"),source_url:data.get("source_url")})});
+            if(response.ok)location.reload();else{const result=await response.json();priceForm.querySelector(".error").textContent=result.error}
           });
         }
       `:""}

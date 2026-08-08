@@ -6,6 +6,7 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertSubscriptionOnlyEnvironment, ClaudeAuthError } from "./auth-guard.ts";
+import type { AiUsage } from "@dcc/domain";
 export { assertSubscriptionOnlyEnvironment, ClaudeAuthError, forbiddenClaudeAuthVariables } from "./auth-guard.ts";
 
 async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; executable?: string; signal?: AbortSignal; timeoutMs?: number } = {}) {
@@ -39,6 +40,9 @@ async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.P
         killTimer = setTimeout(() => terminate("SIGKILL"), 5_000);
       }, options.timeoutMs);
       child.on("error", (error) => {
+        // Aborting a spawned child emits `error` before `close`; wait for close
+        // so callers can still inspect any output the CLI flushed before exit.
+        if (options.signal?.aborted) return;
         if (timeout) clearTimeout(timeout);
         if (killTimer) clearTimeout(killTimer);
         reject(error);
@@ -68,6 +72,7 @@ export class ClaudeExecutionError extends Error {
     message: string,
     public exitCode: number,
     public code: "execution_failed" | "execution_timeout" | "execution_cancelled",
+    public usage?: AiUsage,
   ) {
     super(message);
   }
@@ -78,6 +83,7 @@ export class ClaudePlanningError extends Error {
     message: string,
     public exitCode: number,
     public code: "planning_timeout" | "planning_cancelled",
+    public usage?: AiUsage,
   ) {
     super(message);
   }
@@ -441,6 +447,35 @@ export function truncateStdoutForCapture(stdout: string) {
   return stdout.length > 4000 ? `${stdout.slice(0, 1500)}\n…truncated…\n${stdout.slice(-2500)}` : stdout;
 }
 
+function tokenCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+// Claude's `result` event is the only final usage record in both JSON and
+// stream-json output. Assistant events can describe an in-progress turn.
+export function parseClaudeFinalUsage(event: unknown): AiUsage | null {
+  if (!event || typeof event !== "object" || (event as { type?: unknown }).type !== "result") return null;
+  const usage = (event as { usage?: unknown }).usage;
+  if (!usage || typeof usage !== "object") return null;
+  const raw = usage as Record<string, unknown>;
+  const inputTokens = tokenCount(raw.input_tokens);
+  const outputTokens = tokenCount(raw.output_tokens);
+  if (inputTokens === null || outputTokens === null) return null;
+  const optional = (value: unknown) => value === undefined ? undefined : tokenCount(value);
+  const cacheReadTokens = optional(raw.cache_read_input_tokens);
+  const cacheWriteTokens = optional(raw.cache_creation_input_tokens);
+  const reasoningTokens = optional(raw.reasoning_output_tokens ?? raw.reasoning_tokens);
+  if (cacheReadTokens === null || cacheWriteTokens === null || reasoningTokens === null
+    || (reasoningTokens !== undefined && reasoningTokens > outputTokens)) return null;
+  return {
+    inputTokens, outputTokens,
+    ...(cacheReadTokens === undefined ? {} : { cacheReadTokens }),
+    ...(cacheWriteTokens === undefined ? {} : { cacheWriteTokens }),
+    ...(reasoningTokens === undefined ? {} : { reasoningTokens }),
+    rawUsage: usage,
+  };
+}
+
 export async function invokePlanningClaude(input: PlanningInvocation) {
   assertSubscriptionOnlyEnvironment();
   // Planning receives only locale/PATH, its subscription token, and runner
@@ -461,26 +496,35 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   } finally {
     input.signal?.removeEventListener("abort", onAbort);
   }
-  if (cancelled) throw new ClaudePlanningError("Claude planning was cancelled", result.exitCode ?? 1, "planning_cancelled");
-  if (result.timedOut) throw new ClaudePlanningError("Claude planning timed out", 124, "planning_timeout");
+  let response: any;
+  try { response = JSON.parse(result.stdout.trim()); } catch { /* handled below */ }
+  const usage = parseClaudeFinalUsage(response) ?? undefined;
+  if (cancelled) throw new ClaudePlanningError("Claude planning was cancelled", result.exitCode ?? 1, "planning_cancelled", usage);
+  if (result.timedOut) throw new ClaudePlanningError("Claude planning timed out", 124, "planning_timeout", usage);
   if (result.exitCode !== 0) {
     throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), {
       exitCode: result.exitCode,
       stdout: truncateStdoutForCapture(result.stdout),
+      ...(usage ? { usage } : {}),
     });
   }
-  let response: any;
-  try { response = JSON.parse(result.stdout.trim()); } catch {
-    throw Object.assign(new Error("Claude planning returned invalid JSON"), { stdout: truncateStdoutForCapture(result.stdout) });
+  if (!response) {
+    throw Object.assign(new Error("Claude planning returned invalid JSON"), {
+      stdout: truncateStdoutForCapture(result.stdout), ...(usage ? { usage } : {}),
+    });
   }
   if (response?.type !== "result" || response?.subtype !== "success" || typeof response?.result !== "string") {
-    throw Object.assign(new Error("Claude planning response did not contain a successful Markdown result"), { stdout: truncateStdoutForCapture(result.stdout) });
+    throw Object.assign(new Error("Claude planning response did not contain a successful Markdown result"), {
+      stdout: truncateStdoutForCapture(result.stdout),
+      ...(usage ? { usage } : {}),
+    });
   }
   return {
     markdown: response.result as string,
     sessionId: typeof response.session_id === "string" ? response.session_id : input.sessionId,
     exitCode: Number(response.exit_code ?? result.exitCode ?? 0),
     raw: response,
+    ...(usage ? { usage } : {}),
   };
 }
 
@@ -574,7 +618,7 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
       : buildExecutionArguments(sandboxInput, settingsFile);
     const childEnv = launch ? { ...env, ...launch.env } : env;
     await requireClaudeSandboxVersion(childEnv, input.workingDirectory, input.claudeExecutable, launch ?? undefined);
-    return await new Promise<{ exitCode: number; stderr: string }>((resolve, reject) => {
+    return await new Promise<{ exitCode: number; stderr: string; usage?: AiUsage }>((resolve, reject) => {
     const child = spawn(command, commandArgs, {
       cwd: input.workingDirectory,
       env: childEnv,
@@ -582,10 +626,21 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     });
     let pending = "";
     let stderr = "";
+    let usage: AiUsage | undefined;
     let eventWrites = Promise.resolve();
     let logWrites = Promise.resolve();
     const appendLog = (text: string) => {
       logWrites = logWrites.then(() => appendFile(input.logPath, text));
+    };
+    const queueEvent = (raw: string) => {
+      if (!raw.trim()) return;
+      eventWrites = eventWrites.then(async () => {
+        let event: any;
+        try { event = JSON.parse(raw); } catch { event = { type: "unparsed", text: raw }; }
+        usage = parseClaudeFinalUsage(event) ?? usage;
+        await input.onEvent({ eventType: String(event?.type ?? "event"), event, raw });
+      });
+      void eventWrites.catch(() => undefined);
     };
     let terminationTimer: NodeJS.Timeout | undefined;
     let outcome: "running" | "timeout" | "cancelled" = "running";
@@ -605,13 +660,7 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
       const lines = pending.split(/\r?\n/);
       pending = lines.pop() ?? "";
       for (const raw of lines) {
-        if (!raw.trim()) continue;
-        eventWrites = eventWrites.then(async () => {
-          let event: any;
-          try { event = JSON.parse(raw); } catch { event = { type: "unparsed", text: raw }; }
-          await input.onEvent({ eventType: String(event?.type ?? "event"), event, raw });
-        });
-        void eventWrites.catch(() => undefined);
+        queueEvent(raw);
       }
     });
     child.stderr.on("data", (chunk: Buffer) => {
@@ -621,24 +670,27 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     });
     child.on("error", reject);
     child.on("close", (code) => {
+      queueEvent(pending);
+      pending = "";
       clearTimeout(timeout);
       if (terminationTimer) clearTimeout(terminationTimer);
       input.signal?.removeEventListener("abort", abort);
       Promise.all([eventWrites, logWrites]).then(() => {
         if (outcome === "cancelled") {
-          reject(new ClaudeExecutionError("Claude execution was cancelled", code ?? 1, "execution_cancelled"));
+          reject(new ClaudeExecutionError("Claude execution was cancelled", code ?? 1, "execution_cancelled", usage));
         } else if (outcome === "timeout" || code === 124) {
-          reject(new ClaudeExecutionError("Claude execution timed out", 124, "execution_timeout"));
+          reject(new ClaudeExecutionError("Claude execution timed out", 124, "execution_timeout", usage));
         } else if (code !== 0) {
           reject(new ClaudeExecutionError(
             `Claude execution exited ${code}: ${stderr.trim() || "no error output"}`,
             code ?? 1,
             "execution_failed",
+            usage,
           ));
         } else {
-          resolve({ exitCode: code ?? 0, stderr });
+          resolve({ exitCode: code ?? 0, stderr, ...(usage ? { usage } : {}) });
         }
-      }, reject);
+      }, (error) => reject(Object.assign(error instanceof Error ? error : new Error(String(error)), usage ? { usage } : {})));
     });
   });
   } finally {

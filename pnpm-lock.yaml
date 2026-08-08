@@ -76,7 +76,11 @@ importers:
         specifier: workspace:*
         version: link:../../packages/skill-registry
 
-  packages/claude-runner: {}
+  packages/claude-runner:
+    dependencies:
+      '@dcc/domain':
+        specifier: workspace:*
+        version: link:../domain
 
   packages/database:
     dependencies:

@@ -13,4 +13,7 @@ describe("nav and tab accessibility", () => {
     expect(page).toContain("opener?.focus()");
     for (const key of ["ArrowRight", "ArrowLeft", '"Home"', '"End"']) expect(page).toContain(key);
   });
+  it("shows AI usage under Operate", () => {
+    expect(adminPage("/admin/ai-usage", "AI usage", "", {}, "admin")).toContain('href="/admin/ai-usage"');
+  });
 });

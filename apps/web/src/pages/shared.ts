@@ -4,6 +4,15 @@ import { WORKER_STALE_AFTER_MS } from "@dcc/domain";
 
 export { pool, adminPage, escapeHtml };
 
+export function promptVersionsLabel(value: unknown) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return "";
+  return Object.entries(value as Record<string, unknown>)
+    .filter((entry): entry is [string, string] => typeof entry[1] === "string")
+    .sort(([left], [right]) => left.localeCompare(right))
+    .map(([name, id]) => `${name}: ${id}`)
+    .join(" · ");
+}
+
 // Derives worker health from the `workers` table's own heartbeat_at rather
 // than from job-claim activity (PRD G10-F01): an idle-but-alive worker no
 // longer reads as stale, and a dead worker stops reading as healthy

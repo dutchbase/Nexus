@@ -6,9 +6,10 @@ import { spawn } from "node:child_process";
 import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { AiUsage } from "@dcc/domain";
 
 export class OpenCodeError extends Error {
-  constructor(message: string, readonly code: string) {
+  constructor(message: string, readonly code: string, public usage?: AiUsage) {
     super(message);
   }
 }
@@ -42,6 +43,60 @@ function extractEvent(rawLine: string): any | null {
   const trimmed = rawLine.trim();
   if (!trimmed.startsWith("{")) return null;
   try { return JSON.parse(trimmed); } catch { return null; }
+}
+
+function tokenCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+// A final step is emitted as an update, sometimes more than once. Keep the
+// final update per stable part id, then aggregate the provider-reported steps.
+export function parseOpenCodeFinalUsage(events: readonly unknown[]): AiUsage | null {
+  const steps = new Map<string, Record<string, unknown>>();
+  for (const event of events) {
+    const part = (event as any)?.properties?.part;
+    if (part?.type === "step-finish") {
+      if (typeof part.id !== "string" || !part.id) return null;
+      steps.set(part.id, part);
+    }
+  }
+  if (!steps.size) return null;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let reasoningTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
+  let hasReasoning = false;
+  let hasCacheRead = false;
+  let hasCacheWrite = false;
+  for (const part of steps.values()) {
+    const tokens = part.tokens;
+    if (!tokens || typeof tokens !== "object") return null;
+    const raw = tokens as Record<string, unknown>;
+    const input = tokenCount(raw.input);
+    const output = tokenCount(raw.output);
+    const reasoning = raw.reasoning === undefined ? undefined : tokenCount(raw.reasoning);
+    const cache = raw.cache;
+    if (cache !== undefined && (!cache || typeof cache !== "object" || Array.isArray(cache))) return null;
+    const cacheRead = cache && (cache as Record<string, unknown>).read !== undefined
+      ? tokenCount((cache as Record<string, unknown>).read) : undefined;
+    const cacheWrite = cache && (cache as Record<string, unknown>).write !== undefined
+      ? tokenCount((cache as Record<string, unknown>).write) : undefined;
+    if (input === null || output === null || reasoning === null || cacheRead === null || cacheWrite === null
+      || (reasoning !== undefined && reasoning > output)) return null;
+    inputTokens += input;
+    outputTokens += output;
+    if (reasoning !== undefined) { reasoningTokens += reasoning; hasReasoning = true; }
+    if (cacheRead !== undefined) { cacheReadTokens += cacheRead; hasCacheRead = true; }
+    if (cacheWrite !== undefined) { cacheWriteTokens += cacheWrite; hasCacheWrite = true; }
+  }
+  return {
+    inputTokens, outputTokens,
+    ...(hasReasoning ? { reasoningTokens } : {}),
+    ...(hasCacheRead ? { cacheReadTokens } : {}),
+    ...(hasCacheWrite ? { cacheWriteTokens } : {}),
+    rawUsage: [...steps.values()],
+  };
 }
 
 // ponytail: schema-tolerant deep scan for {type:"text", text} parts instead of
@@ -135,6 +190,7 @@ async function runOpenCode(input: {
     let stderr = "";
     child.stdout.on("data", (chunk: string) => { stdout += chunk; input.onStdoutChunk?.(chunk); });
     child.stderr.on("data", (chunk: string) => { stderr += chunk; });
+    const bufferedUsage = () => parseOpenCodeFinalUsage(stdout.split("\n").map(extractEvent).filter(Boolean)) ?? undefined;
     const terminate = (killSignal: NodeJS.Signals) => {
       if (!child.pid) return child.kill(killSignal);
       if (process.platform === "win32") {
@@ -165,19 +221,19 @@ async function runOpenCode(input: {
       };
       child.on("error", (error: NodeJS.ErrnoException) => {
         settle(() => reject(timedOutNotCancelled()
-          ? new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, timeoutErrorCode)
+          ? new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, timeoutErrorCode, bufferedUsage())
           : callerCancelled()
-            ? new OpenCodeError(`OpenCode was cancelled: ${error.message}`, cancelledErrorCode)
-            : new OpenCodeError(`failed to launch OpenCode: ${error.message}`, "opencode_failed")));
+            ? new OpenCodeError(`OpenCode was cancelled: ${error.message}`, cancelledErrorCode, bufferedUsage())
+            : new OpenCodeError(`failed to launch OpenCode: ${error.message}`, "opencode_failed", bufferedUsage())));
       });
       child.on("close", (code, killSignal) => {
         settle(() => {
           if (timedOutNotCancelled()) {
-            reject(new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, timeoutErrorCode));
+            reject(new OpenCodeError(`OpenCode timed out after ${timeoutMs}ms`, timeoutErrorCode, bufferedUsage()));
           } else if (callerCancelled()) {
-            reject(new OpenCodeError("OpenCode was cancelled", cancelledErrorCode));
+            reject(new OpenCodeError("OpenCode was cancelled", cancelledErrorCode, bufferedUsage()));
           } else if (killSignal || code === null) {
-            reject(new OpenCodeError(`OpenCode terminated by signal ${killSignal}`, "opencode_failed"));
+            reject(new OpenCodeError(`OpenCode terminated by signal ${killSignal}`, "opencode_failed", bufferedUsage()));
           } else {
             resolve(code);
           }
@@ -186,7 +242,7 @@ async function runOpenCode(input: {
     });
     if (exitCode !== 0) {
       throw new OpenCodeError(
-        `OpenCode exited with code ${exitCode}: ${stderr.trim().slice(0, 500) || "no stderr"}`, "opencode_failed");
+        `OpenCode exited with code ${exitCode}: ${stderr.trim().slice(0, 500) || "no stderr"}`, "opencode_failed", bufferedUsage());
     }
     return { exitCode, stdout, stderr };
   } finally {
@@ -204,7 +260,7 @@ export async function invokeOpenCodePlanning(input: {
   timeoutMs?: number;
   executable?: string;
   cancelledErrorCode?: string;
-}): Promise<{ markdown: string; sessionId: string | null; exitCode: number }> {
+}): Promise<{ markdown: string; sessionId: string | null; exitCode: number; usage?: AiUsage }> {
   const result = await runOpenCode({
     args: openCodeArgs(input.task, deepSeekModelFor(input.model), input.promptFile),
     mode: "read-only",
@@ -215,7 +271,13 @@ export async function invokeOpenCodePlanning(input: {
     executable: input.executable,
     cancelledErrorCode: input.cancelledErrorCode,
   });
-  return { ...parseOpenCodeEvents(result.stdout), exitCode: result.exitCode };
+  const usage = parseOpenCodeFinalUsage(result.stdout.split("\n").map(extractEvent).filter(Boolean));
+  try {
+    return { ...parseOpenCodeEvents(result.stdout), exitCode: result.exitCode, ...(usage ? { usage } : {}) };
+  } catch (error) {
+    if (usage && error instanceof OpenCodeError) error.usage = usage;
+    throw error;
+  }
 }
 
 export async function invokeOpenCodeExecution(input: {
@@ -229,9 +291,10 @@ export async function invokeOpenCodeExecution(input: {
   signal?: AbortSignal;
   timeoutMs?: number;
   executable?: string;
-}): Promise<{ exitCode: number; stderr: string }> {
+}): Promise<{ exitCode: number; stderr: string; usage?: AiUsage }> {
   let buffered = "";
   let streamError: OpenCodeError | null = null;
+  const usageEvents: unknown[] = [];
   // Serialize onEvent like claude-runner's eventWrites chain: events must land
   // in agent_run_events in order.
   let eventWrites: Promise<void> = Promise.resolve();
@@ -246,6 +309,7 @@ export async function invokeOpenCodeExecution(input: {
     for (const rawLine of lines) {
       const event = extractEvent(rawLine);
       if (!event) continue;
+      usageEvents.push(event);
       if (event.type === "error" && !streamError) {
         const message = event.error?.data?.message ?? event.error?.name ?? "unknown OpenCode error";
         streamError = new OpenCodeError(`OpenCode reported an error: ${message}`, "opencode_failed");
@@ -280,6 +344,7 @@ export async function invokeOpenCodeExecution(input: {
     if (buffered.trim()) {
       const event = extractEvent(buffered);
       if (event) {
+        usageEvents.push(event);
         if (event.type === "error" && !streamError) {
           const message = event.error?.data?.message ?? event.error?.name ?? "unknown OpenCode error";
           streamError = new OpenCodeError(`OpenCode reported an error: ${message}`, "opencode_failed");
@@ -293,8 +358,15 @@ export async function invokeOpenCodeExecution(input: {
     await eventWrites.catch(() => undefined);
     await logWrites.catch(() => undefined);
   }
-  // Prefer streamError over generic exit error; otherwise throw caught exception
-  if (streamError) throw streamError;
-  if (caught) throw caught;
-  return { exitCode: result!.exitCode, stderr: result!.stderr };
+  const usage = parseOpenCodeFinalUsage(usageEvents);
+  // Prefer streamError over generic exit error; otherwise throw caught exception.
+  if (streamError) {
+    if (usage) streamError.usage = usage;
+    throw streamError;
+  }
+  if (caught) {
+    if (usage && caught instanceof OpenCodeError) caught.usage ??= usage;
+    throw caught;
+  }
+  return { exitCode: result!.exitCode, stderr: result!.stderr, ...(usage ? { usage } : {}) };
 }

@@ -1,6 +1,36 @@
 import { escapeHtml, keysetCondition, lineDiff, nextCursor, pageRequest, PAGE_SIZE_MAX, pagerHtml, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
-import { checkPlanApprovalGate, aiModels } from "@dcc/domain";
+import { checkPlanApprovalGate, aiInvocationPhases, aiLifecycleGroup, aiModels } from "@dcc/domain";
+
+function usd(value: number) {
+  return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 8 }).format(value);
+}
+
+function coverageLabel(run: any) {
+  if (run.ai_usage_status == null) return "Legacy";
+  if (run.ai_usage_status !== "captured") return "Unavailable";
+  if (run.estimated_cost_usd == null) return "Unpriced";
+  return "Captured";
+}
+
+export function ticketAiUsagePanel(runs: any[]) {
+  const aiRuns = runs.filter((run) => aiInvocationPhases.includes(run.run_type));
+  const summary = (label: string, selected: any[]) => {
+    const captured = selected.filter((run) => run.ai_usage_status === "captured");
+    const tokens = captured.reduce((total, run) => total + Number(run.total_tokens ?? 0), 0);
+    const cost = selected.reduce((total, run) => total + (run.estimated_cost_usd == null ? 0 : Number(run.estimated_cost_usd)), 0);
+    const coverage = ["Unavailable", "Unpriced", "Legacy"].map((label) => [label, selected.filter((run) => coverageLabel(run) === label).length] as const).filter(([, count]) => count);
+    return `<div class="card"><div class="card-body"><div class="eyebrow">${label}</div><strong>${selected.length} invocations · ${tokens} tokens · ${escapeHtml(usd(cost))}</strong>${coverage.length ? `<p class="status">${coverage.map(([label, count]) => `${label} ${count}`).join(" · ")}</p>` : ""}</div></div>`;
+  };
+  const groups = [
+    ["Planning", aiRuns.filter((run) => aiLifecycleGroup(run.run_type) === "planning")],
+    ["Execution", aiRuns.filter((run) => aiLifecycleGroup(run.run_type) === "execution")],
+    ["PR work", aiRuns.filter((run) => aiLifecycleGroup(run.run_type) === "pr_work")],
+    ["All AI work", aiRuns],
+  ] as const;
+  const rows = runs.map((run) => `<a class="ticket-row" href="/admin/runs/${escapeHtml(run.id)}"><span class="mono">${escapeHtml(shortRef("RUN", run.id))}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.model ?? "—")} · ${escapeHtml(run.reasoning_level ?? "—")}</span><span>${run.ai_usage_status === "captured" ? `${escapeHtml(run.total_tokens)} tokens · ${escapeHtml(run.estimated_cost_usd == null ? "Unpriced" : usd(Number(run.estimated_cost_usd)))}` : coverageLabel(run)}</span><span class="status">${escapeHtml(run.status ?? "—")} · ${escapeHtml(coverageLabel(run))}</span></a>`).join("");
+  return `<section class="grid two">${groups.map(([label, selected]) => summary(label, selected)).join("")}</section><section class="card" style="margin-top:16px"><div class="card-head">Runs</div>${rows || '<div class="card-body"><p>No runs yet.</p></div>'}</section>`;
+}
 
 export function selectedStatusesFrom(url: URL): string[] {
   return url.searchParams.getAll("status").filter((status) => validStatuses.has(status));
@@ -427,9 +457,7 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
     const plansPanel = `<section class="card"><div class="card-head">Planning</div>${planVersions.length ? planVersions.map((version) =>
       `<a class="ticket-row" href="/admin/tickets/${ticket.ticket_number}/plans/${version.version}"><span class="mono">v${version.version}</span><strong>${escapeHtml(planVersionStatus(version))}</strong><span>${escapeHtml(version.model)} · ${escapeHtml(version.reasoning_level)}</span><time>${new Date(version.created_at).toLocaleString("nl-NL")}</time></a>`,
     ).join("") : '<div class="card-body"><p>No plan has been generated yet.</p></div>'}</section>`;
-    const runsPanel = `<section class="card"><div class="card-head">Runs</div>${runsResult.rows.map((run) =>
-      `<a class="ticket-row" href="/admin/runs/${run.id}"><span class="mono">${shortRef("RUN", run.id)}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}</span><span class="status">${escapeHtml(run.status)}</span><time>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : ""}</time></a>`,
-    ).join("") || '<div class="card-body"><p>No runs yet.</p></div>'}</section>`;
+    const runsPanel = ticketAiUsagePanel(runsResult.rows);
     const validationPanel = `<section class="card"><div class="card-head">Validation</div><div class="card-body">${execRuns.map((run) =>
       `<p><span class="status">${escapeHtml(run.status)}</span> ${run.error_code === "validation_failed" ? "<strong>Validation failed</strong> — " : ""}${escapeHtml(run.error_message ?? "")}</p>`,
     ).join("") || "<p>Greyed out until an execution attempt exists.</p>"}</div></section>`;
@@ -468,7 +496,7 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
       ${planningFailureBanner}
       <dialog data-preview-dialog aria-label="Prompt preview"><div class="card-head">Prompt preview</div><p>This is the exact, complete prompt sent to Claude — including global instructions, project context, resolved AI configuration, resolved skills, and ticket content.</p><pre class="references">Loading…</pre><button class="button" type="button" data-close-dialog>Close</button></dialog>
       <dialog data-commit-dialog aria-label="Uncommitted changes"><div class="card-head">Uncommitted changes</div><div class="card-body"><p>This repository has uncommitted changes. Commit them before planning can start:</p><ul data-commit-files></ul><label class="field"><span>Commit message</span><input name="commit_message" value="chore: pre-planning snapshot"></label><p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-commit-dialog>Cancel</button><button class="button primary" type="button" data-submit-commit>Commit &amp; Approve</button></div></dialog>
-      <div class="tabs" role="tablist">${["Overview", "AI & skills", "Prompt", "Plans", "Runs", "Validation", "Pull request", "Activity"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
+      <div class="tabs" role="tablist">${["Overview", "AI & skills", "Prompt", "Plans", "AI usage", "Validation", "Pull request", "Activity"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
       ${[overviewPanel, aiPanel, promptPanel, plansPanel, runsPanel, validationPanel, prPanel, activityPanel].map((content, index) => panel(index, content)).join("")}`;
     return { status: 200, title: ticket.ticket_number, body };
   }

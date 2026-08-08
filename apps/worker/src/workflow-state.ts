@@ -251,6 +251,33 @@ export async function finalizePlanningFailure<T>(
   });
 }
 
+export function isPlanningCancellation(input: {
+  cancelledBeforeStart: boolean; invocationCancelled: boolean; cancellationAborted: boolean; stopping: boolean;
+}) {
+  return input.cancelledBeforeStart || (input.invocationCancelled && input.cancellationAborted && !input.stopping);
+}
+
+export async function finalizePlanningCancellation(
+  pool: Client,
+  inTransaction: Transaction,
+  input: { runId: string; ticketId: string; jobId: string; exitCode: number; errorCode: string; message: string },
+) {
+  await pool.query(
+    `UPDATE agent_runs SET status='cancelled',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4 WHERE id=$1`,
+    [input.runId, input.exitCode, input.errorCode, input.message],
+  );
+  await inTransaction(async (client) => {
+    const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticketId])).rows[0];
+    await client.query("UPDATE tickets SET status='Cancelled',updated_at=now() WHERE id=$1", [input.ticketId]);
+    await client.query(
+      `INSERT INTO ticket_status_history
+       (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
+       VALUES ($1,$2,'Cancelled',$3,'worker',$4,$5)`,
+      [input.ticketId, current.status, "Planning cancelled", input.jobId, input.runId],
+    );
+  });
+}
+
 export async function withLeaseHeartbeat<T>(
   renew: () => Promise<boolean>,
   work: (lease: LeaseGuard) => Promise<T>,

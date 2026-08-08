@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseOpenCodeEvents, OpenCodeError, deepSeekModelFor, openCodeConfig } from "./opencode.ts";
+import { parseOpenCodeEvents, parseOpenCodeFinalUsage, OpenCodeError, deepSeekModelFor, openCodeConfig } from "./opencode.ts";
 
 const line = (obj: unknown) => JSON.stringify(obj);
 const textPart = (id: string, text: string) =>
@@ -52,6 +52,27 @@ describe("parseOpenCodeEvents", () => {
     const anon = line({ type: "message.part.updated", sessionID: "ses_x", properties: { part: { type: "text", text: "anonymous" } } });
     const withId0 = line({ type: "message.part.updated", sessionID: "ses_x", properties: { part: { id: "0", type: "text", text: "real id zero" } } });
     expect(parseOpenCodeEvents([anon, withId0].join("\n")).markdown).toBe("anonymous\n\nreal id zero");
+  });
+});
+
+describe("parseOpenCodeFinalUsage", () => {
+  it("normalizes each final step once by part id", () => {
+    const step = (id: string) => ({ type: "message.part.updated", properties: { part: {
+      id, type: "step-finish", tokens: { input: 100, output: 200, reasoning: 50, cache: { read: 30, write: 40 } },
+    } } });
+
+    expect(parseOpenCodeFinalUsage([step("step-1"), step("step-1"), step("step-2")])).toMatchObject({
+      inputTokens: 200, outputTokens: 400, reasoningTokens: 100, cacheReadTokens: 60, cacheWriteTokens: 80,
+      rawUsage: [step("step-1").properties.part, step("step-2").properties.part],
+    });
+  });
+
+  it("returns unavailable when final step usage is absent or malformed", () => {
+    expect(parseOpenCodeFinalUsage([{ type: "message.part.updated", properties: { part: { id: "step-1", type: "step-finish" } } }])).toBeNull();
+    expect(parseOpenCodeFinalUsage([{ type: "message.part.updated", properties: { part: { id: "step-1", type: "step-finish", tokens: { input: "1", output: 2 } } } }])).toBeNull();
+    expect(parseOpenCodeFinalUsage([{ type: "message.part.updated", properties: { part: { id: "step-1", type: "step-finish", tokens: { input: 1, output: 2, reasoning: 3 } } } }])).toBeNull();
+    expect(parseOpenCodeFinalUsage([{ type: "message.part.updated", properties: { part: { id: "step-1", type: "step-finish", tokens: { input: 1, output: 2, cache: "invalid" } } } }])).toBeNull();
+    expect(parseOpenCodeFinalUsage([{ type: "message.part.updated", properties: { part: { id: "step-1", type: "step-finish", tokens: { input: 1, output: 2, cache: [] } } } }])).toBeNull();
   });
 });
 
@@ -125,6 +146,21 @@ describe("invokeOpenCodePlanning", () => {
     })).rejects.toMatchObject({ code: "opencode_failed" });
   });
 
+  it("preserves final provider usage when planning exits non-zero", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "opencode-stub-"));
+    const stubPath = path.join(dir, "fail-with-usage.mjs");
+    const usage = { type: "message.part.updated", properties: { part: {
+      id: "step-1", type: "step-finish", tokens: { input: 10, output: 20 },
+    } } };
+    await writeFileFs(stubPath, `#!/usr/bin/env node\nconsole.log(${JSON.stringify(JSON.stringify(usage))});\nprocess.exit(2);\n`);
+    await chmod(stubPath, 0o755);
+
+    await expect(invokeOpenCodePlanning({
+      task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
+      workingDirectory: tmpdir(), apiKey: "k", executable: stubPath,
+    })).rejects.toMatchObject({ code: "opencode_failed", usage: { inputTokens: 10, outputTokens: 20 } });
+  });
+
   it("throws opencode_timeout when the CLI exceeds timeoutMs", async () => {
     const dir = await mkdtemp(path.join(tmpdir(), "opencode-stub-"));
     const stubPath = path.join(dir, "hang.mjs");
@@ -134,6 +170,21 @@ describe("invokeOpenCodePlanning", () => {
       task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
       workingDirectory: tmpdir(), apiKey: "k", executable: stubPath, timeoutMs: 300,
     })).rejects.toMatchObject({ code: "opencode_timeout" });
+  });
+
+  it("preserves final provider usage when planning times out", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "opencode-stub-"));
+    const stubPath = path.join(dir, "timeout-with-usage.mjs");
+    const usage = { type: "message.part.updated", properties: { part: {
+      id: "step-1", type: "step-finish", tokens: { input: 10, output: 20 },
+    } } };
+    await writeFileFs(stubPath, `#!/usr/bin/env node\nconsole.log(${JSON.stringify(JSON.stringify(usage))});\nsetTimeout(() => {}, 60_000);\n`);
+    await chmod(stubPath, 0o755);
+
+    await expect(invokeOpenCodePlanning({
+      task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
+      workingDirectory: tmpdir(), apiKey: "k", executable: stubPath, timeoutMs: 300,
+    })).rejects.toMatchObject({ code: "opencode_timeout", usage: { inputTokens: 10, outputTokens: 20 } });
   });
 
   it("invokeOpenCodePlanning classifies an aborted signal with the caller's cancelledErrorCode", async () => {
@@ -188,13 +239,16 @@ describe("invokeOpenCodeExecution", () => {
   });
 
   it("rejects with opencode_failed when the stream contains an error event", async () => {
-    const stub = await makeStub([{ type: "error", sessionID: "ses_e", error: { data: { message: "provider exploded" } } }]);
+    const stub = await makeStub([
+      { type: "message.part.updated", properties: { part: { id: "step-1", type: "step-finish", tokens: { input: 10, output: 20 } } } },
+      { type: "error", sessionID: "ses_e", error: { data: { message: "provider exploded" } } },
+    ]);
     const logDir = await mkdtemp(path.join(tmpdir(), "opencode-log-"));
     await expect(invokeOpenCodeExecution({
       task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
       workingDirectory: tmpdir(), apiKey: "k", executable: stub.stubPath,
       logPath: path.join(logDir, "x.log"), onEvent: async () => undefined,
-    })).rejects.toMatchObject({ code: "opencode_failed" });
+    })).rejects.toMatchObject({ code: "opencode_failed", usage: { inputTokens: 10, outputTokens: 20 } });
   });
 
   it("flushes events and logs on nonzero exit with error event in stream", async () => {
