@@ -14,7 +14,7 @@ import {
   claimNotificationDelivery, completeNotificationDelivery, failNotificationDelivery, renewJobLease,
   renewNotificationDeliveryLease, recordWorkerHeartbeat, WORKER_HEARTBEAT_INTERVAL_MS,
   planningPromptInputs, renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolvedPromptFor, snapshotPrompt, syncOpenPullRequests,
-  isDeepSeekModel,
+  createAiInvocation, isDeepSeekModel, recordAiUnavailable, recordAiUsage,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
@@ -89,6 +89,11 @@ process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort
 
 function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+async function finalizeAiUsage(runId: string, result: { usage?: any }) {
+  if (result.usage) await recordAiUsage({ runId, ...result.usage });
+  else await recordAiUnavailable(runId);
 }
 
 async function finalizeRegisteredArtifact(staged: StagedArtifact) {
@@ -318,16 +323,17 @@ async function runPlanning(job: any, lease: LeaseGuard) {
   // so a revision doesn't need real CLI session continuity — just a fresh id.
   const sessionId = randomUUID();
   const runType = revising ? "plan_revision" : "planning";
+  const completePrompt = revising
+    ? `${input.content}\n\n## Plan revision instructions\n\n${revisionInstructions?.content ?? ""}\n\n## Previous approved-for-review plan\n\n${revision.previous_markdown}\n\n## Administrator feedback\n\n${revision.feedback}\n`
+    : input.content;
   let rawMarkdownForDebug: string | undefined;
   let temporary: string | undefined;
   try {
     await initializePlanningAttempt(inTransaction, lease, async (client) => {
+      await createAiInvocation({ id: runId, ticketId: ticket.id, projectId: input.project.id, runType, model: input.ai.model, reasoningLevel: input.ai.reasoning_level, taskPrompt: completePrompt }, client);
       await lease.run(() => client.query(
-        `INSERT INTO agent_runs
-         (id,ticket_id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
-         VALUES ($1,$2,$3,$4,'running',NULL,$5,$6,$7,now(),$8)`,
-        [runId, ticket.id, input.project.id, runType, input.ai.model, input.ai.reasoning_level,
-          planningStartPath, { job_id: job.id, project_config_version: input.project.config_version, planning_start_path: planningStartPath, environment_profile: "planning-minimal" }],
+        "UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1",
+        [runId, planningStartPath, { job_id: job.id, project_config_version: input.project.config_version, planning_start_path: planningStartPath, environment_profile: "planning-minimal" }],
       ));
       await transitionToPlanning(client, ticket.id, job.id, runId, lease);
     });
@@ -336,9 +342,6 @@ async function runPlanning(job: any, lease: LeaseGuard) {
       `INSERT INTO skill_snapshots (ticket_id,run_id,skills_json,content_hash) VALUES ($1,$2,$3,$4) RETURNING *`,
       [ticket.id, runId, JSON.stringify(copied.skills), copied.contentHash],
     ))).rows[0];
-    const completePrompt = revising
-      ? `${input.content}\n\n## Plan revision instructions\n\n${revisionInstructions?.content ?? ""}\n\n## Previous approved-for-review plan\n\n${revision.previous_markdown}\n\n## Administrator feedback\n\n${revision.feedback}\n`
-      : input.content;
     const promptSnapshot = await lease.run(() => snapshotPrompt({
       ticketId: ticket.id, projectId: input.project.id, phase: "planning", content: completePrompt,
       model: input.ai.model, reasoningLevel: input.ai.reasoning_level, skillSnapshotId: skillSnapshot.id,
@@ -381,6 +384,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
           timeoutMs: Number(input.project.config_json?.planning_timeout_ms ?? 30 * 60 * 1000),
         });
     await lease.assertOwned();
+    await finalizeAiUsage(runId, result);
     rawMarkdownForDebug = result.markdown;
     const markdown = parsePlanMarkdown(result.markdown);
     const raw = planningIsDeepSeek
@@ -400,6 +404,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
     await store();
   } catch (error) {
     await lease.assertOwned();
+    await recordAiUnavailable(runId);
     const message = error instanceof Error ? error.message : "planning failed";
     // ponytail: transitionToPlanning() moves the ticket to Planning before
     // invocation; on failure it must land on a state the admin can recover
@@ -546,7 +551,8 @@ async function runExecution(job: any, lease: LeaseGuard) {
   try {
     await lease.assertOwned();
     await inTransaction(async (client) => {
-      await client.query(`INSERT INTO agent_runs (id,ticket_id,project_id,run_type,status,model,reasoning_level,working_directory,started_at,metadata_json) VALUES ($1,$2,$3,$4,'running',$5,$6,$7,now(),$8)`, [runId, ticket.id, input.project.id, repairing ? "execution.repair" : "execution", input.ai.model, input.ai.reasoning_level, worktree.worktreePath, { job_id: job.id, execution_attempt_id: attempt.id, project_config_version: input.project.config_version, approved_input_snapshot_id: input.approvedInputSnapshotId, approved_input_hash: input.inputHash }]);
+      await createAiInvocation({ id: runId, ticketId: ticket.id, projectId: input.project.id, runType: repairing ? "execution.repair" : "execution", model: input.ai.model, reasoningLevel: input.ai.reasoning_level, taskPrompt: input.content }, client);
+      await client.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [runId, worktree.worktreePath, { job_id: job.id, execution_attempt_id: attempt.id, project_config_version: input.project.config_version, approved_input_snapshot_id: input.approvedInputSnapshotId, approved_input_hash: input.inputHash }]);
       await client.query("UPDATE execution_attempts SET agent_run_id=$2,validation_status='executing' WHERE id=$1", [attempt.id, runId]);
       await client.query(`INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,agent_run_id,execution_attempt_id) VALUES ($1,$2,'execution_log','staged',now() + interval '1 day',$3,$4)`, [logArtifactId, stagedLog.relativePath, runId, attempt.id]);
     });
@@ -688,6 +694,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
     // quality bar (forced subagent use); OpenCode runs are gated by the same
     // downstream validation (worktree checks + validation commands) instead.
     if (!executionIsDeepSeek) assertExecutionPublicationGate(repairing, usedAgent);
+    await finalizeAiUsage(runId, result);
     await pool.query(
       `UPDATE agent_runs
        SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3 WHERE id=$1`,
@@ -787,6 +794,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
   } catch (error) {
     if (error instanceof PublicationError) throw error;
     await lease.assertOwned();
+    await recordAiUnavailable(runId);
     // Match on the error code regardless of concrete error class: DeepSeek
     // executions throw OpenCodeError (not ClaudeExecutionError), but both
     // taxonomies use the same "execution_cancelled"/"execution_timeout"
@@ -1186,15 +1194,6 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     // invocation fail deterministically at this exact step forever, permanently
     // defeating retry/backoff for this job type.
     const sessionId = randomUUID();
-    await lease.run(() => pool.query(
-      `INSERT INTO agent_runs
-       (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
-       VALUES ($1,$2,'pr_ai_review','running',NULL,$3,$4,$5,now(),$6)`,
-      [newRunId, project.id, model, reasoningLevel, immutableReview.worktreePath,
-        { job_id: job.id, pr_ai_review_id: payload.pr_ai_review_id }],
-    ));
-    runId = newRunId;
-    await lease.run(() => pool.query("UPDATE pr_ai_reviews SET agent_run_id=$1 WHERE id=$2", [runId, payload.pr_ai_review_id]));
     const promptSnapshot = await lease.run(() => snapshotPrompt(prReviewSnapshotInput({
       projectId: project.id,
       content: prompt,
@@ -1209,7 +1208,10 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
       reviewedBaseBranch: pullRequest.base_branch,
       reviewedBaseSha,
     })));
-    await lease.run(() => pool.query("UPDATE agent_runs SET prompt_snapshot_id=$2 WHERE id=$1", [runId, promptSnapshot.id]));
+    await createAiInvocation({ id: newRunId, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_ai_review", model, reasoningLevel, taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
+    await lease.run(() => pool.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [newRunId, immutableReview.worktreePath, { job_id: job.id, pr_ai_review_id: payload.pr_ai_review_id }]));
+    runId = newRunId;
+    await lease.run(() => pool.query("UPDATE pr_ai_reviews SET agent_run_id=$1 WHERE id=$2", [runId, payload.pr_ai_review_id]));
 
     const temporary = await mkdtemp(path.join(tmpdir(), "dcc-pr-review-"));
     try {
@@ -1239,6 +1241,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
             signal: lease.signal,
           });
       await lease.assertOwned();
+      await finalizeAiUsage(runId, result);
       // Publish the correlation id only after the CLI has completed, matching
       // runPlanning's same ordering (agent_runs.claude_session_id stays NULL
       // until the invocation this run actually used has finished).
@@ -1268,6 +1271,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     }
   } catch (error: any) {
     await lease.assertOwned();
+    if (runId) await recordAiUnavailable(runId);
     const storedReview = (await pool.query("SELECT * FROM pr_ai_reviews WHERE id=$1", [payload.pr_ai_review_id])).rows[0];
     if (storedReview?.status !== "running") return;
     const retryablePublication = Boolean(storedReview?.raw_output && storedReview.publication_status === "pending");
@@ -1307,12 +1311,12 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
     });
     runId = randomUUID();
     const sessionId = randomUUID();
-    await lease.run(() => pool.query(
-      `INSERT INTO agent_runs
-       (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
-      VALUES ($1,$2,$3,$4,NULL,$5,$6,$7,now(),$8)`,
-      [runId, project.id, "pr_follow_up_description", "running", "haiku", "low", project.repository_path, { job_id: job.id, pull_request_id: pullRequest.id }],
-    ));
+    const promptSnapshot = await lease.run(() => snapshotPrompt({
+      ticketId: payload.ticket_id ?? null, projectId: project.id, phase: "pr_follow_up_description", content: prompt,
+      model: "haiku", reasoningLevel: "low", metadata: { pullRequestId: pullRequest.id, promptVersionIds: { "global.follow-up-ticket": promptRow.active_version_id } },
+    }));
+    await createAiInvocation({ id: runId, ticketId: payload.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_follow_up_description", model: "haiku", reasoningLevel: "low", taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
+    await lease.run(() => pool.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [runId, project.repository_path, { job_id: job.id, pull_request_id: pullRequest.id }]));
     const temporary = await mkdtemp(path.join(tmpdir(), "dcc-follow-up-description-"));
     try {
       const promptFile = path.join(temporary, "follow-up-ticket-prompt.md");
@@ -1326,6 +1330,7 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
         signal: lease.signal,
       });
       await lease.assertOwned();
+      await finalizeAiUsage(runId, result);
       const description = formatFollowUpDescription({ number: pullRequest.number, title: pullRequest.title, url: pullRequest.url }, result.markdown);
       await runLeaseFencedBatch(lease, [
         () => pool.query("UPDATE jobs SET payload_json=payload_json || jsonb_build_object($2::text,$3::text),updated_at=now() WHERE id=$1", [job.id, "generated_description", description]),
@@ -1340,7 +1345,10 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
     }
   } catch (error) {
     await lease.assertOwned();
-    if (runId) await lease.run(() => pool.query("UPDATE agent_runs SET status=$2,finished_at=now(),error_message=$3 WHERE id=$1", [runId, "failed", error instanceof Error ? error.message : "follow-up description failed"]));
+    if (runId) {
+      await recordAiUnavailable(runId);
+      await lease.run(() => pool.query("UPDATE agent_runs SET status=$2,finished_at=now(),error_message=$3 WHERE id=$1", [runId, "failed", error instanceof Error ? error.message : "follow-up description failed"]));
+    }
     throw error;
   }
 }
@@ -1418,18 +1426,15 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
     const newRunId = randomUUID();
     const sessionId = randomUUID();
     await lease.assertOwned();
-    await pool.query(
-      `INSERT INTO agent_runs
-       (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
-       VALUES ($1,$2,'pr_conflict_resolution','running',NULL,$3,$4,$5,now(),$6)`,
-      [newRunId, project.id, model, reasoningLevel, worktree.worktreePath,
-        {
-          job_id: job.id,
-          pr_conflict_resolution_id: payload.pr_conflict_resolution_id,
-          authority_profile: "conflict-resolution",
-          allowed_write_paths: conflicts,
-        }],
-    );
+    const promptSnapshot = await snapshotPrompt({
+      ticketId: null, projectId: project.id, phase: "pr_conflict_resolution", content: prompt,
+      model, reasoningLevel, metadata: { pullRequestId: pullRequest.id, promptVersionIds: { "global.pr-conflict-resolution": promptRow.active_version_id } },
+    });
+    await createAiInvocation({ id: newRunId, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_conflict_resolution", model, reasoningLevel, taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
+    await pool.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [newRunId, worktree.worktreePath, {
+      job_id: job.id, pr_conflict_resolution_id: payload.pr_conflict_resolution_id,
+      authority_profile: "conflict-resolution", allowed_write_paths: conflicts,
+    }]);
     runId = newRunId;
     await pool.query(
       "UPDATE pr_conflict_resolutions SET agent_run_id=$1 WHERE id=$2",
@@ -1472,6 +1477,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
             signal: lease.signal,
           });
       await lease.assertOwned();
+      await finalizeAiUsage(runId, result);
       await pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]);
 
       await stageConflictResolutionPaths(worktree.worktreePath, conflicts);
@@ -1528,6 +1534,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
   } catch (error: any) {
     await lease.assertOwned();
     if (runId) {
+      await recordAiUnavailable(runId);
       await pool.query(
         "UPDATE agent_runs SET status='failed',finished_at=now(),error_message=$2 WHERE id=$1",
         [runId, error.message],
