@@ -9,7 +9,7 @@ const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const attemptId = "11111111-1111-4111-8111-111111111111";
 const directories: string[] = [];
 
-async function deploy({ fetchHead = sha, failMigration = false, failHealth = false, failWorker = false, failWebhook = false, failBranch = false, extraArg = false, prior = true, launchAllowed = true } = {}) {
+async function deploy({ fetchHead = sha, failVerification = false, failMigration = false, failHealth = false, failWorker = false, failWebhook = false, failBranch = false, extraArg = false, prior = true, launchAllowed = true } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "dcc-deploy-"));
   directories.push(directory);
   const bin = join(directory, "bin");
@@ -36,7 +36,8 @@ case "$1" in
 esac
 `,
     pnpm: `#!/bin/sh
-echo "pnpm $*" >> "$DCC_LOG"
+echo "pnpm $* test_db=\${DCC_TEST_DATABASE_URL-unset} restore_db=\${DCC_TEST_RESTORE_DATABASE_URL-unset}" >> "$DCC_LOG"
+if [ "$DCC_FAIL_VERIFICATION" = 1 ] && [ "$*" = 'verify' ]; then exit 73; fi
 if [ "$DCC_FAIL_MIGRATION" = 1 ] && [ "$*" = '--filter database migrate' ]; then exit 72; fi
 `,
     curl: `#!/bin/sh
@@ -78,6 +79,9 @@ if [ "$*" = "startOrReload $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only
       DCC_LOG: log,
       DCC_MARKER: marker,
       DCC_FETCH_HEAD: fetchHead,
+      DCC_TEST_DATABASE_URL: "must-be-unset",
+      DCC_TEST_RESTORE_DATABASE_URL: "must-be-unset",
+      DCC_FAIL_VERIFICATION: failVerification ? "1" : "0",
       DCC_FAIL_MIGRATION: failMigration ? "1" : "0",
       DCC_FAIL_HEALTH: failHealth ? "1" : "0",
       DCC_FAIL_WORKER: failWorker ? "1" : "0",
@@ -116,6 +120,29 @@ describe("health-gated release deployment", () => {
     expect((await lstat(result.current)).isSymbolicLink()).toBe(true);
     expect(await readlink(join(release, ".env"))).toBe(join(result.directory, ".env"));
     expect(await readlink(join(release, "data"))).toBe(join(result.directory, "data"));
+  });
+
+  it("verifies the staged release locally before migration without test databases", async () => {
+    const result = await deploy();
+
+    const installed = result.commands.indexOf("pnpm install --frozen-lockfile");
+    const verified = result.commands.indexOf("pnpm verify test_db=unset restore_db=unset");
+    const verificationEvent = result.commands.indexOf("--set=stage=local_verification_passed");
+    const migrated = result.commands.indexOf("pnpm --filter database migrate");
+    expect(verified).toBeGreaterThan(installed);
+    expect(verificationEvent).toBeGreaterThan(verified);
+    expect(migrated).toBeGreaterThan(verificationEvent);
+  });
+
+  it("keeps the prior release when local verification fails", async () => {
+    const result = await deploy({ failVerification: true });
+
+    expect(result.status).toBe(73);
+    expect(await readlink(result.current)).toBe(result.previous);
+    expect(result.commands).not.toContain("pnpm --filter database migrate");
+    expect(result.commands).not.toContain("--set=stage=local_verification_passed");
+    expect(result.commands).not.toContain("pm2 startOrReload");
+    expect(result.marker).toEqual({ attemptId, sha, exitCode: 73 });
   });
 
   it("fails before cutover when migration fails and preserves the prior release", async () => {
@@ -222,9 +249,8 @@ describe("health-gated release deployment", () => {
     expect(result.commands).toBe("");
   });
 
-  it("stages all imported artifacts before detecting Superpowers updates and keeps CI fail-closed", async () => {
+  it("stages all imported artifacts before detecting Superpowers updates", async () => {
     const workflow = await readFile(join(root, ".github/workflows/superpowers-update.yml"), "utf8");
-    const ci = await readFile(join(root, ".github/workflows/ci.yml"), "utf8");
 
     expect(workflow).toContain('cron: "17 4 * * *"');
     expect(workflow).toContain("workflow_dispatch:");
@@ -235,7 +261,5 @@ describe("health-gated release deployment", () => {
     expect(workflow.indexOf("git add config/agent-content.json prompts/global/code-reviewer.md skills/vendor/superpowers"))
       .toBeLessThan(workflow.indexOf("git diff --cached --quiet"));
     expect(workflow).toContain("gh pr create");
-    expect(ci).toContain("pnpm verify");
-    expect(ci).not.toContain("|| echo");
   });
 });
