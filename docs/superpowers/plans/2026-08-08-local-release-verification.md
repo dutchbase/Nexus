@@ -283,3 +283,47 @@ Expected: PASS. If an existing unrelated timing flake occurs, rerun its individu
 git add README.md scripts/task-8.test.ts
 git commit -m "docs: describe local release verification"
 ```
+
+### Task 4: Stabilize the local verification timeout
+
+**Files:**
+- Modify: `scripts/create-admin.test.ts:23-27`
+
+**Interfaces:**
+- Consumes: the existing three-process invalid-password test, which deliberately starts `pnpm exec tsx` once for each invalid input.
+- Produces: an explicit 15-second per-test budget for that integration-style test; all password assertions and process behavior remain unchanged.
+
+- [ ] **Step 1: Capture the failing full-suite evidence**
+
+Run: `pnpm verify`
+
+Expected: FAIL only at `scripts/create-admin.test.ts > validates empty and forbidden stdin passwords before looking up the user` after the explicit `10_000` millisecond timeout expires, while the rest of the suite remains green or skipped.
+
+- [ ] **Step 2: Confirm the timing hypothesis in isolation**
+
+Run: `pnpm exec vitest run scripts/create-admin.test.ts --testTimeout=15000`
+
+Expected: PASS. This proves the test's three child-process starts complete correctly with the documented diagnostic budget; no application behavior is changed.
+
+- [ ] **Step 3: Make the minimal fix**
+
+Change only the explicit timeout on the first test:
+
+```ts
+  }, 15_000);
+```
+
+Do not alter the helper, spawned command, assertions, global Vitest timeout, or the second test's three-second EOF guard.
+
+- [ ] **Step 4: Verify the focused test and full local release suite**
+
+Run: `pnpm exec vitest run scripts/create-admin.test.ts --testTimeout=15000 && pnpm verify`
+
+Expected: PASS. The full command must no longer fail from the 10-second budget; any unrelated new failure stops this task for diagnosis.
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add scripts/create-admin.test.ts
+git commit -m "test: allow create-admin process startup under load"
+```
