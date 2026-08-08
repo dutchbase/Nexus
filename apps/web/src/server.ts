@@ -2236,20 +2236,23 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     ];
     const entries = Object.entries(body).filter(([key]) => allowed.includes(key));
     if (!entries.length) return json(response, 400, { error: "no supported fields" });
+    const aiFields = new Set(["default_model", "default_reasoning_level", "planning_model",
+      "planning_reasoning_level", "execution_model", "execution_reasoning_level", "repair_model", "repair_reasoning_level"]);
+    const normalized = entries.map(([key, value]) => (aiFields.has(key) && value === "" ? [key, null] : [key, value]) as [string, unknown]);
     const after = await inTransaction(async (client) => {
       const before = (await client.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE", [ref])).rows[0];
       if (!before) return null;
       if (body.ai_configuration_mode !== undefined && !["basic", "advanced"].includes(body.ai_configuration_mode)) {
         throw new AiConfigurationError(`Unsupported AI configuration mode "${body.ai_configuration_mode}"`);
       }
-      const candidate = { ...before, ...Object.fromEntries(entries) };
+      const candidate = { ...before, ...Object.fromEntries(normalized) };
       const project = (await client.query("SELECT * FROM projects WHERE id=$1", [candidate.project_id])).rows[0];
       const systemAi = await getSystemAiSettings(client);
       for (const phase of (candidate.ai_configuration_mode === "advanced"
         ? ["planning", "execution", "repair"] : ["planning"]) as AiPhase[]) {
         resolvedAiFor(candidate, project, phase, systemAi);
       }
-      const updated = (await client.query(`UPDATE tickets SET ${entries.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now() WHERE id=$1 RETURNING *`, [before.id, ...entries.map(([, value]) => value)])).rows[0];
+      const updated = (await client.query(`UPDATE tickets SET ${normalized.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now() WHERE id=$1 RETURNING *`, [before.id, ...normalized.map(([, value]) => value)])).rows[0];
       if (body.status && body.status !== before.status) await client.query(
         `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id) VALUES ($1,$2,$3,'Manual admin update','admin',$4)`,
         [before.id, before.status, body.status, session.user_id],
