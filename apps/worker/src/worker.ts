@@ -40,7 +40,7 @@ import {
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
 import {
-  finalizePlanningFailure, finalizePlanningSuccess, initializePlanningAttempt, LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch, terminalizePrReview,
+  finalizePlanningCancellation, finalizePlanningFailure, finalizePlanningSuccess, initializePlanningAttempt, isPlanningCancellation, LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch, terminalizePrReview,
   withContainedLeaseHeartbeat, withLeaseHeartbeat, type LeaseGuard,
 } from "./workflow-state.ts";
 
@@ -451,7 +451,9 @@ async function runPlanning(job: any, lease: LeaseGuard) {
     // as cancelled. A shutdown mid-planning therefore falls through to the
     // recoverable Planning Failed / requeue path instead of burning the ticket's
     // retry and falsely telling the admin that someone cancelled it.
-    const cancelled = cancelledBeforeStart || (invocationCancelled && cancellation?.signal.aborted === true && !stopping);
+    const cancelled = isPlanningCancellation({
+      cancelledBeforeStart, invocationCancelled, cancellationAborted: cancellation?.signal.aborted === true, stopping,
+    });
     // errorCode is derived FROM `cancelled` so the two can never disagree: whenever an abort is
     // not being treated as a cancellation, the ambiguous "planning_cancelled" code must not reach
     // agent_runs.error_code, or the ticket page's failure banner (gated on "planning_failed" /
@@ -472,19 +474,8 @@ async function runPlanning(job: any, lease: LeaseGuard) {
       // Mirrors runExecution's cancelled branch: best-effort terminal-state
       // cleanup via pool.query/inTransaction directly, not lease.run — the
       // lease may already be lost by the time cancellation has fully unwound.
-      await pool.query(
-        `UPDATE agent_runs SET status='cancelled',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4 WHERE id=$1`,
-        [runId, (error as any)?.exitCode ?? 1, errorCode, message],
-      );
-      await inTransaction(async (client) => {
-        const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
-        await client.query("UPDATE tickets SET status='Cancelled',updated_at=now() WHERE id=$1", [ticket.id]);
-        await client.query(
-          `INSERT INTO ticket_status_history
-           (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
-           VALUES ($1,$2,'Cancelled',$3,'worker',$4,$5)`,
-          [ticket.id, current.status, "Planning cancelled", job.id, runId],
-        );
+      await finalizePlanningCancellation(pool, inTransaction, {
+        runId, ticketId: ticket.id, jobId: job.id, exitCode: (error as any)?.exitCode ?? 1, errorCode, message,
       });
     } else {
       // ponytail: transitionToPlanning() moves the ticket to Planning before

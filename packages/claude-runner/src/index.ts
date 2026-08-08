@@ -40,6 +40,9 @@ async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.P
         killTimer = setTimeout(() => terminate("SIGKILL"), 5_000);
       }, options.timeoutMs);
       child.on("error", (error) => {
+        // Aborting a spawned child emits `error` before `close`; wait for close
+        // so callers can still inspect any output the CLI flushed before exit.
+        if (options.signal?.aborted) return;
         if (timeout) clearTimeout(timeout);
         if (killTimer) clearTimeout(killTimer);
         reject(error);

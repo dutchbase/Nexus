@@ -403,6 +403,33 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan"}'
   });
 });
 
+test("preserves final provider usage when planning is cancelled after Claude writes it", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-abort-usage-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const written = path.join(root, "written");
+  await writeFile(executable, `#!/bin/sh
+printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan","usage":{"input_tokens":10,"output_tokens":20}}'
+printf written > ${JSON.stringify(written)}
+sleep 1
+`);
+  await chmod(executable, 0o755);
+  const controller = new AbortController();
+  const running = invokePlanningClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root, signal: controller.signal,
+  });
+  while (true) {
+    try { await access(written); break; } catch { await new Promise((resolve) => setImmediate(resolve)); }
+  }
+  controller.abort();
+
+  await expect(running).rejects.toMatchObject({
+    constructor: ClaudePlanningError,
+    code: "planning_cancelled",
+    usage: { inputTokens: 10, outputTokens: 20 },
+  });
+});
+
 test("returns a typed timeout when planning exceeds its deadline", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "claude-planning-timeout-"));
   directories.push(root);

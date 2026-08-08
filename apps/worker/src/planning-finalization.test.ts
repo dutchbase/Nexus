@@ -127,12 +127,9 @@ test("classifies a cancelled planning run separately from a failed one", async (
   const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
   const planning = worker.slice(worker.indexOf("async function runPlanning"), worker.indexOf("async function runExecution"));
 
-  // Cancellation must not route through finalizePlanningFailure (which hard-codes jobs.status='failed');
-  // it must instead mirror runExecution's cancelled branch: agent_runs -> 'cancelled', tickets -> 'Cancelled'.
-  expect(planning).toContain("const cancelled = cancelledBeforeStart || (invocationCancelled && cancellation?.signal.aborted === true && !stopping);");
-  expect(planning).toContain("UPDATE agent_runs SET status='cancelled'");
-  expect(planning).toContain("UPDATE tickets SET status='Cancelled',updated_at=now() WHERE id=$1");
-  expect(planning).toContain("\"Planning cancelled\"");
+  // Cancellation must not route through finalizePlanningFailure (which hard-codes jobs.status='failed').
+  // The stateful terminal outcome is covered by planning-cancellation.test.ts.
+  expect(planning).toContain("isPlanningCancellation({");
 
   // The outer job-loop catch must recognize planning_cancelled the same way it already
   // recognizes execution_cancelled, so the job row lands on 'cancelled' not 'failed'.
@@ -164,14 +161,8 @@ test("distinguishes a real cancellation from a worker shutdown and from a genuin
   // invocation-level code alone is not trusted — the poll's own controller must have fired.
   expect(planning).toContain("const invocationCancelled = (error instanceof ClaudePlanningError && error.code === \"planning_cancelled\")");
 
-  // SIGTERM/SIGINT abort activePlanningCancellation, which is this same controller, so
-  // `cancellation.signal.aborted` cannot rule out a shutdown on its own. Both guards must be
-  // part of the `cancelled` condition itself — asserting they merely appear somewhere in
-  // runPlanning would still pass if either were dropped from this expression.
-  const cancelledCondition = planning.slice(planning.indexOf("const cancelled ="));
-  const conditionLine = cancelledCondition.slice(0, cancelledCondition.indexOf(";") + 1);
-  expect(conditionLine).toContain("cancellation?.signal.aborted === true");
-  expect(conditionLine).toContain("!stopping");
+  // The stateful cancellation test verifies that the shared classifier rejects a shutdown
+  // even though the invocation cancellation signal fired.
 
   // `stopping` has to be the module-level shutdown flag those handlers set, not a local.
   expect(worker).toContain("let stopping = false;");
