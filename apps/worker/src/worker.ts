@@ -77,6 +77,7 @@ const workerCapabilities = [
 ].sort();
 let stopping = false;
 let activeExecutionCancellation: AbortController | null = null;
+let activePlanningCancellation: AbortController | null = null;
 let lastPullRequestSync = 0;
 let lastNotificationDelivery = 0;
 let lastGithubImport = 0;
@@ -84,8 +85,8 @@ let lastSessionCleanup = 0;
 let lastWorkflowRecovery = 0;
 let lastWorkerHeartbeat = 0;
 
-process.on("SIGTERM", () => { stopping = true; activeExecutionCancellation?.abort(); });
-process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort(); });
+process.on("SIGTERM", () => { stopping = true; activeExecutionCancellation?.abort(); activePlanningCancellation?.abort(); });
+process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort(); activePlanningCancellation?.abort(); });
 
 function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");
@@ -357,29 +358,42 @@ async function runPlanning(job: any, lease: LeaseGuard) {
     const skillBundle = await materializeSkillBundle(runId, skillsForPhase(copied.skills, "planning"), temporary);
     const scenarioKey = ["mock", "scenario", "path"].join("_");
     await lease.assertOwned();
+    const cancellation = new AbortController();
+    activePlanningCancellation = cancellation;
+    const cancellationPoll = setInterval(async () => {
+      const row = (await pool.query("SELECT status FROM agent_runs WHERE id=$1", [runId])).rows[0];
+      if (row?.status === "cancellation_requested") cancellation.abort();
+    }, 250);
     const planningTask = revising
       ? `Return a complete revised implementation plan for ticket ${ticket.ticket_number}, applying the administrator feedback.`
       : `Create the implementation plan for ticket ${ticket.ticket_number}.`;
-    const result = planningIsDeepSeek
-      ? await invokeOpenCodePlanning({
-          task: `${planningTask} The attached file contains the complete planning instructions; follow them exactly and produce the full plan markdown with every required section.`,
-          promptFile,
-          model: input.ai.model,
-          workingDirectory: planningStartPath,
-          apiKey: planningDeepSeekKey,
-          signal: lease.signal,
-          timeoutMs: Number(input.project.config_json?.planning_timeout_ms ?? 30 * 60 * 1000),
-        })
-      : await invokePlanningClaude({
-          task: planningTask,
-          sessionId, model: input.ai.model, effort: input.ai.reasoning_level, promptFile,
-          skillBundleDir: skillBundle.additionalDirectory, pluginDirectories: skillBundle.pluginDirectories, workingDirectory: planningStartPath,
-          maxTurns: Number(input.project.config_json?.planning_max_turns ?? 80),
-          oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
-          scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
-          signal: lease.signal,
-          timeoutMs: Number(input.project.config_json?.planning_timeout_ms ?? 30 * 60 * 1000),
-        });
+    let result: Awaited<ReturnType<typeof invokePlanningClaude>> | Awaited<ReturnType<typeof invokeOpenCodePlanning>>;
+    try {
+      result = planningIsDeepSeek
+        ? await invokeOpenCodePlanning({
+            task: `${planningTask} The attached file contains the complete planning instructions; follow them exactly and produce the full plan markdown with every required section.`,
+            promptFile,
+            model: input.ai.model,
+            workingDirectory: planningStartPath,
+            apiKey: planningDeepSeekKey,
+            signal: AbortSignal.any([cancellation.signal, lease.signal]),
+            timeoutMs: Number(input.project.config_json?.planning_timeout_ms ?? 30 * 60 * 1000),
+            cancelledErrorCode: "planning_cancelled",
+          })
+        : await invokePlanningClaude({
+            task: planningTask,
+            sessionId, model: input.ai.model, effort: input.ai.reasoning_level, promptFile,
+            skillBundleDir: skillBundle.additionalDirectory, pluginDirectories: skillBundle.pluginDirectories, workingDirectory: planningStartPath,
+            maxTurns: Number(input.project.config_json?.planning_max_turns ?? 80),
+            oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
+            scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
+            signal: AbortSignal.any([cancellation.signal, lease.signal]),
+            timeoutMs: Number(input.project.config_json?.planning_timeout_ms ?? 30 * 60 * 1000),
+          });
+    } finally {
+      clearInterval(cancellationPoll);
+      if (activePlanningCancellation === cancellation) activePlanningCancellation = null;
+    }
     await lease.assertOwned();
     rawMarkdownForDebug = result.markdown;
     const markdown = parsePlanMarkdown(result.markdown);
