@@ -37,7 +37,7 @@ ALTER TABLE agent_runs
   ADD COLUMN estimated_cost_usd numeric(20,10) CHECK (estimated_cost_usd IS NULL OR estimated_cost_usd >= 0),
   ADD CONSTRAINT agent_runs_ai_accounting_check CHECK (
     ai_usage_status IS NULL OR
-    (ai_usage_status IN ('pending','unavailable') AND input_tokens IS NULL AND output_tokens IS NULL AND reasoning_tokens IS NULL AND cache_read_tokens IS NULL AND cache_write_tokens IS NULL AND total_tokens IS NULL AND ai_model_price_id IS NULL AND estimated_cost_usd IS NULL) OR
+    (ai_usage_status IN ('pending','unavailable') AND input_tokens IS NULL AND output_tokens IS NULL AND reasoning_tokens IS NULL AND cache_read_tokens IS NULL AND cache_write_tokens IS NULL AND total_tokens IS NULL AND raw_usage_json IS NULL AND ai_model_price_id IS NULL AND estimated_cost_usd IS NULL) OR
     (ai_usage_status='captured' AND input_tokens IS NOT NULL AND output_tokens IS NOT NULL AND reasoning_tokens IS NOT NULL AND cache_read_tokens IS NOT NULL AND cache_write_tokens IS NOT NULL AND total_tokens=input_tokens+output_tokens+cache_read_tokens+cache_write_tokens AND reasoning_tokens<=output_tokens)
   );
 

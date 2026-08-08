@@ -34,3 +34,21 @@ GREEN: the same focused test now passes 4/4. The final focused command passed 24
 
 - The database integration test was skipped because neither `DCC_TEST_DATABASE_URL` nor a reachable local PostgreSQL instance is available in this worktree. It covers effective-date selection, historic price retention, unpriced captured usage, and legacy null rows when run in the database-enabled CI environment.
 - Seed sources are the official [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing) and [DeepSeek models/pricing](https://api-docs.deepseek.com/quick_start/models) URLs. DeepSeek has no separately reported cache-write token rate, so its approved cache-write rate is zero.
+
+## Review fix round 1
+
+### Changes
+
+- Replaced the single-statement data-modifying CTE/fallback read with the project’s `inTransaction` plus `SELECT ... FOR UPDATE` pattern when no client transaction is supplied. A competing caller now blocks on the invocation row, then returns its persisted terminal state instead of relying on the earlier statement snapshot.
+- Added focused locking coverage and database coverage for rejected raw provider usage on both `pending` and `unavailable` rows, plus a real contended-row regression case.
+- Tightened `agent_runs_ai_accounting_check` so `raw_usage_json` must be null for `pending` and `unavailable` statuses; captured rows retain the original accounting requirement.
+
+### RED/GREEN evidence
+
+RED: `pnpm exec vitest run packages/domain/src/ai-accounting.test.ts --exclude '.worktrees/**'` failed because the previous accounting statement did not include `FOR UPDATE`.
+
+GREEN: `pnpm exec vitest run packages/domain/src/ai-accounting.test.ts packages/domain/src/ai-accounting.db.test.ts packages/domain/src/prompts.test.ts packages/database/src/migrate.test.ts --exclude '.worktrees/**'` passed with 25 tests passed, 26 skipped, and 0 failed. `pnpm exec tsc --noEmit` and `git diff --check` passed.
+
+### Concern
+
+The four database integration tests remain skipped without `DCC_TEST_DATABASE_URL`; they exercise the real concurrent/idempotent persistence and SQL constraints in a PostgreSQL-enabled environment.

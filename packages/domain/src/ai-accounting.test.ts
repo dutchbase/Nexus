@@ -31,6 +31,8 @@ describe("AI invocation accounting", () => {
       runId: "run-1", inputTokens: 100, outputTokens: 200, reasoningTokens: 50, cacheReadTokens: 30, cacheWriteTokens: 40,
       rawUsage: { input_tokens: 100 },
     }, { query: async (_sql, input) => {
+      if (_sql.includes("FOR UPDATE")) return { rows: [{ id: "run-1", ai_usage_status: "pending", model: "sonnet", started_at: "2026-08-08" }] };
+      if (_sql.includes("FROM ai_model_prices")) return { rows: [{ id: "price-1", input_usd_per_million: 3, output_usd_per_million: 15, cache_read_usd_per_million: 0.3, cache_write_usd_per_million: 3.75 }] };
       values = input!;
       return { rows: [{ id: "run-1", usage_status: "captured", total_tokens: 370, estimated_cost_usd: "0.001" }] };
     } });
@@ -45,5 +47,20 @@ describe("AI invocation accounting", () => {
     const client = { query: async () => ({ rows }) };
     await expect(recordAiUsage({ runId: "run-1", inputTokens: 1, outputTokens: 1, rawUsage: {} }, client)).resolves.toEqual(rows[0]);
     await expect(recordAiUnavailable("run-1", client)).resolves.toEqual(rows[0]);
+  });
+
+  it("locks the invocation before returning concurrent terminal accounting", async () => {
+    const calls: string[] = [];
+    const client = { query: async (sql: string) => {
+      calls.push(sql);
+      return { rows: calls.length === 1
+        ? [{ id: "run-1", ai_usage_status: "captured" }]
+        : [] };
+    } };
+
+    await expect(recordAiUsage({ runId: "run-1", inputTokens: 1, outputTokens: 1, rawUsage: {} }, client))
+      .resolves.toMatchObject({ ai_usage_status: "captured" });
+    expect(calls).toHaveLength(1);
+    expect(calls[0]).toContain("FOR UPDATE");
   });
 });

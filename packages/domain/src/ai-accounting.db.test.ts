@@ -60,4 +60,34 @@ integration("AI invocation accounting persistence", () => {
       expect((await recordAiUnavailable("once", client)).usage_status).toBe("captured");
     } finally { await client.end(); }
   });
+
+  it("does not permit raw provider usage on pending or unavailable invocations", async () => {
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ('raw-usage','Raw usage','/tmp') RETURNING id")).rows[0].id;
+      await createAiInvocation({ id: "pending-raw", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high" }, client);
+      await expect(client.query("UPDATE agent_runs SET raw_usage_json='{}' WHERE id='pending-raw'"))
+        .rejects.toThrow(/agent_runs_ai_accounting_check/);
+      await createAiInvocation({ id: "unavailable-raw", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high" }, client);
+      await recordAiUnavailable("unavailable-raw", client);
+      await expect(client.query("UPDATE agent_runs SET raw_usage_json='{}' WHERE id='unavailable-raw'"))
+        .rejects.toThrow(/agent_runs_ai_accounting_check/);
+    } finally { await client.end(); }
+  });
+
+  it("returns the terminal row when a concurrent caller wins the row lock", async () => {
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ('concurrent','Concurrent','/tmp') RETURNING id")).rows[0].id;
+      await createAiInvocation({ id: "contended", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high" }, client);
+      await client.query("BEGIN");
+      await client.query("SELECT id FROM agent_runs WHERE id='contended' FOR UPDATE");
+      const loser = recordAiUsage({ runId: "contended", inputTokens: 1, outputTokens: 1, rawUsage: {} });
+      await client.query("UPDATE agent_runs SET ai_usage_status='unavailable' WHERE id='contended'");
+      await client.query("COMMIT");
+      await expect(loser).resolves.toMatchObject({ id: "contended", ai_usage_status: "unavailable" });
+    } finally { await client.query("ROLLBACK").catch(() => undefined); await client.end(); }
+  });
 });

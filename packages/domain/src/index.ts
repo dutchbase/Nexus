@@ -94,50 +94,50 @@ export async function createAiInvocation(input: {
   return result.rows[0];
 }
 
-export async function recordAiUsage(input: { runId: string } & AiUsage, client: AiQueryClient = pool) {
+async function withAiAccountingTransaction<T>(client: AiQueryClient | undefined, work: (db: AiQueryClient) => Promise<T>) {
+  return client ? work(client) : inTransaction((db) => work(db));
+}
+
+export async function recordAiUsage(input: { runId: string } & AiUsage, client?: AiQueryClient) {
   const inputTokens = input.inputTokens;
   const outputTokens = input.outputTokens;
   const reasoningTokens = input.reasoningTokens ?? 0;
   const cacheReadTokens = input.cacheReadTokens ?? 0;
   const cacheWriteTokens = input.cacheWriteTokens ?? 0;
   const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
-  const result = await client.query(
-    `WITH price AS (
-       SELECT p.* FROM ai_model_prices p JOIN agent_runs ar ON ar.id=$1
-       WHERE p.model=ar.model AND p.effective_from<=ar.started_at
-       ORDER BY p.effective_from DESC LIMIT 1
-     ), recorded AS (
-       UPDATE agent_runs ar SET
+  return withAiAccountingTransaction(client, async (db) => {
+    const run = (await db.query("SELECT * FROM agent_runs WHERE id=$1 FOR UPDATE", [input.runId])).rows[0];
+    if (!run || run.ai_usage_status !== "pending") return run;
+    const price = (await db.query(
+      `SELECT * FROM ai_model_prices
+       WHERE model=$1 AND effective_from <= $2
+       ORDER BY effective_from DESC LIMIT 1`,
+      [run.model, run.started_at],
+    )).rows[0];
+    return (await db.query(
+      `UPDATE agent_runs SET
          ai_usage_status='captured', input_tokens=$2, output_tokens=$3, reasoning_tokens=$4,
          cache_read_tokens=$5, cache_write_tokens=$6, total_tokens=$7, raw_usage_json=$8,
-         ai_model_price_id=(SELECT id FROM price),
-         estimated_cost_usd=(SELECT
-           ($2 * input_usd_per_million + $3 * output_usd_per_million +
-            $5 * cache_read_usd_per_million + $6 * cache_write_usd_per_million) / 1000000
-           FROM price)
-       WHERE ar.id=$1 AND ar.ai_usage_status='pending'
-       RETURNING ar.*
-     )
-     SELECT * FROM recorded
-     UNION ALL
-     SELECT ar.* FROM agent_runs ar WHERE ar.id=$1 AND NOT EXISTS (SELECT 1 FROM recorded)`,
-    [input.runId, inputTokens, outputTokens, reasoningTokens, cacheReadTokens, cacheWriteTokens, totalTokens, input.rawUsage],
-  );
-  return result.rows[0];
+         ai_model_price_id=$9,
+         estimated_cost_usd=CASE WHEN $9::uuid IS NULL THEN NULL ELSE
+           ($2 * $10 + $3 * $11 + $5 * $12 + $6 * $13) / 1000000 END
+       WHERE id=$1 RETURNING *`,
+      [input.runId, inputTokens, outputTokens, reasoningTokens, cacheReadTokens, cacheWriteTokens, totalTokens,
+        input.rawUsage, price?.id ?? null, price?.input_usd_per_million ?? null, price?.output_usd_per_million ?? null,
+        price?.cache_read_usd_per_million ?? null, price?.cache_write_usd_per_million ?? null],
+    )).rows[0];
+  });
 }
 
-export async function recordAiUnavailable(runId: string, client: AiQueryClient = pool) {
-  const result = await client.query(
-    `WITH recorded AS (
-       UPDATE agent_runs SET ai_usage_status='unavailable'
-       WHERE id=$1 AND ai_usage_status='pending' RETURNING *
-     )
-     SELECT * FROM recorded
-     UNION ALL
-     SELECT ar.* FROM agent_runs ar WHERE ar.id=$1 AND NOT EXISTS (SELECT 1 FROM recorded)`,
-    [runId],
-  );
-  return result.rows[0];
+export async function recordAiUnavailable(runId: string, client?: AiQueryClient) {
+  return withAiAccountingTransaction(client, async (db) => {
+    const run = (await db.query("SELECT * FROM agent_runs WHERE id=$1 FOR UPDATE", [runId])).rows[0];
+    if (!run || run.ai_usage_status !== "pending") return run;
+    return (await db.query(
+      "UPDATE agent_runs SET ai_usage_status='unavailable' WHERE id=$1 RETURNING *",
+      [runId],
+    )).rows[0];
+  });
 }
 
 export class AiConfigurationError extends Error {
