@@ -35,7 +35,7 @@ const groups = [
   ["Overview", [["Dashboard", "/admin", ""]]],
   ["Work", [["Tickets", "/admin/tickets", "tickets"], ["Runs", "/admin/runs", "runs"], ["Queue", "/admin/queue", "jobs"], ["Pull requests", "/admin/pull-requests", "prs"]]],
   ["Configure", [["Projects", "/admin/projects", "projects"], ["Forms", "/admin/forms", "forms"], ["Prompts", "/admin/prompts", ""], ["Skills", "/admin/skills", "skills"]]],
-  ["Operate", [["Notifications", "/admin/notifications", "notifications"], ["Audit log", "/admin/audit", ""], ["Settings", "/admin/settings", ""], ["System", "/admin/system", ""]]],
+  ["Operate", [["Notifications", "/admin/notifications", "notifications"], ["AI usage", "/admin/ai-usage", ""], ["Audit log", "/admin/audit", ""], ["Settings", "/admin/settings", ""], ["System", "/admin/system", ""]]],
 ] as const;
 
 export function adminPage(path: string, title: string, body: string, counts: Record<string, number>, username: string) {

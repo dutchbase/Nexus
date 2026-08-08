@@ -18,8 +18,9 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   const runPageMatch = url.pathname.match(/^\/admin\/runs\/([0-9a-f-]+)$/i);
   if (runPageMatch) {
     const run = (await pool.query(
-      `SELECT ar.*,t.ticket_number,t.status ticket_status,p.name project_name FROM agent_runs ar
-       LEFT JOIN tickets t ON t.id=ar.ticket_id LEFT JOIN projects p ON p.id=ar.project_id WHERE ar.id=$1`,
+      `SELECT ar.*,t.ticket_number,t.status ticket_status,p.name project_name,ps.content rendered_prompt,ps.phase prompt_name,ps.metadata_json->>'prompt_version' prompt_version,
+       mp.input_usd_per_million,mp.output_usd_per_million,mp.cache_write_usd_per_million,mp.cache_read_usd_per_million,mp.source_url price_source_url FROM agent_runs ar
+       LEFT JOIN tickets t ON t.id=ar.ticket_id LEFT JOIN projects p ON p.id=ar.project_id LEFT JOIN prompt_snapshots ps ON ps.id=ar.prompt_snapshot_id LEFT JOIN ai_model_prices mp ON mp.id=ar.ai_model_price_id WHERE ar.id=$1`,
       [runPageMatch[1]],
     )).rows[0];
     if (!run) return { status: 404, title: "Run not found", body: "<h1>Run not found</h1>" };
@@ -69,6 +70,12 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         <dt>Started</dt><dd>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : "Not started"}</dd>
         <dt>Finished</dt><dd>${run.finished_at ? new Date(run.finished_at).toLocaleString("nl-NL") : "Running"}</dd>
       </dl>${run.error_message ? `<p class="error">${escapeHtml(run.error_code ?? "")}: ${escapeHtml(run.error_message)}</p>` : ""}</div></section>
+      <section class="card"><div class="card-head">Usage accounting</div><div class="card-body"><dl>
+        <dt>Usage status</dt><dd>${escapeHtml(run.ai_usage_status === "captured" ? "Captured" : run.ai_usage_status === "pending" ? "Pending" : "Not captured")}</dd>
+        <dt>Tokens</dt><dd>${run.ai_usage_status === "captured" ? `${escapeHtml(run.input_tokens)} input · ${escapeHtml(run.output_tokens)} output · ${escapeHtml(run.reasoning_tokens)} reasoning · ${escapeHtml(run.cache_read_tokens)} cache read · ${escapeHtml(run.cache_write_tokens)} cache write · ${escapeHtml(run.total_tokens)} total` : "Not captured"}</dd>
+        <dt>Estimated cost</dt><dd>${run.estimated_cost_usd == null ? "Not captured" : new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 8 }).format(Number(run.estimated_cost_usd))}</dd>
+        <dt>Rates</dt><dd>${run.ai_model_price_id ? `input ${escapeHtml(run.input_usd_per_million)} · output ${escapeHtml(run.output_usd_per_million)} · cache write ${escapeHtml(run.cache_write_usd_per_million)} · cache read ${escapeHtml(run.cache_read_usd_per_million)} per million${run.price_source_url ? ` · <a href="${escapeHtml(run.price_source_url)}">source</a>` : ""}` : "Not captured"}</dd>
+      </dl><details><summary>Task prompt</summary><pre>${escapeHtml(run.task_prompt ?? "Not captured")}</pre></details><details><summary>Rendered prompt${run.prompt_name ? ` · ${escapeHtml(run.prompt_name)}${run.prompt_version ? ` v${escapeHtml(run.prompt_version)}` : ""}` : ""}</summary><pre>${escapeHtml(run.rendered_prompt ?? "Not captured")}</pre></details></div></section>
       <section class="card"><div class="card-head">Attempt logs</div>${attemptLogs.length ? attemptLogs.map((log) =>
         `<a class="ticket-row" href="/api/admin/runs/${log.agent_run_id}/log" download><span class="mono">Attempt ${log.attempt_number}</span><span class="status">${escapeHtml(log.status)}</span><time>${new Date(log.created_at).toLocaleString("nl-NL")}</time></a>`,
       ).join("") : '<div class="card-body"><p>No attempt logs recorded.</p></div>'}</section>
