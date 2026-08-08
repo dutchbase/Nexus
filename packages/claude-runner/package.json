@@ -1,1 +1,1 @@
-{"name":"@dcc/claude-runner","private":true,"type":"module","exports":"./src/index.ts"}
+{"name":"@dcc/claude-runner","private":true,"type":"module","exports":"./src/index.ts","dependencies":{"@dcc/domain":"workspace:*"}}

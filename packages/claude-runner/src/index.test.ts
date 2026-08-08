@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
-import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, ClaudePlanningError, createExecutionSandboxSettings, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parsePlanMarkdown, preflightClaudeAuthentication, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
+import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, ClaudePlanningError, createExecutionSandboxSettings, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parseClaudeFinalUsage, parsePlanMarkdown, preflightClaudeAuthentication, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -43,6 +43,22 @@ const planSections = [
   "Performance Considerations", "Risks and Edge Cases", "Rollback Strategy",
   "Acceptance Criteria Mapping", "Out of Scope", "Open Questions",
 ];
+
+describe("parseClaudeFinalUsage", () => {
+  test("normalizes final Claude usage without counting reasoning twice", () => {
+    const raw = { type: "result", usage: { input_tokens: 100, output_tokens: 200, cache_read_input_tokens: 30, cache_creation_input_tokens: 40, reasoning_output_tokens: 50 } };
+
+    expect(parseClaudeFinalUsage(raw)).toEqual({
+      inputTokens: 100, outputTokens: 200, cacheReadTokens: 30, cacheWriteTokens: 40, reasoningTokens: 50,
+      rawUsage: raw.usage,
+    });
+  });
+
+  test("returns unavailable for non-final or malformed Claude usage", () => {
+    expect(parseClaudeFinalUsage({ type: "assistant", message: { usage: { input_tokens: 1, output_tokens: 2 } } })).toBeNull();
+    expect(parseClaudeFinalUsage({ type: "result", usage: { input_tokens: "1", output_tokens: 2 } })).toBeNull();
+  });
+});
 
 function planMarkdown(headings = planSections) {
   return headings.map((heading) => `## ${heading}\nContent`).join("\n\n");
@@ -330,7 +346,7 @@ for arg in "$@"; do
   previous="$arg"
 done
 test -f "$bundle/.claude/skills/local/SKILL.md" && test -f "$plugin/.claude-plugin/plugin.json" && test -f "$plugin/skills/local/SKILL.md" || exit 2
-printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan","session_id":"session"}'
+printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan","session_id":"session","usage":{"input_tokens":10,"output_tokens":20}}'
 `);
   await chmod(path.join(bin, "claude"), 0o755);
   await expect(invokePlanningClaude({
@@ -339,7 +355,7 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan","session_
     pluginDirectories: [plugin],
     claudeExecutable: path.join(bin, "claude"),
     workingDirectory: root,
-  })).resolves.toMatchObject({ markdown: "# Plan" });
+  })).resolves.toMatchObject({ markdown: "# Plan", usage: { inputTokens: 10, outputTokens: 20 } });
 });
 
 test("cancels an in-flight planning process when its ownership signal aborts", async () => {
@@ -474,6 +490,7 @@ for arg in "$@"; do
   previous="$arg"
 done
 node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1], JSON.stringify({ settings: JSON.parse(fs.readFileSync(process.argv[2], "utf8")), settingsFile: process.argv[2], configDir: process.env.CLAUDE_CONFIG_DIR, scrub: process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, autoMemory: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, publicationCredential: process.env.GITHUB_TOKEN }))' ${JSON.stringify(capture)} "$settings"
+printf '%s\\n' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}'
 `);
   await chmod(executable, 0o755);
   const previousGithubToken = process.env.GITHUB_TOKEN;
@@ -488,7 +505,7 @@ node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1], JSON.str
       logPath: path.join(root, "run.log"),
       timeoutMs: 1_000,
       onEvent: async () => undefined,
-    })).resolves.toMatchObject({ exitCode: 0 });
+    })).resolves.toMatchObject({ exitCode: 0, usage: { inputTokens: 10, outputTokens: 20 } });
   } finally {
     if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
     else process.env.GITHUB_TOKEN = previousGithubToken;

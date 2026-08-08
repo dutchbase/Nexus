@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { parseOpenCodeEvents, OpenCodeError, deepSeekModelFor, openCodeConfig } from "./opencode.ts";
+import { parseOpenCodeEvents, parseOpenCodeFinalUsage, OpenCodeError, deepSeekModelFor, openCodeConfig } from "./opencode.ts";
 
 const line = (obj: unknown) => JSON.stringify(obj);
 const textPart = (id: string, text: string) =>
@@ -52,6 +52,24 @@ describe("parseOpenCodeEvents", () => {
     const anon = line({ type: "message.part.updated", sessionID: "ses_x", properties: { part: { type: "text", text: "anonymous" } } });
     const withId0 = line({ type: "message.part.updated", sessionID: "ses_x", properties: { part: { id: "0", type: "text", text: "real id zero" } } });
     expect(parseOpenCodeEvents([anon, withId0].join("\n")).markdown).toBe("anonymous\n\nreal id zero");
+  });
+});
+
+describe("parseOpenCodeFinalUsage", () => {
+  it("normalizes each final step once by part id", () => {
+    const step = (id: string) => ({ type: "message.part.updated", properties: { part: {
+      id, type: "step-finish", tokens: { input: 100, output: 200, reasoning: 50, cache: { read: 30, write: 40 } },
+    } } });
+
+    expect(parseOpenCodeFinalUsage([step("step-1"), step("step-1"), step("step-2")])).toMatchObject({
+      inputTokens: 200, outputTokens: 400, reasoningTokens: 100, cacheReadTokens: 60, cacheWriteTokens: 80,
+      rawUsage: [step("step-1").properties.part, step("step-2").properties.part],
+    });
+  });
+
+  it("returns unavailable when final step usage is absent or malformed", () => {
+    expect(parseOpenCodeFinalUsage([{ type: "message.part.updated", properties: { part: { id: "step-1", type: "step-finish" } } }])).toBeNull();
+    expect(parseOpenCodeFinalUsage([{ type: "message.part.updated", properties: { part: { id: "step-1", type: "step-finish", tokens: { input: "1", output: 2 } } } }])).toBeNull();
   });
 });
 

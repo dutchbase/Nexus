@@ -6,6 +6,7 @@ import { spawn } from "node:child_process";
 import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import type { AiUsage } from "@dcc/domain";
 
 export class OpenCodeError extends Error {
   constructor(message: string, readonly code: string) {
@@ -42,6 +43,58 @@ function extractEvent(rawLine: string): any | null {
   const trimmed = rawLine.trim();
   if (!trimmed.startsWith("{")) return null;
   try { return JSON.parse(trimmed); } catch { return null; }
+}
+
+function tokenCount(value: unknown): number | null {
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : null;
+}
+
+// A final step is emitted as an update, sometimes more than once. Keep the
+// final update per stable part id, then aggregate the provider-reported steps.
+export function parseOpenCodeFinalUsage(events: readonly unknown[]): AiUsage | null {
+  const steps = new Map<string, Record<string, unknown>>();
+  for (const event of events) {
+    const part = (event as any)?.properties?.part;
+    if (part?.type === "step-finish") {
+      if (typeof part.id !== "string" || !part.id) return null;
+      steps.set(part.id, part);
+    }
+  }
+  if (!steps.size) return null;
+  let inputTokens = 0;
+  let outputTokens = 0;
+  let reasoningTokens = 0;
+  let cacheReadTokens = 0;
+  let cacheWriteTokens = 0;
+  let hasReasoning = false;
+  let hasCacheRead = false;
+  let hasCacheWrite = false;
+  for (const part of steps.values()) {
+    const tokens = part.tokens;
+    if (!tokens || typeof tokens !== "object") return null;
+    const raw = tokens as Record<string, unknown>;
+    const input = tokenCount(raw.input);
+    const output = tokenCount(raw.output);
+    const reasoning = raw.reasoning === undefined ? undefined : tokenCount(raw.reasoning);
+    const cache = raw.cache;
+    const cacheRead = cache && typeof cache === "object" && (cache as Record<string, unknown>).read !== undefined
+      ? tokenCount((cache as Record<string, unknown>).read) : undefined;
+    const cacheWrite = cache && typeof cache === "object" && (cache as Record<string, unknown>).write !== undefined
+      ? tokenCount((cache as Record<string, unknown>).write) : undefined;
+    if (input === null || output === null || reasoning === null || cacheRead === null || cacheWrite === null) return null;
+    inputTokens += input;
+    outputTokens += output;
+    if (reasoning !== undefined) { reasoningTokens += reasoning; hasReasoning = true; }
+    if (cacheRead !== undefined) { cacheReadTokens += cacheRead; hasCacheRead = true; }
+    if (cacheWrite !== undefined) { cacheWriteTokens += cacheWrite; hasCacheWrite = true; }
+  }
+  return {
+    inputTokens, outputTokens,
+    ...(hasReasoning ? { reasoningTokens } : {}),
+    ...(hasCacheRead ? { cacheReadTokens } : {}),
+    ...(hasCacheWrite ? { cacheWriteTokens } : {}),
+    rawUsage: [...steps.values()],
+  };
 }
 
 // ponytail: schema-tolerant deep scan for {type:"text", text} parts instead of
@@ -203,7 +256,7 @@ export async function invokeOpenCodePlanning(input: {
   signal?: AbortSignal;
   timeoutMs?: number;
   executable?: string;
-}): Promise<{ markdown: string; sessionId: string | null; exitCode: number }> {
+}): Promise<{ markdown: string; sessionId: string | null; exitCode: number; usage?: AiUsage }> {
   const result = await runOpenCode({
     args: openCodeArgs(input.task, deepSeekModelFor(input.model), input.promptFile),
     mode: "read-only",
@@ -213,7 +266,8 @@ export async function invokeOpenCodePlanning(input: {
     timeoutMs: input.timeoutMs,
     executable: input.executable,
   });
-  return { ...parseOpenCodeEvents(result.stdout), exitCode: result.exitCode };
+  const usage = parseOpenCodeFinalUsage(result.stdout.split("\n").map(extractEvent).filter(Boolean));
+  return { ...parseOpenCodeEvents(result.stdout), exitCode: result.exitCode, ...(usage ? { usage } : {}) };
 }
 
 export async function invokeOpenCodeExecution(input: {
@@ -227,9 +281,10 @@ export async function invokeOpenCodeExecution(input: {
   signal?: AbortSignal;
   timeoutMs?: number;
   executable?: string;
-}): Promise<{ exitCode: number; stderr: string }> {
+}): Promise<{ exitCode: number; stderr: string; usage?: AiUsage }> {
   let buffered = "";
   let streamError: OpenCodeError | null = null;
+  const usageEvents: unknown[] = [];
   // Serialize onEvent like claude-runner's eventWrites chain: events must land
   // in agent_run_events in order.
   let eventWrites: Promise<void> = Promise.resolve();
@@ -244,6 +299,7 @@ export async function invokeOpenCodeExecution(input: {
     for (const rawLine of lines) {
       const event = extractEvent(rawLine);
       if (!event) continue;
+      usageEvents.push(event);
       if (event.type === "error" && !streamError) {
         const message = event.error?.data?.message ?? event.error?.name ?? "unknown OpenCode error";
         streamError = new OpenCodeError(`OpenCode reported an error: ${message}`, "opencode_failed");
@@ -278,6 +334,7 @@ export async function invokeOpenCodeExecution(input: {
     if (buffered.trim()) {
       const event = extractEvent(buffered);
       if (event) {
+        usageEvents.push(event);
         if (event.type === "error" && !streamError) {
           const message = event.error?.data?.message ?? event.error?.name ?? "unknown OpenCode error";
           streamError = new OpenCodeError(`OpenCode reported an error: ${message}`, "opencode_failed");
@@ -294,5 +351,6 @@ export async function invokeOpenCodeExecution(input: {
   // Prefer streamError over generic exit error; otherwise throw caught exception
   if (streamError) throw streamError;
   if (caught) throw caught;
-  return { exitCode: result!.exitCode, stderr: result!.stderr };
+  const usage = parseOpenCodeFinalUsage(usageEvents);
+  return { exitCode: result!.exitCode, stderr: result!.stderr, ...(usage ? { usage } : {}) };
 }
