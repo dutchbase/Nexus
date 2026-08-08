@@ -311,6 +311,21 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
     && /upgrade to github (pro|team)/i.test(await protectionResponse.clone().text().catch(() => ""));
   if (protectionResponse.status === 403 && !protectionPlanRestricted) throw await errorFor(protectionResponse);
   const protection = protectionResponse.status === 404 || protectionPlanRestricted ? null : await jsonFor<any>(protectionResponse);
+  const requestedReviewers: ProviderGitHubPolicyInputs["requestedReviewers"] = [
+    ...(pullRequest.requested_reviewers ?? []).flatMap((reviewer) => reviewer.login ? [{ type: "user" as const, name: reviewer.login }] : []),
+    ...(pullRequest.requested_teams ?? []).flatMap((team) => team.slug ? [{ type: "team" as const, name: team.slug }] : []),
+  ];
+  if (protection === null) return {
+    pullRequest,
+    protected: false,
+    requiredApprovals: 0,
+    reviews: [],
+    requestedReviewers,
+    requiredChecks: [],
+    checks: [],
+    complete: true,
+    fetchedAt: new Date().toISOString(),
+  };
   const reviewsResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/pulls/${number}/reviews?per_page=100`, (page) => page);
   const checkRunsResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(headSha)}/check-runs?per_page=100`, (page) => page.check_runs ?? []);
   const statusesResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(headSha)}/status?per_page=100`, (page) => page.statuses ?? []);
@@ -358,10 +373,7 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
       submittedAt: review.submitted_at,
       qualifies: reviewerPermissions.get(review.user?.login?.toLowerCase()) ?? false,
     })).filter((review) => review.reviewer),
-    requestedReviewers: [
-      ...(pullRequest.requested_reviewers ?? []).flatMap((reviewer) => reviewer.login ? [{ type: "user" as const, name: reviewer.login }] : []),
-      ...(pullRequest.requested_teams ?? []).flatMap((team) => team.slug ? [{ type: "team" as const, name: team.slug }] : []),
-    ],
+    requestedReviewers,
     requiredChecks,
     checks,
     complete: unsupported.length === 0,

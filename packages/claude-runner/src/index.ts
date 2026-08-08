@@ -79,7 +79,7 @@ export class ClaudePlanningError extends Error {
   constructor(
     message: string,
     public exitCode: number,
-    public code: "planning_timeout",
+    public code: "planning_timeout" | "planning_cancelled",
     public usage?: AiUsage,
   ) {
     super(message);
@@ -479,12 +479,24 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   // switches. Worker credentials must never cross this process boundary.
   const env = minimalClaudeEnvironment(process.env, input.oauthToken);
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
-  const result = await runClaude(buildPlanningArguments(input), {
-    cwd: input.workingDirectory, env, executable: input.claudeExecutable, signal: input.signal, timeoutMs: input.timeoutMs,
-  });
+  let cancelled = false;
+  const onAbort = () => { cancelled = true; };
+  input.signal?.addEventListener("abort", onAbort, { once: true });
+  let result: Awaited<ReturnType<typeof runClaude>>;
+  try {
+    result = await runClaude(buildPlanningArguments(input), {
+      cwd: input.workingDirectory, env, executable: input.claudeExecutable, signal: input.signal, timeoutMs: input.timeoutMs,
+    });
+  } catch (error) {
+    if (cancelled) throw new ClaudePlanningError("Claude planning was cancelled", 1, "planning_cancelled");
+    throw error;
+  } finally {
+    input.signal?.removeEventListener("abort", onAbort);
+  }
   let response: any;
   try { response = JSON.parse(result.stdout.trim()); } catch { /* handled below */ }
   const usage = parseClaudeFinalUsage(response) ?? undefined;
+  if (cancelled) throw new ClaudePlanningError("Claude planning was cancelled", result.exitCode ?? 1, "planning_cancelled", usage);
   if (result.timedOut) throw new ClaudePlanningError("Claude planning timed out", 124, "planning_timeout", usage);
   if (result.exitCode !== 0) {
     throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), {
@@ -494,7 +506,9 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
     });
   }
   if (!response) {
-    throw Object.assign(new Error("Claude planning returned invalid JSON"), { stdout: truncateStdoutForCapture(result.stdout) });
+    throw Object.assign(new Error("Claude planning returned invalid JSON"), {
+      stdout: truncateStdoutForCapture(result.stdout), ...(usage ? { usage } : {}),
+    });
   }
   if (response?.type !== "result" || response?.subtype !== "success" || typeof response?.result !== "string") {
     throw Object.assign(new Error("Claude planning response did not contain a successful Markdown result"), {

@@ -160,14 +160,16 @@ test("fetches paginated policy inputs and marks unsupported protection incomplet
 });
 
 test("treats a plan-restricted branch-protection 403 as no protection configured", async () => {
+  const urls: string[] = [];
   await withServer((incoming, outgoing) => {
     const url = incoming.url ?? "";
+    urls.push(url);
     outgoing.setHeader("content-type", "application/json");
     if (url === "/repos/acme/widgets/pulls/42") {
       outgoing.end(JSON.stringify({
         number: 42, html_url: "url", state: "open", draft: false, title: "Policy",
         head: { ref: "feature", sha: "head-sha" }, base: { ref: "main", sha: "base-sha" },
-        requested_reviewers: [], requested_teams: [],
+        requested_reviewers: [{ login: "bob" }], requested_teams: [{ slug: "platform" }],
         created_at: "2026-08-03", updated_at: "2026-08-04",
       }));
       return;
@@ -177,17 +179,23 @@ test("treats a plan-restricted branch-protection 403 as no protection configured
       outgoing.end(JSON.stringify({ message: "Upgrade to GitHub Pro or make this repository public to enable this feature." }));
       return;
     }
-    if (url.includes("/pulls/42/reviews") || url.includes("/check-runs") || url.includes("/commits/head-sha/status")) {
-      outgoing.end(JSON.stringify([]));
-      return;
-    }
-    outgoing.statusCode = 404;
-    outgoing.end("{}");
+    outgoing.statusCode = 403;
+    outgoing.end(JSON.stringify({ message: "Resource not accessible by integration" }));
   }, async () => {
     await expect(getPullRequestPolicyInputs("acme", "widgets", 42)).resolves.toMatchObject({
-      protected: false, requiredApprovals: 0, requiredChecks: [], complete: true,
+      protected: false,
+      requiredApprovals: 0,
+      reviews: [],
+      requestedReviewers: [{ type: "user", name: "bob" }, { type: "team", name: "platform" }],
+      requiredChecks: [],
+      checks: [],
+      complete: true,
     });
   });
+  expect(urls).toEqual([
+    "/repos/acme/widgets/pulls/42",
+    "/repos/acme/widgets/branches/main/protection",
+  ]);
 });
 
 test("surfaces a non-plan-restricted branch-protection 403 as an error", async () => {

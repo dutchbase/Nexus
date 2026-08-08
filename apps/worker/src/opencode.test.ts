@@ -91,7 +91,7 @@ describe("openCodeConfig", () => {
   });
 });
 
-import { mkdtemp, writeFile as writeFileFs, chmod, readFile } from "node:fs/promises";
+import { mkdtemp, writeFile as writeFileFs, chmod, readFile, access } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { invokeOpenCodePlanning, invokeOpenCodeExecution } from "./opencode.ts";
@@ -185,6 +185,29 @@ describe("invokeOpenCodePlanning", () => {
       task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
       workingDirectory: tmpdir(), apiKey: "k", executable: stubPath, timeoutMs: 300,
     })).rejects.toMatchObject({ code: "opencode_timeout", usage: { inputTokens: 10, outputTokens: 20 } });
+  });
+
+  it("invokeOpenCodePlanning classifies an aborted signal with the caller's cancelledErrorCode", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "opencode-planning-abort-"));
+    const executable = path.join(root, "opencode");
+    const started = path.join(root, "started");
+    await writeFileFs(executable, `#!/bin/sh
+printf started > ${JSON.stringify(started)}
+sleep 5
+`);
+    await chmod(executable, 0o755);
+    const controller = new AbortController();
+    const running = invokeOpenCodePlanning({
+      task: "plan", promptFile: path.join(root, "prompt.md"), model: "deepseek-chat",
+      workingDirectory: root, apiKey: "test-key", executable, signal: controller.signal,
+      cancelledErrorCode: "planning_cancelled",
+    });
+    while (true) {
+      try { await access(started); break; } catch { await new Promise((resolve) => setImmediate(resolve)); }
+    }
+    controller.abort();
+
+    await expect(running).rejects.toMatchObject({ code: "planning_cancelled" });
   });
 });
 
