@@ -77,7 +77,7 @@ export class ClaudePlanningError extends Error {
   constructor(
     message: string,
     public exitCode: number,
-    public code: "planning_timeout",
+    public code: "planning_timeout" | "planning_cancelled",
   ) {
     super(message);
   }
@@ -447,9 +447,21 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   // switches. Worker credentials must never cross this process boundary.
   const env = minimalClaudeEnvironment(process.env, input.oauthToken);
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
-  const result = await runClaude(buildPlanningArguments(input), {
-    cwd: input.workingDirectory, env, executable: input.claudeExecutable, signal: input.signal, timeoutMs: input.timeoutMs,
-  });
+  let cancelled = false;
+  const onAbort = () => { cancelled = true; };
+  input.signal?.addEventListener("abort", onAbort, { once: true });
+  let result: Awaited<ReturnType<typeof runClaude>>;
+  try {
+    result = await runClaude(buildPlanningArguments(input), {
+      cwd: input.workingDirectory, env, executable: input.claudeExecutable, signal: input.signal, timeoutMs: input.timeoutMs,
+    });
+  } catch (error) {
+    if (cancelled) throw new ClaudePlanningError("Claude planning was cancelled", 1, "planning_cancelled");
+    throw error;
+  } finally {
+    input.signal?.removeEventListener("abort", onAbort);
+  }
+  if (cancelled) throw new ClaudePlanningError("Claude planning was cancelled", result.exitCode ?? 1, "planning_cancelled");
   if (result.timedOut) throw new ClaudePlanningError("Claude planning timed out", 124, "planning_timeout");
   if (result.exitCode !== 0) {
     throw Object.assign(new Error(summarizeClaudeFailure(result.stdout, result.stderr)), {
