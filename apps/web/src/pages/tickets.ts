@@ -28,8 +28,8 @@ export function ticketAiUsagePanel(runs: any[]) {
     ["PR work", aiRuns.filter((run) => aiLifecycleGroup(run.run_type) === "pr_work")],
     ["All AI work", aiRuns],
   ] as const;
-  const rows = aiRuns.map((run) => `<a class="ticket-row" href="/admin/runs/${escapeHtml(run.id)}"><span class="mono">${escapeHtml(shortRef("RUN", run.id))}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.model ?? "—")} · ${escapeHtml(run.reasoning_level ?? "—")}</span><span>${run.ai_usage_status === "captured" ? `${escapeHtml(run.total_tokens)} tokens · ${escapeHtml(usd(Number(run.estimated_cost_usd ?? 0)))}` : coverageLabel(run)}</span><span class="status">${escapeHtml(run.status ?? "—")} · ${escapeHtml(coverageLabel(run))}</span></a>`).join("");
-  return `<section class="grid two">${groups.map(([label, selected]) => summary(label, selected)).join("")}</section><section class="card" style="margin-top:16px"><div class="card-head">AI runs</div>${rows || '<div class="card-body"><p>No AI runs yet.</p></div>'}</section>`;
+  const rows = runs.map((run) => `<a class="ticket-row" href="/admin/runs/${escapeHtml(run.id)}"><span class="mono">${escapeHtml(shortRef("RUN", run.id))}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.model ?? "—")} · ${escapeHtml(run.reasoning_level ?? "—")}</span><span>${run.ai_usage_status === "captured" ? `${escapeHtml(run.total_tokens)} tokens · ${escapeHtml(run.estimated_cost_usd == null ? "Unpriced" : usd(Number(run.estimated_cost_usd)))}` : coverageLabel(run)}</span><span class="status">${escapeHtml(run.status ?? "—")} · ${escapeHtml(coverageLabel(run))}</span></a>`).join("");
+  return `<section class="grid two">${groups.map(([label, selected]) => summary(label, selected)).join("")}</section><section class="card" style="margin-top:16px"><div class="card-head">Runs</div>${rows || '<div class="card-body"><p>No runs yet.</p></div>'}</section>`;
 }
 
 export function selectedStatusesFrom(url: URL): string[] {

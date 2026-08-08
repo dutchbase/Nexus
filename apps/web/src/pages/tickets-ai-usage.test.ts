@@ -33,4 +33,19 @@ describe("ticket AI usage", () => {
     expect(html).not.toContain("Unpriced 1");
     expect(html).not.toContain("Legacy 1");
   });
+
+  it("keeps non-AI historical runs and distinguishes unpriced from zero-cost rows", () => {
+    const html = ticketAiUsagePanel([
+      { id: "historic", run_type: "validation", ai_usage_status: null, model: "—", reasoning_level: null, status: "completed" },
+      { id: "unpriced", run_type: "execution", ai_usage_status: "captured", total_tokens: 10, estimated_cost_usd: null, model: "sonnet", reasoning_level: "low", status: "completed" },
+      { id: "zero", run_type: "execution", ai_usage_status: "captured", total_tokens: 0, estimated_cost_usd: "0", model: "sonnet", reasoning_level: "low", status: "completed" },
+    ]);
+
+    expect(html).toContain('href="/admin/runs/historic"');
+    expect(html).toContain("validation");
+    expect(html).toContain('href="/admin/runs/unpriced"');
+    expect(html).toContain("10 tokens · Unpriced");
+    expect(html).toContain('href="/admin/runs/zero"');
+    expect(html).toContain("0 tokens · $0.00");
+  });
 });
