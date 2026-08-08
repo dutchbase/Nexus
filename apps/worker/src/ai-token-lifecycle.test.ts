@@ -1,6 +1,6 @@
-import { readFile } from "node:fs/promises";
 import { expect, test } from "vitest";
 import { createAiInvocation, recordAiUnavailable, recordAiUsage } from "@dcc/domain";
+import { prReviewSnapshotInput } from "./worker-boundary.ts";
 
 function lifecycleDb() {
   const rows = new Map<string, any>();
@@ -53,10 +53,12 @@ test("persists unavailable usage when a provider returns no normalized usage", a
   expect(db.rows.get("run-2")).toMatchObject({ status: "running", ai_usage_status: "unavailable", provider: "anthropic" });
 });
 
-test("PR worker routes use the durable pull request ticket relation", async () => {
-  const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
-  for (const route of ["runPrAiReview", "runFollowUpDescription", "runPrConflictResolution"]) {
-    const source = worker.slice(worker.indexOf(`async function ${route}`));
-    expect(source).toContain("ticketId: pullRequest.ticket_id");
-  }
+test("builds a PR review snapshot with its durable ticket context", () => {
+  const snapshot = prReviewSnapshotInput({
+    ticketId: "ticket-1", projectId: "project-1", content: "Review", model: "sonnet", reasoningLevel: "high",
+    promptVersionIds: { "global.pr-review": "version-1" }, pullRequestId: "pr-1",
+    reviewedHeadSha: "head", reviewedBaseBranch: "main", reviewedBaseSha: "base",
+  });
+
+  expect(snapshot).toMatchObject({ ticketId: "ticket-1", projectId: "project-1", metadata: { pullRequestId: "pr-1" } });
 });

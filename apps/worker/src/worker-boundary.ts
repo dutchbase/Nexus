@@ -151,6 +151,7 @@ export function shouldRetryPrReview(error: unknown, rawOutput: string | null, at
 }
 
 export function prReviewSnapshotInput(input: {
+  ticketId?: string | null;
   projectId: string;
   content: string;
   model: string;
@@ -162,7 +163,7 @@ export function prReviewSnapshotInput(input: {
   reviewedBaseSha: string;
 }) {
   return {
-    ticketId: null,
+    ticketId: input.ticketId ?? null,
     projectId: input.projectId,
     phase: "pr-review" as const,
     content: input.content,

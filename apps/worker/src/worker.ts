@@ -1195,6 +1195,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     // defeating retry/backoff for this job type.
     const sessionId = randomUUID();
     const promptSnapshot = await lease.run(() => snapshotPrompt(prReviewSnapshotInput({
+      ticketId: pullRequest.ticket_id ?? null,
       projectId: project.id,
       content: prompt,
       model,
