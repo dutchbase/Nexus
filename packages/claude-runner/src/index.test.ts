@@ -254,9 +254,8 @@ describe("buildExecutionArguments", () => {
     } satisfies ExecutionInvocation;
     const { settingsFile } = await createExecutionSandboxSettings(configured, settingsDirectory);
     const args = buildExecutionArguments(configured, settingsFile);
-    expect(args).toContain("Read,Glob,Grep,Skill,Agent");
+    expect(args).toContain("Read,Glob,Grep,Edit,Write,Bash,Skill,Agent");
     expect(args).toEqual(expect.arrayContaining(["--setting-sources", ""]));
-    expect(args).not.toContain("Read,Glob,Grep,Edit,Write,Bash,Skill,Agent");
     expect(args).toEqual(expect.arrayContaining(["--add-dir", "/skills", "--plugin-dir", "/plugin", "--agents"]));
     const agents = JSON.parse(args[args.indexOf("--agents") + 1]);
     const settings = JSON.parse(await readFile(settingsFile, "utf8"));
@@ -277,6 +276,7 @@ describe("buildExecutionArguments", () => {
     const reviewer = agents["dcc-reviewer"] as { tools: string[] };
     expect(reviewer.tools).not.toContain("Bash");
     expect(settings.hooks.PreToolUse).toEqual(expect.arrayContaining([
+      expect.objectContaining({ matcher: "Bash" }),
       expect.objectContaining({ matcher: "Agent" }),
     ]));
     expect(JSON.stringify(settings)).toContain(guardPath);
@@ -323,6 +323,15 @@ describe("buildExecutionArguments", () => {
     const denied = await runConfiguredHook(command, "Read", { file_path: path.join(homedir(), "private-notes") });
     expect(denied.code).toBe(2);
     expect(JSON.parse(denied.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+
+    const bashHook = settings.hooks.PreToolUse.find((hook: { matcher: string }) => hook.matcher === "Bash");
+    expect(bashHook).toBeDefined();
+    const bashCommand = bashHook.hooks[0].command as string;
+    await expect(runConfiguredHook(bashCommand, "Bash", { command: "pnpm exec vitest packages/claude-runner/src/index.test.ts" }))
+      .resolves.toMatchObject({ code: 0, stdout: "" });
+    const bashDenied = await runConfiguredHook(bashCommand, "Bash", { command: "git show" });
+    expect(bashDenied.code).toBe(2);
+    expect(JSON.parse(bashDenied.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
 
   });
 });
@@ -712,12 +721,11 @@ sleep 0.2
   }
 });
 
-test("keeps shell execution behind guarded subagents", () => {
+test("enables guarded shell execution", () => {
   const args = buildExecutionArguments(executionInvocation, "/settings");
 
   expect(args).toContain("dontAsk");
-  expect(args).toContain("Read,Glob,Grep,Skill,Agent");
-  expect(args).not.toContain("Bash,Agent,Skill");
+  expect(args).toContain("Read,Glob,Grep,Edit,Write,Bash,Skill,Agent");
   expect(args).toContain("--strict-mcp-config");
   expect(args).toContain(".git/dcc-support/execution-prompt.md");
   expect(args).toContain(".git/dcc-support/skills");

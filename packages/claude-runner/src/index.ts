@@ -390,6 +390,10 @@ function executionSettings(input: ExecutionInvocation, guardPath: string) {
     hooks: {
       PreToolUse: [
         {
+          matcher: "Bash",
+          hooks: [{ type: "command", command: hookCommand(guardPath) }],
+        },
+        {
           matcher: "Read|Glob|Grep|Edit|Write",
           hooks: [{ type: "command", command: fileHookCommand(guardPath, [...new Set(allowRead)], worktree, writePaths) }],
         },
@@ -552,7 +556,7 @@ export async function createExecutionSandboxSettings(input: ExecutionInvocation,
 export function buildExecutionArguments(input: ExecutionInvocation, settingsFile: string) {
   return [
     "-p", input.task, "--session-id", input.sessionId, "--model", input.model, "--effort", input.effort,
-    "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep,Skill,Agent",
+    "--permission-mode", "dontAsk", "--tools", "Read,Glob,Grep,Edit,Write,Bash,Skill,Agent",
     "--append-system-prompt-file", input.promptFile, ...skillDirectoryArguments(input),
     "--setting-sources", "", "--strict-mcp-config", "--settings", settingsFile,
     "--agents", sessionAgents(input),
