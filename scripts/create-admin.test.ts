@@ -8,7 +8,7 @@ const root = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 
 describe("create-admin", () => {
   async function invalidPassword(input: string | Buffer) {
-    const child = spawn("pnpm", ["exec", "tsx", "scripts/create-admin.ts", "--username", "admin", "--password-stdin", "--non-interactive"], {
+    const child = spawn(process.execPath, ["--import", "tsx", "scripts/create-admin.ts", "--username", "admin", "--password-stdin", "--non-interactive"], {
       cwd: root,
       stdio: ["pipe", "ignore", "pipe"],
     });
@@ -27,7 +27,7 @@ describe("create-admin", () => {
   }, 15_000);
 
   it("rejects an oversized stdin password before EOF", async () => {
-    const child = spawn("pnpm", ["exec", "tsx", "scripts/create-admin.ts", "--username", "admin", "--password-stdin", "--non-interactive"], {
+    const child = spawn(process.execPath, ["--import", "tsx", "scripts/create-admin.ts", "--username", "admin", "--password-stdin", "--non-interactive"], {
       cwd: root,
       stdio: ["pipe", "ignore", "pipe"],
     });

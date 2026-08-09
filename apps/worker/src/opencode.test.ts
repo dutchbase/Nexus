@@ -183,7 +183,7 @@ describe("invokeOpenCodePlanning", () => {
 
     await expect(invokeOpenCodePlanning({
       task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
-      workingDirectory: tmpdir(), apiKey: "k", executable: stubPath, timeoutMs: 300,
+      workingDirectory: tmpdir(), apiKey: "k", executable: stubPath, timeoutMs: 1_000,
     })).rejects.toMatchObject({ code: "opencode_timeout", usage: { inputTokens: 10, outputTokens: 20 } });
   });
 
