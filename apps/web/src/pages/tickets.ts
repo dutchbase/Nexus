@@ -444,6 +444,7 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
 <span data-prompt-skills>${escapeHtml(referenceLines)}</span></pre>
       <a class="button" href="/api/admin/tickets/${ticket.id}/prompt-preview">Open full planning prompt preview</a></div></section>`;
     const planVersions = planVersionsResult.rows;
+    const currentPlanVersion = planVersions.find((version) => version.id === version.current_version_id);
     // ponytail: no dedicated status column on plan_versions — derive the
     // label from what already exists (approval pointer, current-version
     // pointer, ticket status) instead of adding a migration for it.
@@ -491,7 +492,7 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)}</div><h1>${escapeHtml(ticket.title)}</h1>
       <div class="toolbar"><span class="status">${escapeHtml(ticket.status)}</span>
         ${["Completed", "Merged", "Closed Without Merge"].includes(ticket.status) ? `<button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reopen-ticket>Reopen</button>` : `<button class="button" type="button" data-open-preview>Preview prompt</button>
-        ${ticket.status === "Execution Failed" && executionGate.valid ? `<a class="button" href="/admin/tickets/${ticket.ticket_number}/plans/${executionGate.planVersion.version}">Revise plan</a>` : ""}
+        ${ticket.status === "Execution Failed" && currentPlanVersion ? `<a class="button" href="/admin/tickets/${ticket.ticket_number}/plans/${currentPlanVersion.version}">Revise plan</a>` : ""}
         <button class="button primary" type="button" data-approve-planning${canApprovePlanning ? "" : " disabled"} title="${canApprovePlanning ? "" : "Ticket must be Triage, Needs Information or Planning Failed"}">Approve for planning</button>
         <button class="button primary" type="button" data-start-execution${executionGate.valid ? "" : " disabled"} title="${executionGate.valid ? "" : executionGate.message}">${ticket.status === "Execution Failed" ? "Retry execution" : "Start execution"}</button>`}</div>
       ${planningFailureBanner}
