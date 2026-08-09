@@ -37,7 +37,7 @@ esac
 `,
     pnpm: `#!/bin/sh
 echo "pnpm $* test_db=\${DCC_TEST_DATABASE_URL-unset} restore_db=\${DCC_TEST_RESTORE_DATABASE_URL-unset}" >> "$DCC_LOG"
-if [ "$DCC_FAIL_VERIFICATION" = 1 ] && [ "$*" = 'verify' ]; then exit 73; fi
+if [ "$DCC_FAIL_VERIFICATION" = 1 ] && [ "$1" = verify ]; then exit 73; fi
 if [ "$DCC_FAIL_MIGRATION" = 1 ] && [ "$*" = '--filter database migrate' ]; then exit 72; fi
 `,
     curl: `#!/bin/sh
@@ -126,7 +126,7 @@ describe("health-gated release deployment", () => {
     const result = await deploy();
 
     const installed = result.commands.indexOf("pnpm install --frozen-lockfile");
-    const verified = result.commands.indexOf("pnpm verify test_db=unset restore_db=unset");
+    const verified = result.commands.indexOf("pnpm verify -- --no-file-parallelism --testTimeout=15000 test_db=unset restore_db=unset");
     const verificationEvent = result.commands.indexOf("--set=stage=local_verification_passed");
     const migrated = result.commands.indexOf("pnpm --filter database migrate");
     expect(verified).toBeGreaterThan(installed);

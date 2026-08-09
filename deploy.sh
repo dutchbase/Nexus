@@ -127,7 +127,7 @@ record_event "staged"
 cd "$RELEASE"
 pnpm install --frozen-lockfile
 record_event "dependencies_installed"
-env -u DCC_TEST_DATABASE_URL -u DCC_TEST_RESTORE_DATABASE_URL pnpm verify
+env -u DCC_TEST_DATABASE_URL -u DCC_TEST_RESTORE_DATABASE_URL pnpm verify -- --no-file-parallelism --testTimeout=15000
 record_event "local_verification_passed"
 pnpm --filter database migrate
 record_event "migrated"
