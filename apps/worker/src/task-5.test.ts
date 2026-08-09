@@ -22,9 +22,12 @@ test("runs each execution phase from its approved snapshot and materializes only
 
 test("requires a normal execution to invoke Agent before worker validation and publishing", async () => {
   const source = await worker();
+  const execution = source.slice(source.indexOf("async function runExecution"), source.indexOf("async function publishExecutionAttempt"));
 
   expect(source).toContain("usedAgent ||= isAgentToolEvent(eventType, event)");
-  expect(source).toContain("assertExecutionPublicationGate(repairing, usedAgent)");
+  const gate = execution.indexOf("assertExecutionPublicationGate(repairing, usedAgent)");
+  expect(gate).toBeGreaterThan(0);
+  expect(execution.lastIndexOf("await finalizeAiUsage(runId, result)", gate)).toBeGreaterThan(0);
 });
 
 test("materializes the immutable approved plan for execution", async () => {

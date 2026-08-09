@@ -70,3 +70,25 @@ describe("settings page GitHub panel", () => {
     expect(page?.body).toContain("read + write");
   });
 });
+
+describe("settings page model prices", () => {
+  it("renders active and historic model prices with their provenance", async () => {
+    query.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM ai_review_settings")) return { rows: [{ default_model: "sonnet", default_reasoning_level: "medium" }] };
+      if (sql.includes("FROM ai_model_prices")) return { rows: [
+        { id: "current", model: "sonnet", effective_from: "2026-08-08T00:00:00Z", input_usd_per_million: "3", output_usd_per_million: "15", cache_write_usd_per_million: "3.75", cache_read_usd_per_million: "0.3", source_url: "https://example.test/current", creator: "admin", is_active: true },
+        { id: "old", model: "sonnet", effective_from: "2026-01-01T00:00:00Z", input_usd_per_million: "2", output_usd_per_million: "10", cache_write_usd_per_million: "2.5", cache_read_usd_per_million: "0.2", source_url: "https://example.test/old", creator: "former-admin", is_active: false },
+      ] };
+      return { rows: [] };
+    });
+
+    const page = await operate.render(new URL("http://test/admin/settings"), session, {});
+
+    expect(page?.body).toContain("Model pricing");
+    expect(page?.body).toContain("Active");
+    expect(page?.body).toContain("Historic");
+    expect(page?.body).toContain("https://example.test/current");
+    expect(page?.body).toContain("former-admin");
+    expect(page?.body).toContain('data-ai-model-price-form');
+  });
+});

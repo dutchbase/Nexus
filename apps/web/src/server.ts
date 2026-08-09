@@ -12,7 +12,7 @@ import {
   buildExecutionPrompt, checkPlanApprovalGate, enqueueJob, getSystemAiSettings,
   globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
-  unionSkills, validateAiSelection, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
+  unionSkills, validateAiSelection, providerForModel, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
 import {
   mergeNotificationConfiguration, parseNotificationConfiguration, parseNotificationConfigurationPatch,
@@ -36,6 +36,7 @@ import * as skillsPage from "./pages/skills.ts";
 import * as notificationsPage from "./pages/notifications.ts";
 import * as queuePage from "./pages/queue.ts";
 import * as auditPage from "./pages/audit.ts";
+import * as aiUsagePage from "./pages/ai-usage.ts";
 import * as operatePage from "./pages/operate.ts";
 
 const port = Number(process.env.PORT ?? 3000);
@@ -221,6 +222,20 @@ async function bodyOf(request: IncomingMessage) {
   } catch {
     throw Object.assign(new Error("invalid JSON"), { status: 400 });
   }
+}
+
+function effectiveTimestamp(value: unknown): Date {
+  if (typeof value !== "string") throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });
+  const match = value.match(/^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d{1,3})?)?(?:Z|[+-]\d{2}:\d{2})?$/);
+  if (!match) throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });
+  const [, year, month, day, hour, minute, second = 0] = match.map((part) => Number(part ?? 0));
+  const daysInMonth = new Date(Date.UTC(year, month, 0)).getUTCDate();
+  if (month < 1 || month > 12 || day < 1 || day > daysInMonth || hour > 23 || minute > 59 || second > 59) {
+    throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });
+  }
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });
+  return date;
 }
 
 function cookieValue(request: IncomingMessage, name: string) {
@@ -575,6 +590,29 @@ async function transitionTicket(ticketRef: string, status: string, reason: strin
       )).rows[0];
     } else {
       after = (await client.query("UPDATE tickets SET status = $2, updated_at = now() WHERE id = $1 RETURNING *", [before.id, status])).rows[0];
+      if (status === "Cancelled") {
+        // A ticket can only reach "Cancelled" from an in-progress state
+        // (apps/web/src/pages/tickets.ts:398's data-cancel-ticket eligibility
+        // list), so there may be a queued job, a queued execution attempt,
+        // or a running agent run to actually stop — otherwise this action
+        // only ever changed tickets.status while work kept running.
+        await client.query(
+          `UPDATE jobs SET status='cancelled',completed_at=now(),claimed_by=NULL,lease_expires_at=NULL,updated_at=now()
+           WHERE type IN ('planning.generate','planning.revise','execution.run','execution.repair')
+             AND payload_json->>'ticket_id'=$1 AND status='queued'`,
+          [before.id],
+        );
+        await client.query(
+          `UPDATE execution_attempts SET validation_status='cancelled',completed_at=now()
+           WHERE ticket_id=$1 AND validation_status='queued'`,
+          [before.id],
+        );
+        await client.query(
+          `UPDATE agent_runs SET status='cancellation_requested'
+           WHERE ticket_id=$1 AND status='running'`,
+          [before.id],
+        );
+      }
     }
     await client.query(
       `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
@@ -627,7 +665,7 @@ export async function adminHtml(request: IncomingMessage, response: ServerRespon
   }
   const metrics = await counts();
   const pageModules = [
-    dashboardPage, ticketsPage, runsPage, prsPage, projectsPage, formsPage, promptsPage, skillsPage, notificationsPage, queuePage, auditPage, operatePage,
+    dashboardPage, ticketsPage, runsPage, prsPage, projectsPage, formsPage, promptsPage, skillsPage, notificationsPage, queuePage, auditPage, aiUsagePage, operatePage,
   ];
   for (const pageModule of pageModules) {
     const result = await pageModule.render(url, session, metrics);
@@ -853,6 +891,30 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       ],
     );
     return json(response, 200, {});
+  }
+  if (url.pathname === "/api/admin/ai-model-prices" && request.method === "POST") {
+    const body = await bodyOf(request);
+    const model = typeof body.model === "string" ? body.model : "";
+    const rates = ["input_usd_per_million", "output_usd_per_million", "cache_write_usd_per_million", "cache_read_usd_per_million"]
+      .map((field) => body[field]);
+    if (!rates.every((rate) => typeof rate === "number" && Number.isFinite(rate) && rate >= 0)) {
+      throw Object.assign(new Error("rates must be finite non-negative numbers"), { status: 422 });
+    }
+    const effectiveFrom = effectiveTimestamp(body.effective_from);
+    let sourceUrl: URL;
+    try { sourceUrl = new URL(typeof body.source_url === "string" ? body.source_url : ""); } catch { throw Object.assign(new Error("source_url must be an HTTPS URL"), { status: 422 }); }
+    if (sourceUrl.protocol !== "https:") throw Object.assign(new Error("source_url must be an HTTPS URL"), { status: 422 });
+    const price = await inTransaction(async (client) => {
+      const price = (await client.query(
+        `INSERT INTO ai_model_prices
+         (model,provider,effective_from,input_usd_per_million,output_usd_per_million,cache_write_usd_per_million,cache_read_usd_per_million,source_url,created_by)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING *`,
+        [model, providerForModel(model), effectiveFrom.toISOString(), ...rates, sourceUrl.toString(), session.user_id],
+      )).rows[0];
+      await audit({ actorType: "admin", actorId: session.user_id, action: "ai_model_price.create", entityType: "ai_model_price", entityId: price.id, after: price, ip: ipOf(request) }, client);
+      return price;
+    });
+    return json(response, 201, { price });
   }
   const followUpDescriptionMatch = url.pathname.match(/^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/follow-up-description$/i);
   if (followUpDescriptionMatch && request.method === "POST") {
@@ -2284,7 +2346,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   return json(response, 404, { error: "not found" });
 }
 
-async function route(request: IncomingMessage, response: ServerResponse) {
+export async function route(request: IncomingMessage, response: ServerResponse) {
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/api/health")) {
     if (url.pathname === "/") { response.writeHead(302, { location: "/login" }); return response.end(); }

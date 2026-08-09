@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type pg from "pg";
 import { pool } from "@dcc/database";
+import type { AiInvocationPhase } from "./index.ts";
 
 export const globalPromptTypes = [
   "base", "planning", "plan-revision", "execution", "execution-repair", "validation", "pull-request", "pr-review", "pr-conflict-resolution", "follow-up-ticket",
@@ -159,7 +160,7 @@ export function promptContentHash(content: string) {
 export type PromptSnapshotInput = {
   ticketId: string | null;
   projectId: string;
-  phase: "planning" | "execution" | "repair" | "validation" | "pull-request" | "pr-review";
+  phase: AiInvocationPhase | "repair" | "validation" | "pull-request" | "pr-review";
   content: string;
   model: string;
   reasoningLevel: string;

@@ -1,0 +1,72 @@
+# Task 1 report — immutable pricing and invocation accounting
+
+## Scope delivered
+
+- Added migration `050_ai_invocation_accounting.sql` (the repository already contains `049`, so `050` is the next valid migration) with immutable effective-dated `ai_model_prices`, the required `agent_runs` accounting metadata, nullable legacy-safe constraints, and approved Anthropic/DeepSeek seed rates.
+- Added domain provider/lifecycle mapping, pending invocation creation, idempotent captured/unavailable recording, SQL effective-price selection, persisted total/cost calculation, and all invocation prompt phases.
+- Added focused unit and database integration coverage. No worker instrumentation or UI work was performed.
+
+## TDD evidence
+
+RED: `pnpm exec vitest run packages/domain/src/ai-accounting.test.ts --exclude '.worktrees/**'` failed 4/4 before implementation because `providerForModel`, `createAiInvocation`, and `recordAiUsage` did not exist.
+
+GREEN: the same focused test now passes 4/4. The final focused command passed 24 tests across 3 files, with 23 existing/environment-dependent skips and no failures. `pnpm exec tsc --noEmit` also passed.
+
+## Files
+
+- `packages/database/migrations/050_ai_invocation_accounting.sql`
+- `packages/domain/src/index.ts`
+- `packages/domain/src/prompts.ts`
+- `packages/domain/src/ai-accounting.test.ts`
+- `packages/domain/src/ai-accounting.db.test.ts`
+
+## Verification
+
+- `git diff --check` passed.
+- `pnpm exec vitest run packages/domain/src/ai-accounting.test.ts packages/domain/src/ai-accounting.db.test.ts packages/domain/src/prompts.test.ts packages/database/src/migrate.test.ts --exclude '.worktrees/**'` passed: 24 passed, 23 skipped, 0 failed.
+- `pnpm exec tsc --noEmit` passed.
+
+## Commit
+
+`feat(domain): persist AI invocation accounting`
+
+## Concerns
+
+- The database integration test was skipped because neither `DCC_TEST_DATABASE_URL` nor a reachable local PostgreSQL instance is available in this worktree. It covers effective-date selection, historic price retention, unpriced captured usage, and legacy null rows when run in the database-enabled CI environment.
+- Seed sources are the official [Claude pricing](https://platform.claude.com/docs/en/about-claude/pricing) and [DeepSeek models/pricing](https://api-docs.deepseek.com/quick_start/models) URLs. DeepSeek has no separately reported cache-write token rate, so its approved cache-write rate is zero.
+
+## Review fix round 1
+
+### Changes
+
+- Replaced the single-statement data-modifying CTE/fallback read with the project’s `inTransaction` plus `SELECT ... FOR UPDATE` pattern when no client transaction is supplied. A competing caller now blocks on the invocation row, then returns its persisted terminal state instead of relying on the earlier statement snapshot.
+- Added focused locking coverage and database coverage for rejected raw provider usage on both `pending` and `unavailable` rows, plus a real contended-row regression case.
+- Tightened `agent_runs_ai_accounting_check` so `raw_usage_json` must be null for `pending` and `unavailable` statuses; captured rows retain the original accounting requirement.
+
+### RED/GREEN evidence
+
+RED: `pnpm exec vitest run packages/domain/src/ai-accounting.test.ts --exclude '.worktrees/**'` failed because the previous accounting statement did not include `FOR UPDATE`.
+
+GREEN: `pnpm exec vitest run packages/domain/src/ai-accounting.test.ts packages/domain/src/ai-accounting.db.test.ts packages/domain/src/prompts.test.ts packages/database/src/migrate.test.ts --exclude '.worktrees/**'` passed with 25 tests passed, 26 skipped, and 0 failed. `pnpm exec tsc --noEmit` and `git diff --check` passed.
+
+### Concern
+
+The four database integration tests remain skipped without `DCC_TEST_DATABASE_URL`; they exercise the real concurrent/idempotent persistence and SQL constraints in a PostgreSQL-enabled environment.
+
+## Review fix round 2
+
+### Changes
+
+- Replaced the supplied-client lock/read/update sequence with a single pending-only `UPDATE ... RETURNING`, followed only on a lost race by a fresh `SELECT`. PostgreSQL rechecks the pending predicate after a concurrent update releases its row lock, and the separate fallback statement sees the terminal row under a new snapshot.
+- This has no transaction-ownership assumption, so it is equally correct for the default pool, an explicit `pg.Client`, and an explicit `pg.Pool`.
+- Updated the real contention integration case to call the helper through an explicit second `pg.Client`.
+
+### RED/GREEN evidence
+
+RED: `pnpm exec vitest run packages/domain/src/ai-accounting.test.ts --exclude '.worktrees/**'` failed because the former supplied-client path issued only the initial read/lock instead of an atomic pending-only update and fresh fallback read.
+
+GREEN: `pnpm exec vitest run packages/domain/src/ai-accounting.test.ts packages/domain/src/ai-accounting.db.test.ts packages/domain/src/prompts.test.ts packages/database/src/migrate.test.ts --exclude '.worktrees/**'` passed with 25 tests passed, 26 skipped, and 0 failed. `pnpm exec tsc --noEmit` and `git diff --check` passed.
+
+### Concern
+
+The explicit-client PostgreSQL contention test remains skipped here without `DCC_TEST_DATABASE_URL`; it runs in database-enabled CI.

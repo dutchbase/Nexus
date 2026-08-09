@@ -14,7 +14,7 @@ import {
   claimNotificationDelivery, completeNotificationDelivery, failNotificationDelivery, renewJobLease,
   renewNotificationDeliveryLease, recordWorkerHeartbeat, WORKER_HEARTBEAT_INTERVAL_MS,
   planningPromptInputs, renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolvedPromptFor, snapshotPrompt, syncOpenPullRequests,
-  isDeepSeekModel,
+  createAiInvocation, isDeepSeekModel,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
@@ -35,12 +35,12 @@ import { failExecutionPublication, handleExecutionPublicationFailure, prepareExe
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
 import {
-  approvedExecutionInput, approvedPhaseSkills, assertApprovedSkillSnapshot, assertExecutionPublicationGate, prReviewSnapshotInput, shouldRetryPrReview,
+  approvedExecutionInput, approvedPhaseSkills, assertApprovedSkillSnapshot, assertExecutionPublicationGate, finalizeAiUsage, prReviewSnapshotInput, shouldRetryPrReview,
 } from "./worker-boundary.ts";
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
 import {
-  finalizePlanningFailure, finalizePlanningSuccess, initializePlanningAttempt, LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch, terminalizePrReview,
+  finalizePlanningCancellation, finalizePlanningFailure, finalizePlanningSuccess, initializePlanningAttempt, isPlanningCancellation, LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch, terminalizePrReview,
   withContainedLeaseHeartbeat, withLeaseHeartbeat, type LeaseGuard,
 } from "./workflow-state.ts";
 
@@ -77,6 +77,7 @@ const workerCapabilities = [
 ].sort();
 let stopping = false;
 let activeExecutionCancellation: AbortController | null = null;
+let activePlanningCancellation: AbortController | null = null;
 let lastPullRequestSync = 0;
 let lastNotificationDelivery = 0;
 let lastGithubImport = 0;
@@ -84,8 +85,8 @@ let lastSessionCleanup = 0;
 let lastWorkflowRecovery = 0;
 let lastWorkerHeartbeat = 0;
 
-process.on("SIGTERM", () => { stopping = true; activeExecutionCancellation?.abort(); });
-process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort(); });
+process.on("SIGTERM", () => { stopping = true; activeExecutionCancellation?.abort(); activePlanningCancellation?.abort(); });
+process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort(); activePlanningCancellation?.abort(); });
 
 function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");
@@ -194,6 +195,13 @@ async function resolvedGlobalPrompt(promptType: string) {
 async function transitionToPlanning(client: any, ticketId: string, jobId: string, runId: string, lease: LeaseGuard) {
   const ticket = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticketId])).rows[0];
   if (!ticket) throw new Error("ticket not found");
+  // Closes the same silent-un-cancel hole storePlan/storeRevisedPlan already guard against
+  // (see the `if (ticket.status !== "Cancelled")` checks in those functions): if the ticket was
+  // cancelled in the window between the worker claiming this job and this transition running,
+  // throwing here — before the UPDATE below — rolls back the whole initializePlanningAttempt
+  // transaction (including the agent_runs INSERT that precedes this call), so no run ever starts
+  // and the ticket stays Cancelled instead of silently flipping back to Planning.
+  if (ticket.status === "Cancelled") throw Object.assign(new Error("ticket was cancelled before planning started"), { code: "ticket_cancelled_before_planning" });
   await lease.run(() => client.query("UPDATE tickets SET status='Planning',updated_at=now() WHERE id=$1", [ticketId]));
   await lease.run(() => client.query(
     `INSERT INTO ticket_status_history
@@ -221,14 +229,16 @@ async function storePlan(input: {
     ))).rows[0];
     await lease.run(() => client.query("UPDATE plans SET current_version_id=$2,updated_at=now() WHERE id=$1", [plan.id, version.id]));
     const ticket = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
-    await lease.run(() => client.query("UPDATE tickets SET status='Plan Ready for Review',updated_at=now() WHERE id=$1", [input.ticket.id]));
-    await lease.run(() => client.query(
-      `INSERT INTO ticket_status_history
-       (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
-       VALUES ($1,$2,'Plan Ready for Review','Planning completed','worker',$3,$4,$5)`,
-      [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
-    ));
-    await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId }, lease.assertOwned);
+    if (ticket.status !== "Cancelled") {
+      await lease.run(() => client.query("UPDATE tickets SET status='Plan Ready for Review',updated_at=now() WHERE id=$1", [input.ticket.id]));
+      await lease.run(() => client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
+         VALUES ($1,$2,'Plan Ready for Review','Planning completed','worker',$3,$4,$5)`,
+        [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
+      ));
+      await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId }, lease.assertOwned);
+    }
     await lease.run(() => client.query(
       "UPDATE agent_runs SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3,metadata_json=metadata_json || $4::jsonb WHERE id=$1",
       [input.runId, input.sessionId, input.exitCode, JSON.stringify({ response: input.raw })],
@@ -258,21 +268,23 @@ async function storeRevisedPlan(input: {
       [locked.id, version.id],
     ));
     const ticket = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [input.ticket.id])).rows[0];
-    await lease.run(() => client.query(
-      `UPDATE tickets SET status='Plan Ready for Review',approved_plan_version_id=NULL,
-       approved_plan_hash=NULL,approved_ticket_version=NULL,approved_project_config_version=NULL,
-       approved_model_config_json=NULL,approved_skill_snapshot_id=NULL,
-       approved_prompt_versions_json=NULL,plan_approved_at=NULL,updated_at=now()
-       WHERE id=$1`,
-      [input.ticket.id],
-    ));
-    await lease.run(() => client.query(
-      `INSERT INTO ticket_status_history
-       (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
-       VALUES ($1,$2,'Plan Ready for Review','Plan revision completed','worker',$3,$4,$5)`,
-      [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
-    ));
-    await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId }, lease.assertOwned);
+    if (ticket.status !== "Cancelled") {
+      await lease.run(() => client.query(
+        `UPDATE tickets SET status='Plan Ready for Review',approved_plan_version_id=NULL,
+         approved_plan_hash=NULL,approved_ticket_version=NULL,approved_project_config_version=NULL,
+         approved_model_config_json=NULL,approved_skill_snapshot_id=NULL,
+         approved_prompt_versions_json=NULL,plan_approved_at=NULL,updated_at=now()
+         WHERE id=$1`,
+        [input.ticket.id],
+      ));
+      await lease.run(() => client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id,related_plan_version_id)
+         VALUES ($1,$2,'Plan Ready for Review','Plan revision completed','worker',$3,$4,$5)`,
+        [input.ticket.id, ticket.status, input.jobId, input.runId, version.id],
+      ));
+      await enqueueNotification(client, "plan.ready_for_review", input.ticket.id, version.id, { runId: input.runId }, lease.assertOwned);
+    }
     await lease.run(() => client.query(
       "UPDATE agent_runs SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3,metadata_json=metadata_json || $4::jsonb WHERE id=$1",
       [input.runId, input.sessionId, input.exitCode, JSON.stringify({ response: input.raw })],
@@ -318,16 +330,18 @@ async function runPlanning(job: any, lease: LeaseGuard) {
   // so a revision doesn't need real CLI session continuity — just a fresh id.
   const sessionId = randomUUID();
   const runType = revising ? "plan_revision" : "planning";
+  const completePrompt = revising
+    ? `${input.content}\n\n## Plan revision instructions\n\n${revisionInstructions?.content ?? ""}\n\n## Previous approved-for-review plan\n\n${revision.previous_markdown}\n\n## Administrator feedback\n\n${revision.feedback}\n`
+    : input.content;
   let rawMarkdownForDebug: string | undefined;
   let temporary: string | undefined;
+  let cancellation: AbortController | undefined;
   try {
     await initializePlanningAttempt(inTransaction, lease, async (client) => {
+      await createAiInvocation({ id: runId, ticketId: ticket.id, projectId: input.project.id, runType, model: input.ai.model, reasoningLevel: input.ai.reasoning_level, taskPrompt: completePrompt }, client);
       await lease.run(() => client.query(
-        `INSERT INTO agent_runs
-         (id,ticket_id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
-         VALUES ($1,$2,$3,$4,'running',NULL,$5,$6,$7,now(),$8)`,
-        [runId, ticket.id, input.project.id, runType, input.ai.model, input.ai.reasoning_level,
-          planningStartPath, { job_id: job.id, project_config_version: input.project.config_version, planning_start_path: planningStartPath, environment_profile: "planning-minimal" }],
+        "UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1",
+        [runId, planningStartPath, { job_id: job.id, project_config_version: input.project.config_version, planning_start_path: planningStartPath, environment_profile: "planning-minimal" }],
       ));
       await transitionToPlanning(client, ticket.id, job.id, runId, lease);
     });
@@ -336,9 +350,6 @@ async function runPlanning(job: any, lease: LeaseGuard) {
       `INSERT INTO skill_snapshots (ticket_id,run_id,skills_json,content_hash) VALUES ($1,$2,$3,$4) RETURNING *`,
       [ticket.id, runId, JSON.stringify(copied.skills), copied.contentHash],
     ))).rows[0];
-    const completePrompt = revising
-      ? `${input.content}\n\n## Plan revision instructions\n\n${revisionInstructions?.content ?? ""}\n\n## Previous approved-for-review plan\n\n${revision.previous_markdown}\n\n## Administrator feedback\n\n${revision.feedback}\n`
-      : input.content;
     const promptSnapshot = await lease.run(() => snapshotPrompt({
       ticketId: ticket.id, projectId: input.project.id, phase: "planning", content: completePrompt,
       model: input.ai.model, reasoningLevel: input.ai.reasoning_level, skillSnapshotId: skillSnapshot.id,
@@ -357,30 +368,48 @@ async function runPlanning(job: any, lease: LeaseGuard) {
     const skillBundle = await materializeSkillBundle(runId, skillsForPhase(copied.skills, "planning"), temporary);
     const scenarioKey = ["mock", "scenario", "path"].join("_");
     await lease.assertOwned();
+    cancellation = new AbortController();
+    activePlanningCancellation = cancellation;
+    const cancellationPoll = setInterval(async () => {
+      try {
+        const row = (await pool.query("SELECT status FROM agent_runs WHERE id=$1", [runId])).rows[0];
+        if (row?.status === "cancellation_requested") cancellation?.abort();
+      } catch (error) {
+        console.error(`planning cancellation poll failed: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }, 250);
     const planningTask = revising
       ? `Return a complete revised implementation plan for ticket ${ticket.ticket_number}, applying the administrator feedback.`
       : `Create the implementation plan for ticket ${ticket.ticket_number}.`;
-    const result = planningIsDeepSeek
-      ? await invokeOpenCodePlanning({
-          task: `${planningTask} The attached file contains the complete planning instructions; follow them exactly and produce the full plan markdown with every required section.`,
-          promptFile,
-          model: input.ai.model,
-          workingDirectory: planningStartPath,
-          apiKey: planningDeepSeekKey,
-          signal: lease.signal,
-          timeoutMs: Number(input.project.config_json?.planning_timeout_ms ?? 30 * 60 * 1000),
-        })
-      : await invokePlanningClaude({
-          task: planningTask,
-          sessionId, model: input.ai.model, effort: input.ai.reasoning_level, promptFile,
-          skillBundleDir: skillBundle.additionalDirectory, pluginDirectories: skillBundle.pluginDirectories, workingDirectory: planningStartPath,
-          maxTurns: Number(input.project.config_json?.planning_max_turns ?? 80),
-          oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
-          scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
-          signal: lease.signal,
-          timeoutMs: Number(input.project.config_json?.planning_timeout_ms ?? 30 * 60 * 1000),
-        });
+    let result: Awaited<ReturnType<typeof invokePlanningClaude>> | Awaited<ReturnType<typeof invokeOpenCodePlanning>>;
+    try {
+      result = planningIsDeepSeek
+        ? await invokeOpenCodePlanning({
+            task: `${planningTask} The attached file contains the complete planning instructions; follow them exactly and produce the full plan markdown with every required section.`,
+            promptFile,
+            model: input.ai.model,
+            workingDirectory: planningStartPath,
+            apiKey: planningDeepSeekKey,
+            signal: AbortSignal.any([cancellation.signal, lease.signal]),
+            timeoutMs: Number(input.project.config_json?.planning_timeout_ms ?? 30 * 60 * 1000),
+            cancelledErrorCode: "planning_cancelled",
+          })
+        : await invokePlanningClaude({
+            task: planningTask,
+            sessionId, model: input.ai.model, effort: input.ai.reasoning_level, promptFile,
+            skillBundleDir: skillBundle.additionalDirectory, pluginDirectories: skillBundle.pluginDirectories, workingDirectory: planningStartPath,
+            maxTurns: Number(input.project.config_json?.planning_max_turns ?? 80),
+            oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
+            scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
+            signal: AbortSignal.any([cancellation.signal, lease.signal]),
+            timeoutMs: Number(input.project.config_json?.planning_timeout_ms ?? 30 * 60 * 1000),
+          });
+    } finally {
+      clearInterval(cancellationPoll);
+      if (activePlanningCancellation === cancellation) activePlanningCancellation = null;
+    }
     await lease.assertOwned();
+    await finalizeAiUsage(runId, result);
     rawMarkdownForDebug = result.markdown;
     const markdown = parsePlanMarkdown(result.markdown);
     const raw = planningIsDeepSeek
@@ -400,40 +429,86 @@ async function runPlanning(job: any, lease: LeaseGuard) {
     await store();
   } catch (error) {
     await lease.assertOwned();
+    await finalizeAiUsage(runId, error as { usage?: any });
     const message = error instanceof Error ? error.message : "planning failed";
-    // ponytail: transitionToPlanning() moves the ticket to Planning before
-    // invocation; on failure it must land on a state the admin can recover
-    // from. "Planning Failed" is a valid status the approve/revision
-    // endpoints accept — reverting to "Planning Queued" (an active-queue
-    // state that no longer exists) stranded tickets and blocked retries.
-    await finalizePlanningFailure(inTransaction, lease, { jobId: job.id, workerId, message }, async (client) => {
-      const rawStdoutOnFailure = typeof (error as any)?.stdout === "string" ? (error as any).stdout : undefined;
-      await lease.run(() => client.query(
-        `UPDATE agent_runs SET status='failed',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4,metadata_json=metadata_json || $5::jsonb WHERE id=$1`,
-        [runId, (error as any)?.exitCode ?? 1,
-          error instanceof ClaudePlanningError ? error.code : error instanceof Error && error.message.startsWith("invalid_plan_structure") ? "invalid_plan_structure" : "planning_failed",
-          message,
-          // ponytail: capture the raw markdown (success/invalid-structure)
-          // or raw stdout (hard CLI failure — e.g. denied-tool max-turns) so
-          // a future failure is diagnosable without re-running the costly
-          // CLI call. See DCC-1014, 2026-08-07: three failures in a row
-          // left nothing but a one-line summary to investigate from.
-          JSON.stringify({
-            ...(rawMarkdownForDebug ? { raw_markdown: rawMarkdownForDebug.slice(0, 8000) } : {}),
-            ...(rawStdoutOnFailure ? { raw_stdout_on_failure: rawStdoutOnFailure } : {}),
-          })],
-      ));
-      const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
-      if (!current || !["Planning", expectedStatus].includes(current.status)) return;
-      await lease.run(() => client.query("UPDATE tickets SET status='Planning Failed',updated_at=now() WHERE id=$1", [ticket.id]));
-      await lease.run(() => client.query(
-        `INSERT INTO ticket_status_history
-         (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
-         VALUES ($1,$2,'Planning Failed',$3,'worker',$4,$5)`,
-        [ticket.id, current.status, `Planning job failed: ${message.slice(0, 500)}`, job.id, runId],
-      ));
-      await enqueueNotification(client, "planning.failed", ticket.id, runId, { runId }, lease.assertOwned);
+    const cancelledBeforeStart = (error as any)?.code === "ticket_cancelled_before_planning";
+    const invocationCancelled = (error instanceof ClaudePlanningError && error.code === "planning_cancelled")
+      || (error instanceof OpenCodeError && error.code === "planning_cancelled");
+    // "planning_cancelled" from the invocation is ambiguous on its own: it means
+    // AbortSignal.any([cancellation.signal, lease.signal]) fired, and neither
+    // invokePlanningClaude nor invokeOpenCodePlanning can say which constituent
+    // signal did it. Three different events reach this point as that same code:
+    //   - a real admin cancellation  -> the 250ms poll sees
+    //     agent_runs.status='cancellation_requested' and aborts `cancellation`
+    //   - a lost/expired lease       -> aborts only lease.signal
+    //   - a worker shutdown          -> SIGTERM/SIGINT abort
+    //     activePlanningCancellation, which IS this same `cancellation` object,
+    //     so cancellation.signal.aborted alone cannot rule a shutdown out
+    // Requiring `cancellation` to have fired excludes the lease case, and
+    // excluding `stopping` (set synchronously by those same handlers, before the
+    // abort propagates through the invocation and throws) excludes the shutdown
+    // case — leaving only a genuine cancellation_requested-driven abort classified
+    // as cancelled. A shutdown mid-planning therefore falls through to the
+    // recoverable Planning Failed / requeue path instead of burning the ticket's
+    // retry and falsely telling the admin that someone cancelled it.
+    const cancelled = isPlanningCancellation({
+      cancelledBeforeStart, invocationCancelled, cancellationAborted: cancellation?.signal.aborted === true, stopping,
     });
+    // errorCode is derived FROM `cancelled` so the two can never disagree: whenever an abort is
+    // not being treated as a cancellation, the ambiguous "planning_cancelled" code must not reach
+    // agent_runs.error_code, or the ticket page's failure banner (gated on "planning_failed" /
+    // "invalid_plan_structure") silently vanishes for a run the admin still has to act on.
+    const errorCode = cancelled ? "planning_cancelled"
+      // Claude keeps its other codes — "planning_timeout" is meaningful and reported separately;
+      // only its ambiguous "planning_cancelled" is remapped when this was not a real cancellation.
+      : error instanceof ClaudePlanningError ? (error.code === "planning_cancelled" ? "planning_failed" : error.code)
+      // Every OpenCode code (opencode_failed / opencode_no_output / opencode_timeout, plus a
+      // shutdown-induced "planning_cancelled") misses that banner gate, so a non-cancelled OpenCode
+      // failure collapses to the generic code, exactly as it did before this branch added an
+      // OpenCodeError arm here.
+      : error instanceof OpenCodeError ? "planning_failed"
+      : error instanceof Error && error.message.startsWith("invalid_plan_structure") ? "invalid_plan_structure"
+      : "planning_failed";
+    const rawStdoutOnFailure = typeof (error as any)?.stdout === "string" ? (error as any).stdout : undefined;
+    if (cancelled) {
+      // Mirrors runExecution's cancelled branch: best-effort terminal-state
+      // cleanup via pool.query/inTransaction directly, not lease.run — the
+      // lease may already be lost by the time cancellation has fully unwound.
+      await finalizePlanningCancellation(pool, inTransaction, {
+        runId, ticketId: ticket.id, jobId: job.id, exitCode: (error as any)?.exitCode ?? 1, errorCode, message,
+      });
+    } else {
+      // ponytail: transitionToPlanning() moves the ticket to Planning before
+      // invocation; on failure it must land on a state the admin can recover
+      // from. "Planning Failed" is a valid status the approve/revision
+      // endpoints accept — reverting to "Planning Queued" (an active-queue
+      // state that no longer exists) stranded tickets and blocked retries.
+      await finalizePlanningFailure(inTransaction, lease, { jobId: job.id, workerId, message }, async (client) => {
+        await lease.run(() => client.query(
+          `UPDATE agent_runs SET status='failed',finished_at=now(),exit_code=$2,error_code=$3,error_message=$4,metadata_json=metadata_json || $5::jsonb WHERE id=$1`,
+          [runId, (error as any)?.exitCode ?? 1, errorCode, message,
+            // ponytail: capture the raw markdown (success/invalid-structure)
+            // or raw stdout (hard CLI failure — e.g. denied-tool max-turns) so
+            // a future failure is diagnosable without re-running the costly
+            // CLI call. See DCC-1014, 2026-08-07: three failures in a row
+            // left nothing but a one-line summary to investigate from.
+            JSON.stringify({
+              ...(rawMarkdownForDebug ? { raw_markdown: rawMarkdownForDebug.slice(0, 8000) } : {}),
+              ...(rawStdoutOnFailure ? { raw_stdout_on_failure: rawStdoutOnFailure } : {}),
+            })],
+        ));
+        const current = (await client.query("SELECT status FROM tickets WHERE id=$1 FOR UPDATE", [ticket.id])).rows[0];
+        if (!current || !["Planning", expectedStatus].includes(current.status)) return;
+        await lease.run(() => client.query("UPDATE tickets SET status='Planning Failed',updated_at=now() WHERE id=$1", [ticket.id]));
+        await lease.run(() => client.query(
+          `INSERT INTO ticket_status_history
+           (ticket_id,previous_status,new_status,reason,actor_type,related_job_id,related_run_id)
+           VALUES ($1,$2,'Planning Failed',$3,'worker',$4,$5)`,
+          [ticket.id, current.status, `Planning job failed: ${message.slice(0, 500)}`, job.id, runId],
+        ));
+        await enqueueNotification(client, "planning.failed", ticket.id, runId, { runId }, lease.assertOwned);
+      });
+    }
     throw error;
   } finally {
     if (temporary) await rm(temporary, { recursive: true, force: true });
@@ -546,7 +621,8 @@ async function runExecution(job: any, lease: LeaseGuard) {
   try {
     await lease.assertOwned();
     await inTransaction(async (client) => {
-      await client.query(`INSERT INTO agent_runs (id,ticket_id,project_id,run_type,status,model,reasoning_level,working_directory,started_at,metadata_json) VALUES ($1,$2,$3,$4,'running',$5,$6,$7,now(),$8)`, [runId, ticket.id, input.project.id, repairing ? "execution.repair" : "execution", input.ai.model, input.ai.reasoning_level, worktree.worktreePath, { job_id: job.id, execution_attempt_id: attempt.id, project_config_version: input.project.config_version, approved_input_snapshot_id: input.approvedInputSnapshotId, approved_input_hash: input.inputHash }]);
+      await createAiInvocation({ id: runId, ticketId: ticket.id, projectId: input.project.id, runType: repairing ? "execution.repair" : "execution", model: input.ai.model, reasoningLevel: input.ai.reasoning_level, taskPrompt: input.content }, client);
+      await client.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [runId, worktree.worktreePath, { job_id: job.id, execution_attempt_id: attempt.id, project_config_version: input.project.config_version, approved_input_snapshot_id: input.approvedInputSnapshotId, approved_input_hash: input.inputHash }]);
       await client.query("UPDATE execution_attempts SET agent_run_id=$2,validation_status='executing' WHERE id=$1", [attempt.id, runId]);
       await client.query(`INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,agent_run_id,execution_attempt_id) VALUES ($1,$2,'execution_log','staged',now() + interval '1 day',$3,$4)`, [logArtifactId, stagedLog.relativePath, runId, attempt.id]);
     });
@@ -684,6 +760,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
           invoke: invokeExecutionClaude,
         });
     await lease.assertOwned();
+    await finalizeAiUsage(runId, result);
     // ponytail: the Agent-tool publication gate encodes a Claude-specific
     // quality bar (forced subagent use); OpenCode runs are gated by the same
     // downstream validation (worktree checks + validation commands) instead.
@@ -787,6 +864,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
   } catch (error) {
     if (error instanceof PublicationError) throw error;
     await lease.assertOwned();
+    await finalizeAiUsage(runId, error as { usage?: any });
     // Match on the error code regardless of concrete error class: DeepSeek
     // executions throw OpenCodeError (not ClaudeExecutionError), but both
     // taxonomies use the same "execution_cancelled"/"execution_timeout"
@@ -1186,16 +1264,8 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     // invocation fail deterministically at this exact step forever, permanently
     // defeating retry/backoff for this job type.
     const sessionId = randomUUID();
-    await lease.run(() => pool.query(
-      `INSERT INTO agent_runs
-       (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
-       VALUES ($1,$2,'pr_ai_review','running',NULL,$3,$4,$5,now(),$6)`,
-      [newRunId, project.id, model, reasoningLevel, immutableReview.worktreePath,
-        { job_id: job.id, pr_ai_review_id: payload.pr_ai_review_id }],
-    ));
-    runId = newRunId;
-    await lease.run(() => pool.query("UPDATE pr_ai_reviews SET agent_run_id=$1 WHERE id=$2", [runId, payload.pr_ai_review_id]));
     const promptSnapshot = await lease.run(() => snapshotPrompt(prReviewSnapshotInput({
+      ticketId: pullRequest.ticket_id ?? null,
       projectId: project.id,
       content: prompt,
       model,
@@ -1209,7 +1279,10 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
       reviewedBaseBranch: pullRequest.base_branch,
       reviewedBaseSha,
     })));
-    await lease.run(() => pool.query("UPDATE agent_runs SET prompt_snapshot_id=$2 WHERE id=$1", [runId, promptSnapshot.id]));
+    await createAiInvocation({ id: newRunId, ticketId: pullRequest.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_ai_review", model, reasoningLevel, taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
+    await lease.run(() => pool.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [newRunId, immutableReview.worktreePath, { job_id: job.id, pr_ai_review_id: payload.pr_ai_review_id }]));
+    runId = newRunId;
+    await lease.run(() => pool.query("UPDATE pr_ai_reviews SET agent_run_id=$1 WHERE id=$2", [runId, payload.pr_ai_review_id]));
 
     const temporary = await mkdtemp(path.join(tmpdir(), "dcc-pr-review-"));
     try {
@@ -1239,6 +1312,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
             signal: lease.signal,
           });
       await lease.assertOwned();
+      await finalizeAiUsage(runId, result);
       // Publish the correlation id only after the CLI has completed, matching
       // runPlanning's same ordering (agent_runs.claude_session_id stays NULL
       // until the invocation this run actually used has finished).
@@ -1268,6 +1342,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     }
   } catch (error: any) {
     await lease.assertOwned();
+    if (runId) await finalizeAiUsage(runId, error);
     const storedReview = (await pool.query("SELECT * FROM pr_ai_reviews WHERE id=$1", [payload.pr_ai_review_id])).rows[0];
     if (storedReview?.status !== "running") return;
     const retryablePublication = Boolean(storedReview?.raw_output && storedReview.publication_status === "pending");
@@ -1307,12 +1382,12 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
     });
     runId = randomUUID();
     const sessionId = randomUUID();
-    await lease.run(() => pool.query(
-      `INSERT INTO agent_runs
-       (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
-      VALUES ($1,$2,$3,$4,NULL,$5,$6,$7,now(),$8)`,
-      [runId, project.id, "pr_follow_up_description", "running", "haiku", "low", project.repository_path, { job_id: job.id, pull_request_id: pullRequest.id }],
-    ));
+    const promptSnapshot = await lease.run(() => snapshotPrompt({
+      ticketId: pullRequest.ticket_id ?? null, projectId: project.id, phase: "pr_follow_up_description", content: prompt,
+      model: "haiku", reasoningLevel: "low", metadata: { pullRequestId: pullRequest.id, promptVersionIds: { "global.follow-up-ticket": promptRow.active_version_id } },
+    }));
+    await createAiInvocation({ id: runId, ticketId: pullRequest.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_follow_up_description", model: "haiku", reasoningLevel: "low", taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
+    await lease.run(() => pool.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [runId, project.repository_path, { job_id: job.id, pull_request_id: pullRequest.id }]));
     const temporary = await mkdtemp(path.join(tmpdir(), "dcc-follow-up-description-"));
     try {
       const promptFile = path.join(temporary, "follow-up-ticket-prompt.md");
@@ -1326,6 +1401,7 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
         signal: lease.signal,
       });
       await lease.assertOwned();
+      await finalizeAiUsage(runId, result);
       const description = formatFollowUpDescription({ number: pullRequest.number, title: pullRequest.title, url: pullRequest.url }, result.markdown);
       await runLeaseFencedBatch(lease, [
         () => pool.query("UPDATE jobs SET payload_json=payload_json || jsonb_build_object($2::text,$3::text),updated_at=now() WHERE id=$1", [job.id, "generated_description", description]),
@@ -1340,7 +1416,10 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
     }
   } catch (error) {
     await lease.assertOwned();
-    if (runId) await lease.run(() => pool.query("UPDATE agent_runs SET status=$2,finished_at=now(),error_message=$3 WHERE id=$1", [runId, "failed", error instanceof Error ? error.message : "follow-up description failed"]));
+    if (runId) {
+      await finalizeAiUsage(runId, error as { usage?: any });
+      await lease.run(() => pool.query("UPDATE agent_runs SET status=$2,finished_at=now(),error_message=$3 WHERE id=$1", [runId, "failed", error instanceof Error ? error.message : "follow-up description failed"]));
+    }
     throw error;
   }
 }
@@ -1418,18 +1497,15 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
     const newRunId = randomUUID();
     const sessionId = randomUUID();
     await lease.assertOwned();
-    await pool.query(
-      `INSERT INTO agent_runs
-       (id,project_id,run_type,status,claude_session_id,model,reasoning_level,working_directory,started_at,metadata_json)
-       VALUES ($1,$2,'pr_conflict_resolution','running',NULL,$3,$4,$5,now(),$6)`,
-      [newRunId, project.id, model, reasoningLevel, worktree.worktreePath,
-        {
-          job_id: job.id,
-          pr_conflict_resolution_id: payload.pr_conflict_resolution_id,
-          authority_profile: "conflict-resolution",
-          allowed_write_paths: conflicts,
-        }],
-    );
+    const promptSnapshot = await snapshotPrompt({
+      ticketId: pullRequest.ticket_id ?? null, projectId: project.id, phase: "pr_conflict_resolution", content: prompt,
+      model, reasoningLevel, metadata: { pullRequestId: pullRequest.id, promptVersionIds: { "global.pr-conflict-resolution": promptRow.active_version_id } },
+    });
+    await createAiInvocation({ id: newRunId, ticketId: pullRequest.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_conflict_resolution", model, reasoningLevel, taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
+    await pool.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [newRunId, worktree.worktreePath, {
+      job_id: job.id, pr_conflict_resolution_id: payload.pr_conflict_resolution_id,
+      authority_profile: "conflict-resolution", allowed_write_paths: conflicts,
+    }]);
     runId = newRunId;
     await pool.query(
       "UPDATE pr_conflict_resolutions SET agent_run_id=$1 WHERE id=$2",
@@ -1472,6 +1548,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
             signal: lease.signal,
           });
       await lease.assertOwned();
+      await finalizeAiUsage(runId, result);
       await pool.query("UPDATE agent_runs SET claude_session_id=$2 WHERE id=$1", [runId, sessionId]);
 
       await stageConflictResolutionPaths(worktree.worktreePath, conflicts);
@@ -1528,6 +1605,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
   } catch (error: any) {
     await lease.assertOwned();
     if (runId) {
+      await finalizeAiUsage(runId, error);
       await pool.query(
         "UPDATE agent_runs SET status='failed',finished_at=now(),error_message=$2 WHERE id=$1",
         [runId, error.message],
@@ -1666,7 +1744,9 @@ while (!stopping) {
       if (error instanceof LeaseLostError) return;
       if (error instanceof ClaudeAuthError) console.error(`${error.code}: ${error.message}`);
       else console.error(error instanceof Error ? error.message : "job failed");
-      if ((error instanceof ClaudeExecutionError || error instanceof OpenCodeError) && error.code === "execution_cancelled") {
+      if (((error instanceof ClaudeExecutionError || error instanceof ClaudePlanningError || error instanceof OpenCodeError)
+        && (error.code === "execution_cancelled" || error.code === "planning_cancelled"))
+        || (error as any)?.code === "ticket_cancelled_before_planning") {
         await lease.run(() => pool.query(
           `UPDATE jobs SET status='cancelled',completed_at=now(),claimed_by=NULL,lease_expires_at=NULL,updated_at=now()
            WHERE id=$1 AND status='running' AND claimed_by=$2 AND lease_expires_at > now()`,
