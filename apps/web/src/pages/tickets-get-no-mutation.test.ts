@@ -83,9 +83,12 @@ describe("ticket detail GET", () => {
     });
 
     const page = await tickets.render(new URL("http://test/admin/tickets/T-1"), session, {});
+    const body = page?.body ?? "";
 
-    expect(page?.body).toMatch(/data-start-execution(?![^>]*\bdisabled\b)[^>]*>Retry execution/);
-    expect(page?.body).toContain('href="/admin/tickets/T-1/plans/1"');
-    expect(page?.body).toContain(">Revise plan</a>");
+    expect(body).toMatch(/data-start-execution(?![^>]*\bdisabled\b)[^>]*>Retry execution/);
+    expect(body).toContain('href="/admin/tickets/T-1/plans/1"');
+    expect(body).toContain(">Revise plan</a>");
+    expect(body.indexOf("Revise plan")).toBeLessThan(body.indexOf("data-approve-planning"));
+    expect(body.indexOf("data-approve-planning")).toBeLessThan(body.indexOf("data-start-execution"));
   });
 });
