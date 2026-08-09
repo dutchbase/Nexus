@@ -4,7 +4,7 @@ module.exports = {
       name: 'dcc-web',
       cwd: __dirname,
       script: 'bash',
-      args: ['-c', 'set -a; source .env; set +a; exec env NODE_ENV=production DCC_PROCESS_ROLE=web pnpm --filter web dev'],
+      args: ['-c', 'set -a; source .env; set +a; exec env -u GITHUB_TOKEN NODE_ENV=production DCC_PROCESS_ROLE=web pnpm --filter web dev'],
       autorestart: true,
     },
     {
