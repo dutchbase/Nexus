@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
-import { access, cp, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
+import { access, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
@@ -410,6 +410,31 @@ export async function validateEffectiveWorktree(input: {
     );
   }
   results.push({ check: "changed-file inspection", status: "passed", detail: `${files.length} changed file(s)` });
+
+  const [tracked, untracked] = await Promise.all([
+    git(input.worktreePath, ["diff", "--numstat", input.baseCommit]),
+    git(input.worktreePath, ["ls-files", "-z", "--others", "--exclude-standard"]),
+  ]);
+  const trackedContent = tracked.stdout.split("\n").some((line) => {
+    const [inserted, deleted] = line.split("\t");
+    return inserted === "-" || deleted === "-" || Number(inserted) > 0 || Number(deleted) > 0;
+  });
+  const untrackedContent = (await Promise.all(untracked.stdout.split("\0").filter(Boolean).map(async (file) => {
+    try {
+      return (await lstat(path.join(input.worktreePath, file))).size > 0;
+    } catch (error: any) {
+      if (error?.code === "ENOENT") return false;
+      throw error;
+    }
+  }))).some(Boolean);
+  if (!trackedContent && !untrackedContent) {
+    throw new WorktreeValidationError(
+      "content-change inspection",
+      "execution produced only contentless file changes",
+      results,
+    );
+  }
+  results.push({ check: "content-change inspection", status: "passed" });
 
   const protectedMatches = files.filter((file) =>
     matchesProtectedPath(file, input.protectedPaths?.length ? input.protectedPaths : DEFAULT_PROTECTED_PATHS));

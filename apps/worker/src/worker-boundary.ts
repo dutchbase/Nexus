@@ -112,7 +112,7 @@ export function approvedExecutionInput(snapshot: {
     throw new Error("approved execution input is incomplete");
   }
   const runtime = [
-    "## Runtime worktree details", `\`\`\`json\n${JSON.stringify({ path: details.worktreePath, branch: details.branchName, base_commit: details.baseCommit }, null, 2)}\n\`\`\``,
+    "## Runtime worktree details", `\`\`\`json\n${JSON.stringify({ path: ".", branch: details.branchName, base_commit: details.baseCommit }, null, 2)}\n\`\`\``,
   ];
   if (phase === "repair") runtime.push(
     "## Current worktree diff", details.currentDiff ?? "",

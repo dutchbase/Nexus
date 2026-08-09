@@ -98,7 +98,8 @@ describe("worker orchestration boundary", () => {
       promptVersionIds: { "global.execution-repair": "prompt-v1" },
     });
     expect(result.content).toContain("Approved immutable repair prompt.");
-    expect(result.content).toContain("/runtime/worktree");
+    expect(result.content).toContain('"path": "."');
+    expect(result.content).not.toContain("/runtime/worktree");
     expect(result.content).toContain("+runtime diff");
     expect(result.content).toContain("runtime feedback");
     expect(result.inputHash).toBe(preview.inputHash);

@@ -20,6 +20,7 @@ import {
   mergeBaseIntoWorktree,
   stageConflictResolutionPaths,
   sanitizeValidationOutput,
+  validateEffectiveWorktree,
   validateExecutionWorktree,
   worktreeDiff,
 } from "./index.ts";
@@ -40,7 +41,7 @@ async function initRepo(dir: string) {
   await git(dir, ["config", "user.name", "git-runner test"]);
 }
 
-async function writeAndCommit(dir: string, file: string, content: string, message: string) {
+async function writeAndCommit(dir: string, file: string, content: string | Uint8Array, message: string) {
   await writeFile(path.join(dir, file), content);
   await git(dir, ["add", "-A"]);
   await git(dir, ["commit", "-m", message]);
@@ -429,6 +430,78 @@ describe("execution commit containment", () => {
 });
 
 describe("execution effective diff", () => {
+  it("rejects only empty untracked files", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-contentless-untracked-"));
+    try {
+      await initRepo(tmp);
+      await writeAndCommit(tmp, "base.txt", "base\n", "initial commit");
+      const baseCommit = (await git(tmp, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeFile(path.join(tmp, "empty.txt"), "");
+
+      await expect(validateEffectiveWorktree({ worktreePath: tmp, baseCommit }))
+        .rejects.toThrow("execution produced only contentless file changes");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects empty tracked files", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-contentless-tracked-"));
+    try {
+      await initRepo(tmp);
+      await writeAndCommit(tmp, "base.txt", "base\n", "initial commit");
+      const baseCommit = (await git(tmp, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeAndCommit(tmp, "empty.txt", "", "empty file");
+
+      await expect(validateEffectiveWorktree({ worktreePath: tmp, baseCommit }))
+        .rejects.toThrow("execution produced only contentless file changes");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a non-empty untracked file", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-contentful-untracked-"));
+    try {
+      await initRepo(tmp);
+      await writeAndCommit(tmp, "base.txt", "base\n", "initial commit");
+      const baseCommit = (await git(tmp, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeFile(path.join(tmp, "output.txt"), "output\n");
+
+      await expect(validateEffectiveWorktree({ worktreePath: tmp, baseCommit })).resolves.toBeDefined();
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a whitespace-only text edit", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-contentful-text-"));
+    try {
+      await initRepo(tmp);
+      await writeAndCommit(tmp, "base.txt", "base\n", "initial commit");
+      const baseCommit = (await git(tmp, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeFile(path.join(tmp, "base.txt"), "base \n");
+
+      await expect(validateEffectiveWorktree({ worktreePath: tmp, baseCommit })).resolves.toBeDefined();
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("allows a binary edit", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-contentful-binary-"));
+    try {
+      await initRepo(tmp);
+      await writeAndCommit(tmp, "image.bin", Buffer.from([0, 255]), "initial commit");
+      const baseCommit = (await git(tmp, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeFile(path.join(tmp, "image.bin"), Buffer.from([0, 255, 1]));
+
+      await expect(validateEffectiveWorktree({ worktreePath: tmp, baseCommit })).resolves.toBeDefined();
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
   it("keeps committed and working task changes relative to the recorded base", async () => {
     const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-effective-diff-"));
     try {
@@ -536,13 +609,16 @@ describe("execution effective diff", () => {
     try {
       const repo = path.join(tmp, "repo");
       await initRepo(repo);
-      await writeAndCommit(repo, "before.txt", "safe\n", "initial commit");
+      const safeContent = "safe\n".repeat(20);
+      await writeAndCommit(repo, "before.txt", safeContent, "initial commit");
       const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
       await git(repo, ["mv", "before.txt", "after.txt"]);
+      await writeFile(path.join(repo, "after.txt"), safeContent + "updated\n");
 
       await commitExecutionChanges({ worktreePath: repo, baseCommit, message: "worker commit" });
 
-      expect((await git(repo, ["show", "--format=", "--name-status", "HEAD"])).stdout.trim()).toBe("R100\tbefore.txt\tafter.txt");
+      expect((await git(repo, ["show", "--format=", "--name-status", "HEAD"])).stdout.trim())
+        .toMatch(/^R\d+\tbefore\.txt\tafter\.txt$/);
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }
@@ -577,6 +653,7 @@ describe("execution effective diff", () => {
       const baseCommit = (await git(repo, ["rev-parse", "HEAD"])).stdout.trim();
       await mkdir(path.join(repo, "public"));
       await git(repo, ["mv", "secrets/old.txt", "public/new.txt"]);
+      await writeFile(path.join(repo, "public/new.txt"), "safe\nupdated\n");
 
       await expect(commitExecutionChanges({ worktreePath: repo, baseCommit, message: "worker commit" }))
         .rejects.toMatchObject({ check: "protected-path inspection" });
