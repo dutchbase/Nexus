@@ -30,7 +30,7 @@ export async function checkPlanApprovalGate(
     [ticketId],
   )).rows[0];
   if (!row) return { valid: false, code: "ticket_not_found", message: "ticket not found" };
-  if (!["Plan Approved", "Execution Queued"].includes(row.status)) {
+  if (!["Plan Approved", "Execution Queued", "Execution Failed"].includes(row.status)) {
     return { valid: false, code: "plan_approval_status_invalid", message: "the ticket must be approved or queued for execution" };
   }
   if (!row.approved_plan_version_id || !row.gate_plan_version_id) {

@@ -125,6 +125,71 @@ test("execution queueing binds the job to the exact approved input snapshot", as
   expect(response.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
 });
 
+test("execution retries a failed ticket with the approved plan and input snapshot", async () => {
+  const approvedInput = {
+    plan: { versionId: "plan-version", version: 1, contentHash: "plan-hash" },
+    ticket: { title: "Approved title" },
+    project: { configVersion: 1, config: {} }, models: {}, prompts: [], skills: [], policySources: [],
+  };
+  const { materialInput, inputHash } = (await import("@dcc/domain")).buildApprovedInputSnapshot(approvedInput as any);
+  const gateRow = {
+    id: "ticket", status: "Execution Failed", approved_plan_version_id: "plan-version",
+    approved_input_snapshot_id: "approved-input-1", gate_snapshot_id: "approved-input-1",
+    snapshot_ticket_id: "ticket", snapshot_plan_version_id: "plan-version",
+    snapshot_material_input: materialInput, snapshot_input_hash: inputHash,
+    gate_plan_version_id: "plan-version", current_version_id: "plan-version",
+    approved_plan_hash: "plan-hash", current_content_hash: "plan-hash", potentially_stale: false, plan_id: "plan",
+  };
+  pool.query.mockImplementation(async (sql: string) => sql.includes("id::text=$1")
+    ? { rows: [{ id: "ticket" }] }
+    : { rows: [gateRow] });
+  transactionClient = { query: vi.fn(async (sql: string, values?: unknown[]) => {
+    if (sql.includes("FROM tickets t")) return { rows: [gateRow] };
+    if (sql.includes("max(attempt_number)")) return { rows: [{ next: 2 }] };
+    if (sql.includes("FROM execution_attempts")) return { rows: [], rowCount: 0 };
+    if (sql.includes("INSERT INTO execution_attempts")) return { rows: [{ id: "attempt-2" }] };
+    if (sql.includes("INSERT INTO jobs")) return { rows: [{ id: "job-2", payload_json: values?.[2] }] };
+    return { rows: [], rowCount: 1 };
+  }) };
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await adminApi(request({}, "POST"), response, new URL("http://test/api/admin/tickets/ticket/execute"), { user_id: "admin" });
+
+  const attempt = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO execution_attempts"));
+  const queued = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO jobs"));
+  expect(attempt[1]).toEqual(["ticket", "plan-version", 2]);
+  expect(queued[1][0]).toBe("execution.run");
+  expect(queued[1][2]).toMatchObject({ plan_version_id: "plan-version", approved_input_snapshot_id: "approved-input-1" });
+  expect(response.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
+});
+
+test("revision from execution failure clears approval and queues planning revision", async () => {
+  pool.query.mockResolvedValue({ rows: [{
+    ticket_id: "ticket", current_version_id: "plan-version", status: "Execution Failed",
+    ticket_version: "2026-08-09T10:00:00Z", approved_input_snapshot_id: "approved-input-1",
+  }] });
+  transactionClient = { query: vi.fn(async (sql: string, values?: unknown[]) => {
+    if (sql.includes("FROM plans p JOIN tickets t") && sql.includes("FOR UPDATE")) return { rows: [{ id: "plan", ticket_id: "ticket" }] };
+    if (sql.includes("SELECT * FROM plan_versions")) return { rows: [{ id: "plan-version", version: 1 }] };
+    if (sql.includes("UPDATE tickets t SET status='Plan Revision Requested'")) return { rows: [{ id: "ticket" }] };
+    if (sql.includes("INSERT INTO plan_review_feedback")) return { rows: [{ id: "feedback-1" }] };
+    if (sql.includes("INSERT INTO jobs")) return { rows: [{ id: "job-1", payload_json: values?.[2] }] };
+    if (sql.includes("UPDATE tickets SET status='Plan Revision Queued'")) return { rows: [{ id: "ticket" }] };
+    return { rows: [], rowCount: 1 };
+  }) };
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await adminApi(request({ feedback: "Revise the failed execution plan." }, "POST"), response,
+    new URL("http://test/api/admin/plans/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/request-revision"), { user_id: "admin" });
+
+  const cleared = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("UPDATE tickets t SET status='Plan Revision Requested'"));
+  const queued = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO jobs"));
+  expect(cleared[0]).toContain("approved_plan_version_id=NULL");
+  expect(cleared[0]).toContain("approved_input_snapshot_id=NULL");
+  expect(queued[1][2]).toMatchObject({ ticket_id: "ticket", plan_id: "plan", plan_version_id: "plan-version", feedback_id: "feedback-1" });
+  expect(response.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
+});
+
 test("repair queueing keeps the originating execution snapshot binding", async () => {
   transactionClient = { query: vi.fn(async (sql: string, values?: unknown[]) => {
     if (sql.includes("FROM agent_runs ar")) return { rows: [{

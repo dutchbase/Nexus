@@ -1795,7 +1795,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       [planRevisionMatch[1]],
     )).rows[0];
     if (!expected) return json(response, 404, { error: "plan not found" });
-    if (!["Plan Ready for Review", "Plan Approved", "Needs Information", "Planning Failed"].includes(expected.status)) {
+    if (!["Plan Ready for Review", "Plan Approved", "Needs Information", "Planning Failed", "Execution Failed"].includes(expected.status)) {
       return json(response, 409, { error: `revision cannot be requested from ${expected.status}` });
     }
     let result;

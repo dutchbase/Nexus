@@ -51,10 +51,8 @@ export function skillPresentation(skill: any) {
 
 export function approvalGatesCard(ticket: { status: string }) {
   const canAcknowledge = ticket.status === "Submitted";
-  const canApprovePlanning = ["Triage", "Needs Information", "Planning Failed"].includes(ticket.status);
   return `<section class="card"><div class="card-head">Approval gates</div><div class="card-body">
-    <p><button class="button" type="button" data-acknowledge-ticket${canAcknowledge ? "" : " disabled"} title="${canAcknowledge ? "" : "Ticket must be Submitted"}">Acknowledge</button></p>
-    <p><button class="button primary" type="button" data-approve-planning${canApprovePlanning ? "" : " disabled"} title="${canApprovePlanning ? "" : "Ticket must be Triage, Needs Information or Planning Failed"}">Approve for planning</button></p><p class="error" role="alert"></p></div></section>`;
+    <p><button class="button" type="button" data-acknowledge-ticket${canAcknowledge ? "" : " disabled"} title="${canAcknowledge ? "" : "Ticket must be Submitted"}">Acknowledge</button></p></div></section>`;
 }
 
 export function ticketCreateModal(projects: Array<{ id: string; name: string }>) {
@@ -405,6 +403,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     };
     const execRuns = runsResult.rows.filter((run) => run.run_type === "execution");
     const executionGate = await checkPlanApprovalGate(pool, ticket.id);
+    const canApprovePlanning = ["Triage", "Needs Information", "Planning Failed"].includes(ticket.status);
     const panel = (index: number, content: string) => `<div role="tabpanel" id="panel-${index}" aria-labelledby="tab-${index}"${index === 0 ? "" : " hidden"}>${content}</div>`;
     const priorityOptions = ["critical", "high", "medium", "low"].map((value) => `<option value="${value}"${ticket.priority === value ? " selected" : ""}>${value[0].toUpperCase()}${value.slice(1)}</option>`).join("");
     const overviewPanel = `<div class="grid two"><section class="card"><div class="card-head">Original submission <button class="button" type="button" data-edit-ticket>Edit</button></div><div class="card-body">
@@ -492,7 +491,9 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)}</div><h1>${escapeHtml(ticket.title)}</h1>
       <div class="toolbar"><span class="status">${escapeHtml(ticket.status)}</span>
         ${["Completed", "Merged", "Closed Without Merge"].includes(ticket.status) ? `<button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reopen-ticket>Reopen</button>` : `<button class="button" type="button" data-open-preview>Preview prompt</button>
-        <button class="button primary" type="button" data-start-execution${executionGate.valid ? "" : " disabled"} title="${executionGate.valid ? "" : executionGate.message}">Start execution</button>`}</div>
+        <button class="button primary" type="button" data-approve-planning${canApprovePlanning ? "" : " disabled"} title="${canApprovePlanning ? "" : "Ticket must be Triage, Needs Information or Planning Failed"}">Approve for planning</button>
+        ${ticket.status === "Execution Failed" && executionGate.valid ? `<a class="button" href="/admin/tickets/${ticket.ticket_number}/plans/${executionGate.planVersion.version}">Revise plan</a>` : ""}
+        <button class="button primary" type="button" data-start-execution${executionGate.valid ? "" : " disabled"} title="${executionGate.valid ? "" : executionGate.message}">${ticket.status === "Execution Failed" ? "Retry execution" : "Start execution"}</button>`}</div>
       ${planningFailureBanner}
       <dialog data-preview-dialog aria-label="Prompt preview"><div class="card-head">Prompt preview</div><p>This is the exact, complete prompt sent to Claude — including global instructions, project context, resolved AI configuration, resolved skills, and ticket content.</p><pre class="references">Loading…</pre><button class="button" type="button" data-close-dialog>Close</button></dialog>
       <dialog data-commit-dialog aria-label="Uncommitted changes"><div class="card-head">Uncommitted changes</div><div class="card-body"><p>This repository has uncommitted changes. Commit them before planning can start:</p><ul data-commit-files></ul><label class="field"><span>Commit message</span><input name="commit_message" value="chore: pre-planning snapshot"></label><p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-commit-dialog>Cancel</button><button class="button primary" type="button" data-submit-commit>Commit &amp; Approve</button></div></dialog>

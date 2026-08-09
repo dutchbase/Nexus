@@ -62,6 +62,38 @@ test("start execution runs the plan and produces a PR ready for review", async (
   await expect(page.locator("body")).toContainText(ticketNumber);
 });
 
+test("a failed execution can be retried with the approved plan", async ({ page }) => {
+  test.setTimeout(120_000);
+  const { ticketNumber, ticketId } = await driveTicketToPlanApproved(page, `E2E recovery ${Date.now()}`);
+
+  await injectScenarioOnce(page, "/execute", scenarioRef({
+    mode: "timeout", events: [{ type: "turn", turn_index: 0 }], timeout_after_events: 1,
+  }));
+  await page.locator("[data-start-execution]").click();
+  expect(await waitForTicketStatus(ticketId, ["Execution Failed"], 90_000)).toBe("Execution Failed");
+
+  await page.reload();
+  await expect(page.locator("[data-start-execution]")).toBeEnabled();
+  await expect(page.locator("[data-start-execution]")).toHaveText("Retry execution");
+  await expect(page.locator(`a[href="/admin/tickets/${ticketNumber}/plans/1"]`, { hasText: "Revise plan" })).toBeVisible();
+
+  await injectScenarioOnce(page, "/execute", scenarioRef({
+    mode: "exec_stream",
+    write_files: [{ path: "docs/e2e-recovery-change.md", content: `E2E recovery change ${Date.now()}\n` }],
+    events: [
+      { type: "turn", turn_index: 0 },
+      { type: "tool_use", name: "Agent", turn_index: 0 },
+      { type: "result", subtype: "success" },
+    ],
+    exit_code: 0,
+  } as any));
+  await page.locator("[data-start-execution]").click();
+  expect(await waitForTicketStatus(ticketId, ["PR Ready for Review"], 90_000)).toBe("PR Ready for Review");
+
+  const attempts = await queryOne("select count(*)::int count from execution_attempts where ticket_id = $1", [ticketId]);
+  expect(Number(attempts?.count)).toBe(2);
+});
+
 test("a running execution can be cancelled from the run page", async ({ page }) => {
   const { ticketId } = await driveTicketToPlanApproved(page, `E2E cancel ${Date.now()}`);
 
