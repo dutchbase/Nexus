@@ -75,7 +75,7 @@ rollback() {
         if switch_current "$PRIOR_RELEASE"; then rollback_outcome="prior_release_restored"; else rollback_outcome="prior_release_restore_failed"; recovered=0; fi
         pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-web --update-env || recovered=0
         pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-worker --update-env || recovered=0
-        if curl --fail --silent --show-error --max-time 10 "$DCC_DEPLOY_HEALTH_URL"; then recovery_health="passed"; else recovery_health="failed"; recovered=0; fi
+        if curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 "$DCC_DEPLOY_HEALTH_URL"; then recovery_health="passed"; else recovery_health="failed"; recovered=0; fi
         pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-webhook --update-env || recovered=0
       else
         if rm -f "$CURRENT"; then rollback_outcome="bootstrap_processes_stopped"; else rollback_outcome="bootstrap_current_remove_failed"; recovered=0; fi
@@ -142,7 +142,7 @@ record_event "cutover"
 pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-web --update-env
 pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-worker --update-env
 record_event "processes_reloaded"
-curl --fail --silent --show-error --max-time 10 "$DCC_DEPLOY_HEALTH_URL"
+curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 "$DCC_DEPLOY_HEALTH_URL"
 record_event "healthy"
 write_marker 0 reload_pending
 pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-webhook --update-env
