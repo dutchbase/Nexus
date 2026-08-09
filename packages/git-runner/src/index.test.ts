@@ -41,7 +41,7 @@ async function initRepo(dir: string) {
   await git(dir, ["config", "user.name", "git-runner test"]);
 }
 
-async function writeAndCommit(dir: string, file: string, content: string, message: string) {
+async function writeAndCommit(dir: string, file: string, content: string | Uint8Array, message: string) {
   await writeFile(path.join(dir, file), content);
   await git(dir, ["add", "-A"]);
   await git(dir, ["commit", "-m", message]);
