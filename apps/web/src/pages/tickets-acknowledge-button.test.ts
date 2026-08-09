@@ -14,4 +14,8 @@ describe("approvalGatesCard", () => {
 
     expect(html).toMatch(/data-acknowledge-ticket[^>]*\bdisabled\b/);
   });
+
+  it("keeps planning approval out of the lower approval card", () => {
+    expect(approvalGatesCard({ status: "Triage" })).not.toContain("data-approve-planning");
+  });
 });

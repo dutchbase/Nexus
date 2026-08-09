@@ -30,8 +30,8 @@ export async function checkPlanApprovalGate(
     [ticketId],
   )).rows[0];
   if (!row) return { valid: false, code: "ticket_not_found", message: "ticket not found" };
-  if (!["Plan Approved", "Execution Queued"].includes(row.status)) {
-    return { valid: false, code: "plan_approval_status_invalid", message: "the ticket must be approved or queued for execution" };
+  if (!["Plan Approved", "Execution Queued", "Execution Failed"].includes(row.status)) {
+    return { valid: false, code: "plan_approval_status_invalid", message: "the ticket must be approved, queued for execution, or have a failed execution" };
   }
   if (!row.approved_plan_version_id || !row.gate_plan_version_id) {
     return { valid: false, code: "plan_approval_required", message: "a valid approved plan version is required" };

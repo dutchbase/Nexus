@@ -47,6 +47,7 @@ describe("plan approval gate", () => {
       .toMatchObject({ valid: false, code: "plan_approval_required" });
     expect(await checkPlanApprovalGate(clientWith({ ...approved, current_version_id: "new-version" }), "ticket"))
       .toMatchObject({ valid: false, code: "plan_approval_stale" });
+    expect((await checkPlanApprovalGate(clientWith({ ...approved, status: "Execution Failed" }), "ticket")).valid).toBe(true);
     expect(await checkPlanApprovalGate(clientWith({ ...approved, status: "Cancelled" }), "ticket"))
       .toMatchObject({ valid: false, code: "plan_approval_status_invalid" });
     expect(await checkPlanApprovalGate(clientWith({ ...approved, snapshot_plan_version_id: "other-version" }), "ticket"))

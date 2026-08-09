@@ -52,4 +52,71 @@ describe("ticket detail GET", () => {
     expect(page?.body).toContain("Unavailable 1");
     expect(page?.body).toContain('href="/admin/runs/run-1"');
   });
+
+  it("renders the only planning approval control in the top toolbar before tabs", async () => {
+    const page = await tickets.render(new URL("http://test/admin/tickets/T-1"), session, {});
+    const body = page?.body ?? "";
+
+    expect(body.match(/data-approve-planning/g)).toHaveLength(1);
+    expect(body.indexOf("data-approve-planning")).toBeLessThan(body.indexOf('role="tablist"'));
+  });
+
+  it("renders recovery actions for a failed ticket with a current plan", async () => {
+    const { materialInput, inputHash } = (await import("@dcc/domain")).buildApprovedInputSnapshot({
+      plan: { versionId: "plan-version", version: 1, contentHash: "plan-hash" },
+      ticket: {}, project: {}, models: {}, prompts: [], skills: [], policySources: [],
+    } as any);
+    query.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM tickets t JOIN projects p")) return { rows: [{
+        ...ticket, status: "Execution Failed", approved_plan_version_id: "plan-version", approved_input_snapshot_id: "approved-input-1",
+      }] };
+      if (sql.includes("FROM tickets t") && sql.includes("approved_input_snapshots")) return { rows: [{
+        id: "ticket-1", status: "Execution Failed", approved_plan_version_id: "plan-version",
+        approved_input_snapshot_id: "approved-input-1", gate_snapshot_id: "approved-input-1",
+        snapshot_ticket_id: "ticket-1", snapshot_plan_version_id: "plan-version",
+        snapshot_material_input: materialInput, snapshot_input_hash: inputHash,
+        gate_plan_version_id: "plan-version", current_version_id: "plan-version",
+        approved_plan_hash: "plan-hash", current_content_hash: "plan-hash", potentially_stale: false, plan_id: "plan",
+      }] };
+      if (sql.includes("FROM plans p JOIN plan_versions pv")) return { rows: [{ id: "plan-version", version: 1, current_version_id: "plan-version", model: "model", reasoning_level: "high", created_at: "2026-08-04T10:00:00Z" }] };
+      return { rows: [] };
+    });
+
+    const page = await tickets.render(new URL("http://test/admin/tickets/T-1"), session, {});
+    const body = page?.body ?? "";
+
+    expect(body).toMatch(/data-start-execution(?![^>]*\bdisabled\b)[^>]*>Retry execution/);
+    expect(body).toContain('href="/admin/tickets/T-1/plans/1"');
+    expect(body).toContain(">Revise plan</a>");
+    expect(body.indexOf("Revise plan")).toBeLessThan(body.indexOf("data-approve-planning"));
+    expect(body.indexOf("data-approve-planning")).toBeLessThan(body.indexOf("data-start-execution"));
+  });
+
+  it("keeps plan revision available when failed execution cannot be retried", async () => {
+    const { materialInput, inputHash } = (await import("@dcc/domain")).buildApprovedInputSnapshot({
+      plan: { versionId: "plan-version", version: 1, contentHash: "plan-hash" },
+      ticket: {}, project: {}, models: {}, prompts: [], skills: [], policySources: [],
+    } as any);
+    query.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM tickets t JOIN projects p")) return { rows: [{
+        ...ticket, status: "Execution Failed", approved_plan_version_id: "plan-version", approved_input_snapshot_id: "approved-input-1",
+      }] };
+      if (sql.includes("FROM tickets t") && sql.includes("approved_input_snapshots")) return { rows: [{
+        id: "ticket-1", status: "Execution Failed", approved_plan_version_id: "plan-version",
+        approved_input_snapshot_id: "approved-input-1", gate_snapshot_id: "approved-input-1",
+        snapshot_ticket_id: "ticket-1", snapshot_plan_version_id: "plan-version",
+        snapshot_material_input: materialInput, snapshot_input_hash: inputHash,
+        gate_plan_version_id: "plan-version", current_version_id: "plan-version",
+        approved_plan_hash: "plan-hash", current_content_hash: "plan-hash", potentially_stale: true, plan_id: "plan",
+      }] };
+      if (sql.includes("FROM plans p JOIN plan_versions pv")) return { rows: [{ id: "plan-version", version: 1, current_version_id: "plan-version", model: "model", reasoning_level: "high", created_at: "2026-08-04T10:00:00Z" }] };
+      return { rows: [] };
+    });
+
+    const body = (await tickets.render(new URL("http://test/admin/tickets/T-1"), session, {}))?.body ?? "";
+
+    expect(body).toMatch(/data-start-execution[^>]*\bdisabled\b/);
+    expect(body).toContain('href="/admin/tickets/T-1/plans/1"');
+    expect(body).toContain(">Revise plan</a>");
+  });
 });
