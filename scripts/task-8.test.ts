@@ -120,6 +120,7 @@ describe("health-gated release deployment", () => {
     expect((await lstat(result.current)).isSymbolicLink()).toBe(true);
     expect(await readlink(join(release, ".env"))).toBe(join(result.directory, ".env"));
     expect(await readlink(join(release, "data"))).toBe(join(result.directory, "data"));
+    expect(result.commands).toContain("curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 http://127.0.0.1/health");
   });
 
   it("verifies the staged release locally before migration without test databases", async () => {
