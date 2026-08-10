@@ -363,7 +363,7 @@ export function validateFields(fields: any[], body: Record<string, any>) {
     if (optionTypes.has(field.field_type)) {
       const options = Array.isArray(field.options_json) ? field.options_json : [];
       if (field.field_type === "multi_select") {
-        if (value.some((v: any) => !options.includes(v))) errors[field.field_key] = "invalid option";
+        if ((value as string[]).some((v) => !options.includes(v))) errors[field.field_key] = "invalid option";
       } else if (Array.isArray(value)) {
         errors[field.field_key] = "invalid option";
       } else if (value !== undefined && value !== null && value !== "" && !options.includes(value)) {
