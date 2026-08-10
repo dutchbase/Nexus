@@ -21,7 +21,7 @@ async function generatePlan(page: Page, title: string): Promise<{ ticketNumber: 
   const ticketNumber = await createTicketViaUI(page, title);
   const scenario = scenarioRef({ mode: "plan_valid", plan_markdown: DEFAULT_PLAN_MARKDOWN });
   await injectScenarioOnce(page, "/approve-planning", scenario);
-  await page.locator("[data-approve-planning]").click();
+  await page.locator("[data-start-planning]").click();
 
   const row = await queryOne("select id from tickets where ticket_number = $1", [ticketNumber]);
   await waitForTicketStatus(row.id, ["Plan Ready for Review", "Planning Failed"]);
@@ -30,7 +30,7 @@ async function generatePlan(page: Page, title: string): Promise<{ ticketNumber: 
   return { ticketNumber, ticketId: row.id };
 }
 
-test("approve for planning produces a reviewable plan and the UI tracks it", async ({ page }) => {
+test("start planning produces a reviewable plan and the UI tracks it", async ({ page }) => {
   const { ticketNumber } = await generatePlan(page, `E2E planning ${Date.now()}`);
 
   await page.goto(`/admin/tickets/${ticketNumber}/plans`);
@@ -61,7 +61,7 @@ test("planning captures valid provider usage emitted by the mock", async ({ page
     mode: "plan_valid", plan_markdown: DEFAULT_PLAN_MARKDOWN,
     usage: { input_tokens: 12, output_tokens: 8, cache_read_input_tokens: 3, cache_creation_input_tokens: 4 },
   } as any));
-  await page.locator("[data-approve-planning]").click();
+  await page.locator("[data-start-planning]").click();
 
   const ticket = await queryOne("select id from tickets where ticket_number = $1", [ticketNumber]);
   await waitForTicketStatus(ticket.id, ["Plan Ready for Review", "Planning Failed"]);

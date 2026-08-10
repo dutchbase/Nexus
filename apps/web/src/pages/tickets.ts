@@ -1,6 +1,7 @@
-import { escapeHtml, keysetCondition, lineDiff, nextCursor, pageRequest, PAGE_SIZE_MAX, pagerHtml, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
+import { escapeHtml, fieldsFor, keysetCondition, lineDiff, nextCursor, pageRequest, PAGE_SIZE_MAX, pagerHtml, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { checkPlanApprovalGate, aiInvocationPhases, aiLifecycleGroup, aiModels } from "@dcc/domain";
+import { formControls } from "../ui.ts";
 
 function usd(value: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 8 }).format(value);
@@ -344,7 +345,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       [decodeURIComponent(ticketMatch[1])],
     )).rows[0];
     if (!ticket) return { status: 404, title: "Ticket not found", body: "<h1>Ticket not found</h1>" };
-    const [notesResult, historyResult, skillsResult, notificationsResult, runsResult, prsResult, planVersionsResult, attachmentsResult] = await Promise.all([
+    const [notesResult, historyResult, skillsResult, notificationsResult, runsResult, prsResult, planVersionsResult, attachmentsResult, projectsResult, sourceFields] = await Promise.all([
       pool.query("SELECT n.*,u.username FROM ticket_notes n LEFT JOIN users u ON u.id=n.author_id WHERE ticket_id=$1 ORDER BY n.created_at DESC", [ticket.id]),
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
       pool.query(
@@ -378,6 +379,8 @@ export async function render(url: URL, session: Session, _metrics: Record<string
         [ticket.id],
       ),
       pool.query("SELECT a.id,u.original_name,u.media_type,u.size_bytes FROM attachments a JOIN uploads u ON u.id=a.upload_id WHERE a.ticket_id=$1 ORDER BY a.created_at", [ticket.id]),
+      pool.query("SELECT id, slug, name FROM projects ORDER BY name"),
+      ticket.form_id ? fieldsFor(ticket.form_id) : Promise.resolve([]),
     ]);
     const notes = notesResult.rows;
     const history = historyResult.rows;
@@ -403,20 +406,12 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     };
     const execRuns = runsResult.rows.filter((run) => run.run_type === "execution");
     const executionGate = await checkPlanApprovalGate(pool, ticket.id);
-    const canApprovePlanning = ["Triage", "Needs Information", "Planning Failed"].includes(ticket.status);
     const panel = (index: number, content: string) => `<div role="tabpanel" id="panel-${index}" aria-labelledby="tab-${index}"${index === 0 ? "" : " hidden"}>${content}</div>`;
-    const priorityOptions = ["critical", "high", "medium", "low"].map((value) => `<option value="${value}"${ticket.priority === value ? " selected" : ""}>${value[0].toUpperCase()}${value.slice(1)}</option>`).join("");
+    const submissionValues = { ...(ticket.custom_values_json ?? {}), ...ticket };
     const overviewPanel = `<div class="grid two"><section class="card"><div class="card-head">Original submission <button class="button" type="button" data-edit-ticket>Edit</button></div><div class="card-body">
       <div data-ticket-view><p>${escapeHtml(ticket.description)}</p><dl><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Environment</dt><dd>${escapeHtml(ticket.environment)}</dd><dt>Source URL</dt><dd>${escapeHtml(ticket.source_url)}</dd></dl></div>
       <form data-ticket-edit-form data-ticket-id="${ticket.id}" hidden>
-        <label class="field"><span>Title</span><input name="title" value="${escapeHtml(ticket.title)}"></label>
-        <label class="field"><span>Description</span><textarea name="description" rows="4">${escapeHtml(ticket.description)}</textarea></label>
-        <div class="grid two"><label class="field"><span>Category</span><input name="category" value="${escapeHtml(ticket.category)}"></label>
-        <label class="field"><span>Environment</span><input name="environment" value="${escapeHtml(ticket.environment)}"></label></div>
-        <label class="field"><span>Priority</span><select name="priority">${priorityOptions}</select></label>
-        <label class="field"><span>Expected behavior</span><textarea name="expected_behavior" rows="3">${escapeHtml(ticket.expected_behavior ?? "")}</textarea></label>
-        <label class="field"><span>Actual behavior</span><textarea name="actual_behavior" rows="3">${escapeHtml(ticket.actual_behavior ?? "")}</textarea></label>
-        <label class="field"><span>Reproduction steps</span><textarea name="reproduction_steps" rows="3">${escapeHtml(ticket.reproduction_steps ?? "")}</textarea></label>
+        ${formControls(sourceFields, projectsResult.rows, submissionValues, "admin")}
         <button class="button" type="submit">Save</button> <button class="button" type="button" data-cancel-edit-ticket>Cancel</button><p class="error" role="alert"></p>
       </form>
       </div></section>
@@ -489,12 +484,22 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
     const planningFailureBanner = failedPlanningRun
       ? `<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px;margin:14px 0"><strong>Planning failed.</strong> <em>${escapeHtml(failedPlanningRun.error_message ?? failedPlanningRun.error_code ?? "planning failed")}</em> <a href="/admin/runs/${failedPlanningRun.id}">View failed run</a> — ${planVersions.length ? "request a revision of the existing plan to retry" : "approve for planning to retry"}.</div>`
       : "";
+    const currentPlanLink = currentPlanVersion ? `/admin/tickets/${ticket.ticket_number}/plans/${currentPlanVersion.version}` : "";
+    const approvedPlanVersion = planVersions.find((version) => version.id === ticket.approved_plan_version_id);
+    const approvedPlanLink = approvedPlanVersion ? `/admin/tickets/${ticket.ticket_number}/plans/${approvedPlanVersion.version}` : "";
+    const workflowAction = !currentPlanVersion && ["Triage", "Needs Information", "Planning Failed"].includes(ticket.status)
+      ? `<button class="button primary" type="button" data-start-planning>Start planning</button>`
+      : ticket.status === "Plan Ready for Review" && currentPlanLink
+      ? `<a class="button primary" href="${currentPlanLink}">Review plan</a>`
+      : ticket.status === "Plan Approved" && approvedPlanLink
+      ? `<button class="button primary" type="button" data-start-execution${executionGate.valid ? "" : " disabled"} title="${executionGate.valid ? "" : executionGate.message}">Start execution</button><a class="button" href="${approvedPlanLink}">Update plan</a>`
+      : ticket.status === "Execution Failed" && approvedPlanLink
+      ? `<button class="button primary" type="button" data-start-execution${executionGate.valid ? "" : " disabled"} title="${executionGate.valid ? "" : executionGate.message}">Retry execution</button><a class="button" href="${approvedPlanLink}">Update plan</a>`
+      : "";
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)}</div><h1>${escapeHtml(ticket.title)}</h1>
       <div class="toolbar"><span class="status">${escapeHtml(ticket.status)}</span>
         ${["Completed", "Merged", "Closed Without Merge"].includes(ticket.status) ? `<button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reopen-ticket>Reopen</button>` : `<button class="button" type="button" data-open-preview>Preview prompt</button>
-        ${ticket.status === "Execution Failed" && currentPlanVersion ? `<a class="button" href="/admin/tickets/${ticket.ticket_number}/plans/${currentPlanVersion.version}">Revise plan</a>` : ""}
-        <button class="button primary" type="button" data-approve-planning${canApprovePlanning ? "" : " disabled"} title="${canApprovePlanning ? "" : "Ticket must be Triage, Needs Information or Planning Failed"}">Approve for planning</button>
-        <button class="button primary" type="button" data-start-execution${executionGate.valid ? "" : " disabled"} title="${executionGate.valid ? "" : executionGate.message}">${ticket.status === "Execution Failed" ? "Retry execution" : "Start execution"}</button>`}</div>
+        ${workflowAction}`}</div>
       ${planningFailureBanner}
       <dialog data-preview-dialog aria-label="Prompt preview"><div class="card-head">Prompt preview</div><p>This is the exact, complete prompt sent to Claude — including global instructions, project context, resolved AI configuration, resolved skills, and ticket content.</p><pre class="references">Loading…</pre><button class="button" type="button" data-close-dialog>Close</button></dialog>
       <dialog data-commit-dialog aria-label="Uncommitted changes"><div class="card-head">Uncommitted changes</div><div class="card-body"><p>This repository has uncommitted changes. Commit them before planning can start:</p><ul data-commit-files></ul><label class="field"><span>Commit message</span><input name="commit_message" value="chore: pre-planning snapshot"></label><p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-commit-dialog>Cancel</button><button class="button primary" type="button" data-submit-commit>Commit &amp; Approve</button></div></dialog>

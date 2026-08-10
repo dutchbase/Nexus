@@ -85,11 +85,11 @@ test("per-ticket advanced AI config drives the planning run's model", async ({ p
   const ticket = await queryOne("select id, planning_model, planning_reasoning_level from tickets where ticket_number = $1", [ticketNumber]);
   expect(ticket).toMatchObject({ planning_model: "haiku", planning_reasoning_level: "low" });
 
-  // The override must reach the actual planning run. The approve button is
+  // The override must reach the actual planning run. The start button is
   // in the Overview tab.
   await injectScenarioOnce(page, "/approve-planning", scenarioRef({ mode: "plan_valid", plan_markdown: DEFAULT_PLAN_MARKDOWN }));
   await page.getByRole("tab", { name: "Overview" }).click();
-  await page.locator("[data-approve-planning]").click();
+  await page.locator("[data-start-planning]").click();
   await waitForTicketStatus(ticket.id, ["Plan Ready for Review"]);
 
   const run = await queryOne("select model, reasoning_level from agent_runs where ticket_id = $1 and run_type = 'planning' order by created_at desc limit 1", [ticket.id]);

@@ -73,12 +73,12 @@ export async function submitPublicTicket(page: Page, title: string): Promise<str
 }
 
 // Drives a fresh admin-created ticket to "Plan Approved" purely through UI
-// clicks (approve planning -> worker generates plan v1 -> approve dialog).
+// clicks (start planning -> worker generates plan v1 -> approve dialog).
 export async function driveTicketToPlanApproved(page: Page, title: string): Promise<{ ticketNumber: string; ticketId: string }> {
   const ticketNumber = await createTicketViaUI(page, title);
   const scenario = scenarioRef({ mode: "plan_valid", plan_markdown: DEFAULT_PLAN_MARKDOWN });
   await injectScenarioOnce(page, "/approve-planning", scenario);
-  await page.locator("[data-approve-planning]").click();
+  await page.locator("[data-start-planning]").click();
 
   const row = await queryOne("select id from tickets where ticket_number = $1", [ticketNumber]);
   await waitForTicketStatus(row.id, ["Plan Ready for Review"]);

@@ -15,7 +15,7 @@ test("create ticket via modal lands in Triage, ready for planning, and takes not
   const title = `E2E lifecycle ${Date.now()}`;
   const ticketNumber = await createTicketViaUI(page, title);
 
-  await expect(page.locator("[data-approve-planning]")).toBeEnabled();
+  await expect(page.locator("[data-start-planning]")).toBeEnabled();
   await expect(page.locator("[data-acknowledge-ticket]")).toBeDisabled();
 
   const noteBody = `Note from the e2e suite ${Date.now()}`;
@@ -36,7 +36,7 @@ test("acknowledge a publicly submitted ticket from the detail page", async ({ pa
 
   await waitFor(async () => (await queryOne("select status from tickets where ticket_number = $1", [ticketNumber]))?.status === "Triage");
   await expect(page.locator("[data-acknowledge-ticket]")).toBeDisabled();
-  await expect(page.locator("[data-approve-planning]")).toBeEnabled();
+  await expect(page.locator("[data-start-planning]")).toBeEnabled();
 });
 
 test("reject an early-stage ticket, then archive it", async ({ page }) => {
@@ -60,10 +60,10 @@ test("lifecycle buttons are gated by status", async ({ page }) => {
   await page.goto(`/admin/tickets/${ticketNumber}`);
 
   // A freshly submitted public ticket can be acknowledged or rejected, but
-  // not approved for planning, cancelled, or archived.
+  // not ready to start planning, cancelled, or archived.
   await expect(page.locator("[data-acknowledge-ticket]")).toBeEnabled();
   await expect(page.locator("[data-reject-ticket]")).toBeEnabled();
-  await expect(page.locator("[data-approve-planning]")).toBeDisabled();
+  await expect(page.locator("[data-start-planning]")).toHaveCount(0);
   await expect(page.locator("[data-cancel-ticket]")).toBeDisabled();
   await expect(page.locator("[data-archive-ticket]")).toBeDisabled();
 });
