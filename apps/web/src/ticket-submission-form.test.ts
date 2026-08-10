@@ -44,4 +44,22 @@ describe("ticket submission form controls", () => {
     expect(page).not.toContain("publicSubmissionPayload(values)");
     expect(page).toContain('payload[key]=key in payload?[].concat(payload[key],value):value');
   });
+
+  it("serializes a checked checkbox as a boolean", () => {
+    const page = publicFormPage({ slug: "feedback", title: "Feedback", description: "" }, [
+      { field_key: "follow_up", field_type: "checkbox", label: "Follow up" },
+    ], []);
+
+    expect(page).toContain('"follow_up":"checkbox"');
+    expect(page).toContain('if(type==="checkbox")payload[key]=payload[key]==="true"');
+  });
+
+  it("serializes a one-choice multi-select as an array", () => {
+    const page = publicFormPage({ slug: "feedback", title: "Feedback", description: "" }, [
+      { field_key: "labels", field_type: "multi_select", label: "Labels", options_json: ["alpha"] },
+    ], []);
+
+    expect(page).toContain('"labels":"multi_select"');
+    expect(page).toContain('else if(type==="multi_select")payload[key]=Array.isArray(payload[key])?payload[key]:key in payload?[payload[key]]:[]');
+  });
 });

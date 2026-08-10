@@ -9,3 +9,9 @@ Verification:
 
 - `npx vitest run apps/web/src/public-intake-validation.test.ts apps/web/src/ticket-submission-form.test.ts apps/web/src/pages/tickets-get-no-mutation.test.ts apps/web/src/ticket-submission-edit.test.ts` — 21 tests passed.
 - `npx tsc --noEmit` — passed.
+
+Follow-up serializer fix:
+
+- The public form serializer now converts checkbox values to booleans and always sends multi-select values as arrays. This keeps browser submissions compatible with runtime validation.
+- `npx vitest run apps/web/src/ticket-submission-form.test.ts apps/web/src/public-intake-validation.test.ts apps/web/src/ticket-submission-edit.test.ts` — 16 tests passed.
+- `npx tsc --noEmit` — passed.
