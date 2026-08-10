@@ -43,12 +43,13 @@ function policy(overrides: Record<string, unknown> = {}) {
   } as any;
 }
 
-function database(options: { enabled?: boolean; missingStored?: boolean; verifiedHash?: string; attempt?: Record<string, unknown> } = {}) {
+function database(options: { enabled?: boolean; ticketStatus?: string; missingStored?: boolean; verifiedHash?: string; attempt?: Record<string, unknown> } = {}) {
   const queries: Array<{ sql: string; values?: unknown[] }> = [];
+  const ticket = options.ticketStatus ? { id: "ticket-id", status: options.ticketStatus } : null;
   const query = vi.fn(async (sql: string, values?: unknown[]) => {
     queries.push({ sql, values });
     if (sql.includes("FROM pull_request_merge_settings")) return { rows: [{ require_fresh_policy_binding: options.enabled ?? true }], rowCount: 1 };
-    if (sql.includes("FROM pull_requests pr") && !sql.includes("pull_request_policy_snapshots")) return { rows: [{
+    if (sql.includes("FROM pull_requests pr") && !sql.includes("pull_request_policy_snapshots") && !sql.includes("JOIN tickets t")) return { rows: [{
       id: "pr-id", github_owner: "acme", github_repository: "widgets", number: 42,
       ticket_id: "ticket-id", ticket_status: "PR Approved",
     }], rowCount: 1 };
@@ -57,6 +58,13 @@ function database(options: { enabled?: boolean; missingStored?: boolean; verifie
       expected_snapshot_id: "expected-snapshot", expected_head_sha: "head-sha", expected_material_hash: "same-hash",
     }], rowCount: options.missingStored ? 0 : 1 };
     if (sql.includes("FROM pull_request_merge_attempts")) return { rows: options.attempt ? [options.attempt] : [], rowCount: options.attempt ? 1 : 0 };
+    if (sql.includes("FROM pull_requests pr JOIN tickets t") && sql.includes("FOR UPDATE")) return { rows: ticket ? [{
+      id: "pr-id", ticket_id: ticket.id, ticket_status: ticket.status,
+    }] : [], rowCount: ticket ? 1 : 0 };
+    if (sql.includes("UPDATE tickets SET status=$2") && ticket) {
+      ticket.status = values?.[1] as string;
+      return { rows: [], rowCount: 1 };
+    }
     if (sql.includes("INSERT INTO pull_request_policy_snapshots")) return { rows: [{ id: "verified-snapshot", material_hash: options.verifiedHash ?? "same-hash" }], rowCount: 1 };
     return { rows: [], rowCount: 1 };
   });
@@ -72,8 +80,8 @@ beforeEach(() => {
   syncPullRequest.mockResolvedValue(undefined);
 });
 
-test("merges a matching head without fetching policy inputs when policy binding is disabled", async () => {
-  const db = database({ enabled: false });
+test("merges a matching head and records cached PR and ticket completion when policy binding is disabled", async () => {
+  const db = database({ enabled: false, ticketStatus: "PR Approved" });
 
   await expect(approveAndMergePullRequest(db, { ...expected, expectedPolicySnapshotId: undefined })).resolves.toEqual({
     mergedSha: "merge-sha", mergedHeadSha: "head-sha", policySnapshotId: null,
@@ -85,6 +93,27 @@ test("merges a matching head without fetching policy inputs when policy binding 
   expect(github.mergePullRequest).toHaveBeenCalledWith("acme", "widgets", 42, "squash", "head-sha");
   expect(db.queries.some(({ sql, values }: any) => sql.includes("pull_request_merge_attempts")
     && values?.includes(null))).toBe(true);
+  expect(db.queries.some(({ sql }) => sql.includes("state='merged'") && sql.includes("merge_commit_sha"))).toBe(true);
+  expect(db.queries.filter(({ sql }) => sql.includes("INSERT INTO ticket_status_history")).map(({ values }) => values?.[2]))
+    .toEqual(["Merged", "Completed"]);
+});
+
+test("reconciles a verified disabled merge without another provider merge", async () => {
+  const db = database({
+    enabled: false,
+    ticketStatus: "PR Approved",
+    attempt: { state: "verified", expected_head_sha: "head-sha", verified_policy_snapshot_id: null },
+  });
+  github.getPullRequest.mockResolvedValue({ merged: true, head: { sha: "head-sha" }, merge_commit_sha: "merge-sha" });
+
+  await expect(approveAndMergePullRequest(db, { ...expected, expectedPolicySnapshotId: undefined })).resolves.toEqual({
+    mergedSha: "merge-sha", mergedHeadSha: "head-sha", policySnapshotId: null,
+  });
+
+  expect(github.mergePullRequest).not.toHaveBeenCalled();
+  expect(github.getPullRequestPolicyInputs).not.toHaveBeenCalled();
+  expect(syncPullRequest).not.toHaveBeenCalled();
+  expect(db.queries.some(({ sql }) => sql.includes("state='merged'") && sql.includes("merge_commit_sha"))).toBe(true);
 });
 
 test("refuses a changed head before the merge request when policy binding is disabled", async () => {

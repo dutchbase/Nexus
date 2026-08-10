@@ -44,6 +44,29 @@ function resultFor(row: any) {
   };
 }
 
+async function completeLinkedTicket(client: pg.PoolClient, input: MergeInput) {
+  const ticket = (await client.query(
+    `SELECT pr.id,pr.ticket_id,t.status ticket_status
+     FROM pull_requests pr JOIN tickets t ON t.id=pr.ticket_id
+     WHERE pr.id=$1 FOR UPDATE OF pr,t`,
+    [input.pullRequestId],
+  )).rows[0];
+  if (!ticket) return;
+  const transition = async (next: "Merged" | "Completed") => {
+    if (ticket.ticket_status === next) return;
+    await client.query("UPDATE tickets SET status=$2,updated_at=now() WHERE id=$1", [ticket.ticket_id, next]);
+    await client.query(
+      `INSERT INTO ticket_status_history
+       (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_pull_request_id)
+       VALUES ($1,$2,$3,'GitHub pull request merged',$4,$5,$6)`,
+      [ticket.ticket_id, ticket.ticket_status, next, input.actor.type, input.actor.id, input.pullRequestId],
+    );
+    ticket.ticket_status = next;
+  };
+  if (!['Merged', 'Completed'].includes(ticket.ticket_status)) await transition("Merged");
+  if (ticket.ticket_status === "Merged") await transition("Completed");
+}
+
 async function recordMerged(
   db: pg.Pool,
   input: MergeInput,
@@ -67,22 +90,7 @@ async function recordMerged(
       completeCachedState ? [input.pullRequestId, mergedSha] : [input.pullRequestId],
     );
     if (completeCachedState) {
-      await client.query(
-        `INSERT INTO ticket_status_history
-         (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_pull_request_id)
-         SELECT ticket.id,ticket.status,'Completed','GitHub pull request merged',$2,$3,$1
-         FROM tickets ticket
-         WHERE ticket.id=(SELECT ticket_id FROM pull_requests WHERE id=$1)
-           AND ticket.status IN ('PR Ready for Review','PR Changes Requested','PR Approved','Merged')
-         RETURNING ticket_id`,
-        [input.pullRequestId, input.actor.type, input.actor.id],
-      );
-      await client.query(
-        `UPDATE tickets SET status='Completed',updated_at=now()
-         WHERE id=(SELECT ticket_id FROM pull_requests WHERE id=$1)
-           AND status IN ('PR Ready for Review','PR Changes Requested','PR Approved','Merged')`,
-        [input.pullRequestId],
-      );
+      await completeLinkedTicket(client, input);
     }
   });
 }
