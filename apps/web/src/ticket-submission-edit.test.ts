@@ -15,6 +15,7 @@ const { adminApi } = await import("./server.ts");
 
 const ticket = {
   id: "ticket-1", ticket_number: "T-1", form_id: "form-1", project_id: "project-1", status: "Triage",
+  title: "Saved title", description: "Saved description",
   custom_values_json: { retained: "value" }, ai_configuration_mode: "basic",
   default_model: "sonnet", default_reasoning_level: "high",
 };
@@ -38,6 +39,8 @@ function body(result: any) {
 beforeEach(() => {
   pool.query.mockReset();
   pool.query.mockResolvedValue({ rows: [
+    { field_key: "title", field_type: "short_text", required: true, validation_json: {}, options_json: [] },
+    { field_key: "description", field_type: "long_text", required: true, validation_json: {}, options_json: [] },
     { field_key: "source_url", field_type: "url", required: false, validation_json: {}, options_json: [] },
     { field_key: "details", field_type: "long_text", required: false, validation_json: {}, options_json: [] },
     { field_key: "screenshot", field_type: "image_upload", required: false, validation_json: {}, options_json: [] },
@@ -49,6 +52,18 @@ beforeEach(() => {
     if (sql.includes("UPDATE tickets SET")) return { rows: [{ ...ticket, source_url: "https://example.test/report", custom_values_json: { retained: "value", details: "Saved detail" } }] };
     return { rows: [], rowCount: 1 };
   }) };
+});
+
+test("PATCH submission validates a source URL against saved required values", async () => {
+  const result = response();
+
+  await adminApi(request({ submission: { source_url: "https://example.test/only-url" } }), result,
+    new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin" });
+
+  expect(result.writeHead).toHaveBeenCalledWith(200, expect.anything());
+  const update = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("UPDATE tickets SET"));
+  expect(update[0]).toContain("source_url=$2");
+  expect(update[1]).toContain("https://example.test/only-url");
 });
 
 test("PATCH submission saves allowed source values without changing attachments", async () => {

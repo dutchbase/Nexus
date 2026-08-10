@@ -2317,7 +2317,9 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
             if (!fieldKeys.has(key)) errors[key] = "unknown field";
             else if (!(typeof value === "string" || typeof value === "boolean" || (Array.isArray(value) && value.every((item) => typeof item === "string")))) errors[key] = "invalid value";
           }
-          Object.assign(errors, validateFields(fields, submission));
+          const savedValues = { ...(before.custom_values_json ?? {}) };
+          for (const field of fields) if (field.field_key in before) savedValues[field.field_key] = before[field.field_key];
+          Object.assign(errors, validateFields(fields, { ...savedValues, ...submission }));
           if (!Object.keys(errors).length) {
             const ticketColumns = new Set(["project_id", "title", "description", "category", "priority", "submitter_name", "submitter_email", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps"]);
             const customValues = { ...(before.custom_values_json ?? {}) };
