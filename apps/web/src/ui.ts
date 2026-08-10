@@ -751,7 +751,7 @@ export function formControls(fields: any[], projects: any[], values: Record<stri
     const value = mode === "admin" ? escapeHtml(values[field.field_key]) : "";
     const options = (Array.isArray(field.options_json) ? field.options_json : []).map((option: any) => {
       const optionValue = option.value ?? option;
-      const selected = mode === "admin" && (type === "multi_select" ? values[field.field_key] ?? [] : [values[field.field_key]]).some((value: any) => String(optionValue) === String(value));
+      const selected = mode === "admin" && (type === "multi_select" ? Array.isArray(values[field.field_key]) ? values[field.field_key] : values[field.field_key] == null ? [] : [values[field.field_key]] : [values[field.field_key]]).some((value: any) => String(optionValue) === String(value));
       return `<option value="${escapeHtml(optionValue)}"${selected ? " selected" : ""}>${escapeHtml(option.label ?? option)}</option>`;
     }).join("");
     let control = `<input name="${name}" placeholder="${escapeHtml(field.placeholder)}"${mode === "admin" ? ` value="${value}"` : ""}${required}>`;

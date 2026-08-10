@@ -32,6 +32,12 @@ describe("ticket submission form controls", () => {
     ], [], {}, "admin")).toContain('<select name="labels" multiple>');
   });
 
+  it("renders an admin multi-select saved by an older scalar value", () => {
+    expect(formControls([
+      { field_key: "labels", field_type: "multi_select", label: "Labels", options_json: ["alpha", "beta"] },
+    ], [], { labels: "alpha" }, "admin")).toContain('<option value="alpha" selected>alpha</option>');
+  });
+
   it("emits a public submit script that groups repeated values", () => {
     const page = publicFormPage({ slug: "feedback", title: "Feedback", description: "" }, [], []);
 

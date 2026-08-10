@@ -58,7 +58,7 @@ describe("ticket detail GET", () => {
     const render = async (status: string, approved = false) => {
       query.mockImplementation(async (sql: string) => {
         if (sql.includes("FROM tickets t JOIN projects p")) return { rows: [{ ...ticket, status, approved_plan_version_id: approved ? "plan-version" : null }] };
-        if (sql.includes("FROM plans p JOIN plan_versions pv")) return { rows: approved || status === "Plan Ready for Review" ? [plan] : [] };
+        if (sql.includes("FROM plans p JOIN plan_versions pv")) return { rows: approved || ["Plan Ready for Review", "Needs Information", "Planning Failed"].includes(status) ? [plan] : [] };
         if (sql.includes("FROM tickets t") && sql.includes("approved_input_snapshots")) return { rows: [] };
         return { rows: [] };
       });
@@ -66,6 +66,11 @@ describe("ticket detail GET", () => {
     };
 
     expect(await render("Triage")).toContain('data-start-planning>Start planning');
+    for (const status of ["Needs Information", "Planning Failed"]) {
+      const recovery = await render(status);
+      expect(recovery).toContain('href="/admin/tickets/T-1/plans/1">Revise plan</a>');
+      expect(recovery).not.toContain("data-start-planning");
+    }
     const review = await render("Plan Ready for Review");
     expect(review).toContain('href="/admin/tickets/T-1/plans/1">Review plan</a>');
     expect(review).not.toContain("data-start-planning");
@@ -105,6 +110,13 @@ describe("ticket detail GET", () => {
     expect(body).not.toContain('name="internal"');
     expect(body).not.toContain('name="notice"');
     expect(body).not.toContain('name="image"');
+  });
+
+  it("renders built-in editing controls when a ticket has no source form", async () => {
+    const body = (await tickets.render(new URL("http://test/admin/tickets/T-1"), session, {}))?.body ?? "";
+
+    expect(body).toMatch(/name="title"[^>]*value="Ticket title"/);
+    expect(body).toMatch(/name="description" rows="5"[^>]*>Ticket description<\/textarea>/);
   });
 
   it("renders recovery actions for a failed ticket with a current plan", async () => {

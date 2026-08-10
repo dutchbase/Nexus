@@ -344,13 +344,26 @@ export function validateFields(fields: any[], body: Record<string, any>) {
       else if (ids.some((id) => typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id))) errors[field.field_key] = "invalid upload";
       continue;
     }
-    if (field.required && (value === undefined || value === null || value === "")) errors[field.field_key] = "required";
+    const empty = value === undefined || value === null || value === "" || (Array.isArray(value) && !value.length);
+    if (field.required && empty) errors[field.field_key] = "required";
+    if (value === undefined || value === null) continue;
+    if (field.field_type === "checkbox") {
+      if (typeof value !== "boolean") errors[field.field_key] = "invalid value";
+      continue;
+    }
+    if (field.field_type === "multi_select") {
+      if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+        errors[field.field_key] = "invalid value";
+        continue;
+      }
+    } else if (typeof value !== "string") {
+      errors[field.field_key] = "invalid value";
+      continue;
+    }
     if (optionTypes.has(field.field_type)) {
       const options = Array.isArray(field.options_json) ? field.options_json : [];
       if (field.field_type === "multi_select") {
-        const isEmpty = value === undefined || value === null || value === "";
-        if (!isEmpty && !Array.isArray(value)) errors[field.field_key] = "invalid option";
-        else if (Array.isArray(value) && value.some((v: any) => !options.includes(v))) errors[field.field_key] = "invalid option";
+        if (value.some((v: any) => !options.includes(v))) errors[field.field_key] = "invalid option";
       } else if (Array.isArray(value)) {
         errors[field.field_key] = "invalid option";
       } else if (value !== undefined && value !== null && value !== "" && !options.includes(value)) {

@@ -1,4 +1,4 @@
-import { escapeHtml, fieldsFor, keysetCondition, lineDiff, nextCursor, pageRequest, PAGE_SIZE_MAX, pagerHtml, pool, renderMarkdown, shortRef, validStatuses } from "./shared.ts";
+import { escapeHtml, fieldsFor, keysetCondition, lineDiff, nextCursor, pageRequest, PAGE_SIZE_MAX, pagerHtml, pool, renderMarkdown, shortRef, standardFields, validStatuses } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { checkPlanApprovalGate, aiInvocationPhases, aiLifecycleGroup, aiModels } from "@dcc/domain";
 import { formControls } from "../ui.ts";
@@ -380,7 +380,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       ),
       pool.query("SELECT a.id,u.original_name,u.media_type,u.size_bytes FROM attachments a JOIN uploads u ON u.id=a.upload_id WHERE a.ticket_id=$1 ORDER BY a.created_at", [ticket.id]),
       pool.query("SELECT id, slug, name FROM projects ORDER BY name"),
-      ticket.form_id ? fieldsFor(ticket.form_id) : Promise.resolve([]),
+      ticket.form_id ? fieldsFor(ticket.form_id) : Promise.resolve(standardFields),
     ]);
     const notes = notesResult.rows;
     const history = historyResult.rows;
@@ -489,6 +489,8 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
     const approvedPlanLink = approvedPlanVersion ? `/admin/tickets/${ticket.ticket_number}/plans/${approvedPlanVersion.version}` : "";
     const workflowAction = !currentPlanVersion && ["Triage", "Needs Information", "Planning Failed"].includes(ticket.status)
       ? `<button class="button primary" type="button" data-start-planning>Start planning</button>`
+      : currentPlanLink && ["Needs Information", "Planning Failed"].includes(ticket.status)
+      ? `<a class="button primary" href="${currentPlanLink}">Revise plan</a>`
       : ticket.status === "Plan Ready for Review" && currentPlanLink
       ? `<a class="button primary" href="${currentPlanLink}">Review plan</a>`
       : ticket.status === "Plan Approved" && approvedPlanLink
