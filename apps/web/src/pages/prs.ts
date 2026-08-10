@@ -14,7 +14,7 @@ const detailQuery = `SELECT pr.*,p.name project_name,p.slug project_slug,t.ticke
 
 // Shared by both the uuid route (/admin/pull-requests/{uuid}) and the slug
 // route (/admin/pull-requests/{projectSlug}/{number}) so the two never drift.
-function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[]): PageResult {
+function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[], requireFreshPolicyBinding: boolean): PageResult {
   if (!item) return { status: 404, title: "Pull request not found", body: "<h1>Pull request not found</h1>" };
   const validation = item.metadata_json?.validation_output ?? {};
   const changes = (item.additions != null || item.deletions != null || item.changed_files != null)
@@ -34,17 +34,17 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[]): 
     : !item.policy_complete
     ? `Incomplete${item.policy_error_code ? `: ${item.policy_error_code}` : ""}`
     : "Current";
-  const mergeBlocker = !item.current_policy_snapshot_id
-    ? "GitHub policy snapshot is unavailable"
-    : !item.head_sha
+  const mergeBlocker = !item.head_sha
     ? "GitHub head SHA is unavailable"
-    : item.policy_stale
+    : requireFreshPolicyBinding && !item.current_policy_snapshot_id
+    ? "GitHub policy snapshot is unavailable"
+    : requireFreshPolicyBinding && item.policy_stale
     ? "GitHub policy is stale"
-    : !item.policy_complete
+    : requireFreshPolicyBinding && !item.policy_complete
     ? "GitHub policy is incomplete"
-    : !["approved", "not_required"].includes(item.review_state)
+    : requireFreshPolicyBinding && !["approved", "not_required"].includes(item.review_state)
     ? `GitHub reviews are ${item.review_state ?? "unknown"}`
-    : !["success", "not_required"].includes(item.check_state)
+    : requireFreshPolicyBinding && !["success", "not_required"].includes(item.check_state)
     ? `GitHub checks are ${item.check_state ?? "unknown"}`
     : "";
   const policyAllowsMerge = !mergeBlocker;
@@ -227,14 +227,16 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const item = (await pool.query(`${detailQuery} WHERE p.slug=$1 AND pr.number=$2`, [decodeURIComponent(pullRequestSlugMatch[1]), Number(pullRequestSlugMatch[2])])).rows[0];
     const aiReviews = item ? (await pool.query("SELECT * FROM pr_ai_reviews WHERE pull_request_id=$1 ORDER BY created_at DESC", [item.id])).rows : [];
     const conflictResolutions = item ? (await pool.query("SELECT * FROM pr_conflict_resolutions WHERE pull_request_id=$1 ORDER BY created_at DESC", [item.id])).rows : [];
-    return renderDetail(item, aiReviews, conflictResolutions);
+    const settings = await pool.query("SELECT require_fresh_policy_binding FROM pull_request_merge_settings WHERE id=1");
+    return renderDetail(item, aiReviews, conflictResolutions, settings.rows[0]?.require_fresh_policy_binding === true);
   }
   const pullRequestPageMatch = url.pathname.match(/^\/admin\/pull-requests\/([0-9a-f-]+)$/i);
   if (pullRequestPageMatch) {
     const item = (await pool.query(`${detailQuery} WHERE pr.id=$1`, [pullRequestPageMatch[1]])).rows[0];
     const aiReviews = item ? (await pool.query("SELECT * FROM pr_ai_reviews WHERE pull_request_id=$1 ORDER BY created_at DESC", [item.id])).rows : [];
     const conflictResolutions = item ? (await pool.query("SELECT * FROM pr_conflict_resolutions WHERE pull_request_id=$1 ORDER BY created_at DESC", [item.id])).rows : [];
-    return renderDetail(item, aiReviews, conflictResolutions);
+    const settings = await pool.query("SELECT require_fresh_policy_binding FROM pull_request_merge_settings WHERE id=1");
+    return renderDetail(item, aiReviews, conflictResolutions, settings.rows[0]?.require_fresh_policy_binding === true);
   }
   return null;
 }

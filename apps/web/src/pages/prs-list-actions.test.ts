@@ -13,18 +13,19 @@ const pr = {
   review_state: "approved", check_state: "success", requested_reviewers: [], created_at: "2026-08-04T10:00:00Z",
 };
 
-function mockPr(item: any, reviews: any[] = []) {
+function mockPr(item: any, reviews: any[] = [], requireFreshPolicyBinding = true) {
   query.mockImplementation(async (sql: string) => {
     if (!sql) return { rows: [] };
     if (sql.includes("FROM pull_requests pr JOIN projects")) return { rows: [item] };
     if (sql.includes("FROM pr_ai_reviews")) return { rows: reviews };
     if (sql.includes("FROM pr_conflict_resolutions")) return { rows: [] };
+    if (sql.includes("FROM pull_request_merge_settings")) return { rows: [{ require_fresh_policy_binding: requireFreshPolicyBinding }] };
     throw new Error(`unexpected query: ${sql}`);
   });
 }
 
-async function renderPr(item: any, reviews: any[] = []) {
-  mockPr(item, reviews);
+async function renderPr(item: any, reviews: any[] = [], requireFreshPolicyBinding = true) {
+  mockPr(item, reviews, requireFreshPolicyBinding);
   return (await prs.render(new URL("http://test/admin/pull-requests/project/7"), session, {}))!.body;
 }
 
@@ -60,6 +61,13 @@ test("labels missing snapshot and head bindings as unavailable", async () => {
   expect(noSnapshot).toContain('disabled title="GitHub policy snapshot is unavailable"');
   expect(noHead).toContain("GitHub: Unavailable: head SHA missing");
   expect(noHead).toContain('disabled title="GitHub head SHA is unavailable"');
+});
+
+test("allows a matching head without a policy snapshot when enforcement is disabled", async () => {
+  const body = await renderPr({ ...pr, current_policy_snapshot_id: null, policy_stale: true }, [], false);
+
+  expect(body).toContain('data-pr-approve data-pr-head-sha="head-sha" data-pr-policy-snapshot-id=""');
+  expect(body).not.toContain('data-pr-approve data-pr-head-sha="head-sha" data-pr-policy-snapshot-id="" disabled');
 });
 
 test.each([
