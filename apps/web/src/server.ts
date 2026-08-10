@@ -356,7 +356,7 @@ export function validateFields(fields: any[], body: Record<string, any>) {
         errors[field.field_key] = "invalid value";
         continue;
       }
-    } else if (typeof value !== "string") {
+    } else if (typeof value !== "string" && !(field.field_type === "project_selector" && typeof value === "number")) {
       errors[field.field_key] = "invalid value";
       continue;
     }
