@@ -768,19 +768,12 @@ export function formControls(fields: any[], projects: any[], values: Record<stri
   }).join("");
 }
 
-export function publicSubmissionPayload(entries: Iterable<[string, string]>) {
-  const payload: Record<string, string | string[]> = {};
-  for (const [key, value] of entries) payload[key] = key in payload ? ([] as string[]).concat(payload[key] as string | string[], value) : value;
-  return payload;
-}
-
 export function publicFormPage(form: any, fields: any[], projects: any[]) {
   const controls = formControls(fields, projects, {}, "public");
   return document(form.title, `<main class="public"><div class="url-strip">/f/${escapeHtml(form.slug)}</div><form class="card" id="public-form"><div class="card-body"><div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description)}</p><div class="grid one">${controls}</div><br><button class="button primary" type="submit">Melding versturen</button><p class="error" role="alert"></p></div></form></main>`, `
     document.querySelector("#public-form").addEventListener("submit",async(event)=>{
-      event.preventDefault();const data=new FormData(event.currentTarget);const values=[];const files={};
-      for(const [key,value] of data){if(value instanceof File&&value.size){(files[key]=files[key]||[]).push(value)}else if(!(value instanceof File))values.push([key,value])}
-      const payload=publicSubmissionPayload(values);
+      event.preventDefault();const data=new FormData(event.currentTarget);const payload={};const files={};
+      for(const [key,value] of data){if(value instanceof File&&value.size){(files[key]=files[key]||[]).push(value)}else if(!(value instanceof File))payload[key]=key in payload?[].concat(payload[key],value):value}
       for(const [key,list] of Object.entries(files)){
         if(list.length>5){document.querySelector(".error").textContent="Max 5 bestanden per veld";return}
         const ids=[];

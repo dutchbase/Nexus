@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formControls, publicSubmissionPayload } from "./ui.ts";
+import { formControls, publicFormPage } from "./ui.ts";
 
 describe("ticket submission form controls", () => {
   it("renders saved admin values without admin-only field types", () => {
@@ -32,9 +32,10 @@ describe("ticket submission form controls", () => {
     ], [], {}, "admin")).toContain('<select name="labels" multiple>');
   });
 
-  it("preserves repeated public form values as an array", () => {
-    expect(publicSubmissionPayload([
-      ["title", "Saved title"], ["labels", "alpha"], ["labels", "beta"],
-    ])).toEqual({ title: "Saved title", labels: ["alpha", "beta"] });
+  it("emits a public submit script that groups repeated values", () => {
+    const page = publicFormPage({ slug: "feedback", title: "Feedback", description: "" }, [], []);
+
+    expect(page).not.toContain("publicSubmissionPayload(values)");
+    expect(page).toContain('payload[key]=key in payload?[].concat(payload[key],value):value');
   });
 });
