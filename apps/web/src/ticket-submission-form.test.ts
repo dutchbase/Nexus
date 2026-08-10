@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formControls } from "./ui.ts";
+import { formControls, publicSubmissionPayload } from "./ui.ts";
 
 describe("ticket submission form controls", () => {
   it("renders saved admin values without admin-only field types", () => {
@@ -24,5 +24,17 @@ describe("ticket submission form controls", () => {
     expect(html).toContain('<option value="project-2" selected>Saved project</option>');
     expect(html).toContain('name="follow_up" type="checkbox" value="true" checked');
     expect(html).not.toContain('type="file"');
+  });
+
+  it("renders an optional admin multi-select without a saved value", () => {
+    expect(formControls([
+      { field_key: "labels", field_type: "multi_select", label: "Labels", options_json: ["alpha", "beta"] },
+    ], [], {}, "admin")).toContain('<select name="labels" multiple>');
+  });
+
+  it("preserves repeated public form values as an array", () => {
+    expect(publicSubmissionPayload([
+      ["title", "Saved title"], ["labels", "alpha"], ["labels", "beta"],
+    ])).toEqual({ title: "Saved title", labels: ["alpha", "beta"] });
   });
 });
