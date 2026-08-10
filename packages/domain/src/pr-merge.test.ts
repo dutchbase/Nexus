@@ -116,6 +116,17 @@ test("reconciles a verified disabled merge without another provider merge", asyn
   expect(db.queries.some(({ sql }) => sql.includes("state='merged'") && sql.includes("merge_commit_sha"))).toBe(true);
 });
 
+test("does not complete a terminal linked ticket when policy binding is disabled", async () => {
+  const db = database({ enabled: false, ticketStatus: "Closed Without Merge" });
+
+  await expect(approveAndMergePullRequest(db, { ...expected, expectedPolicySnapshotId: undefined })).resolves.toEqual({
+    mergedSha: "merge-sha", mergedHeadSha: "head-sha", policySnapshotId: null,
+  });
+
+  expect(db.queries.some(({ sql }) => sql.includes("UPDATE tickets SET status=$2"))).toBe(false);
+  expect(db.queries.some(({ sql }) => sql.includes("INSERT INTO ticket_status_history"))).toBe(false);
+});
+
 test("refuses a changed head before the merge request when policy binding is disabled", async () => {
   const db = database({ enabled: false });
   github.getPullRequest.mockResolvedValue({ merged: false, head: { sha: "changed-head" } });

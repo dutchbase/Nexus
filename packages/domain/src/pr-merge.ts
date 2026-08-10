@@ -52,6 +52,7 @@ async function completeLinkedTicket(client: pg.PoolClient, input: MergeInput) {
     [input.pullRequestId],
   )).rows[0];
   if (!ticket) return;
+  if (!['PR Ready for Review', 'PR Changes Requested', 'PR Approved', 'Merged'].includes(ticket.ticket_status)) return;
   const transition = async (next: "Merged" | "Completed") => {
     if (ticket.ticket_status === next) return;
     await client.query("UPDATE tickets SET status=$2,updated_at=now() WHERE id=$1", [ticket.ticket_id, next]);
