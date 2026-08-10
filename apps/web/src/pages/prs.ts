@@ -92,7 +92,7 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[], r
       ${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}
       ${conflictResolutionBadge ? `<span class="status ${conflictResolutionBadge.cls}" data-conflict-resolution-status="${escapeHtml(latestConflictResolution.status)}">${escapeHtml(conflictResolutionBadge.label)}</span>` : ""}
       ${item.merge_conflicts ? button("data-pr-resolve-conflicts", "Resolve conflicts (AI)", true, "") : ""}
-      ${button(`data-pr-approve data-pr-head-sha="${escapeHtml(item.head_sha ?? "")}" data-pr-policy-snapshot-id="${escapeHtml(item.current_policy_snapshot_id ?? "")}"`, "Approve & merge", policyAllowsMerge, mergeBlocker, " primary")}
+      ${button(`data-pr-approve data-pr-head-sha="${escapeHtml(item.head_sha ?? "")}"${requireFreshPolicyBinding ? ` data-pr-policy-snapshot-id="${escapeHtml(item.current_policy_snapshot_id ?? "")}"` : ""}`, "Approve & merge", policyAllowsMerge, mergeBlocker, " primary")}
       ${button("data-pr-ai-review", "AI review", true, "")}
       <a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a>
       <details class="menu">

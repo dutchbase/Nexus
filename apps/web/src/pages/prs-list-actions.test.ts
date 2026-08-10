@@ -63,11 +63,11 @@ test("labels missing snapshot and head bindings as unavailable", async () => {
   expect(noHead).toContain('disabled title="GitHub head SHA is unavailable"');
 });
 
-test("allows a matching head without a policy snapshot when enforcement is disabled", async () => {
-  const body = await renderPr({ ...pr, current_policy_snapshot_id: null, policy_stale: true }, [], false);
+test("omits the policy snapshot and allows a matching head when enforcement is disabled", async () => {
+  const body = await renderPr({ ...pr, policy_stale: true }, [], false);
 
-  expect(body).toContain('data-pr-approve data-pr-head-sha="head-sha" data-pr-policy-snapshot-id=""');
-  expect(body).not.toContain('data-pr-approve data-pr-head-sha="head-sha" data-pr-policy-snapshot-id="" disabled');
+  expect(body).toContain('data-pr-approve data-pr-head-sha="head-sha" title=""');
+  expect(body).not.toContain('data-pr-policy-snapshot-id="snapshot-1"');
 });
 
 test.each([

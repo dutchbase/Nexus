@@ -93,8 +93,8 @@ test("merges a matching head and records cached PR and ticket completion when po
   expect(github.mergePullRequest).toHaveBeenCalledWith("acme", "widgets", 42, "squash", "head-sha");
   expect(db.queries.some(({ sql, values }: any) => sql.includes("pull_request_merge_attempts")
     && values?.includes(null))).toBe(true);
-  expect(db.queries.some(({ sql }) => sql.includes("state='merged'") && sql.includes("merge_commit_sha"))).toBe(true);
-  expect(db.queries.filter(({ sql }) => sql.includes("INSERT INTO ticket_status_history")).map(({ values }) => values?.[2]))
+  expect(db.queries.some(({ sql }: { sql: string }) => sql.includes("state='merged'") && sql.includes("merge_commit_sha"))).toBe(true);
+  expect(db.queries.filter(({ sql }: { sql: string }) => sql.includes("INSERT INTO ticket_status_history")).map(({ values }: { values?: unknown[] }) => values?.[2]))
     .toEqual(["Merged", "Completed"]);
 });
 
@@ -113,7 +113,7 @@ test("reconciles a verified disabled merge without another provider merge", asyn
   expect(github.mergePullRequest).not.toHaveBeenCalled();
   expect(github.getPullRequestPolicyInputs).not.toHaveBeenCalled();
   expect(syncPullRequest).not.toHaveBeenCalled();
-  expect(db.queries.some(({ sql }) => sql.includes("state='merged'") && sql.includes("merge_commit_sha"))).toBe(true);
+  expect(db.queries.some(({ sql }: { sql: string }) => sql.includes("state='merged'") && sql.includes("merge_commit_sha"))).toBe(true);
 });
 
 test("does not complete a terminal linked ticket when policy binding is disabled", async () => {
@@ -123,8 +123,8 @@ test("does not complete a terminal linked ticket when policy binding is disabled
     mergedSha: "merge-sha", mergedHeadSha: "head-sha", policySnapshotId: null,
   });
 
-  expect(db.queries.some(({ sql }) => sql.includes("UPDATE tickets SET status=$2"))).toBe(false);
-  expect(db.queries.some(({ sql }) => sql.includes("INSERT INTO ticket_status_history"))).toBe(false);
+  expect(db.queries.some(({ sql }: { sql: string }) => sql.includes("UPDATE tickets SET status=$2"))).toBe(false);
+  expect(db.queries.some(({ sql }: { sql: string }) => sql.includes("INSERT INTO ticket_status_history"))).toBe(false);
 });
 
 test("refuses a changed head before the merge request when policy binding is disabled", async () => {

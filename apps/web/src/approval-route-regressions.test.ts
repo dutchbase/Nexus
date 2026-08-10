@@ -15,7 +15,7 @@ const { adminApi } = await import("./server.ts");
 
 function request(body: unknown, method = "PATCH") {
   return {
-    method, headers: {},
+    method, headers: {}, socket: { remoteAddress: "127.0.0.1" },
     async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)); },
   } as any;
 }
@@ -76,6 +76,19 @@ test("pull-request merge setting rejects non-boolean values", async () => {
 
   expect(response.writeHead).toHaveBeenCalledWith(400, expect.any(Object));
   expect(pool.query).not.toHaveBeenCalled();
+});
+
+test("pull-request merge setting updates the singleton and audits the actor", async () => {
+  pool.query.mockResolvedValue({ rows: [], rowCount: 1 });
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await adminApi(request({ require_fresh_policy_binding: true }, "POST"), response, new URL("http://test/api/admin/settings/pull-request-merge"), { user_id: "admin" });
+
+  const update = pool.query.mock.calls.find(([sql]) => sql.includes("UPDATE pull_request_merge_settings"));
+  const audit = pool.query.mock.calls.find(([sql]) => sql.includes("INSERT INTO audit_events"));
+  expect(update?.[1]).toEqual([true]);
+  expect(audit?.[1]?.slice(0, 7)).toEqual(["admin", "admin", "pull_request_merge_settings.update", "pull_request_merge_settings", "1", null, { require_fresh_policy_binding: true }]);
+  expect(response.writeHead).toHaveBeenCalledWith(200, expect.any(Object));
 });
 
 test("pull-request approval queues the exact current head and policy binding", async () => {
