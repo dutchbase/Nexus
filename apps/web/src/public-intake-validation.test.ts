@@ -38,12 +38,16 @@ describe("validateFields", () => {
   });
   test("option fields reject values of the wrong JS shape instead of coercing them", () => {
     const options = ["alpha", "beta"];
-    expect(validateFields([field({ field_type: "dropdown", options_json: options })], { f: ["alpha"] })).toEqual({ f: "invalid option" });
-    expect(validateFields([field({ field_type: "multi_select", options_json: options })], { f: "alpha" })).toEqual({ f: "invalid option" });
+    expect(validateFields([field({ field_type: "dropdown", options_json: options })], { f: ["alpha"] })).toEqual({ f: "invalid value" });
+    expect(validateFields([field({ field_type: "multi_select", options_json: options })], { f: "alpha" })).toEqual({ f: "invalid value" });
   });
   test("optional empty values for option fields pass, required empty fail", () => {
     expect(validateFields([field({ field_type: "dropdown", options_json: ["a"] })], {})).toEqual({});
     expect(validateFields([field({ field_type: "dropdown", options_json: ["a"], required: true })], {})).toEqual({ f: "required" });
+  });
+  test("rejects wrong scalar types and an empty required multi-select", () => {
+    expect(validateFields([field({ field_type: "url" })], { f: true })).toEqual({ f: "invalid value" });
+    expect(validateFields([field({ field_type: "multi_select", options_json: ["a"], required: true })], { f: [] })).toEqual({ f: "required" });
   });
 });
 

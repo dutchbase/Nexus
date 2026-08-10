@@ -344,13 +344,26 @@ export function validateFields(fields: any[], body: Record<string, any>) {
       else if (ids.some((id) => typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id))) errors[field.field_key] = "invalid upload";
       continue;
     }
-    if (field.required && (value === undefined || value === null || value === "")) errors[field.field_key] = "required";
+    const empty = value === undefined || value === null || value === "" || (Array.isArray(value) && !value.length);
+    if (field.required && empty) errors[field.field_key] = "required";
+    if (value === undefined || value === null) continue;
+    if (field.field_type === "checkbox") {
+      if (typeof value !== "boolean") errors[field.field_key] = "invalid value";
+      continue;
+    }
+    if (field.field_type === "multi_select") {
+      if (!Array.isArray(value) || value.some((item) => typeof item !== "string")) {
+        errors[field.field_key] = "invalid value";
+        continue;
+      }
+    } else if (typeof value !== "string") {
+      errors[field.field_key] = "invalid value";
+      continue;
+    }
     if (optionTypes.has(field.field_type)) {
       const options = Array.isArray(field.options_json) ? field.options_json : [];
       if (field.field_type === "multi_select") {
-        const isEmpty = value === undefined || value === null || value === "";
-        if (!isEmpty && !Array.isArray(value)) errors[field.field_key] = "invalid option";
-        else if (Array.isArray(value) && value.some((v: any) => !options.includes(v))) errors[field.field_key] = "invalid option";
+        if ((value as string[]).some((v) => !options.includes(v))) errors[field.field_key] = "invalid option";
       } else if (Array.isArray(value)) {
         errors[field.field_key] = "invalid option";
       } else if (value !== undefined && value !== null && value !== "" && !options.includes(value)) {
@@ -2297,24 +2310,54 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       "planning_reasoning_level", "execution_model", "execution_reasoning_level", "repair_model", "repair_reasoning_level",
     ];
     const entries = Object.entries(body).filter(([key]) => allowed.includes(key));
-    if (!entries.length) return json(response, 400, { error: "no supported fields" });
+    if (!entries.length && body.submission === undefined) return json(response, 400, { error: "no supported fields" });
     const aiFields = new Set(["default_model", "default_reasoning_level", "planning_model",
       "planning_reasoning_level", "execution_model", "execution_reasoning_level", "repair_model", "repair_reasoning_level"]);
     const normalized = entries.map(([key, value]) => (aiFields.has(key) && value === "" ? [key, null] : [key, value]) as [string, unknown]);
     const after = await inTransaction(async (client) => {
       const before = (await client.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE", [ref])).rows[0];
       if (!before) return null;
+      const updates = new Map(normalized);
+      if (body.submission !== undefined) {
+        const submission = body.submission;
+        const errors: Record<string, string> = {};
+        if (!submission || typeof submission !== "object" || Array.isArray(submission)) {
+          errors.submission = "invalid value";
+        } else {
+          const fields = (await fieldsFor(before.form_id)).filter((field) => !["hidden", "static", "image_upload"].includes(field.field_type));
+          const fieldKeys = new Set(fields.map((field) => field.field_key));
+          for (const [key, value] of Object.entries(submission)) {
+            if (!fieldKeys.has(key)) errors[key] = "unknown field";
+            else if (!(typeof value === "string" || typeof value === "boolean" || (Array.isArray(value) && value.every((item) => typeof item === "string")))) errors[key] = "invalid value";
+          }
+          const savedValues = { ...(before.custom_values_json ?? {}) };
+          for (const field of fields) if (field.field_key in before) savedValues[field.field_key] = before[field.field_key];
+          Object.assign(errors, validateFields(fields, { ...savedValues, ...submission }));
+          if (!Object.keys(errors).length) {
+            const ticketColumns = new Set(["project_id", "title", "description", "category", "priority", "submitter_name", "submitter_email", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps"]);
+            const customValues = { ...(before.custom_values_json ?? {}) };
+            for (const [key, value] of Object.entries(submission)) {
+              if (ticketColumns.has(key)) updates.set(key, value);
+              else customValues[key] = value;
+            }
+            updates.set("custom_values_json", customValues);
+          }
+        }
+        if (Object.keys(errors).length) return { validationErrors: errors };
+      }
+      if (!updates.size) return { noSupportedFields: true };
       if (body.ai_configuration_mode !== undefined && !["basic", "advanced"].includes(body.ai_configuration_mode)) {
         throw new AiConfigurationError(`Unsupported AI configuration mode "${body.ai_configuration_mode}"`);
       }
-      const candidate = { ...before, ...Object.fromEntries(normalized) };
+      const updatedEntries = [...updates];
+      const candidate = { ...before, ...Object.fromEntries(updatedEntries) };
       const project = (await client.query("SELECT * FROM projects WHERE id=$1", [candidate.project_id])).rows[0];
       const systemAi = await getSystemAiSettings(client);
       for (const phase of (candidate.ai_configuration_mode === "advanced"
         ? ["planning", "execution", "repair"] : ["planning"]) as AiPhase[]) {
         resolvedAiFor(candidate, project, phase, systemAi);
       }
-      const updated = (await client.query(`UPDATE tickets SET ${normalized.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now() WHERE id=$1 RETURNING *`, [before.id, ...normalized.map(([, value]) => value)])).rows[0];
+      const updated = (await client.query(`UPDATE tickets SET ${updatedEntries.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now() WHERE id=$1 RETURNING *`, [before.id, ...updatedEntries.map(([, value]) => value)])).rows[0];
       if (body.status && body.status !== before.status) await client.query(
         `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id) VALUES ($1,$2,$3,'Manual admin update','admin',$4)`,
         [before.id, before.status, body.status, session.user_id],
@@ -2322,7 +2365,10 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       await audit({ actorType: "admin", actorId: session.user_id, action: "ticket.update", entityType: "ticket", entityId: before.id, before, after: updated, ip: ipOf(request) }, client);
       return updated;
     });
-    return after ? json(response, 200, { ticket: after }) : json(response, 404, { error: "ticket not found" });
+    if (!after) return json(response, 404, { error: "ticket not found" });
+    if ("validationErrors" in after) return json(response, 400, { error: "validation failed", fields: after.validationErrors });
+    if ("noSupportedFields" in after) return json(response, 400, { error: "no supported fields" });
+    return json(response, 200, { ticket: after });
   }
   if (url.pathname === "/api/admin/audit" && request.method === "GET") {
     const search = url.searchParams.get("search") ?? "";

@@ -184,7 +184,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         const ticketNumber=window.location.pathname.match(/\\/tickets\\/([^\\/]+)/)?.[1]||"";
         async function ticketAction(endpoint){const response=await fetch("/api/admin/tickets/"+ticketNumber+"/"+endpoint,{method:"POST",headers:{"x-csrf-token":csrf}});if(response.ok)location.reload();else{const result=await response.json();alert(result.error)}}
         const commitDialog=document.querySelector("[data-commit-dialog]"),commitFiles=commitDialog?.querySelector("[data-commit-files]");
-        async function approvePlanning(commitMessage){
+        async function startPlanning(commitMessage){
           const response=await fetch("/api/admin/tickets/"+ticketNumber+"/approve-planning",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(commitMessage?{commit_message:commitMessage}:{})});
           const result=await response.json();
           if(response.ok)return location.reload();
@@ -196,12 +196,12 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           }
           alert(result.error||"request failed");
         }
-        document.querySelector("[data-approve-planning]")?.addEventListener("click",()=>approvePlanning());
+        document.querySelector("[data-start-planning]")?.addEventListener("click",()=>startPlanning());
         commitDialog?.querySelector("[data-close-commit-dialog]")?.addEventListener("click",()=>commitDialog.close());
         commitDialog?.querySelector("[data-submit-commit]")?.addEventListener("click",async()=>{
           const message=(commitDialog.querySelector("[name=commit_message]").value||"").trim();
           if(!message){commitDialog.querySelector(".error").textContent="Commit message is required";return}
-          await approvePlanning(message);
+          await startPlanning(message);
         });
         document.querySelector("[data-acknowledge-ticket]")?.addEventListener("click",()=>ticketAction("acknowledge"));
         document.querySelector("[data-reject-ticket]")?.addEventListener("click",()=>{if(confirm("Reject this ticket?"))ticketAction("reject")});
@@ -222,17 +222,12 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         document.querySelector("[data-cancel-edit-ticket]")?.addEventListener("click",()=>{ticketEditForm.hidden=true;ticketView.hidden=false});
         if(ticketEditForm){ticketEditForm.addEventListener("submit",async(event)=>{
           event.preventDefault();
-          const body={
-            title:ticketEditForm.querySelector('[name="title"]').value,
-            description:ticketEditForm.querySelector('[name="description"]').value,
-            category:ticketEditForm.querySelector('[name="category"]').value,
-            environment:ticketEditForm.querySelector('[name="environment"]').value,
-            priority:ticketEditForm.querySelector('[name="priority"]').value,
-            expected_behavior:ticketEditForm.querySelector('[name="expected_behavior"]').value,
-            actual_behavior:ticketEditForm.querySelector('[name="actual_behavior"]').value,
-            reproduction_steps:ticketEditForm.querySelector('[name="reproduction_steps"]').value,
-          };
-          const response=await fetch("/api/admin/tickets/"+ticketEditForm.dataset.ticketId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(body)});
+          const submission={};
+          for(const input of ticketEditForm.elements){
+            if(!input.name)continue;
+            submission[input.name]=input.type==="checkbox"?input.checked:input.multiple?[...input.selectedOptions].map(option=>option.value):input.value;
+          }
+          const response=await fetch("/api/admin/tickets/"+ticketEditForm.dataset.ticketId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({submission})});
           const result=await response.json();
           if(response.ok){location.reload()}else{ticketEditForm.querySelector(".error").textContent=result.error}
         })}
@@ -748,28 +743,39 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
     `);
 }
 
-export function publicFormPage(form: any, fields: any[], projects: any[]) {
-  const controls = fields.filter((field) => field.field_type !== "static").map((field) => {
+export function formControls(fields: any[], projects: any[], values: Record<string, any> = {}, mode: "public" | "admin" = "public") {
+  return fields.filter((field) => field.field_type !== "static" && (mode === "public" || !["hidden", "image_upload"].includes(field.field_type))).map((field) => {
     const name = escapeHtml(field.field_key);
     const required = field.required ? " required" : "";
     const type = field.field_type;
-    const options = (Array.isArray(field.options_json) ? field.options_json : []).map((option: any) => `<option value="${escapeHtml(option.value ?? option)}">${escapeHtml(option.label ?? option)}</option>`).join("");
-    let control = `<input name="${name}" placeholder="${escapeHtml(field.placeholder)}"${required}>`;
-    if (type === "long_text") control = `<textarea name="${name}" rows="5"${required}></textarea>`;
-    if (type === "email" || type === "url" || type === "number") control = `<input name="${name}" type="${type}"${required}>`;
+    const value = mode === "admin" ? escapeHtml(values[field.field_key]) : "";
+    const options = (Array.isArray(field.options_json) ? field.options_json : []).map((option: any) => {
+      const optionValue = option.value ?? option;
+      const selected = mode === "admin" && (type === "multi_select" ? Array.isArray(values[field.field_key]) ? values[field.field_key] : values[field.field_key] == null ? [] : [values[field.field_key]] : [values[field.field_key]]).some((value: any) => String(optionValue) === String(value));
+      return `<option value="${escapeHtml(optionValue)}"${selected ? " selected" : ""}>${escapeHtml(option.label ?? option)}</option>`;
+    }).join("");
+    let control = `<input name="${name}" placeholder="${escapeHtml(field.placeholder)}"${mode === "admin" ? ` value="${value}"` : ""}${required}>`;
+    if (type === "long_text") control = `<textarea name="${name}" rows="5"${required}>${value}</textarea>`;
+    if (type === "email" || type === "url" || type === "number") control = `<input name="${name}" type="${type}"${mode === "admin" ? ` value="${value}"` : ""}${required}>`;
     if (type.includes("selector") || ["dropdown", "radio", "multi_select"].includes(type)) {
-      const choices = type === "project_selector" ? projects.map((project) => `<option value="${project.id}">${escapeHtml(project.name)}</option>`).join("") : options;
-      control = `<select name="${name}"${required}>${choices}</select>`;
+      const choices = type === "project_selector" ? projects.map((project) => `<option value="${project.id}"${mode === "admin" && String(project.id) === String(values[field.field_key]) ? " selected" : ""}>${escapeHtml(project.name)}</option>`).join("") : options;
+      control = `<select name="${name}"${type === "multi_select" ? " multiple" : ""}${required}>${choices}</select>`;
     }
-    if (type === "checkbox") control = `<input name="${name}" type="checkbox" value="true">`;
+    if (type === "checkbox") control = `<input name="${name}" type="checkbox" value="true"${mode === "admin" && values[field.field_key] ? " checked" : ""}>`;
     if (type === "hidden") return `<label class="honeypot" aria-hidden="true">${escapeHtml(field.label)}<input name="${name}" tabindex="-1" autocomplete="off"></label>`;
     if (type === "image_upload") control = `<input name="${name}" type="file" accept="image/png,image/jpeg" multiple><small>PNG of JPG · max 5 bestanden · max 5 MB per bestand · geen SVG</small>`;
     return `<label class="field"><span>${escapeHtml(field.label)}</span>${control}</label>`;
   }).join("");
+}
+
+export function publicFormPage(form: any, fields: any[], projects: any[]) {
+  const controls = formControls(fields, projects, {}, "public");
+  const fieldTypes = JSON.stringify(Object.fromEntries(fields.map((field) => [field.field_key, field.field_type])));
   return document(form.title, `<main class="public"><div class="url-strip">/f/${escapeHtml(form.slug)}</div><form class="card" id="public-form"><div class="card-body"><div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description)}</p><div class="grid one">${controls}</div><br><button class="button primary" type="submit">Melding versturen</button><p class="error" role="alert"></p></div></form></main>`, `
     document.querySelector("#public-form").addEventListener("submit",async(event)=>{
       event.preventDefault();const data=new FormData(event.currentTarget);const payload={};const files={};
-      for(const [key,value] of data){if(value instanceof File&&value.size){(files[key]=files[key]||[]).push(value)}else if(!(value instanceof File))payload[key]=value}
+      for(const [key,value] of data){if(value instanceof File&&value.size){(files[key]=files[key]||[]).push(value)}else if(!(value instanceof File))payload[key]=key in payload?[].concat(payload[key],value):value}
+      for(const [key,type] of Object.entries(${fieldTypes})){if(type==="checkbox")payload[key]=payload[key]==="true";else if(type==="multi_select")payload[key]=Array.isArray(payload[key])?payload[key]:key in payload?[payload[key]]:[]}
       for(const [key,list] of Object.entries(files)){
         if(list.length>5){document.querySelector(".error").textContent="Max 5 bestanden per veld";return}
         const ids=[];
