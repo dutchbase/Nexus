@@ -503,6 +503,14 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             if(response.ok)location.reload();else{const result=await response.json();form.querySelector(".error").textContent=result.error}
           });
         }
+        const mergeSettingsForm=document.querySelector("[data-pull-request-merge-settings-form]");
+        if(mergeSettingsForm){
+          mergeSettingsForm.addEventListener("submit",async(event)=>{
+            event.preventDefault();
+            const response=await fetch("/api/admin/settings/pull-request-merge",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({require_fresh_policy_binding:mergeSettingsForm.querySelector("[name=require_fresh_policy_binding]").checked})});
+            if(response.ok)location.reload();else{const result=await response.json();mergeSettingsForm.querySelector(".error").textContent=result.error}
+          });
+        }
         const systemForm=document.querySelector("[data-system-ai-settings-form]");
         if(systemForm){
           systemForm.addEventListener("submit",async(event)=>{
@@ -544,7 +552,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         document.querySelector("[data-pr-mark-reviewed]")?.addEventListener("click",()=>prAction("mark-reviewed"));
         document.querySelector("[data-pr-approve]")?.addEventListener("click",event=>{
           const button=event.currentTarget;
-          if(confirm("Approve and merge this pull request on GitHub? This cannot be undone from here."))prAction("approve",{expected_head_sha:button.dataset.prHeadSha,policy_snapshot_id:button.dataset.prPolicySnapshotId});
+          if(confirm("Approve and merge this pull request on GitHub? This cannot be undone from here."))prAction("approve",{expected_head_sha:button.dataset.prHeadSha,...(button.dataset.prPolicySnapshotId?{policy_snapshot_id:button.dataset.prPolicySnapshotId}:{})});
         });
         document.querySelector("[data-pr-request-changes]")?.addEventListener("click",()=>prAction("request-changes"));
         document.querySelector("[data-pr-resolve-conflicts]")?.addEventListener("click",(event)=>{

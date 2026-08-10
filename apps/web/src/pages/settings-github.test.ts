@@ -13,6 +13,7 @@ beforeEach(() => {
     if (!sql) return { rows: [] };
     if (sql.includes("FROM ai_review_settings")) return { rows: [{ default_model: "sonnet", default_reasoning_level: "medium" }] };
     if (sql.includes("FROM github_capability")) return { rows: [] };
+    if (sql.includes("FROM pull_request_merge_settings")) return { rows: [{ require_fresh_policy_binding: false }] };
     return { rows: [] };
   });
 });
@@ -42,6 +43,14 @@ describe("capabilityLabel", () => {
 });
 
 describe("settings page GitHub panel", () => {
+  it("renders the policy binding setting unchecked by default", async () => {
+    const page = await operate.render(new URL("http://test/admin/settings"), session, {});
+
+    expect(page?.body).toContain('data-pull-request-merge-settings-form');
+    expect(page?.body).toContain('name="require_fresh_policy_binding" type="checkbox"');
+    expect(page?.body).not.toContain('name="require_fresh_policy_binding" type="checkbox" checked');
+    expect(page?.body).toContain("When disabled, Approve &amp; merge checks only the selected commit. GitHub still applies its repository rules.");
+  });
   it("renders configuration intent as unverified and drops the fake verified checkboxes", async () => {
     const page = await operate.render(new URL("http://test/admin/settings"), session, {});
 

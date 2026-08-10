@@ -15,7 +15,7 @@ const { adminApi } = await import("./server.ts");
 
 function request(body: unknown, method = "PATCH") {
   return {
-    method, headers: {},
+    method, headers: {}, socket: { remoteAddress: "127.0.0.1" },
     async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify(body)); },
   } as any;
 }
@@ -31,7 +31,7 @@ test("pull-request approval rejects a browser request without a head and policy 
   pool.query.mockResolvedValueOnce({ rows: [{
     id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", head_sha: "head-sha",
     current_policy_snapshot_id: "snapshot-1", policy_stale: false,
-  }] });
+  }] }).mockResolvedValueOnce({ rows: [{ require_fresh_policy_binding: true }] });
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
   await adminApi(request({}, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin" });
@@ -41,10 +41,9 @@ test("pull-request approval rejects a browser request without a head and policy 
 });
 
 test("pull-request approval rejects a stale browser policy binding", async () => {
-  pool.query.mockResolvedValueOnce({ rows: [{
-    id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", head_sha: "new-head",
-    current_policy_snapshot_id: "snapshot-2", policy_stale: false,
-  }] });
+  pool.query.mockImplementation(async (sql: string) => sql.includes("FROM pull_request_merge_settings")
+    ? { rows: [{ require_fresh_policy_binding: true }] }
+    : { rows: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", head_sha: "new-head", current_policy_snapshot_id: "snapshot-2", policy_stale: false }] });
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
   await adminApi(request({ expected_head_sha: "old-head", policy_snapshot_id: "snapshot-1" }, "POST"),
@@ -54,8 +53,47 @@ test("pull-request approval rejects a stale browser policy binding", async () =>
   expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(false);
 });
 
+test("pull-request approval queues a matching head without a policy snapshot when enforcement is disabled", async () => {
+  pool.query.mockImplementation(async (sql: string, values?: unknown[]) => {
+    if (sql.includes("FROM pull_request_merge_settings")) return { rows: [{ require_fresh_policy_binding: false }] };
+    if (sql.includes("FROM pull_requests pr")) return { rows: [{ id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", head_sha: "head-sha", current_policy_snapshot_id: null, policy_stale: true }] };
+    if (sql.includes("INSERT INTO jobs")) return { rows: [{ id: "job-1", payload_json: values?.[2] }], rowCount: 1 };
+    return { rows: [], rowCount: 1 };
+  });
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await adminApi(request({ expected_head_sha: "head-sha" }, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin" });
+
+  const queued = pool.query.mock.calls.find(([sql]) => sql.includes("INSERT INTO jobs"));
+  expect(queued?.[1]?.[2]).toEqual({ actor_id: "admin", pull_request_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", expected_head_sha: "head-sha" });
+  expect(response.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
+});
+
+test("pull-request merge setting rejects non-boolean values", async () => {
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await adminApi(request({ require_fresh_policy_binding: "false" }, "POST"), response, new URL("http://test/api/admin/settings/pull-request-merge"), { user_id: "admin" });
+
+  expect(response.writeHead).toHaveBeenCalledWith(400, expect.any(Object));
+  expect(pool.query).not.toHaveBeenCalled();
+});
+
+test("pull-request merge setting updates the singleton and audits the actor", async () => {
+  pool.query.mockResolvedValue({ rows: [], rowCount: 1 });
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await adminApi(request({ require_fresh_policy_binding: true }, "POST"), response, new URL("http://test/api/admin/settings/pull-request-merge"), { user_id: "admin" });
+
+  const update = pool.query.mock.calls.find(([sql]) => sql.includes("UPDATE pull_request_merge_settings"));
+  const audit = pool.query.mock.calls.find(([sql]) => sql.includes("INSERT INTO audit_events"));
+  expect(update?.[1]).toEqual([true]);
+  expect(audit?.[1]?.slice(0, 7)).toEqual(["admin", "admin", "pull_request_merge_settings.update", "pull_request_merge_settings", "1", null, { require_fresh_policy_binding: true }]);
+  expect(response.writeHead).toHaveBeenCalledWith(200, expect.any(Object));
+});
+
 test("pull-request approval queues the exact current head and policy binding", async () => {
   pool.query.mockImplementation(async (sql: string, values?: unknown[]) => {
+    if (sql.includes("FROM pull_request_merge_settings")) return { rows: [{ require_fresh_policy_binding: true }] };
     if (sql.includes("FROM pull_requests pr")) return { rows: [{
       id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", head_sha: "head-sha",
       current_policy_snapshot_id: "snapshot-1", policy_stale: false,

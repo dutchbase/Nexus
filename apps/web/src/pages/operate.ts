@@ -34,7 +34,7 @@ export function capabilityLabel(row: { status: string; can_read: boolean; can_wr
   return row.reason ? `${row.status} · ${row.reason} · ${checked}` : `${row.status} · ${checked}`;
 }
 
-function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: boolean; can_write: boolean; reason: string | null; checked_at: string | Date } | null, systemAiSettings: any, modelPrices: any[]): string {
+function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: boolean; can_write: boolean; reason: string | null; checked_at: string | Date } | null, systemAiSettings: any, modelPrices: any[], pullRequestMergeSettings: any): string {
   const panel = (index: number, content: string) => `<div role="tabpanel" id="panel-${index}" aria-labelledby="tab-${index}"${index === 0 ? "" : " hidden"}>${content}</div>`;
   const field = (label: string, value: string) => `<div style="padding:10px 0;border-bottom:1px solid var(--border)"><div class="eyebrow">${escapeHtml(label)}</div><div class="mono" style="font-size:13px;margin-top:4px">${escapeHtml(value)}</div></div>`;
   const check = (label: string) => `<label style="display:flex;align-items:center;gap:8px;padding:6px 0;font-size:13px"><input type="checkbox" checked disabled>${escapeHtml(label)}</label>`;
@@ -71,6 +71,7 @@ function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: bo
     ${field("GitHub access", capabilityLabel(cap))}
     <div class="eyebrow" style="margin-top:14px">Configuration intent — not verified against GitHub</div>
     <div style="padding-top:4px">${field("Pull request draft policy", "Always open pull requests as draft")}${field("Merge policy", "Automatic merge permanently disabled")}</div>
+    <form data-pull-request-merge-settings-form style="margin-top:14px"><label style="display:flex;align-items:center;gap:8px"><input name="require_fresh_policy_binding" type="checkbox"${pullRequestMergeSettings?.require_fresh_policy_binding ? " checked" : ""}> Require fresh policy binding</label><p style="font-size:12.5px;color:var(--text3)">When disabled, Approve &amp; merge checks only the selected commit. GitHub still applies its repository rules.</p><div style="display:flex;gap:8px"><button class="button primary" type="submit">Save</button><div class="error" style="color:var(--t-danger);align-self:center;font-size:13px"></div></div></form>
   </section>`;
 
   const backupRetention = /^[1-9][0-9]*$/.test(process.env.DCC_BACKUP_RETENTION_DAYS ?? "") ? process.env.DCC_BACKUP_RETENTION_DAYS + " days" : "not configured";
@@ -253,15 +254,16 @@ async function systemBody(): Promise<string> {
 
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname === "/admin/settings") {
-    const [aiReviewSettings, capability, systemAiSettings, modelPrices] = await Promise.all([
+    const [aiReviewSettings, capability, systemAiSettings, modelPrices, pullRequestMergeSettings] = await Promise.all([
       pool.query("SELECT * FROM ai_review_settings WHERE id=1"),
       pool.query("SELECT * FROM github_capability WHERE id=1"),
       pool.query("SELECT * FROM system_ai_settings WHERE id=1"),
       pool.query(`SELECT p.*,u.username creator,
         p.effective_from=(SELECT max(current.effective_from) FROM ai_model_prices current WHERE current.model=p.model AND current.effective_from<=now()) is_active
         FROM ai_model_prices p LEFT JOIN users u ON u.id=p.created_by ORDER BY p.model,p.effective_from DESC`),
+      pool.query("SELECT require_fresh_policy_binding FROM pull_request_merge_settings WHERE id=1"),
     ]);
-    return { status: 200, title: "Settings", body: settingsBody(aiReviewSettings.rows[0], capability.rows[0] ?? null, systemAiSettings.rows[0], modelPrices.rows) };
+    return { status: 200, title: "Settings", body: settingsBody(aiReviewSettings.rows[0], capability.rows[0] ?? null, systemAiSettings.rows[0], modelPrices.rows, pullRequestMergeSettings.rows[0]) };
   }
   if (url.pathname === "/admin/system") return { status: 200, title: "System health", body: await systemBody() };
   return null;

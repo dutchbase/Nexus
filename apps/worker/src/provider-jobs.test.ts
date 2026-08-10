@@ -143,17 +143,35 @@ test("fences provider side effects before dispatch", async () => {
   expect(approveAndMergePullRequest).not.toHaveBeenCalled();
 });
 
-test.each(["expected_head_sha", "policy_snapshot_id"])("requires merge job %s binding", async (missing) => {
+test("allows a merge job without a policy snapshot binding", async () => {
+  const database = db([{ id: "pr-1" }]);
+
+  await runProviderJob({
+    id: "job-7", type: "github.merge_pull_request",
+    idempotency_key: "g07:github.merge_pull_request:pr-1:once",
+    payload_json: { actor_id: "admin-1", pull_request_id: "pr-1", expected_head_sha: "head-sha" },
+  }, database as any);
+
+  expect(approveAndMergePullRequest).toHaveBeenCalledWith(
+    database,
+    expect.objectContaining({ expectedHeadSha: "head-sha", expectedPolicySnapshotId: undefined }),
+    expect.any(Function),
+  );
+  expect(database.queries.at(-1)?.values?.[5]).toEqual(expect.objectContaining({ expected_head_sha: "head-sha" }));
+  expect(database.queries.at(-1)?.values?.[5]).not.toHaveProperty("policy_snapshot_id");
+});
+
+test("requires a merge job head binding", async () => {
   const database = db([{ id: "pr-1" }]);
   const payload: Record<string, unknown> = {
     actor_id: "admin-1", pull_request_id: "pr-1", expected_head_sha: "head-sha", policy_snapshot_id: "snapshot-1",
   };
-  delete payload[missing];
+  delete payload.expected_head_sha;
 
   await expect(runProviderJob({
     id: "job-7", type: "github.merge_pull_request",
     idempotency_key: "g07:github.merge_pull_request:pr-1:once", payload_json: payload,
-  }, database as any)).rejects.toThrow(`${missing} is required`);
+  }, database as any)).rejects.toThrow("expected_head_sha is required");
 
   expect(approveAndMergePullRequest).not.toHaveBeenCalled();
 });

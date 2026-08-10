@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
 import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
-  buildExecutionPrompt, checkPlanApprovalGate, enqueueJob, getSystemAiSettings,
+  buildExecutionPrompt, checkPlanApprovalGate, enqueueJob, getPullRequestMergeSettings, getSystemAiSettings,
   globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
   unionSkills, validateAiSelection, providerForModel, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
@@ -852,6 +852,13 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const job = await enqueueJob({ type: "github.sync_open", payload: { actor_id: session.user_id }, idempotencyKey: `g07:github.sync_open:all:${randomUUID()}` });
     return json(response, 202, { job });
   }
+  if (url.pathname === "/api/admin/settings/pull-request-merge" && request.method === "POST") {
+    const body = await bodyOf(request);
+    if (typeof body.require_fresh_policy_binding !== "boolean") return json(response, 400, { error: "require_fresh_policy_binding must be a boolean" });
+    await pool.query("UPDATE pull_request_merge_settings SET require_fresh_policy_binding=$1 WHERE id=1", [body.require_fresh_policy_binding]);
+    await audit({ actorType: "admin", actorId: session.user_id, action: "pull_request_merge_settings.update", entityType: "pull_request_merge_settings", entityId: "1", after: { require_fresh_policy_binding: body.require_fresh_policy_binding }, ip: ipOf(request) });
+    return json(response, 200, { ok: true });
+  }
   if (url.pathname === "/api/admin/settings/ai-review" && request.method === "POST") {
     const body = await bodyOf(request);
     const selection = validateAiSelection({
@@ -987,15 +994,16 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     } else if (action === "approve") {
       const expectedHeadSha = typeof body.expected_head_sha === "string" ? body.expected_head_sha.trim() : "";
       const policySnapshotId = typeof body.policy_snapshot_id === "string" ? body.policy_snapshot_id.trim() : "";
-      if (!expectedHeadSha || !policySnapshotId || pullRequest.policy_stale
-        || expectedHeadSha !== pullRequest.head_sha || policySnapshotId !== pullRequest.current_policy_snapshot_id) {
+      const { requireFreshPolicyBinding } = await getPullRequestMergeSettings(pool);
+      if (!expectedHeadSha || expectedHeadSha !== pullRequest.head_sha || (requireFreshPolicyBinding && (!policySnapshotId || pullRequest.policy_stale
+        || policySnapshotId !== pullRequest.current_policy_snapshot_id))) {
         return json(response, 409, { error: "pull request policy binding is missing or stale" });
       }
       const job = await enqueueJob({
         type: "github.merge_pull_request",
         payload: {
           actor_id: session.user_id, pull_request_id: pullRequest.id,
-          expected_head_sha: expectedHeadSha, policy_snapshot_id: policySnapshotId,
+          expected_head_sha: expectedHeadSha, ...(requireFreshPolicyBinding ? { policy_snapshot_id: policySnapshotId } : {}),
         },
         idempotencyKey: `g07:github.merge_pull_request:${pullRequest.id}:${randomUUID()}`,
       });
