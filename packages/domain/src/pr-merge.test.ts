@@ -43,14 +43,19 @@ function policy(overrides: Record<string, unknown> = {}) {
   } as any;
 }
 
-function database(options: { verifiedHash?: string; attempt?: Record<string, unknown> } = {}) {
+function database(options: { enabled?: boolean; missingStored?: boolean; verifiedHash?: string; attempt?: Record<string, unknown> } = {}) {
   const queries: Array<{ sql: string; values?: unknown[] }> = [];
   const query = vi.fn(async (sql: string, values?: unknown[]) => {
     queries.push({ sql, values });
-    if (sql.includes("FROM pull_requests pr") && sql.includes("pull_request_policy_snapshots")) return { rows: [{
+    if (sql.includes("FROM pull_request_merge_settings")) return { rows: [{ require_fresh_policy_binding: options.enabled ?? true }], rowCount: 1 };
+    if (sql.includes("FROM pull_requests pr") && !sql.includes("pull_request_policy_snapshots")) return { rows: [{
+      id: "pr-id", github_owner: "acme", github_repository: "widgets", number: 42,
+      ticket_id: "ticket-id", ticket_status: "PR Approved",
+    }], rowCount: 1 };
+    if (sql.includes("FROM pull_requests pr") && sql.includes("pull_request_policy_snapshots")) return { rows: options.missingStored ? [] : [{
       id: "pr-id", github_owner: "acme", github_repository: "widgets", number: 42,
       expected_snapshot_id: "expected-snapshot", expected_head_sha: "head-sha", expected_material_hash: "same-hash",
-    }], rowCount: 1 };
+    }], rowCount: options.missingStored ? 0 : 1 };
     if (sql.includes("FROM pull_request_merge_attempts")) return { rows: options.attempt ? [options.attempt] : [], rowCount: options.attempt ? 1 : 0 };
     if (sql.includes("INSERT INTO pull_request_policy_snapshots")) return { rows: [{ id: "verified-snapshot", material_hash: options.verifiedHash ?? "same-hash" }], rowCount: 1 };
     return { rows: [], rowCount: 1 };
@@ -61,9 +66,36 @@ function database(options: { verifiedHash?: string; attempt?: Record<string, unk
 
 beforeEach(() => {
   vi.clearAllMocks();
+  github.getPullRequest.mockResolvedValue({ merged: false, head: { sha: "head-sha" } });
   github.getPullRequestPolicyInputs.mockResolvedValue(policy());
   github.mergePullRequest.mockResolvedValue({ merged: true, sha: "merge-sha", message: "merged" });
   syncPullRequest.mockResolvedValue(undefined);
+});
+
+test("merges a matching head without fetching policy inputs when policy binding is disabled", async () => {
+  const db = database({ enabled: false });
+
+  await expect(approveAndMergePullRequest(db, { ...expected, expectedPolicySnapshotId: undefined })).resolves.toEqual({
+    mergedSha: "merge-sha", mergedHeadSha: "head-sha", policySnapshotId: null,
+  });
+
+  expect(github.getPullRequest).toHaveBeenCalledWith("acme", "widgets", 42);
+  expect(github.getPullRequestPolicyInputs).not.toHaveBeenCalled();
+  expect(syncPullRequest).not.toHaveBeenCalled();
+  expect(github.mergePullRequest).toHaveBeenCalledWith("acme", "widgets", 42, "squash", "head-sha");
+  expect(db.queries.some(({ sql, values }: any) => sql.includes("pull_request_merge_attempts")
+    && values?.includes(null))).toBe(true);
+});
+
+test("refuses a changed head before the merge request when policy binding is disabled", async () => {
+  const db = database({ enabled: false });
+  github.getPullRequest.mockResolvedValue({ merged: false, head: { sha: "changed-head" } });
+
+  await expect(approveAndMergePullRequest(db, { ...expected, expectedPolicySnapshotId: undefined }))
+    .rejects.toMatchObject({ code: "head_changed" });
+
+  expect(github.getPullRequestPolicyInputs).not.toHaveBeenCalled();
+  expect(github.mergePullRequest).not.toHaveBeenCalled();
 });
 
 test("refuses when GitHub's final head differs from the browser-bound head", async () => {
@@ -175,8 +207,7 @@ test("reconciles a retry after GitHub merged but the first worker missed durable
 });
 
 test("rejects a job whose expected snapshot is not the PR snapshot it names", async () => {
-  const db = database();
-  db.query.mockImplementationOnce(async () => ({ rows: [], rowCount: 0 }));
+  const db = database({ missingStored: true });
 
   await expect(approveAndMergePullRequest(db, expected)).rejects.toBeInstanceOf(PullRequestMergeError);
   expect(github.getPullRequestPolicyInputs).not.toHaveBeenCalled();

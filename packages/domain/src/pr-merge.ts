@@ -3,6 +3,7 @@ import {
   getPullRequest, getPullRequestPolicyInputs, GitHubProviderError, mergePullRequest,
 } from "../../github-provider/src/index.ts";
 import { evaluatePullRequestPolicy } from "./pull-request-policy.ts";
+import { getPullRequestMergeSettings } from "./pull-request-merge-settings.ts";
 import { syncPullRequest } from "./pull-request-sync.ts";
 
 export class PullRequestMergeError extends Error {
@@ -17,7 +18,7 @@ type MergeInput = {
   jobId: string;
   actor: { type: "worker" | "admin"; id: string };
   expectedHeadSha: string;
-  expectedPolicySnapshotId: string;
+  expectedPolicySnapshotId?: string;
 };
 
 async function transaction<T>(db: pg.Pool, work: (client: pg.PoolClient) => Promise<T>) {
@@ -46,9 +47,10 @@ function resultFor(row: any) {
 async function recordMerged(
   db: pg.Pool,
   input: MergeInput,
-  policySnapshotId: string,
+  policySnapshotId: string | null,
   mergedSha: string,
   providerResponse: unknown,
+  completeCachedState = false,
 ) {
   await transaction(db, async (client) => {
     await client.query(
@@ -59,9 +61,29 @@ async function recordMerged(
       [input.jobId, policySnapshotId, input.expectedHeadSha, mergedSha, providerResponse],
     );
     await client.query(
-      "UPDATE pull_requests SET internal_review_state='approved',updated_at=now() WHERE id=$1",
-      [input.pullRequestId],
+      completeCachedState
+        ? "UPDATE pull_requests SET state='merged',internal_review_state='approved',merged_at=now(),merge_commit_sha=$2,updated_at=now() WHERE id=$1"
+        : "UPDATE pull_requests SET internal_review_state='approved',updated_at=now() WHERE id=$1",
+      completeCachedState ? [input.pullRequestId, mergedSha] : [input.pullRequestId],
     );
+    if (completeCachedState) {
+      await client.query(
+        `INSERT INTO ticket_status_history
+         (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_pull_request_id)
+         SELECT ticket.id,ticket.status,'Completed','GitHub pull request merged',$2,$3,$1
+         FROM tickets ticket
+         WHERE ticket.id=(SELECT ticket_id FROM pull_requests WHERE id=$1)
+           AND ticket.status IN ('PR Ready for Review','PR Changes Requested','PR Approved','Merged')
+         RETURNING ticket_id`,
+        [input.pullRequestId, input.actor.type, input.actor.id],
+      );
+      await client.query(
+        `UPDATE tickets SET status='Completed',updated_at=now()
+         WHERE id=(SELECT ticket_id FROM pull_requests WHERE id=$1)
+           AND status IN ('PR Ready for Review','PR Changes Requested','PR Approved','Merged')`,
+        [input.pullRequestId],
+      );
+    }
   });
 }
 
@@ -77,7 +99,7 @@ export function approveAndMergePullRequest(
   db: pg.Pool,
   input: MergeInput,
   assertOwned?: () => Promise<void>,
-): Promise<{ mergedSha: string; mergedHeadSha: string; policySnapshotId: string }>;
+): Promise<{ mergedSha: string; mergedHeadSha: string; policySnapshotId: string | null }>;
 // Temporary compile-only compatibility for the disabled AI auto-merge branch;
 // Task 4 removes that dead caller rather than extending this gate for it.
 export function approveAndMergePullRequest(
@@ -92,11 +114,82 @@ export async function approveAndMergePullRequest(
   ..._legacy: unknown[]
 ): Promise<any> {
   if (typeof input.pullRequestId !== "string" || typeof input.jobId !== "string"
-    || typeof input.expectedHeadSha !== "string" || typeof input.expectedPolicySnapshotId !== "string") {
+    || typeof input.expectedHeadSha !== "string") {
     throw new PullRequestMergeError("legacy merge path is disabled", "stale_binding");
   }
   const mergeInput = input as MergeInput;
   const ownership = typeof assertOwned === "function" ? assertOwned : async () => {};
+  const settings = await getPullRequestMergeSettings(db);
+  if (!settings.requireFreshPolicyBinding) {
+    const stored = (await db.query(
+      `SELECT pr.id,p.github_owner,p.github_repository,pr.number
+       FROM pull_requests pr JOIN projects p ON p.id=pr.project_id WHERE pr.id=$1`,
+      [mergeInput.pullRequestId],
+    )).rows[0];
+    if (!stored) throw new PullRequestMergeError("pull request not found", "stale_binding");
+    const prior = (await db.query("SELECT * FROM pull_request_merge_attempts WHERE job_id=$1", [mergeInput.jobId])).rows[0];
+    if (prior?.state === "merged") return resultFor(prior);
+    if (prior?.state === "refused") {
+      const code = prior.refusal_code ?? "merge_failed";
+      const reason = prior.provider_response?.message;
+      throw new PullRequestMergeError(typeof reason === "string" ? reason : `merge refused: ${code}`, code);
+    }
+    await ownership();
+    const remote = await getPullRequest(stored.github_owner, stored.github_repository, stored.number);
+    await ownership();
+    if (prior?.state === "verified" && remote.merged === true && remote.head.sha === mergeInput.expectedHeadSha && remote.merge_commit_sha) {
+      const providerResponse = { reconciled: true, pull_request: remote };
+      await recordMerged(db, mergeInput, null, remote.merge_commit_sha, providerResponse, true);
+      return { mergedSha: remote.merge_commit_sha, mergedHeadSha: mergeInput.expectedHeadSha, policySnapshotId: null };
+    }
+    if (remote.head.sha !== mergeInput.expectedHeadSha) {
+      await transaction(db, async (client) => {
+        await client.query(
+          `INSERT INTO pull_request_merge_attempts
+           (job_id,pull_request_id,expected_policy_snapshot_id,verified_policy_snapshot_id,expected_head_sha,
+            state,refusal_code,actor_type,actor_id,verified_at,refused_at,completed_at)
+           VALUES ($1,$2,NULL,NULL,$3,'refused','head_changed',$4,$5,now(),now(),now())
+           ON CONFLICT (job_id) DO UPDATE SET state='refused',refusal_code='head_changed',verified_policy_snapshot_id=NULL,
+            refused_at=now(),completed_at=now(),updated_at=now()`,
+          [mergeInput.jobId, mergeInput.pullRequestId, mergeInput.expectedHeadSha, mergeInput.actor.type, mergeInput.actor.id],
+        );
+      });
+      throw new PullRequestMergeError("merge refused: head_changed", "head_changed");
+    }
+    await transaction(db, async (client) => {
+      await client.query(
+        `INSERT INTO pull_request_merge_attempts
+         (job_id,pull_request_id,expected_policy_snapshot_id,verified_policy_snapshot_id,expected_head_sha,
+          state,refusal_code,actor_type,actor_id,verified_at)
+         VALUES ($1,$2,NULL,NULL,$3,'verified',NULL,$4,$5,now())
+         ON CONFLICT (job_id) DO UPDATE SET state='verified',refusal_code=NULL,verified_policy_snapshot_id=NULL,
+          verified_at=now(),refused_at=NULL,completed_at=NULL,updated_at=now()`,
+        [mergeInput.jobId, mergeInput.pullRequestId, mergeInput.expectedHeadSha, mergeInput.actor.type, mergeInput.actor.id],
+      );
+    });
+    await ownership();
+    let providerResponse;
+    try {
+      providerResponse = await mergePullRequest(stored.github_owner, stored.github_repository, stored.number, "squash", mergeInput.expectedHeadSha);
+    } catch (error) {
+      const refused = error instanceof GitHubProviderError && error.code === "http_error";
+      const code = error instanceof GitHubProviderError && error.status === 409 ? "provider_head_changed" : "provider_error";
+      const response = error instanceof GitHubProviderError
+        ? { code: error.code, status: error.status ?? null, message: error.message }
+        : { message: error instanceof Error ? error.message : "merge failed" };
+      if (refused) await recordProviderRefusal(db, mergeInput, code, response);
+      throw new PullRequestMergeError(`${refused ? "merge refused" : "merge outcome unknown"}: ${code}`, code);
+    }
+    if (!providerResponse.merged || !providerResponse.sha) {
+      await recordProviderRefusal(db, mergeInput, "provider_refused", providerResponse);
+      throw new PullRequestMergeError("merge refused by GitHub", "provider_refused");
+    }
+    await recordMerged(db, mergeInput, null, providerResponse.sha, providerResponse, true);
+    return { mergedSha: providerResponse.sha, mergedHeadSha: mergeInput.expectedHeadSha, policySnapshotId: null };
+  }
+  if (typeof mergeInput.expectedPolicySnapshotId !== "string") {
+    throw new PullRequestMergeError("merge policy binding is missing or stale", "stale_binding");
+  }
   const stored = (await db.query(
     `SELECT pr.id,p.github_owner,p.github_repository,pr.number,
        ps.id expected_snapshot_id,ps.head_sha expected_head_sha,ps.material_hash expected_material_hash

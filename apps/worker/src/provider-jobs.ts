@@ -91,7 +91,8 @@ export async function runProviderJob(
   if (job.type === "github.merge_pull_request") {
     const pullRequestId = required(job.payload_json, "pull_request_id");
     const expectedHeadSha = required(job.payload_json, "expected_head_sha");
-    const expectedPolicySnapshotId = required(job.payload_json, "policy_snapshot_id");
+    const expectedPolicySnapshotId = typeof job.payload_json.policy_snapshot_id === "string" && job.payload_json.policy_snapshot_id.trim()
+      ? job.payload_json.policy_snapshot_id.trim() : undefined;
     await assertOwned();
     await approveAndMergePullRequest(
       db as pg.Pool,
@@ -104,7 +105,7 @@ export async function runProviderJob(
     await assertOwned();
     await audit(db, job, actorId, "github.merge_pull_request", "pull_request", pullRequestId, {
       expected_head_sha: expectedHeadSha,
-      policy_snapshot_id: expectedPolicySnapshotId,
+      ...(expectedPolicySnapshotId ? { policy_snapshot_id: expectedPolicySnapshotId } : {}),
     });
     return;
   }
