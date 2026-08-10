@@ -748,24 +748,32 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
     `);
 }
 
-export function publicFormPage(form: any, fields: any[], projects: any[]) {
-  const controls = fields.filter((field) => field.field_type !== "static").map((field) => {
+export function formControls(fields: any[], projects: any[], values: Record<string, any> = {}, mode: "public" | "admin" = "public") {
+  return fields.filter((field) => field.field_type !== "static" && (mode === "public" || !["hidden", "image_upload"].includes(field.field_type))).map((field) => {
     const name = escapeHtml(field.field_key);
     const required = field.required ? " required" : "";
     const type = field.field_type;
-    const options = (Array.isArray(field.options_json) ? field.options_json : []).map((option: any) => `<option value="${escapeHtml(option.value ?? option)}">${escapeHtml(option.label ?? option)}</option>`).join("");
-    let control = `<input name="${name}" placeholder="${escapeHtml(field.placeholder)}"${required}>`;
-    if (type === "long_text") control = `<textarea name="${name}" rows="5"${required}></textarea>`;
-    if (type === "email" || type === "url" || type === "number") control = `<input name="${name}" type="${type}"${required}>`;
+    const value = mode === "admin" ? escapeHtml(values[field.field_key]) : "";
+    const options = (Array.isArray(field.options_json) ? field.options_json : []).map((option: any) => {
+      const optionValue = option.value ?? option;
+      return `<option value="${escapeHtml(optionValue)}"${mode === "admin" && String(optionValue) === String(values[field.field_key]) ? " selected" : ""}>${escapeHtml(option.label ?? option)}</option>`;
+    }).join("");
+    let control = `<input name="${name}" placeholder="${escapeHtml(field.placeholder)}"${mode === "admin" ? ` value="${value}"` : ""}${required}>`;
+    if (type === "long_text") control = `<textarea name="${name}" rows="5"${required}>${value}</textarea>`;
+    if (type === "email" || type === "url" || type === "number") control = `<input name="${name}" type="${type}"${mode === "admin" ? ` value="${value}"` : ""}${required}>`;
     if (type.includes("selector") || ["dropdown", "radio", "multi_select"].includes(type)) {
       const choices = type === "project_selector" ? projects.map((project) => `<option value="${project.id}">${escapeHtml(project.name)}</option>`).join("") : options;
       control = `<select name="${name}"${required}>${choices}</select>`;
     }
-    if (type === "checkbox") control = `<input name="${name}" type="checkbox" value="true">`;
+    if (type === "checkbox") control = `<input name="${name}" type="checkbox" value="true"${mode === "admin" && values[field.field_key] ? " checked" : ""}>`;
     if (type === "hidden") return `<label class="honeypot" aria-hidden="true">${escapeHtml(field.label)}<input name="${name}" tabindex="-1" autocomplete="off"></label>`;
     if (type === "image_upload") control = `<input name="${name}" type="file" accept="image/png,image/jpeg" multiple><small>PNG of JPG · max 5 bestanden · max 5 MB per bestand · geen SVG</small>`;
     return `<label class="field"><span>${escapeHtml(field.label)}</span>${control}</label>`;
   }).join("");
+}
+
+export function publicFormPage(form: any, fields: any[], projects: any[]) {
+  const controls = formControls(fields, projects, {}, "public");
   return document(form.title, `<main class="public"><div class="url-strip">/f/${escapeHtml(form.slug)}</div><form class="card" id="public-form"><div class="card-body"><div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description)}</p><div class="grid one">${controls}</div><br><button class="button primary" type="submit">Melding versturen</button><p class="error" role="alert"></p></div></form></main>`, `
     document.querySelector("#public-form").addEventListener("submit",async(event)=>{
       event.preventDefault();const data=new FormData(event.currentTarget);const payload={};const files={};
