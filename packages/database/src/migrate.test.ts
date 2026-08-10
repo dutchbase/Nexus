@@ -26,6 +26,12 @@ describe("validateMigrations", () => {
     expect(migration).toContain("('fable','anthropic','2026-08-08T00:00:00Z',10,50,12.5,1,'https://platform.claude.com/docs/en/about-claude/pricing')");
   });
 
+  it("replaces the merged-attempt check created by migration 040", async () => {
+    const migration = await readFile(new URL("../migrations/051_pull_request_merge_settings.sql", import.meta.url), "utf8");
+    expect(migration).toMatch(/DROP CONSTRAINT pull_request_merge_attempts_check1/);
+    expect(migration).toMatch(/ADD CONSTRAINT pull_request_merge_attempts_merged_sha_check/);
+  });
+
   it("includes rejected deployment history without weakening active SHA deduplication", async () => {
     await expect(readdir(new URL("../migrations/", import.meta.url))).resolves.toContain("044_deployment_rejection_history.sql");
   });
