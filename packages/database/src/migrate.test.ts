@@ -127,6 +127,28 @@ integration("migrate", () => {
     }
   });
 
+  it("seeds optional fresh policy binding and permits unbound merged attempts", async () => {
+    await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      expect((await client.query("SELECT require_fresh_policy_binding FROM pull_request_merge_settings WHERE id=1")).rows[0])
+        .toEqual({ require_fresh_policy_binding: false });
+      const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ($q$unbound-merge$q$,$q$Unbound merge$q$,$q$/tmp/project$q$) RETURNING id")).rows[0].id;
+      const pullRequestId = (await client.query("INSERT INTO pull_requests (project_id) VALUES ($1) RETURNING id", [projectId])).rows[0].id;
+      const jobId = (await client.query("INSERT INTO jobs (type,idempotency_key) VALUES ($q$merge$q$,$q$unbound-merged-attempt$q$) RETURNING id")).rows[0].id;
+
+      const attempt = await client.query(
+        "INSERT INTO pull_request_merge_attempts (job_id,pull_request_id,expected_head_sha,merged_head_sha,merged_sha,state,actor_type,actor_id) VALUES ($1,$2,$q$head$q$,$q$head$q$,$q$merge$q$,$q$merged$q$,$q$worker$q$,$q$worker-1$q$) RETURNING expected_policy_snapshot_id,verified_policy_snapshot_id",
+        [jobId, pullRequestId],
+      );
+      expect(attempt.rows).toEqual([{ expected_policy_snapshot_id: null, verified_policy_snapshot_id: null }]);
+    } finally {
+      await client.end();
+    }
+  });
+
   it("serializes concurrent runners", async () => {
     await writeFile(join(migrationDirectory, "001_serialized.sql"), "SELECT pg_sleep(0.05); CREATE TABLE migration_lock_test (id integer);");
     await Promise.all([
