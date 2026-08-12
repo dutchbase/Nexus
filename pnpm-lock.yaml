@@ -51,6 +51,9 @@ importers:
 
   apps/worker:
     dependencies:
+      '@dcc/anthropic-runner':
+        specifier: workspace:*
+        version: link:../../packages/anthropic-runner
       '@dcc/claude-runner':
         specifier: workspace:*
         version: link:../../packages/claude-runner

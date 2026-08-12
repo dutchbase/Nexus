@@ -129,12 +129,22 @@ DEEPSEEK_API_KEY=
 
 # Absolute path to the OpenCode CLI binary (defaults to "opencode" on PATH).
 OPENCODE_BIN=/home/deploy/.opencode/bin/opencode
+
+# Anthropic API key (pay-per-token Messages API). Optional. When set, the
+# text-only jobs listed in DCC_ANTHROPIC_API_JOBS run through the metered API
+# instead of the subscription Claude CLI. Unset => everything stays on the CLI.
+# NEVER put this in .env — the web process must never see it.
+ANTHROPIC_API_KEY=
+# Comma-separated run types routed to the Messages API.
+# Default: pr_follow_up_description. Set to "" as a kill switch.
+DCC_ANTHROPIC_API_JOBS=pr_follow_up_description
 ```
 
 Production always runs with `NODE_ENV=production`. The web process requires
 `DCC_PROCESS_ROLE=web`, an HTTPS `APP_BASE_URL`, and no worker credentials;
 the worker requires `DCC_PROCESS_ROLE=worker`. `pnpm dev` assigns those roles
-automatically for local development.
+automatically for local development. `ANTHROPIC_API_KEY` is worker-only,
+scrubbed from the web process and from the spawned `claude` CLI.
 
 Then source it in your shell for the one-off setup commands below:
 

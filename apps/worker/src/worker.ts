@@ -8,6 +8,7 @@ import {
   ClaudeExecutionError, invokeExecutionClaude, parsePlanMarkdown, preflightClaudeAuthentication,
   describeExecutionDenials, type ExecutionOutcome,
 } from "@dcc/claude-runner";
+import { invokeAnthropicText } from "@dcc/anthropic-runner";
 import { artifactDataRoot, finalizeArtifact, inTransaction, legacyArtifactDataRoot, pool, reconcileArtifacts, stageArtifact, type StagedArtifact } from "@dcc/database";
 import {
   assertPrReviewDestination, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
@@ -35,6 +36,7 @@ import { runPrivateExecution } from "./execution-handoff.ts";
 import { assertExecutionProducedChanges, ExecutionNoChangesError, fingerprintExecutionWorktree } from "./execution-change-detection.ts";
 import { failExecutionPublication, handleExecutionPublicationFailure, prepareExecutionPublication, PublicationError, publishExternalResult, storePublishedPullRequest } from "./execution-publication.ts";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
+import { anthropicKeyOrThrow, usesAnthropicApi } from "./ai-transport.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
 import {
   approvedExecutionInput, approvedPhaseSkills, assertApprovedSkillSnapshot, assertExecutionPublicationGate, finalizeAiUsage, prReviewSnapshotInput, shouldRetryPrReview,
@@ -143,7 +145,13 @@ async function refuseQueuedClaudeJobs(code: string, message: string) {
   try {
     await refuseClaudeJobs(
       inTransaction,
-      [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes],
+      [
+        ...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes,
+        // Excluded once the API transport is active for it: that job no
+        // longer depends on Claude CLI subscription auth.
+        ...(usesAnthropicApi("pr_follow_up_description") ? [] : followUpDescriptionJobTypes),
+        ...conflictResolutionJobTypes,
+      ],
       code,
       message,
     );
@@ -1425,23 +1433,38 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
       ticketId: pullRequest.ticket_id ?? null, projectId: project.id, phase: "pr_follow_up_description", content: prompt,
       model: "haiku", reasoningLevel: "low", metadata: { pullRequestId: pullRequest.id, promptVersionIds: { "global.follow-up-ticket": promptRow.active_version_id } },
     }));
-    // ponytail: always subscription-billed for now — Task B4 makes this
-    // conditional once the follow-up job can route through the metered
-    // Anthropic API.
-    await createAiInvocation({ id: runId, ticketId: pullRequest.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_follow_up_description", model: "haiku", reasoningLevel: "low", taskPrompt: prompt, promptSnapshotId: promptSnapshot.id, billingMode: "subscription" });
+    const useApi = usesAnthropicApi("pr_follow_up_description");
+    await createAiInvocation({ id: runId, ticketId: pullRequest.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_follow_up_description", model: "haiku", reasoningLevel: "low", taskPrompt: prompt, promptSnapshotId: promptSnapshot.id, billingMode: useApi ? "api" : "subscription" });
     await lease.run(() => pool.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [runId, project.repository_path, { job_id: job.id, pull_request_id: pullRequest.id }]));
-    const temporary = await mkdtemp(path.join(tmpdir(), "dcc-follow-up-description-"));
+    const task = `Write a follow-up ticket description for PR #${pullRequest.number}. Use only the supplied prompt; do not inspect repositories or run commands.`;
+    // Only the CLI path writes anything to disk: the API path sends the
+    // rendered prompt as the request's system prompt directly, so it never
+    // needs the tempdir/writeFile/rm dance below.
+    let temporary: string | null = null;
     try {
-      const promptFile = path.join(temporary, "follow-up-ticket-prompt.md");
-      await writeFile(promptFile, prompt, { flag: "wx" });
       await lease.assertOwned();
-      const result = await invokePlanningClaude({
-        task: `Write a follow-up ticket description for PR #${pullRequest.number}. Use only the supplied prompt; do not inspect repositories or run commands.`,
-        sessionId, model: "haiku", effort: "low", promptFile,
-        skillBundleDir: temporary, workingDirectory: temporary, tools: [], maxTurns: 1,
-        oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
-        signal: lease.signal,
-      });
+      const result = useApi
+        ? await invokeAnthropicText({
+            task,
+            systemPrompt: prompt,
+            model: "haiku",
+            effort: "low",
+            apiKey: anthropicKeyOrThrow(),
+            signal: lease.signal,
+            timeoutMs: Number(process.env.DCC_ANTHROPIC_TIMEOUT_MS ?? 120_000),
+            ...(process.env.ANTHROPIC_BASE_URL ? { baseUrl: process.env.ANTHROPIC_BASE_URL } : {}),
+          })
+        : await (async () => {
+            temporary = await mkdtemp(path.join(tmpdir(), "dcc-follow-up-description-"));
+            const promptFile = path.join(temporary, "follow-up-ticket-prompt.md");
+            await writeFile(promptFile, prompt, { flag: "wx" });
+            return invokePlanningClaude({
+              task, sessionId, model: "haiku", effort: "low", promptFile,
+              skillBundleDir: temporary, workingDirectory: temporary, tools: [], maxTurns: 1,
+              oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
+              signal: lease.signal,
+            });
+          })();
       await lease.assertOwned();
       await finalizeAiUsage(runId, result);
       const description = formatFollowUpDescription({ number: pullRequest.number, title: pullRequest.title, url: pullRequest.url }, result.markdown);
@@ -1451,10 +1474,11 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
           "UPDATE tickets SET description=$2,updated_at=now() WHERE id=$1 AND description=$3",
           [payload.ticket_id, description, payload.initial_description],
         )] : []),
-        () => pool.query("UPDATE agent_runs SET status=$2,claude_session_id=$3,finished_at=now(),exit_code=$4 WHERE id=$1", [runId, "completed", sessionId, result.exitCode]),
+        () => pool.query("UPDATE agent_runs SET status=$2,claude_session_id=$3,finished_at=now(),exit_code=$4 WHERE id=$1",
+          [runId, "completed", useApi ? result.sessionId : sessionId, result.exitCode]),
       ]);
     } finally {
-      await rm(temporary, { recursive: true, force: true });
+      if (temporary) await rm(temporary, { recursive: true, force: true });
     }
   } catch (error) {
     await lease.assertOwned();
