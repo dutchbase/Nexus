@@ -65,6 +65,15 @@ const publicationJobTypes = ["pull-request.retry"];
 const aiReviewJobTypes = ["pr.ai_review"];
 const followUpDescriptionJobTypes = ["pr.follow_up_description"];
 const conflictResolutionJobTypes = ["pr.conflict_resolution"];
+// Resolved once, at module load — deliberately OUTSIDE the try/catch in
+// refuseQueuedClaudeJobs (that catch exists only to tolerate the database
+// being unreachable). usesAnthropicApi() calls anthropicApiPhases(), which
+// throws on an unrecognized DCC_ANTHROPIC_API_JOBS entry; evaluating it here
+// means a config typo crashes the worker at startup instead of being
+// silently swallowed by that unrelated resilience mechanism. Reused
+// everywhere the worker decides whether follow-up-description jobs still
+// depend on Claude CLI subscription auth (they don't once this is true).
+const followUpUsesAnthropicApi = usesAnthropicApi("pr_follow_up_description");
 // PRD G10-F03: how often runExecution's cancellation poll also pushes a
 // heartbeat_at/phase update onto agent_runs, so long-running runs report
 // live progress instead of only the metadata_json->>'turn' snapshot taken
@@ -149,7 +158,7 @@ async function refuseQueuedClaudeJobs(code: string, message: string) {
         ...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes,
         // Excluded once the API transport is active for it: that job no
         // longer depends on Claude CLI subscription auth.
-        ...(usesAnthropicApi("pr_follow_up_description") ? [] : followUpDescriptionJobTypes),
+        ...(followUpUsesAnthropicApi ? [] : followUpDescriptionJobTypes),
         ...conflictResolutionJobTypes,
       ],
       code,
@@ -1763,14 +1772,30 @@ while (!stopping) {
       }
     }
   }
-  let job = await claimJob(workerId, ["project.validate", ...publicationJobTypes, ...providerJobTypes]);
+  // Follow-up-description jobs are claimable in the ungated call (alongside
+  // job types that never touch Claude CLI auth) once the API transport is
+  // active for them, and dropped from both the "is anything Claude-dependent
+  // still queued" probe and the gated claim below — otherwise a queued
+  // follow-up job would never be claimed (subscriptionPreflightOrRefuse()
+  // can't succeed while Claude CLI auth is broken, even though this job type
+  // no longer needs it), and the probe would stay permanently truthy,
+  // re-running the auth preflight every loop iteration for nothing.
+  let job = await claimJob(workerId, [
+    "project.validate", ...publicationJobTypes, ...providerJobTypes,
+    ...(followUpUsesAnthropicApi ? followUpDescriptionJobTypes : []),
+  ]);
   if (!job) {
+    const claudeDependentJobTypes = [
+      ...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes,
+      ...(followUpUsesAnthropicApi ? [] : followUpDescriptionJobTypes),
+      ...conflictResolutionJobTypes,
+    ];
     const waiting = (await pool.query(
       "SELECT 1 FROM jobs WHERE status='queued' AND type=ANY($1::text[]) LIMIT 1",
-      [[...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes]],
+      [claudeDependentJobTypes],
     )).rowCount;
     if (waiting && (await subscriptionPreflightOrRefuse())) {
-      job = await claimJob(workerId, [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes]);
+      job = await claimJob(workerId, claudeDependentJobTypes);
     }
   }
   if (!job) {

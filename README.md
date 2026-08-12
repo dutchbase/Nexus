@@ -138,6 +138,13 @@ ANTHROPIC_API_KEY=
 # Comma-separated run types routed to the Messages API.
 # Default: pr_follow_up_description. Set to "" as a kill switch.
 DCC_ANTHROPIC_API_JOBS=pr_follow_up_description
+# Optional Messages API request timeout in milliseconds. Default: 120000.
+DCC_ANTHROPIC_TIMEOUT_MS=120000
+# Optional Messages API base URL override. Only ever point this at a
+# trusted Anthropic-compatible endpoint — it receives ANTHROPIC_API_KEY and
+# the full prompt, so redirecting it exfiltrates both to whatever host it
+# names.
+ANTHROPIC_BASE_URL=
 ```
 
 Production always runs with `NODE_ENV=production`. The web process requires
