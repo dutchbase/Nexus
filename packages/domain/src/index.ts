@@ -45,6 +45,8 @@ export function isDeepSeekModel(model: string): boolean {
 
 export const aiProviders = ["anthropic", "deepseek"] as const;
 export type AiProvider = typeof aiProviders[number];
+export const aiBillingModes = ["subscription", "api"] as const;
+export type AiBillingMode = typeof aiBillingModes[number];
 export const aiInvocationPhases = ["planning", "plan_revision", "execution", "execution.repair", "pr_ai_review", "pr_follow_up_description", "pr_conflict_resolution"] as const;
 export type AiInvocationPhase = typeof aiInvocationPhases[number];
 export type AiLifecycleGroup = "planning" | "execution" | "pr_work";
@@ -82,15 +84,16 @@ export async function createAiInvocation(input: {
   taskPrompt?: string | null;
   promptSnapshotId?: string | null;
   startedAt?: Date;
+  billingMode?: AiBillingMode;
 }, client: AiQueryClient = pool) {
   const result = await client.query(
     `INSERT INTO agent_runs
-       (id,ticket_id,project_id,pull_request_id,run_type,status,model,reasoning_level,provider,task_prompt,prompt_snapshot_id,started_at,ai_usage_status)
-     VALUES ($1,$2,$3,$4,$5,'running',$6,$7,$8,$9,$10,COALESCE($11,now()),'pending')
+       (id,ticket_id,project_id,pull_request_id,run_type,status,model,reasoning_level,provider,task_prompt,prompt_snapshot_id,started_at,ai_usage_status,billing_mode)
+     VALUES ($1,$2,$3,$4,$5,'running',$6,$7,$8,$9,$10,COALESCE($11,now()),'pending',$12)
      RETURNING *`,
     [input.id, input.ticketId ?? null, input.projectId, input.pullRequestId ?? null, input.runType,
       input.model, input.reasoningLevel, providerForModel(input.model), input.taskPrompt ?? null,
-      input.promptSnapshotId ?? null, input.startedAt ?? null],
+      input.promptSnapshotId ?? null, input.startedAt ?? null, input.billingMode ?? "subscription"],
   );
   return result.rows[0];
 }

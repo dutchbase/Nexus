@@ -23,6 +23,21 @@ describe("AI invocation accounting", () => {
 
     expect(row).toMatchObject({ usage_status: "pending", provider: "anthropic" });
     expect(values).toContain("anthropic");
+    expect(values).toContain("subscription");
+  });
+
+  it("persists an explicit billing mode instead of the subscription default", async () => {
+    let values: unknown[] = [];
+    await createAiInvocation({
+      id: "run-2", projectId: "project-1", runType: "planning", model: "deepseek-v4-flash", reasoningLevel: "high",
+      billingMode: "api",
+    }, { query: async (_sql, input) => {
+      values = input!;
+      return { rows: [{ id: "run-2", usage_status: "pending", provider: "deepseek", billing_mode: "api" }] };
+    } });
+
+    expect(values).toContain("api");
+    expect(values).not.toContain("subscription");
   });
 
   it("persists provider totals and the effective price exactly once", async () => {

@@ -340,7 +340,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
   let cancellation: AbortController | undefined;
   try {
     await initializePlanningAttempt(inTransaction, lease, async (client) => {
-      await createAiInvocation({ id: runId, ticketId: ticket.id, projectId: input.project.id, runType, model: input.ai.model, reasoningLevel: input.ai.reasoning_level, taskPrompt: completePrompt }, client);
+      await createAiInvocation({ id: runId, ticketId: ticket.id, projectId: input.project.id, runType, model: input.ai.model, reasoningLevel: input.ai.reasoning_level, taskPrompt: completePrompt, billingMode: planningIsDeepSeek ? "api" : "subscription" }, client);
       await lease.run(() => client.query(
         "UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1",
         [runId, planningStartPath, { job_id: job.id, project_config_version: input.project.config_version, planning_start_path: planningStartPath, environment_profile: "planning-minimal" }],
@@ -636,7 +636,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
   try {
     await lease.assertOwned();
     await inTransaction(async (client) => {
-      await createAiInvocation({ id: runId, ticketId: ticket.id, projectId: input.project.id, runType: repairing ? "execution.repair" : "execution", model: input.ai.model, reasoningLevel: input.ai.reasoning_level, taskPrompt: input.content }, client);
+      await createAiInvocation({ id: runId, ticketId: ticket.id, projectId: input.project.id, runType: repairing ? "execution.repair" : "execution", model: input.ai.model, reasoningLevel: input.ai.reasoning_level, taskPrompt: input.content, billingMode: executionIsDeepSeek ? "api" : "subscription" }, client);
       await client.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [runId, worktree.worktreePath, { job_id: job.id, execution_attempt_id: attempt.id, project_config_version: input.project.config_version, approved_input_snapshot_id: input.approvedInputSnapshotId, approved_input_hash: input.inputHash }]);
       await client.query("UPDATE execution_attempts SET agent_run_id=$2,validation_status='executing' WHERE id=$1", [attempt.id, runId]);
       await client.query(`INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,agent_run_id,execution_attempt_id) VALUES ($1,$2,'execution_log','staged',now() + interval '1 day',$3,$4)`, [logArtifactId, stagedLog.relativePath, runId, attempt.id]);
@@ -1318,7 +1318,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
       reviewedBaseBranch: pullRequest.base_branch,
       reviewedBaseSha,
     })));
-    await createAiInvocation({ id: newRunId, ticketId: pullRequest.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_ai_review", model, reasoningLevel, taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
+    await createAiInvocation({ id: newRunId, ticketId: pullRequest.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_ai_review", model, reasoningLevel, taskPrompt: prompt, promptSnapshotId: promptSnapshot.id, billingMode: isDeepSeek ? "api" : "subscription" });
     await lease.run(() => pool.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [newRunId, immutableReview.worktreePath, { job_id: job.id, pr_ai_review_id: payload.pr_ai_review_id }]));
     runId = newRunId;
     await lease.run(() => pool.query("UPDATE pr_ai_reviews SET agent_run_id=$1 WHERE id=$2", [runId, payload.pr_ai_review_id]));
@@ -1425,7 +1425,10 @@ async function runFollowUpDescription(job: any, lease: LeaseGuard) {
       ticketId: pullRequest.ticket_id ?? null, projectId: project.id, phase: "pr_follow_up_description", content: prompt,
       model: "haiku", reasoningLevel: "low", metadata: { pullRequestId: pullRequest.id, promptVersionIds: { "global.follow-up-ticket": promptRow.active_version_id } },
     }));
-    await createAiInvocation({ id: runId, ticketId: pullRequest.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_follow_up_description", model: "haiku", reasoningLevel: "low", taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
+    // ponytail: always subscription-billed for now — Task B4 makes this
+    // conditional once the follow-up job can route through the metered
+    // Anthropic API.
+    await createAiInvocation({ id: runId, ticketId: pullRequest.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_follow_up_description", model: "haiku", reasoningLevel: "low", taskPrompt: prompt, promptSnapshotId: promptSnapshot.id, billingMode: "subscription" });
     await lease.run(() => pool.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [runId, project.repository_path, { job_id: job.id, pull_request_id: pullRequest.id }]));
     const temporary = await mkdtemp(path.join(tmpdir(), "dcc-follow-up-description-"));
     try {
@@ -1540,7 +1543,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
       ticketId: pullRequest.ticket_id ?? null, projectId: project.id, phase: "pr_conflict_resolution", content: prompt,
       model, reasoningLevel, metadata: { pullRequestId: pullRequest.id, promptVersionIds: { "global.pr-conflict-resolution": promptRow.active_version_id } },
     });
-    await createAiInvocation({ id: newRunId, ticketId: pullRequest.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_conflict_resolution", model, reasoningLevel, taskPrompt: prompt, promptSnapshotId: promptSnapshot.id });
+    await createAiInvocation({ id: newRunId, ticketId: pullRequest.ticket_id, projectId: project.id, pullRequestId: pullRequest.id, runType: "pr_conflict_resolution", model, reasoningLevel, taskPrompt: prompt, promptSnapshotId: promptSnapshot.id, billingMode: conflictIsDeepSeek ? "api" : "subscription" });
     await pool.query("UPDATE agent_runs SET working_directory=$2,metadata_json=$3 WHERE id=$1", [newRunId, worktree.worktreePath, {
       job_id: job.id, pr_conflict_resolution_id: payload.pr_conflict_resolution_id,
       authority_profile: "conflict-resolution", allowed_write_paths: conflicts,

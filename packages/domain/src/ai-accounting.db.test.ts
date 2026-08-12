@@ -53,6 +53,19 @@ integration("AI invocation accounting persistence", () => {
     } finally { await client.end(); }
   });
 
+  it("defaults billing_mode to subscription and persists an explicit api mode", async () => {
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ('billing','Billing','/tmp') RETURNING id")).rows[0].id;
+      await createAiInvocation({ id: "billing-default", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high" }, client);
+      expect((await client.query("SELECT billing_mode FROM agent_runs WHERE id='billing-default'")).rows[0].billing_mode).toBe("subscription");
+
+      await createAiInvocation({ id: "billing-api", projectId, runType: "planning", model: "deepseek-v4-flash", reasoningLevel: "high", billingMode: "api" }, client);
+      expect((await client.query("SELECT billing_mode FROM agent_runs WHERE id='billing-api'")).rows[0].billing_mode).toBe("api");
+    } finally { await client.end(); }
+  });
+
   it("does not replace terminal captured accounting", async () => {
     const client = new pg.Client({ connectionString: testDatabaseUrl });
     await client.connect();

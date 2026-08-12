@@ -32,6 +32,12 @@ describe("validateMigrations", () => {
     expect(migration).toMatch(/ADD CONSTRAINT pull_request_merge_attempts_merged_sha_check/);
   });
 
+  it("adds and backfills the AI billing mode column", async () => {
+    const migration = await readFile(new URL("../migrations/052_ai_billing_mode.sql", import.meta.url), "utf8");
+    expect(migration).toMatch(/ADD COLUMN billing_mode text CHECK \(billing_mode IS NULL OR billing_mode IN \('subscription','api'\)\)/);
+    expect(migration).toMatch(/UPDATE agent_runs SET billing_mode = CASE WHEN provider = 'deepseek' THEN 'api' ELSE 'subscription' END/);
+  });
+
   it("includes rejected deployment history without weakening active SHA deduplication", async () => {
     await expect(readdir(new URL("../migrations/", import.meta.url))).resolves.toContain("044_deployment_rejection_history.sql");
   });

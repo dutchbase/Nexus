@@ -10,7 +10,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     )).rows;
     const runLabels = shortRefs("RUN", runs);
     const rows = runs.map((run) =>
-      `<a class="ticket-row runs-row" href="/admin/runs/${run.id}"><span class="mono">${runLabels.get(run.id)}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.ticket_number ?? "")} · ${escapeHtml(run.project_name ?? "")}</span><span>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}</span><span class="status">${escapeHtml(run.status)}</span><time>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : ""}</time></a>`,
+      `<a class="ticket-row runs-row" href="/admin/runs/${run.id}"><span class="mono">${runLabels.get(run.id)}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.ticket_number ?? "")} · ${escapeHtml(run.project_name ?? "")}</span><span>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}${run.billing_mode ? ` · ${escapeHtml(run.billing_mode)}` : ""}</span><span class="status">${escapeHtml(run.status)}</span><time>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : ""}</time></a>`,
     ).join("");
     const body = `<div class="eyebrow">Work</div><h1>Runs</h1><section class="card"><div class="list-head runs-head"><span>Run</span><span>Type</span><span>Ticket</span><span>AI</span><span>Status</span><span>Started</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No runs recorded.</div>`}</section>`;
     return { status: 200, title: "Runs", body };
@@ -64,7 +64,8 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       </div>
       ${isActive ? `<div data-run-stream id="run-stream" style="background:var(--code-bg);border:1px solid var(--border);border-radius:6px;padding:12px;font-family:'JetBrains Mono',monospace;font-size:12px;max-height:560px;overflow:auto;color:var(--text2);white-space:pre-wrap;word-break:break-word"></div>` : ""}
       <section class="card"><div class="card-head">Run snapshot</div><div class="card-body"><dl>
-        <dt>Model</dt><dd>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}</dd>
+        <dt>Model</dt><dd>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}${run.provider ? ` · ${escapeHtml(run.provider)}` : ""}</dd>
+        <dt>Billing</dt><dd>${run.billing_mode === "api" ? "Metered API" : run.billing_mode === "subscription" ? "Subscription" : "Not recorded"}</dd>
         <dt>Session</dt><dd class="mono">${escapeHtml(run.claude_session_id ?? "")}</dd>
         <dt>Working directory</dt><dd class="mono">${escapeHtml(run.working_directory ?? "")}</dd>
         <dt>Started</dt><dd>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : "Not started"}</dd>

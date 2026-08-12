@@ -82,3 +82,28 @@ test("run detail escapes and retains captured prompts and accounting", async () 
   expect(sql).toContain("ps.metadata_json->'promptVersionIds' prompt_versions");
   expect(sql).not.toContain("prompt_version'");
 });
+
+test("run detail shows the billing mode alongside model and provider", async () => {
+  query.mockImplementation(async (sql: string) => {
+    if (String(sql).includes("FROM agent_runs ar")) return { rows: [{ ...run, provider: "deepseek", billing_mode: "api" }] };
+    if (String(sql).includes("FROM artifacts a JOIN execution_attempts ea")) return { rows: [] };
+    return { rows: [] };
+  });
+
+  const page = await runs.render(new URL("http://test/admin/runs/aaaaaaaa-0000-4000-8000-000000000002"), session, {});
+
+  expect(page?.body).toContain("Metered API");
+  expect(page?.body).toContain("deepseek");
+});
+
+test("runs list shows billing mode next to the model", async () => {
+  query.mockImplementation(async (sql: string) => {
+    if (!sql) return { rows: [] };
+    if (sql.includes("FROM agent_runs ar")) return { rows: [{ ...run, billing_mode: "subscription" }] };
+    return { rows: [] };
+  });
+
+  const page = await runs.render(new URL("http://test/admin/runs"), session, {});
+
+  expect(page?.body).toContain("sonnet · high · subscription");
+});
