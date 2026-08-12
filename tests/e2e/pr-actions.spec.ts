@@ -173,16 +173,57 @@ test("create follow-up ticket generates its description via the API-billed Anthr
   expect(run.status).toBe("completed");
   expect(run.billing_mode).toBe("api");
 
-  // The mock `claude` CLI must never have been invoked for this job — its own
-  // forbidden-env-var check would have made it exit 1 rather than silently
-  // succeed, so the strongest assertion is simply that no CLI log entry
-  // references this ticket/PR's follow-up prompt.
+  // Positive proof the API-billed path actually executed: the mock Anthropic
+  // server's own request log must contain a successful POST /v1/messages
+  // entry. Unlike scanning the CLI log for absence of evidence, this proves
+  // the real code path ran rather than merely that nothing looks wrong.
+  const mockAnthropicLog = process.env.MOCK_ANTHROPIC_LOG;
+  expect(mockAnthropicLog, "MOCK_ANTHROPIC_LOG must be set for this test").toBeTruthy();
+  expect(fs.existsSync(mockAnthropicLog!), `mock Anthropic log not found at ${mockAnthropicLog}`).toBe(true);
+  const anthropicEntries = fs
+    .readFileSync(mockAnthropicLog!, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const sawMessagesCall = anthropicEntries.some(
+    (entry: any) => entry.method === "POST" && entry.path === "/v1/messages" && entry.status === 200,
+  );
+  expect(sawMessagesCall, "expected a completed POST /v1/messages entry in the mock Anthropic log").toBe(true);
+
+  // The mock `claude` CLI must never have been invoked with the leaked key.
+  // Its own forbidden-env-var check exits 1 *before* writing any log entry,
+  // so a missing log file/path would make a "no leak reference found"
+  // assertion vacuously true even in the exact failure mode this proof
+  // exists to catch — require the log to be configured and the file to
+  // exist (never silently skip) before inspecting its contents.
+  //
+  // The file's contents are expected to stay empty here, and that is itself
+  // meaningful: every real invocation path (packages/claude-runner's
+  // invokePlanningClaude / invokeExecutionClaude / preflightClaudeAuthentication)
+  // builds the CLI child process's env from a hardcoded allowlist (PATH,
+  // LANG, LC_ALL, CLAUDE_CODE_OAUTH_TOKEN, and a few CLAUDE_CODE_* flags) —
+  // MOCK_CLAUDE_LOG is test-only plumbing and is never forwarded, so the
+  // mock CLI's log() is a no-op for every invocation in this suite,
+  // regardless of whether a leak occurred. That is a *stronger* guarantee
+  // than a populated log could prove on its own: the CLI subprocess never
+  // receives any variable outside that allowlist, not only
+  // ANTHROPIC_API_KEY. So this check can only assert the log is genuinely
+  // wired up (env var set, file present) and, if it ever does contain
+  // entries, that none of them reference this run's follow-up prompt.
   const mockClaudeLog = process.env.MOCK_CLAUDE_LOG;
-  if (mockClaudeLog && fs.existsSync(mockClaudeLog)) {
-    const entries = fs.readFileSync(mockClaudeLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
-    const leaked = entries.some((entry: any) => (entry.argv || []).some((arg: string) => typeof arg === "string" && arg.includes("follow-up-ticket-prompt.md")));
-    expect(leaked).toBe(false);
-  }
+  expect(mockClaudeLog, "MOCK_CLAUDE_LOG must be set for this test").toBeTruthy();
+  expect(fs.existsSync(mockClaudeLog!), `mock claude log not found at ${mockClaudeLog}`).toBe(true);
+  const claudeEntries = fs
+    .readFileSync(mockClaudeLog!, "utf8")
+    .trim()
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => JSON.parse(line));
+  const leaked = claudeEntries.some((entry: any) =>
+    (entry.argv || []).some((arg: string) => typeof arg === "string" && arg.includes("follow-up-ticket-prompt.md")),
+  );
+  expect(leaked).toBe(false);
 });
 
 test("sync pull requests from the list header", async ({ page }) => {
