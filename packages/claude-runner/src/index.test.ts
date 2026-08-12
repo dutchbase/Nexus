@@ -583,6 +583,98 @@ printf '%s' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}'
   });
 });
 
+function denialEventsScript(count: number) {
+  const lines: string[] = [];
+  for (let index = 0; index < count; index += 1) {
+    const toolUse = JSON.stringify({ type: "assistant", message: { content: [{ type: "tool_use", id: `tool-${index}`, name: "Bash" }] } });
+    const toolResult = JSON.stringify({ type: "user", message: { content: [{ type: "tool_result", tool_use_id: `tool-${index}`, is_error: true, content: "DCC_TOOL_DENIED" }] } });
+    lines.push(`printf '%s\\n' '${toolUse}'`, `printf '%s\\n' '${toolResult}'`);
+  }
+  return lines.join("\n");
+}
+
+test("rejects execution_max_turns when the result event reports turn exhaustion despite exit 0", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-execution-max-turns-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  await mkdir(path.join(root, ".git"));
+  await writeFile(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '%s\\n' '2.1.220 (Claude Code)'; exit 0; fi
+printf '%s\\n' '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":50,"permission_denials":[{"tool_name":"Bash"}]}'
+exit 0
+`);
+  await chmod(executable, 0o755);
+
+  await expect(invokeExecutionClaude({
+    ...invocation,
+    claudeExecutable: executable,
+    workingDirectory: root,
+    executionDirectory: root,
+    gitMetadataPaths: [path.join(root, ".git")],
+    logPath: path.join(root, "run.log"),
+    timeoutMs: 1_000,
+    onEvent: async () => undefined,
+  })).rejects.toMatchObject({
+    constructor: ClaudeExecutionError,
+    code: "execution_max_turns",
+    exitCode: 0,
+  });
+});
+
+test("stops the child after N consecutive denied tool calls instead of burning max-turns", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-execution-denial-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  await mkdir(path.join(root, ".git"));
+  await writeFile(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '%s\\n' '2.1.220 (Claude Code)'; exit 0; fi
+${denialEventsScript(5)}
+exec sleep 300
+`);
+  await chmod(executable, 0o755);
+
+  const started = Date.now();
+  await expect(invokeExecutionClaude({
+    ...invocation,
+    claudeExecutable: executable,
+    workingDirectory: root,
+    executionDirectory: root,
+    gitMetadataPaths: [path.join(root, ".git")],
+    logPath: path.join(root, "run.log"),
+    timeoutMs: 60_000,
+    maxConsecutiveToolDenials: 5,
+    onEvent: async () => undefined,
+  })).rejects.toMatchObject({
+    constructor: ClaudeExecutionError,
+    code: "execution_tool_denied",
+  });
+  expect(Date.now() - started).toBeLessThan(30_000);
+}, 35_000);
+
+test("returns the outcome snapshot on success", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-execution-outcome-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  await mkdir(path.join(root, ".git"));
+  await writeFile(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '%s\\n' '2.1.220 (Claude Code)'; exit 0; fi
+printf '%s\\n' '{"type":"result","subtype":"success"}'
+exit 0
+`);
+  await chmod(executable, 0o755);
+
+  await expect(invokeExecutionClaude({
+    ...invocation,
+    claudeExecutable: executable,
+    workingDirectory: root,
+    executionDirectory: root,
+    gitMetadataPaths: [path.join(root, ".git")],
+    logPath: path.join(root, "run.log"),
+    timeoutMs: 1_000,
+    onEvent: async () => undefined,
+  })).resolves.toMatchObject({ outcome: { resultSeen: true, deniedToolCalls: 0 } });
+});
+
 test("preserves final provider usage when execution exits unsuccessfully", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "claude-execution-usage-error-"));
   directories.push(root);

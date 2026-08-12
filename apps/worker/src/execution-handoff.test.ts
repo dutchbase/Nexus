@@ -103,6 +103,7 @@ test -f "$prompt" || exit 7
 test -f "$skills/execution-plan.md" || exit 8
 test -f "$plugin/.claude-plugin/plugin.json" || exit 9
 printf '%s\n' 'runner output' > result.txt
+printf '%s\n' '{"type":"result","subtype":"success"}'
 `);
     await chmod(executable, 0o755);
 

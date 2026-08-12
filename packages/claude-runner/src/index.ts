@@ -6,8 +6,10 @@ import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { assertSubscriptionOnlyEnvironment, ClaudeAuthError } from "./auth-guard.ts";
+import { createExecutionOutcomeTracker, describeExecutionDenials, executionOutcomeVerdict, type ExecutionOutcome } from "./execution-outcome.ts";
 import type { AiUsage } from "@dcc/domain";
 export { assertSubscriptionOnlyEnvironment, ClaudeAuthError, forbiddenClaudeAuthVariables } from "./auth-guard.ts";
+export { DENIAL_MARKER, describeExecutionDenials, type ExecutionOutcome, type ExecutionVerdict } from "./execution-outcome.ts";
 
 async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; executable?: string; signal?: AbortSignal; timeoutMs?: number } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "dcc-claude-output-"));
@@ -71,8 +73,9 @@ export class ClaudeExecutionError extends Error {
   constructor(
     message: string,
     public exitCode: number,
-    public code: "execution_failed" | "execution_timeout" | "execution_cancelled",
+    public code: "execution_failed" | "execution_timeout" | "execution_cancelled" | "execution_max_turns" | "execution_incomplete" | "execution_tool_denied",
     public usage?: AiUsage,
+    public outcome?: ExecutionOutcome,
   ) {
     super(message);
   }
@@ -539,6 +542,7 @@ export type ExecutionInvocation = PlanningInvocation & {
   signal?: AbortSignal;
   onEvent: (event: { eventType: string; event: unknown; raw: string }) => Promise<void>;
   allowedWritePaths?: readonly string[];
+  maxConsecutiveToolDenials?: number;
 };
 
 export function assertExecutionSandboxVersion(value: string) {
@@ -622,7 +626,9 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
       : buildExecutionArguments(sandboxInput, settingsFile);
     const childEnv = launch ? { ...env, ...launch.env } : env;
     await requireClaudeSandboxVersion(childEnv, input.workingDirectory, input.claudeExecutable, launch ?? undefined);
-    return await new Promise<{ exitCode: number; stderr: string; usage?: AiUsage }>((resolve, reject) => {
+    const tracker = createExecutionOutcomeTracker();
+    const denialLimit = input.maxConsecutiveToolDenials ?? 5;
+    return await new Promise<{ exitCode: number; stderr: string; outcome: ExecutionOutcome; usage?: AiUsage }>((resolve, reject) => {
     const child = spawn(command, commandArgs, {
       cwd: input.workingDirectory,
       env: childEnv,
@@ -642,13 +648,15 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
         let event: any;
         try { event = JSON.parse(raw); } catch { event = { type: "unparsed", text: raw }; }
         usage = parseClaudeFinalUsage(event) ?? usage;
+        const { consecutiveDenials } = tracker.observe(event);
+        if (denialLimit > 0 && consecutiveDenials >= denialLimit) stop("denied");
         await input.onEvent({ eventType: String(event?.type ?? "event"), event, raw });
       });
       void eventWrites.catch(() => undefined);
     };
     let terminationTimer: NodeJS.Timeout | undefined;
-    let outcome: "running" | "timeout" | "cancelled" = "running";
-    const stop = (reason: "timeout" | "cancelled") => {
+    let outcome: "running" | "timeout" | "cancelled" | "denied" = "running";
+    const stop = (reason: "timeout" | "cancelled" | "denied") => {
       if (outcome !== "running") return;
       outcome = reason;
       child.kill("SIGTERM");
@@ -680,19 +688,34 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
       if (terminationTimer) clearTimeout(terminationTimer);
       input.signal?.removeEventListener("abort", abort);
       Promise.all([eventWrites, logWrites]).then(() => {
+        const snapshot = tracker.snapshot();
         if (outcome === "cancelled") {
-          reject(new ClaudeExecutionError("Claude execution was cancelled", code ?? 1, "execution_cancelled", usage));
+          reject(new ClaudeExecutionError("Claude execution was cancelled", code ?? 1, "execution_cancelled", usage, snapshot));
+        } else if (outcome === "denied") {
+          reject(new ClaudeExecutionError(
+            `Claude execution stopped after ${snapshot.maxConsecutiveDeniedToolCalls} consecutive denied tool calls. ${describeExecutionDenials(snapshot)}`,
+            code ?? 1,
+            "execution_tool_denied",
+            usage,
+            snapshot,
+          ));
         } else if (outcome === "timeout" || code === 124) {
-          reject(new ClaudeExecutionError("Claude execution timed out", 124, "execution_timeout", usage));
+          reject(new ClaudeExecutionError("Claude execution timed out", 124, "execution_timeout", usage, snapshot));
         } else if (code !== 0) {
           reject(new ClaudeExecutionError(
             `Claude execution exited ${code}: ${stderr.trim() || "no error output"}`,
             code ?? 1,
             "execution_failed",
             usage,
+            snapshot,
           ));
         } else {
-          resolve({ exitCode: code ?? 0, stderr, ...(usage ? { usage } : {}) });
+          const verdict = executionOutcomeVerdict(snapshot);
+          if (verdict) {
+            reject(new ClaudeExecutionError(verdict.message, code ?? 0, verdict.code, usage, snapshot));
+          } else {
+            resolve({ exitCode: code ?? 0, stderr, outcome: snapshot, ...(usage ? { usage } : {}) });
+          }
         }
       }, (error) => reject(Object.assign(error instanceof Error ? error : new Error(String(error)), usage ? { usage } : {})));
     });
