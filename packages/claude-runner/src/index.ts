@@ -5,10 +5,13 @@ import { appendFile, chmod, copyFile, mkdtemp, open, readFile, rename, rm, write
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { assertSubscriptionOnlyEnvironment, ClaudeAuthError } from "./auth-guard.ts";
+import { assertSubscriptionOnlyChildEnvironment, assertSubscriptionOnlyEnvironment, ClaudeAuthError } from "./auth-guard.ts";
 import { createExecutionOutcomeTracker, describeExecutionDenials, executionOutcomeVerdict, type ExecutionOutcome } from "./execution-outcome.ts";
 import type { AiUsage } from "@dcc/domain";
-export { assertSubscriptionOnlyEnvironment, ClaudeAuthError, forbiddenClaudeAuthVariables } from "./auth-guard.ts";
+export {
+  assertSubscriptionOnlyChildEnvironment, assertSubscriptionOnlyEnvironment, ClaudeAuthError,
+  forbiddenClaudeAuthVariables, forbiddenWorkerAuthVariables,
+} from "./auth-guard.ts";
 export { DENIAL_MARKER, describeExecutionDenials, type ExecutionOutcome, type ExecutionVerdict } from "./execution-outcome.ts";
 
 async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; executable?: string; signal?: AbortSignal; timeoutMs?: number } = {}) {
@@ -104,8 +107,10 @@ function minimalClaudeEnvironment(env: NodeJS.ProcessEnv, oauthToken: string): N
 
 export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = process.env) {
   assertSubscriptionOnlyEnvironment(env);
+  const childEnv = minimalClaudeEnvironment(env, env.CLAUDE_CODE_OAUTH_TOKEN ?? "");
+  assertSubscriptionOnlyChildEnvironment(childEnv);
   const result = await runClaude(["auth", "status"], {
-    env: minimalClaudeEnvironment(env, env.CLAUDE_CODE_OAUTH_TOKEN ?? ""),
+    env: childEnv,
   });
   let status: any = null;
   try { status = JSON.parse(result.stdout.trim()); } catch { /* handled below */ }
@@ -489,6 +494,7 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   // switches. Worker credentials must never cross this process boundary.
   const env = minimalClaudeEnvironment(process.env, input.oauthToken);
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
+  assertSubscriptionOnlyChildEnvironment(env);
   let cancelled = false;
   const onAbort = () => { cancelled = true; };
   input.signal?.addEventListener("abort", onAbort, { once: true });
@@ -605,6 +611,7 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     AGENT_CONTROL_DISABLE: "1",
   };
   if (input.scenarioPath && process.env.NODE_ENV !== "production") env.MOCK_CLAUDE_SCENARIO = input.scenarioPath;
+  assertSubscriptionOnlyChildEnvironment(env);
   const guard = await materializeBashGuard();
   let hiddenGitMetadata: Awaited<ReturnType<typeof hideWorktreeGitMetadata>> = null;
   try {
@@ -625,6 +632,7 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
       ? [...launch.args, launch.executable, ...buildExecutionArguments(sandboxInput, launch.settingsFile)]
       : buildExecutionArguments(sandboxInput, settingsFile);
     const childEnv = launch ? { ...env, ...launch.env } : env;
+    assertSubscriptionOnlyChildEnvironment(childEnv);
     await requireClaudeSandboxVersion(childEnv, input.workingDirectory, input.claudeExecutable, launch ?? undefined);
     const tracker = createExecutionOutcomeTracker();
     const denialLimit = input.maxConsecutiveToolDenials ?? 5;

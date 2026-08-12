@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
-import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, ClaudeExecutionError, ClaudePlanningError, createExecutionSandboxSettings, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parseClaudeFinalUsage, parsePlanMarkdown, preflightClaudeAuthentication, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
+import { assertExecutionSandboxVersion, assertSubscriptionOnlyChildEnvironment, assertSubscriptionOnlyEnvironment, buildExecutionArguments, buildPlanningArguments, ClaudeAuthError, ClaudeExecutionError, ClaudePlanningError, createExecutionSandboxSettings, forbiddenClaudeAuthVariables, forbiddenWorkerAuthVariables, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parseClaudeFinalUsage, parsePlanMarkdown, preflightClaudeAuthentication, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -502,6 +502,53 @@ printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan","session_
   expect(environment).toMatchObject({ CLAUDE_CODE_OAUTH_TOKEN: "token", AGENT_CONTROL_DISABLE: "1" });
   expect(environment.GITHUB_TOKEN).toBeUndefined();
   expect(environment.DATABASE_URL).toBeUndefined();
+});
+
+describe("assertSubscriptionOnlyEnvironment", () => {
+  test("allows the worker to hold ANTHROPIC_API_KEY", () => {
+    expect(() => assertSubscriptionOnlyEnvironment({ ANTHROPIC_API_KEY: "sk-x" })).not.toThrow();
+  });
+
+  test("still blocks every other forbidden auth variable", () => {
+    expect(() => assertSubscriptionOnlyEnvironment({ ANTHROPIC_AUTH_TOKEN: "x" })).toThrow(ClaudeAuthError);
+    expect(() => assertSubscriptionOnlyEnvironment({ CLAUDE_CODE_USE_BEDROCK: "1" })).toThrow(ClaudeAuthError);
+  });
+});
+
+describe("assertSubscriptionOnlyChildEnvironment", () => {
+  test("blocks ANTHROPIC_API_KEY from reaching the constructed child env", () => {
+    expect(() => assertSubscriptionOnlyChildEnvironment({ ANTHROPIC_API_KEY: "x" }))
+      .toThrow(expect.objectContaining({ code: "blocked_auth_configuration" }));
+  });
+
+  test("forbiddenWorkerAuthVariables omits only ANTHROPIC_API_KEY from forbiddenClaudeAuthVariables", () => {
+    expect(forbiddenWorkerAuthVariables).toEqual(
+      forbiddenClaudeAuthVariables.filter((name) => name !== "ANTHROPIC_API_KEY"),
+    );
+  });
+});
+
+test("invokePlanningClaude succeeds and keeps a worker-held ANTHROPIC_API_KEY out of the claude CLI env", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-api-key-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const capture = path.join(root, "environment.json");
+  await writeFile(executable, `#!/bin/sh
+node -e 'require("node:fs").writeFileSync(process.argv[1], JSON.stringify(process.env))' ${JSON.stringify(capture)}
+printf '%s\\n' '{"type":"result","subtype":"success","result":"# Plan","session_id":"session"}'
+`);
+  await chmod(executable, 0o755);
+  const previousApiKey = process.env.ANTHROPIC_API_KEY;
+  process.env.ANTHROPIC_API_KEY = "sk-worker-held-key";
+  try {
+    await expect(invokePlanningClaude({ ...invocation, claudeExecutable: executable, workingDirectory: root }))
+      .resolves.toMatchObject({ markdown: "# Plan" });
+  } finally {
+    if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousApiKey;
+  }
+  const environment = JSON.parse(await readFile(capture, "utf8"));
+  expect(Object.keys(environment).some((name) => name.startsWith("ANTHROPIC_"))).toBe(false);
 });
 
 test("preflight excludes parent credentials from Claude auth status", async () => {
