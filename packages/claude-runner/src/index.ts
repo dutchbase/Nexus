@@ -14,7 +14,20 @@ export {
 } from "./auth-guard.ts";
 export { DENIAL_MARKER, describeExecutionDenials, type ExecutionOutcome, type ExecutionVerdict } from "./execution-outcome.ts";
 
-async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; executable?: string; signal?: AbortSignal; timeoutMs?: number } = {}) {
+// Exported only so index.test.ts can exercise the runClaude spawn chokepoint
+// directly (a polluted env passed straight in, bypassing every allowlist
+// constructor) — not part of the package's public API.
+export { runClaude as __testOnlyRunClaude };
+
+// Chokepoint: every `claude` CLI child process is spawned through this
+// function, so the subscription-only guarantee is asserted here rather than
+// trusted to every call site. `env` is required on the options type (not
+// merely asserted at runtime) so a future call site that omits it fails to
+// compile instead of silently inheriting the full worker `process.env` —
+// which may legitimately hold ANTHROPIC_API_KEY, GITHUB_TOKEN, DATABASE_URL,
+// etc. — via Node's `spawn` default.
+async function runClaude(args: string[], options: { cwd?: string; env: NodeJS.ProcessEnv; executable?: string; signal?: AbortSignal; timeoutMs?: number }) {
+  assertSubscriptionOnlyChildEnvironment(options.env);
   const directory = await mkdtemp(path.join(tmpdir(), "dcc-claude-output-"));
   const stdoutPath = path.join(directory, "stdout");
   const stderrPath = path.join(directory, "stderr");

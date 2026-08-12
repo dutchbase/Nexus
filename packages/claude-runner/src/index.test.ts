@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { afterEach, describe, expect, test } from "vitest";
-import { assertExecutionSandboxVersion, assertSubscriptionOnlyChildEnvironment, assertSubscriptionOnlyEnvironment, buildExecutionArguments, buildPlanningArguments, ClaudeAuthError, ClaudeExecutionError, ClaudePlanningError, createExecutionSandboxSettings, forbiddenClaudeAuthVariables, forbiddenWorkerAuthVariables, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parseClaudeFinalUsage, parsePlanMarkdown, preflightClaudeAuthentication, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
+import { __testOnlyRunClaude, assertExecutionSandboxVersion, assertSubscriptionOnlyChildEnvironment, assertSubscriptionOnlyEnvironment, buildExecutionArguments, buildPlanningArguments, ClaudeAuthError, ClaudeExecutionError, ClaudePlanningError, createExecutionSandboxSettings, forbiddenClaudeAuthVariables, forbiddenWorkerAuthVariables, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parseClaudeFinalUsage, parsePlanMarkdown, preflightClaudeAuthentication, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
 
 const directories: string[] = [];
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
@@ -528,6 +528,35 @@ describe("assertSubscriptionOnlyChildEnvironment", () => {
   });
 });
 
+// Regression test for the fail-open risk in the runClaude spawn chokepoint:
+// every documented caller constructs its child env through an allowlist
+// (minimalClaudeEnvironment) that never includes a forbidden variable, so a
+// test that only exercises those callers can't prove the chokepoint itself
+// still guards anything — it would pass fully green even if all four
+// assertSubscriptionOnlyChildEnvironment call sites in index.ts were
+// deleted. This bypasses the allowlist entirely and hands runClaude an
+// already-polluted env, the way a future caller that forgets to build one
+// correctly would.
+describe("runClaude spawn chokepoint", () => {
+  test("throws before spawning when handed a polluted child env, even bypassing the normal allowlist construction", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "claude-chokepoint-"));
+    directories.push(root);
+    const executable = path.join(root, "claude");
+    const sentinel = path.join(root, "spawned.marker");
+    await writeFile(executable, `#!/bin/sh\ntouch ${JSON.stringify(sentinel)}\n`);
+    await chmod(executable, 0o755);
+
+    await expect(__testOnlyRunClaude(["--version"], {
+      env: { PATH: process.env.PATH, ANTHROPIC_API_KEY: "sk-leaked-directly" },
+      executable,
+    })).rejects.toThrow(ClaudeAuthError);
+
+    // No process spawned: the sentinel the fake CLI would have touched must
+    // not exist.
+    await expect(access(sentinel)).rejects.toThrow();
+  });
+});
+
 test("invokePlanningClaude succeeds and keeps a worker-held ANTHROPIC_API_KEY out of the claude CLI env", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "claude-planning-api-key-"));
   directories.push(root);
@@ -591,12 +620,14 @@ for arg in "$@"; do
   if [ "$previous" = "--settings" ]; then settings="$arg"; fi
   previous="$arg"
 done
-node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1], JSON.stringify({ settings: JSON.parse(fs.readFileSync(process.argv[2], "utf8")), settingsFile: process.argv[2], configDir: process.env.CLAUDE_CONFIG_DIR, scrub: process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, autoMemory: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, publicationCredential: process.env.GITHUB_TOKEN }))' ${JSON.stringify(capture)} "$settings"
+node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1], JSON.stringify({ settings: JSON.parse(fs.readFileSync(process.argv[2], "utf8")), settingsFile: process.argv[2], configDir: process.env.CLAUDE_CONFIG_DIR, scrub: process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, autoMemory: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, publicationCredential: process.env.GITHUB_TOKEN, hasAnthropicKey: Object.keys(process.env).some((name) => name.startsWith("ANTHROPIC_")) }))' ${JSON.stringify(capture)} "$settings"
 printf '%s' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}'
 `);
   await chmod(executable, 0o755);
   const previousGithubToken = process.env.GITHUB_TOKEN;
+  const previousApiKey = process.env.ANTHROPIC_API_KEY;
   process.env.GITHUB_TOKEN = "publication-token";
+  process.env.ANTHROPIC_API_KEY = "sk-worker-held-key";
   const seen: string[] = [];
   try {
     await expect(invokeExecutionClaude({
@@ -612,6 +643,8 @@ printf '%s' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}'
   } finally {
     if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
     else process.env.GITHUB_TOKEN = previousGithubToken;
+    if (previousApiKey === undefined) delete process.env.ANTHROPIC_API_KEY;
+    else process.env.ANTHROPIC_API_KEY = previousApiKey;
   }
   const captured = JSON.parse(await (await import("node:fs/promises")).readFile(capture, "utf8"));
   const settings = captured.settings;
@@ -621,6 +654,10 @@ printf '%s' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}'
   expect(captured.scrub).toBe("1");
   expect(captured.autoMemory).toBe("1");
   expect(captured.publicationCredential).toBeUndefined();
+  // Mirrors the planning-path assertion (invokePlanningClaude keeps a
+  // worker-held ANTHROPIC_API_KEY out of the claude CLI env) for the
+  // execution path, which previously had no such assertion at all.
+  expect(captured.hasAnthropicKey).toBe(false);
   expect(seen).toEqual(["result"]);
   await expect(access(captured.settingsFile)).rejects.toThrow();
   await expect(access(captured.configDir)).rejects.toThrow();
