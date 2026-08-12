@@ -34,6 +34,9 @@ describe("curated agent content", () => {
     expect(read("prompts/global/execution.md")).toContain("subagent-driven-development");
     expect(read("prompts/global/execution.md")).toContain("Ponytail");
     expect(read("prompts/global/execution.md")).toContain("test-driven-development");
+    expect(read("prompts/global/execution.md")).toMatch(/runtime environment/i);
+    expect(read("prompts/global/execution.md")).toMatch(/do not retry/i);
+    expect(read("prompts/global/execution.md")).toMatch(/no file changes/i);
     expect(read("prompts/global/execution-repair.md")).toContain("systematic-debugging");
     const rubric = read("prompts/global/code-reviewer.md");
     expect(rubric).toContain("You are reviewing code changes for production readiness.");
