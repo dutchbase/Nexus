@@ -651,6 +651,43 @@ exec sleep 300
   expect(Date.now() - started).toBeLessThan(30_000);
 }, 35_000);
 
+test("settles via denial fail-fast even when a lingering descendant holds stdout open (no detached process-group kill would hang forever)", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-execution-denial-hang-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  await mkdir(path.join(root, ".git"));
+  // Backgrounds a long sleep (a descendant that inherits the stdout pipe)
+  // and then blocks in the foreground on ANOTHER sleep *without* `exec` —
+  // so the shell itself stays alive as a wrapper around a grandchild.
+  // Killing only the direct child (the shell) leaves the backgrounded sleep
+  // holding stdout open, so `close` never fires unless the whole process
+  // group is signalled.
+  await writeFile(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '%s\\n' '2.1.220 (Claude Code)'; exit 0; fi
+${denialEventsScript(5)}
+sleep 300 &
+sleep 300
+`);
+  await chmod(executable, 0o755);
+
+  const started = Date.now();
+  await expect(invokeExecutionClaude({
+    ...invocation,
+    claudeExecutable: executable,
+    workingDirectory: root,
+    executionDirectory: root,
+    gitMetadataPaths: [path.join(root, ".git")],
+    logPath: path.join(root, "run.log"),
+    timeoutMs: 60_000,
+    maxConsecutiveToolDenials: 5,
+    onEvent: async () => undefined,
+  })).rejects.toMatchObject({
+    constructor: ClaudeExecutionError,
+    code: "execution_tool_denied",
+  });
+  expect(Date.now() - started).toBeLessThan(30_000);
+}, 35_000);
+
 test("returns the outcome snapshot on success", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "claude-execution-outcome-"));
   directories.push(root);

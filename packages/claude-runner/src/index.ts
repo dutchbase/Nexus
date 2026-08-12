@@ -628,11 +628,20 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     await requireClaudeSandboxVersion(childEnv, input.workingDirectory, input.claudeExecutable, launch ?? undefined);
     const tracker = createExecutionOutcomeTracker();
     const denialLimit = input.maxConsecutiveToolDenials ?? 5;
+    // bwrap's `--die-with-parent --new-session --unshare-pid` already ties the
+    // whole sandboxed process tree's lifetime to the direct child, so a plain
+    // `child.kill()` there tears everything down. The unwrapped path has no
+    // such guarantee: a descendant that inherits the stdout pipe (e.g. a
+    // backgrounded Bash command) can keep it open after the direct child is
+    // killed, so `close` never fires and the promise hangs forever. Mirror
+    // `runClaude`'s detached + process-group-kill approach for that path only.
+    const groupKillEligible = !launch;
     return await new Promise<{ exitCode: number; stderr: string; outcome: ExecutionOutcome; usage?: AiUsage }>((resolve, reject) => {
     const child = spawn(command, commandArgs, {
       cwd: input.workingDirectory,
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: groupKillEligible && process.platform !== "win32",
     });
     let pending = "";
     let stderr = "";
@@ -641,6 +650,31 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     let logWrites = Promise.resolve();
     const appendLog = (text: string) => {
       logWrites = logWrites.then(() => appendFile(input.logPath, text));
+    };
+    let terminationTimer: NodeJS.Timeout | undefined;
+    let outcome: "running" | "timeout" | "cancelled" | "denied" = "running";
+    const terminate = (signal: NodeJS.Signals) => {
+      if (!groupKillEligible || !child.pid) return child.kill(signal);
+      if (process.platform === "win32") {
+        const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+        killer.on("error", () => child.kill(signal));
+        killer.unref();
+        return true;
+      }
+      try { return process.kill(-child.pid, signal); }
+      catch { return child.kill(signal); }
+    };
+    const stop = (reason: "timeout" | "cancelled" | "denied") => {
+      if (outcome !== "running") return;
+      outcome = reason;
+      // Skip the kill + escalation timer once the child has already exited
+      // naturally (e.g. a denial threshold trips on the tail-flush of a
+      // buffered event after `close` already fired) — nothing left to kill,
+      // and a stray timer would otherwise be installed and never cleared.
+      if (child.exitCode === null && child.signalCode === null) {
+        terminate("SIGTERM");
+        terminationTimer = setTimeout(() => terminate("SIGKILL"), 5000);
+      }
     };
     const queueEvent = (raw: string) => {
       if (!raw.trim()) return;
@@ -653,14 +687,6 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
         await input.onEvent({ eventType: String(event?.type ?? "event"), event, raw });
       });
       void eventWrites.catch(() => undefined);
-    };
-    let terminationTimer: NodeJS.Timeout | undefined;
-    let outcome: "running" | "timeout" | "cancelled" | "denied" = "running";
-    const stop = (reason: "timeout" | "cancelled" | "denied") => {
-      if (outcome !== "running") return;
-      outcome = reason;
-      child.kill("SIGTERM");
-      terminationTimer = setTimeout(() => child.kill("SIGKILL"), 5000);
     };
     const timeout = setTimeout(() => stop("timeout"), input.timeoutMs);
     const abort = () => stop("cancelled");
