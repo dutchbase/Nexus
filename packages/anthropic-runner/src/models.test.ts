@@ -15,7 +15,15 @@ describe("anthropicModelSpec", () => {
     }
   });
 
-  test("ids equal the ai_model_prices seed rows in migration 050 (drift guard)", () => {
+  // Migration 050 seeds only shorthand keys ('fable'/'opus'/'sonnet'/'haiku')
+  // and pricing — it has no literal Anthropic API model-id strings anywhere.
+  // This test can therefore only prove shorthand-key parity between
+  // models.ts and the migration's seed rows; it cannot and does not verify
+  // that the literal id strings models.ts maps each shorthand to (e.g.
+  // "claude-sonnet-5") are themselves correct. Those must be confirmed
+  // against a live Anthropic API endpoint (or shared/models.md in the
+  // claude-api skill) before ANTHROPIC_API_KEY is ever set in production.
+  test("shorthand keys match the ai_model_prices seed rows in migration 050 (drift guard)", () => {
     const migrationPath = fileURLToPath(new URL("../../database/migrations/050_ai_invocation_accounting.sql", import.meta.url));
     const sql = readFileSync(migrationPath, "utf8");
     const seededAnthropicShorthands = [...sql.matchAll(/\('([a-z0-9-]+)','anthropic',/g)].map((match) => match[1]);

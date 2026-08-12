@@ -75,7 +75,7 @@ test("a failed execution can be retried with the approved plan", async ({ page }
   await page.reload();
   await expect(page.locator("[data-start-execution]")).toBeEnabled();
   await expect(page.locator("[data-start-execution]")).toHaveText("Retry execution");
-  await expect(page.locator(`a[href="/admin/tickets/${ticketNumber}/plans/1"]`, { hasText: "Revise plan" })).toBeVisible();
+  await expect(page.locator(`a[href="/admin/tickets/${ticketNumber}/plans/1"]`, { hasText: "Update plan" })).toBeVisible();
 
   await injectScenarioOnce(page, "/execute", scenarioRef({
     mode: "exec_stream",
@@ -127,6 +127,50 @@ test("a max-turns run with zero file changes fails the ticket instead of silentl
   expect(run?.status).toBe("failed");
   expect(run?.error_code).toBe("execution_max_turns");
   expect(run?.metadata_json?.tool_denials?.reportedDenials).toBe(2);
+
+  const pr = await queryOne(
+    `select pr.* from pull_requests pr
+     join execution_attempts ea on ea.id = pr.execution_attempt_id
+     where ea.ticket_id = $1`,
+    [ticketId],
+  );
+  expect(pr, "a run that never produced a change must never publish a PR").toBeFalsy();
+});
+
+test("a well-formed success run with zero file changes fails the ticket (no-op gate, not just max-turns)", async ({ page }) => {
+  const { ticketId } = await driveTicketToPlanApproved(page, `E2E success no-op ${Date.now()}`);
+
+  // Unlike the max-turns scenario above, this is the exact shape the no-op
+  // bug originally slipped through: the CLI exits 0 and the stream's result
+  // event reports a plain, non-error "success" — the shape that would
+  // previously have been silently accepted — but the mock writes zero files.
+  // The Agent tool_use event is still required so this run reaches the
+  // worktree no-op gate (assertExecutionProducedChanges) instead of failing
+  // earlier at the publication gate (worker.ts requires proof the Agent tool
+  // ran before that gate is even reached).
+  const scenario = scenarioRef({
+    mode: "exec_stream",
+    write_files: [],
+    events: [
+      { type: "turn", turn_index: 0 },
+      { type: "tool_use", name: "Agent", turn_index: 0 },
+      { type: "result", subtype: "success" },
+    ],
+    exit_code: 0,
+  } as any);
+  await injectScenarioOnce(page, "/execute", scenario);
+  await page.locator("[data-start-execution]").click();
+
+  const finalStatus = await waitForTicketStatus(
+    ticketId,
+    ["Execution Failed", "PR Ready for Review", "PR Creation Failed", "Validation Failed"],
+    90_000,
+  );
+  expect(finalStatus, "a well-formed success run that changed nothing must not sail through to Validating/PR Ready").toBe("Execution Failed");
+
+  const run = await queryOne("select * from agent_runs where ticket_id = $1 and run_type = 'execution' order by created_at desc limit 1", [ticketId]);
+  expect(run?.status).toBe("failed");
+  expect(run?.error_code).toBe("execution_no_changes");
 
   const pr = await queryOne(
     `select pr.* from pull_requests pr
