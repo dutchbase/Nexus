@@ -94,6 +94,49 @@ test("a failed execution can be retried with the approved plan", async ({ page }
   expect(Number(attempts?.count)).toBe(2);
 });
 
+test("a max-turns run with zero file changes fails the ticket instead of silently succeeding", async ({ page }) => {
+  const { ticketId } = await driveTicketToPlanApproved(page, `E2E max-turns no-op ${Date.now()}`);
+
+  // The process exits 0 (mirrors the real DCC incident: Claude Code exits
+  // clean even for error_max_turns), but the final result event reports
+  // turn exhaustion and the mock writes no files — the no-op + max-turns
+  // path this scenario proves must still fail the ticket.
+  const scenario = scenarioRef({
+    mode: "exec_stream",
+    write_files: [],
+    events: [
+      { type: "turn", turn_index: 0 },
+      {
+        type: "result", subtype: "error_max_turns", is_error: true, num_turns: 50,
+        permission_denials: [{ tool_name: "Bash" }, { tool_name: "Bash" }],
+      },
+    ],
+    exit_code: 0,
+  } as any);
+  await injectScenarioOnce(page, "/execute", scenario);
+  await page.locator("[data-start-execution]").click();
+
+  const finalStatus = await waitForTicketStatus(
+    ticketId,
+    ["Execution Failed", "PR Ready for Review", "PR Creation Failed", "Validation Failed"],
+    90_000,
+  );
+  expect(finalStatus, "a well-formed but turn-exhausted no-op run must not sail through to Validating/PR Ready").toBe("Execution Failed");
+
+  const run = await queryOne("select * from agent_runs where ticket_id = $1 and run_type = 'execution' order by created_at desc limit 1", [ticketId]);
+  expect(run?.status).toBe("failed");
+  expect(run?.error_code).toBe("execution_max_turns");
+  expect(run?.metadata_json?.tool_denials?.reportedDenials).toBe(2);
+
+  const pr = await queryOne(
+    `select pr.* from pull_requests pr
+     join execution_attempts ea on ea.id = pr.execution_attempt_id
+     where ea.ticket_id = $1`,
+    [ticketId],
+  );
+  expect(pr, "a run that never produced a change must never publish a PR").toBeFalsy();
+});
+
 test("a running execution can be cancelled from the run page", async ({ page }) => {
   const { ticketId } = await driveTicketToPlanApproved(page, `E2E cancel ${Date.now()}`);
 
