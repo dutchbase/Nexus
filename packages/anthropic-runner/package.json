@@ -1,0 +1,10 @@
+{
+  "name": "@dcc/anthropic-runner",
+  "private": true,
+  "type": "module",
+  "exports": "./src/index.ts",
+  "dependencies": {
+    "@dcc/domain": "workspace:*",
+    "@anthropic-ai/sdk": "0.116.0"
+  }
+}
