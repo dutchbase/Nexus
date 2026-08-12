@@ -35,3 +35,14 @@ test("materializes the immutable approved plan for execution", async () => {
 
   expect(source).toContain("materializeExecutionPlan(gate.planVersion.content_markdown)");
 });
+
+test("gates execution success on produced changes before completion is recorded", async () => {
+  const source = await worker();
+  const execution = source.slice(source.indexOf("async function runExecution"), source.indexOf("async function publishExecutionAttempt"));
+
+  const check = execution.indexOf("assertExecutionProducedChanges(");
+  expect(check).toBeGreaterThan(0);
+  expect(check).toBeLessThan(execution.indexOf("SET status='completed'"));
+  expect(check).toBeLessThan(execution.indexOf('"execution.completed"'));
+  expect(execution).toContain("fingerprintExecutionWorktree(worktree.worktreePath, executionBaseCommit)");
+});

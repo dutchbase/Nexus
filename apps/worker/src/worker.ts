@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   assertSubscriptionOnlyEnvironment, ClaudeAuthError, ClaudePlanningError, invokePlanningClaude,
   ClaudeExecutionError, invokeExecutionClaude, parsePlanMarkdown, preflightClaudeAuthentication,
+  describeExecutionDenials, type ExecutionOutcome,
 } from "@dcc/claude-runner";
 import { artifactDataRoot, finalizeArtifact, inTransaction, legacyArtifactDataRoot, pool, reconcileArtifacts, stageArtifact, type StagedArtifact } from "@dcc/database";
 import {
@@ -31,6 +32,7 @@ import {
 } from "@dcc/skill-registry";
 import { invokeOpenCodeExecution, invokeOpenCodePlanning, OpenCodeError } from "./opencode.ts";
 import { runPrivateExecution } from "./execution-handoff.ts";
+import { assertExecutionProducedChanges, ExecutionNoChangesError, fingerprintExecutionWorktree } from "./execution-change-detection.ts";
 import { failExecutionPublication, handleExecutionPublicationFailure, prepareExecutionPublication, PublicationError, publishExternalResult, storePublishedPullRequest } from "./execution-publication.ts";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
@@ -515,6 +517,19 @@ async function runPlanning(job: any, lease: LeaseGuard) {
   }
 }
 
+// Persists the tracked tool-denial telemetry onto agent_runs so an
+// investigator can see denial counts/tools without replaying agent_run_events,
+// on both the success and failure paths. A no-op on the OpenCode/DeepSeek
+// path (and any other engine that reports no outcome), since it has no
+// ExecutionOutcome to record.
+async function recordExecutionOutcomeMetadata(runId: string, outcome: ExecutionOutcome | undefined) {
+  if (!outcome) return;
+  await pool.query(
+    `UPDATE agent_runs SET metadata_json = metadata_json || jsonb_build_object('tool_denials', $2::jsonb) WHERE id = $1`,
+    [runId, JSON.stringify(outcome)],
+  );
+}
+
 async function runExecution(job: any, lease: LeaseGuard) {
   const repairing = job.type === "execution.repair";
   const ticket = (await pool.query("SELECT * FROM tickets WHERE id=$1", [job.payload_json.ticket_id])).rows[0];
@@ -693,6 +708,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
     const scenarioKey = ["mock", "scenario", "path"].join("_");
     const executionBaseCommit = worktree.baseCommit ?? attempt.base_commit;
     if (!executionBaseCommit) throw new Error("execution attempt base commit is unavailable");
+    const fingerprintBefore = await fingerprintExecutionWorktree(worktree.worktreePath, executionBaseCommit);
     await lease.assertOwned();
     const result = executionIsDeepSeek
       ? await runPrivateExecution({
@@ -741,6 +757,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
             pluginDirectories: skillBundle.pluginDirectories.map((directory) =>
               path.join(".git/dcc-support/skills", path.relative(skillBundle.additionalDirectory, directory))),
             maxTurns: Number(input.project.config_json?.execution_max_turns ?? 50),
+            maxConsecutiveToolDenials: Number(input.project.config_json?.execution_max_tool_denials ?? 5),
             oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
             scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
             logPath: stagedLog.stagedPath,
@@ -765,6 +782,20 @@ async function runExecution(job: any, lease: LeaseGuard) {
     // quality bar (forced subagent use); OpenCode runs are gated by the same
     // downstream validation (worktree checks + validation commands) instead.
     if (!executionIsDeepSeek) assertExecutionPublicationGate(repairing, usedAgent);
+    const executionOutcome = (result as { outcome?: ExecutionOutcome }).outcome;
+    await recordExecutionOutcomeMetadata(runId, executionOutcome);
+    // Claude Code (and any other engine) can exit 0 / report success while
+    // leaving the worktree untouched — a silent no-op that would otherwise
+    // sail through to the completed status and the completion notification
+    // below before validation ever runs. Compare against the pre-execution
+    // fingerprint so both engines get the same no-op protection.
+    await assertExecutionProducedChanges({
+      worktreePath: worktree.worktreePath,
+      baseCommit: executionBaseCommit,
+      repairing,
+      fingerprintBefore,
+      ...(executionOutcome ? { detail: describeExecutionDenials(executionOutcome) } : {}),
+    });
     await pool.query(
       `UPDATE agent_runs
        SET status='completed',claude_session_id=$2,finished_at=now(),exit_code=$3 WHERE id=$1`,
@@ -865,14 +896,20 @@ async function runExecution(job: any, lease: LeaseGuard) {
     if (error instanceof PublicationError) throw error;
     await lease.assertOwned();
     await finalizeAiUsage(runId, error as { usage?: any });
+    await recordExecutionOutcomeMetadata(runId, error instanceof ClaudeExecutionError ? error.outcome : undefined);
     // Match on the error code regardless of concrete error class: DeepSeek
     // executions throw OpenCodeError (not ClaudeExecutionError), but both
     // taxonomies use the same "execution_cancelled"/"execution_timeout"
     // codes for the execution path so cancels/timeouts classify the same
     // way for either engine instead of opencode runs falling through to a
-    // generic "execution_failed" -> Execution Failed.
-    const executionErrorCode = error instanceof ClaudeExecutionError || error instanceof OpenCodeError
-      ? error.code : null;
+    // generic "execution_failed" -> Execution Failed. ExecutionNoChangesError
+    // (the no-op gate) and Claude's execution_max_turns/execution_incomplete/
+    // execution_tool_denied codes fall through the same cancelled/timeout
+    // ternaries below to validation_status='failed' and ticket
+    // 'Execution Failed' — deliberately not 'Validation Failed', whose Repair
+    // affordance is wrong for a no-op or an incomplete session.
+    const executionErrorCode = error instanceof ExecutionNoChangesError ? error.code
+      : error instanceof ClaudeExecutionError || error instanceof OpenCodeError ? error.code : null;
     const executionExitCode = error instanceof ClaudeExecutionError ? error.exitCode : undefined;
     const cancelled = executionErrorCode === "execution_cancelled";
     await pool.query(
