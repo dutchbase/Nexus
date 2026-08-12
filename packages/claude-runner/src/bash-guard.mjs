@@ -1,6 +1,7 @@
 import { realpathSync } from "node:fs";
 import path from "node:path";
 
+const DENIAL_MARKER = "DCC_TOOL_DENIED";
 const unsafeShellSyntax = /[\n\r\t'"\\`$(){}\[\]*?~!<>;&|#]/;
 const safeArgument = /^[A-Za-z0-9@%_.,:=+\/-]+$/;
 const namedDccAgents = new Set(["dcc-mechanical", "dcc-implementer", "dcc-repair", "dcc-reviewer"]);
@@ -85,10 +86,10 @@ async function main() {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
       permissionDecisionReason: input?.tool_name === "Agent"
-        ? "DCC_TOOL_DENIED: Execution may delegate only to dcc-mechanical, dcc-implementer, dcc-repair or dcc-reviewer."
+        ? `${DENIAL_MARKER}: Execution may delegate only to dcc-mechanical, dcc-implementer, dcc-repair or dcc-reviewer.`
         : fileTools.has(input?.tool_name)
-          ? "DCC_TOOL_DENIED: Execution file tools are confined to the worktree and trusted read-only runtime inputs."
-        : "DCC_TOOL_DENIED: Bash is sandboxed. Only \"git status|diff|log\" and \"pnpm exec vitest|tsc\" are permitted, and in this environment Git metadata is hidden and dependencies are not installed, so those commands fail too. Do not retry any Bash command — use Read, Glob and Grep, make the file edits, and report verification as \"not run\".",
+          ? `${DENIAL_MARKER}: Execution file tools are confined to the worktree and trusted read-only runtime inputs.`
+        : `${DENIAL_MARKER}: Bash is sandboxed. Only "git status|diff|log" and "pnpm exec vitest|tsc" are permitted, and in this environment Git metadata is hidden and dependencies are not installed, so those commands fail too. Do not retry any Bash command — use Read, Glob and Grep, make the file edits, and report verification as "not run".`,
     },
   }));
   process.exitCode = 2;

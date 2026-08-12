@@ -5,7 +5,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { afterEach, describe, expect, test } from "vitest";
 import { allowsAgent, allowsBashCommand, allowsFileTool } from "./bash-guard.mjs";
-import { materializeBashGuard } from "./index.ts";
+import { DENIAL_MARKER, materializeBashGuard } from "./index.ts";
 
 const guard = fileURLToPath(new URL("./bash-guard.mjs", import.meta.url));
 const directories = [];
@@ -42,9 +42,9 @@ describe("execution Bash guard", () => {
       expect(result.code).toBe(2);
       const output = JSON.parse(result.stdout);
       expect(output.hookSpecificOutput.permissionDecision).toBe("deny");
-      expect(output.hookSpecificOutput.permissionDecisionReason).toMatch(/^DCC_TOOL_DENIED:/);
+      expect(output.hookSpecificOutput.permissionDecisionReason).toMatch(new RegExp(`^${DENIAL_MARKER}:`));
       expect(output.hookSpecificOutput.permissionDecisionReason).toContain("Do not retry");
-      expect(/Read|Glob|Grep/.test(output.hookSpecificOutput.permissionDecisionReason)).toBe(true);
+      expect(output.hookSpecificOutput.permissionDecisionReason).toMatch(/Read|Glob|Grep/);
     }
   });
 
@@ -59,7 +59,7 @@ describe("execution Bash guard", () => {
       expect(result.code).toBe(2);
       const output = JSON.parse(result.stdout);
       expect(output.hookSpecificOutput.permissionDecision).toBe("deny");
-      expect(output.hookSpecificOutput.permissionDecisionReason).toMatch(/^DCC_TOOL_DENIED:/);
+      expect(output.hookSpecificOutput.permissionDecisionReason).toMatch(new RegExp(`^${DENIAL_MARKER}:`));
       expect(output.hookSpecificOutput.permissionDecisionReason).toContain("dcc-mechanical");
       expect(output.hookSpecificOutput.permissionDecisionReason).toContain("dcc-implementer");
       expect(output.hookSpecificOutput.permissionDecisionReason).toContain("dcc-repair");
@@ -107,7 +107,7 @@ describe("execution Bash guard", () => {
     expect(result.code).toBe(2);
     const output = JSON.parse(result.stdout);
     expect(output.hookSpecificOutput.permissionDecision).toBe("deny");
-    expect(output.hookSpecificOutput.permissionDecisionReason).toMatch(/^DCC_TOOL_DENIED:/);
+    expect(output.hookSpecificOutput.permissionDecisionReason).toMatch(new RegExp(`^${DENIAL_MARKER}:`));
     expect(output.hookSpecificOutput.permissionDecisionReason).toContain("confined");
   });
 
