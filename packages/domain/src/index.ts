@@ -106,6 +106,16 @@ export async function recordAiUsage(input: { runId: string } & AiUsage, client?:
   const cacheWriteTokens = input.cacheWriteTokens ?? 0;
   const totalTokens = inputTokens + outputTokens + cacheReadTokens + cacheWriteTokens;
   const db = client ?? pool;
+  // Explicit ::bigint casts on every $2/$3/$5/$6 occurrence: without them
+  // Postgres's parameter-type unification sees $2 used both as a bare
+  // `input_tokens=$2` (bigint column) and inside `$2 * input_usd_per_million`
+  // (numeric(20,8) arithmetic) and refuses to resolve a single type for the
+  // placeholder ("inconsistent types deduced for parameter $2 — DETAIL:
+  // numeric versus bigint"). This path went unexercised until the e2e mock
+  // Anthropic server (tests/e2e/mock-anthropic/server.mjs) started returning
+  // real usage numbers against a priced model — no prior CLI-mock scenario
+  // in tests/e2e ever supplied `usage`, so recordAiUsage's success branch
+  // (as opposed to recordAiUnavailable) was never actually run end-to-end.
   const result = await db.query(
     `WITH price AS (
        SELECT p.* FROM ai_model_prices p JOIN agent_runs ar ON ar.id=$1
@@ -113,12 +123,12 @@ export async function recordAiUsage(input: { runId: string } & AiUsage, client?:
        ORDER BY p.effective_from DESC LIMIT 1
      )
      UPDATE agent_runs ar SET
-       ai_usage_status='captured', input_tokens=$2, output_tokens=$3, reasoning_tokens=$4,
-       cache_read_tokens=$5, cache_write_tokens=$6, total_tokens=$7, raw_usage_json=$8,
+       ai_usage_status='captured', input_tokens=$2::bigint, output_tokens=$3::bigint, reasoning_tokens=$4::bigint,
+       cache_read_tokens=$5::bigint, cache_write_tokens=$6::bigint, total_tokens=$7::bigint, raw_usage_json=$8,
        ai_model_price_id=(SELECT id FROM price),
        estimated_cost_usd=(SELECT
-         ($2 * input_usd_per_million + $3 * output_usd_per_million +
-          $5 * cache_read_usd_per_million + $6 * cache_write_usd_per_million) / 1000000
+         ($2::bigint * input_usd_per_million + $3::bigint * output_usd_per_million +
+          $5::bigint * cache_read_usd_per_million + $6::bigint * cache_write_usd_per_million) / 1000000
          FROM price)
      WHERE ar.id=$1 AND ar.ai_usage_status='pending'
      RETURNING ar.*`,

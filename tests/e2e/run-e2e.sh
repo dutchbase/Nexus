@@ -28,14 +28,16 @@ log() { echo "[run-e2e] $*" >&2; }
 PG_PORT=55434
 PG_CONTAINER="e2e-dcc-postgres"
 export MOCK_GITHUB_PORT=8993
+export MOCK_ANTHROPIC_PORT=8994
 export PORT=3100
 export APP_BASE_URL="http://127.0.0.1:${PORT}"
 
 MOCK_GITHUB_PID=""
+MOCK_ANTHROPIC_PID=""
 
 cleanup() {
   if [ "$KEEP" = true ]; then
-    log "--keep: leaving Postgres / mock-github / app running"
+    log "--keep: leaving Postgres / mock-github / mock-anthropic / app running"
     return
   fi
   log "cleanup"
@@ -43,7 +45,9 @@ cleanup() {
   pkill -f "tsx watch src/worker.ts" 2>/dev/null
   pkill -f "scripts/dev.ts" 2>/dev/null
   [ -n "$MOCK_GITHUB_PID" ] && kill "$MOCK_GITHUB_PID" 2>/dev/null
+  [ -n "$MOCK_ANTHROPIC_PID" ] && kill "$MOCK_ANTHROPIC_PID" 2>/dev/null
   pkill -f "mock-github/server.js" 2>/dev/null
+  pkill -f "mock-anthropic/server.mjs" 2>/dev/null
   docker rm -f "$PG_CONTAINER" >/dev/null 2>&1
 }
 trap cleanup EXIT
@@ -107,6 +111,12 @@ export MOCK_GITHUB_LOG="$SCRIPT_DIR/.mock-github.log"
 node "$SCRIPT_DIR/mock-github/server.js" > "$SCRIPT_DIR/.mock-github.stdout.log" 2>&1 &
 MOCK_GITHUB_PID=$!
 
+log "starting mock-anthropic on :$MOCK_ANTHROPIC_PORT"
+export MOCK_ANTHROPIC_LOG="$SCRIPT_DIR/.mock-anthropic.log"
+: > "$MOCK_ANTHROPIC_LOG"
+node "$SCRIPT_DIR/mock-anthropic/server.mjs" > "$SCRIPT_DIR/.mock-anthropic.stdout.log" 2>&1 &
+MOCK_ANTHROPIC_PID=$!
+
 # Shim first (fixes the stale `auth status` shape), harness mock second.
 chmod +x "$SCRIPT_DIR/mock-claude/claude"
 export PATH="$SCRIPT_DIR/mock-claude:$HARNESS_DIR/mock-claude:$PATH"
@@ -116,6 +126,17 @@ mkdir -p "$MOCK_CLAUDE_SCENARIO_DIR"
 : > "$MOCK_CLAUDE_LOG"
 export CLAUDE_CODE_OAUTH_TOKEN="mock-token-not-a-secret"
 for v in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_USE_BEDROCK CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_FOUNDRY; do unset "$v"; done
+
+# Set ANTHROPIC_API_KEY only AFTER the unset loop above, and only for the
+# worker's API-billed follow-up-description path (Task B4) — the mock
+# `claude` CLI (tests/e2e/mock-claude/claude:17-21) exits 1 if it ever sees
+# this var, which is the e2e proof that the worker's child-process env
+# scrubbing (packages/claude-runner's assertSubscriptionOnlyChildEnvironment,
+# Task B1) actually keeps it away from the CLI subprocess. scripts/dev.ts
+# also strips it from the web child's env before spawning apps/web.
+# DCC_ANTHROPIC_API_JOBS is left at its default (routes pr_follow_up_description).
+export ANTHROPIC_API_KEY="sk-ant-mock-not-a-secret"
+export ANTHROPIC_BASE_URL="http://127.0.0.1:${MOCK_ANTHROPIC_PORT}"
 
 # ------------------------------------------------------------ app
 export GITHUB_API_BASE_URL="$MOCK_GITHUB_BASE_URL"
@@ -143,6 +164,8 @@ log "app ready at $APP_BASE_URL"
   echo "E2E_ADMIN_PASSWORD=$E2E_ADMIN_PASSWORD"
   echo "MOCK_GITHUB_BASE_URL=$MOCK_GITHUB_BASE_URL"
   echo "MOCK_GITHUB_LOG=$MOCK_GITHUB_LOG"
+  echo "ANTHROPIC_BASE_URL=$ANTHROPIC_BASE_URL"
+  echo "MOCK_ANTHROPIC_LOG=$MOCK_ANTHROPIC_LOG"
   echo "MOCK_CLAUDE_LOG=$MOCK_CLAUDE_LOG"
   echo "MOCK_CLAUDE_SCENARIO_DIR=$MOCK_CLAUDE_SCENARIO_DIR"
   cat "$SCRIPT_DIR/.fixtures.env"

@@ -7,6 +7,7 @@
 // top-level toolbar buttons. Successful reviews end in status "approved"
 // (pr_ai_reviews), and the policy snapshot is synced automatically after PR
 // creation (badge "GitHub: Current").
+import fs from "node:fs";
 import { test, expect, type Page } from "@playwright/test";
 import { loginViaUI, queryOne, waitFor, driveTicketToPrReady, waitForTicketStatus } from "./helpers";
 
@@ -102,6 +103,86 @@ test("mark reviewed and close the linked ticket without merging", async ({ page 
   await openMoreOptions(page);
   await page.locator("[data-pr-close-ticket]").click();
   await waitForTicketStatus(ticketId, ["Closed Without Merge"]);
+});
+
+test("create follow-up ticket generates its description via the API-billed Anthropic path", async ({ page }) => {
+  // Proves B4's transport routing end to end: DCC_ANTHROPIC_API_JOBS defaults
+  // to routing pr_follow_up_description through invokeAnthropicText against
+  // the mock Anthropic server (tests/e2e/mock-anthropic/server.mjs), started
+  // and pointed at via ANTHROPIC_BASE_URL by run-e2e.sh — never through the
+  // mock `claude` CLI, which would exit 1 if it ever saw ANTHROPIC_API_KEY
+  // (tests/e2e/mock-claude/claude:17-21, the B1 env-scrubbing invariant).
+  const { ticketNumber, prId } = await driveTicketToPrReady(page, `E2E follow-up ${Date.now()}`);
+  await openPrDetail(page, ticketNumber);
+
+  await openMoreOptions(page);
+  await page.locator("[data-open-create-ticket]").click();
+
+  const dialog = page.locator("[data-create-ticket-dialog]");
+  const followUpTitle = `E2E follow-up ticket ${Date.now()}`;
+  await dialog.locator('input[name="title"]').fill(followUpTitle);
+  await dialog.locator('textarea[name="feedback"]').fill("Please document the edge case we missed in review.");
+  // Leave description empty: with generate_description checked (default),
+  // ui.ts falls back to using the feedback text as the ticket's initial
+  // description, then fires the follow-up-description job which overwrites
+  // it with the AI-generated text once the job completes (worker.ts's
+  // `UPDATE tickets SET description=... WHERE description=$initial` guard).
+  await expect(dialog.locator('input[name="generate_description"]')).toBeChecked();
+  await dialog.locator('button[type="submit"]').click();
+
+  // The create-ticket request is awaited by the UI, but the follow-up
+  // description POST is fired with keepalive and not awaited — poll the DB
+  // for the resulting job instead of trusting page state.
+  let ticketRow: any;
+  await waitFor(async () => {
+    ticketRow = await queryOne("select id, description from tickets where title = $1", [followUpTitle]);
+    return !!ticketRow;
+  });
+
+  let job: any;
+  await waitFor(async () => {
+    job = await queryOne(
+      `select id, status, payload_json, error_json from jobs
+       where type = 'pr.follow_up_description'
+         and payload_json->>'pull_request_id' = $1
+         and payload_json->>'ticket_id' = $2
+       order by created_at desc limit 1`,
+      [prId, ticketRow.id],
+    );
+    return !!job && job.status !== "queued" && job.status !== "running";
+  }, { timeoutMs: 30_000, intervalMs: 300 });
+
+  expect(job.status).toBe("completed");
+  const generatedDescription = job.payload_json?.generated_description;
+  expect(generatedDescription).toContain(
+    "Mock Anthropic follow-up description: generated via the metered Messages API mock, proving the API-billed request/response round-trip.",
+  );
+
+  // The job handler also rewrites tickets.description (payload.initial_description
+  // matched what the UI sent, since the description field was left blank).
+  await waitFor(async () => {
+    ticketRow = await queryOne("select description from tickets where id = $1", [ticketRow.id]);
+    return ticketRow?.description === generatedDescription;
+  });
+
+  const run = await queryOne(
+    "select billing_mode, run_type, status from agent_runs where pull_request_id = $1 and run_type = 'pr_follow_up_description' order by created_at desc limit 1",
+    [prId],
+  );
+  expect(run).toBeTruthy();
+  expect(run.status).toBe("completed");
+  expect(run.billing_mode).toBe("api");
+
+  // The mock `claude` CLI must never have been invoked for this job — its own
+  // forbidden-env-var check would have made it exit 1 rather than silently
+  // succeed, so the strongest assertion is simply that no CLI log entry
+  // references this ticket/PR's follow-up prompt.
+  const mockClaudeLog = process.env.MOCK_CLAUDE_LOG;
+  if (mockClaudeLog && fs.existsSync(mockClaudeLog)) {
+    const entries = fs.readFileSync(mockClaudeLog, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line));
+    const leaked = entries.some((entry: any) => (entry.argv || []).some((arg: string) => typeof arg === "string" && arg.includes("follow-up-ticket-prompt.md")));
+    expect(leaked).toBe(false);
+  }
 });
 
 test("sync pull requests from the list header", async ({ page }) => {

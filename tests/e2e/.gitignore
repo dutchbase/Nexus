@@ -8,4 +8,6 @@
 .app.stdout.log
 .mock-github.log
 .mock-github.stdout.log
+.mock-anthropic.log
+.mock-anthropic.stdout.log
 .mock-claude.log
