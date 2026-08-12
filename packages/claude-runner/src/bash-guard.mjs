@@ -85,10 +85,10 @@ async function main() {
       hookEventName: "PreToolUse",
       permissionDecision: "deny",
       permissionDecisionReason: input?.tool_name === "Agent"
-        ? "Execution may delegate only to named DCC roles."
+        ? "DCC_TOOL_DENIED: Execution may delegate only to dcc-mechanical, dcc-implementer, dcc-repair or dcc-reviewer."
         : fileTools.has(input?.tool_name)
-          ? "Execution file tools are confined to the worktree and trusted read-only runtime inputs."
-        : "Execution subagents may run only direct git status/diff/log or pnpm exec vitest/tsc commands.",
+          ? "DCC_TOOL_DENIED: Execution file tools are confined to the worktree and trusted read-only runtime inputs."
+        : "DCC_TOOL_DENIED: Bash is sandboxed. Only \"git status|diff|log\" and \"pnpm exec vitest|tsc\" are permitted, and in this environment Git metadata is hidden and dependencies are not installed, so those commands fail too. Do not retry any Bash command — use Read, Glob and Grep, make the file edits, and report verification as \"not run\".",
     },
   }));
   process.exitCode = 2;

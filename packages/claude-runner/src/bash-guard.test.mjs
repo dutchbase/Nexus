@@ -40,7 +40,11 @@ describe("execution Bash guard", () => {
       expect(allowsBashCommand(command)).toBe(false);
       const result = await runHook("Bash", { command });
       expect(result.code).toBe(2);
-      expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+      const output = JSON.parse(result.stdout);
+      expect(output.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(output.hookSpecificOutput.permissionDecisionReason).toMatch(/^DCC_TOOL_DENIED:/);
+      expect(output.hookSpecificOutput.permissionDecisionReason).toContain("Do not retry");
+      expect(/Read|Glob|Grep/.test(output.hookSpecificOutput.permissionDecisionReason)).toBe(true);
     }
   });
 
@@ -53,7 +57,13 @@ describe("execution Bash guard", () => {
       expect(allowsAgent({ subagent_type })).toBe(false);
       const result = await runHook("Agent", { subagent_type });
       expect(result.code).toBe(2);
-      expect(JSON.parse(result.stdout).hookSpecificOutput.permissionDecision).toBe("deny");
+      const output = JSON.parse(result.stdout);
+      expect(output.hookSpecificOutput.permissionDecision).toBe("deny");
+      expect(output.hookSpecificOutput.permissionDecisionReason).toMatch(/^DCC_TOOL_DENIED:/);
+      expect(output.hookSpecificOutput.permissionDecisionReason).toContain("dcc-mechanical");
+      expect(output.hookSpecificOutput.permissionDecisionReason).toContain("dcc-implementer");
+      expect(output.hookSpecificOutput.permissionDecisionReason).toContain("dcc-repair");
+      expect(output.hookSpecificOutput.permissionDecisionReason).toContain("dcc-reviewer");
     }
   });
 
@@ -84,6 +94,21 @@ describe("execution Bash guard", () => {
       { tool_name: "Edit", tool_input: { file_path: path.join(bundle, "SKILL.md") }, cwd: worktree },
       { tool_name: "Write", tool_input: { file_path: outside }, cwd: worktree },
     ]) expect(allowsFileTool(input, policy)).toBe(false);
+  });
+
+  test("denies file tool access with DCC_TOOL_DENIED marker", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "claude-file-guard-deny-"));
+    directories.push(root);
+    const outside = path.join(root, "private-notes");
+    await writeFile(outside, "host secret\n");
+    const policy = { readRoots: [root], writeRoot: root };
+
+    const result = await runHook("Read", { file_path: outside, cwd: root });
+    expect(result.code).toBe(2);
+    const output = JSON.parse(result.stdout);
+    expect(output.hookSpecificOutput.permissionDecision).toBe("deny");
+    expect(output.hookSpecificOutput.permissionDecisionReason).toMatch(/^DCC_TOOL_DENIED:/);
+    expect(output.hookSpecificOutput.permissionDecisionReason).toContain("confined");
   });
 
   test("permits edits only to explicit conflict paths when supplied", async () => {
