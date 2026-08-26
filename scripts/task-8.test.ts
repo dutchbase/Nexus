@@ -220,12 +220,14 @@ describe("health-gated release deployment", () => {
     expect(result.commands).toContain("target_release_path");
   });
 
-  it("replaces pending success with failure and restores the webhook when webhook reload fails", async () => {
+  it("replaces pending success with a nonzero marker when webhook reload fails, keeping the new release", async () => {
     const result = await deploy({ failWebhook: true });
 
-    expect(result.status).toBe(74);
-    expect(await readlink(result.current)).toBe(result.previous);
-    expect(result.commands.match(/pm2 start .*\--only dcc-webhook --update-env/g)).toHaveLength(2);
+    // Web/worker stay on the new release (already health-gated); only the
+    // webhook reload failed, surfaced as a nonzero final marker.
+    expect(result.status).toBe(0);
+    expect(await readlink(result.current)).toContain(sha.slice(0, 8));
+    expect(result.commands.match(/pm2 start .*\--only dcc-webhook --update-env/g)).toHaveLength(1);
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 74 });
   });
 

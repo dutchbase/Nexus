@@ -155,11 +155,21 @@ record_event "processes_reloaded"
 curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 "$DCC_DEPLOY_HEALTH_URL"
 record_event "healthy"
 write_marker 0 reload_pending
-# The next line tears down this script's ancestor (the old webhook), and pm2
+# The next lines tear down this script's ancestor (the old webhook), and pm2
 # tree-kills descendants — including us. Everything that matters is already
-# durable: release cut over, web/worker healthy, reloadPending marker on
-# disk. Ignore teardown signals; the fresh webhook finalizes this attempt
-# during its own boot recovery.
+# durable: release cut over, web/worker healthy. Ignore teardown signals;
+# capture the start's own exit code so a failed webhook reload still lands as
+# a nonzero final marker (visible failure) instead of a hung pending attempt.
+# Success path: the fresh webhook finalizes this attempt during boot recovery.
 trap '' HUP INT TERM
-reload_app dcc-webhook >/dev/null 2>&1 || true
+set +e
+pm2 delete dcc-webhook >/dev/null 2>&1
+pm2 start "$CURRENT/ecosystem.config.cjs" --only dcc-webhook --update-env
+webhook_reload_rc=$?
+set -e
+if [ "$webhook_reload_rc" -ne 0 ]; then
+  echo "deploy.sh: dcc-webhook reload failed (rc=$webhook_reload_rc)" >&2
+  write_marker "$webhook_reload_rc"
+fi
 echo "deploy.sh: deployed $SHA"
+exit 0
