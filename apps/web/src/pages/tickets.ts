@@ -504,7 +504,7 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
       : "";
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)}</div><h1>${escapeHtml(ticket.title)}</h1>
       <div class="toolbar">${statusBadge(ticket.status)}
-        ${["Completed", "Merged", "Closed Without Merge"].includes(ticket.status) ? `<button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reopen-ticket>Reopen</button>${archiveButton}` : `${canArchive ? archiveButton : ""}<button class="button" type="button" data-open-preview>Preview prompt</button>
+        ${["Completed", "Merged", "Closed Without Merge"].includes(ticket.status) ? `<button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reopen-ticket>Reopen</button>${archiveButton}` : `${archiveButton}<button class="button" type="button" data-open-preview>Preview prompt</button>
         ${workflowAction}`}</div>
       ${planningFailureBanner}
       <dialog data-preview-dialog aria-label="Prompt preview"><div class="card-head">Prompt preview</div><p>This is the exact, complete prompt sent to Claude — including global instructions, project context, resolved AI configuration, resolved skills, and ticket content.</p><pre class="references">Loading…</pre><button class="button" type="button" data-close-dialog>Close</button></dialog>

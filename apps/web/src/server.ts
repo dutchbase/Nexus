@@ -405,8 +405,8 @@ export async function consumeSubmissionAttempt(formId: string, ip: string, limit
       `SELECT count(*)::integer AS count,
               coalesce(ceil(extract(epoch FROM min(created_at) + interval '1 hour' - now()))::integer, 0) AS reset_seconds
        FROM public_submission_attempts
-       WHERE form_id = $1 AND ip_address = $2 AND kind = $4 AND created_at > now() - interval '1 hour'`,
-      [formId, ip, limit, kind],
+       WHERE form_id = $1 AND ip_address = $2 AND kind = $3 AND created_at > now() - interval '1 hour'`,
+      [formId, ip, kind],
     );
     if (recent.rows[0].count >= limit) return { allowed: false, resetSeconds: Math.max(1, recent.rows[0].reset_seconds) };
     await client.query("INSERT INTO public_submission_attempts (form_id, ip_address, accepted, kind) VALUES ($1,$2,true,$3)", [formId, ip, kind]);
