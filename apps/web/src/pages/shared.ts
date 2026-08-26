@@ -4,6 +4,45 @@ import { WORKER_STALE_AFTER_MS } from "@dcc/domain";
 
 export { pool, adminPage, escapeHtml };
 
+// One semantic color scale for every status/state badge in the app:
+// ok=green done/approved/enabled, danger=red failed/rejected, warn=amber
+// needs attention/blocked, info=blue queued/intake, run=purple actively
+// executing, muted=gray organizational/unknown. Ticket statuses use their
+// exact display casing; worker-side states (runs, jobs, deliveries) are
+// matched lowercase. Unknown labels fall back to muted so a new status can
+// never render as the alarming default.
+const ticketStatusTones: Record<string, string> = {
+  "Submitted": "info", "Triage": "info", "Needs Information": "warn",
+  "Approved for Planning": "ok", "Planning Queued": "info", "Planning": "run", "Planning Failed": "danger",
+  "Plan Ready for Review": "run", "Plan Revision Requested": "warn", "Plan Revision Queued": "run", "Plan Approved": "ok",
+  "Execution Queued": "info", "Executing": "run", "Validating": "run", "Validation Failed": "danger",
+  "Execution Failed": "danger", "PR Creation Failed": "danger",
+  "PR Ready for Review": "warn", "PR Changes Requested": "warn", "PR Approved": "ok",
+  "Merged": "ok", "Completed": "ok", "Rejected": "danger", "Cancelled": "muted", "Archived": "muted",
+  "Closed Without Merge": "muted",
+};
+const stateTones: Record<string, string> = {
+  queued: "info", running: "run", completed: "ok", failed: "danger", cancelled: "muted",
+  timed_out: "warn", cancellation_requested: "warn",
+  blocked_auth: "warn", blocked_auth_configuration: "warn",
+  sent: "ok", pending: "info", exhausted: "danger",
+  staged: "info", finalized: "ok",
+  enabled: "ok", disabled: "muted", active: "ok", inactive: "muted", historic: "muted",
+  captured: "ok", legacy: "muted", unpriced: "warn", unavailable: "warn",
+  healthy: "ok", repository_dirty: "danger", stale: "warn", unknown: "muted",
+  published: "ok", draft: "muted", placeholder: "muted",
+  approved: "ok", rejected: "danger", error: "danger", resolved: "ok", open: "info", closed: "muted",
+};
+
+export function statusTone(label: unknown): string {
+  const value = String(label ?? "").trim();
+  return ticketStatusTones[value] ?? stateTones[value.toLowerCase()] ?? "muted";
+}
+
+export function statusBadge(label: unknown, extraClass = ""): string {
+  return `<span class="status ${statusTone(label)}${extraClass ? ` ${extraClass}` : ""}">${escapeHtml(String(label ?? ""))}</span>`;
+}
+
 export function promptVersionsLabel(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "";
   return Object.entries(value as Record<string, unknown>)

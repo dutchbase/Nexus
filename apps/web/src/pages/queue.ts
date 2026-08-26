@@ -1,4 +1,4 @@
-import { escapeHtml, pool, shortRef, workerHealth } from "./shared.ts";
+import { escapeHtml, pool, shortRef, statusBadge, workerHealth } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 
 const cap = (value: string) => value.charAt(0).toUpperCase() + value.slice(1);
@@ -73,7 +73,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <span>${job.ticket_label ? escapeHtml(job.ticket_label) : `<span style="color:var(--text3)">—</span>`}${job.project_name ? ` · ${escapeHtml(job.project_name)}` : ""}</span>
       <span>${escapeHtml(cap(job.priority))}</span>
       <span class="mono">${job.attempt} / ${job.max_attempts}</span>
-      <span class="status">${escapeHtml(cap(job.status))}</span>
+      ${statusBadge(cap(job.status))}
       <span style="text-align:right">${escapeHtml(availability(job))}${workflow ? `<br><span style="font-size:11.5px;color:var(--text3)">${escapeHtml(workflow)}</span>` : ""}</span>
     </div>`;
   }).join("");

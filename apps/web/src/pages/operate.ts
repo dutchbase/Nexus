@@ -2,7 +2,7 @@ import { statfsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { artifactDataRoot } from "../../../../packages/database/src/artifacts.ts";
-import { escapeHtml, pool, shortRef, workerHealth } from "./shared.ts";
+import { escapeHtml, pool, shortRef, statusBadge, workerHealth } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { aiModels, reasoningLevels } from "@dcc/domain";
 
@@ -131,7 +131,7 @@ function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: bo
     <td>${escapeHtml(rate(price.input_usd_per_million))}</td><td>${escapeHtml(rate(price.output_usd_per_million))}</td>
     <td>${escapeHtml(rate(price.cache_write_usd_per_million))}</td><td>${escapeHtml(rate(price.cache_read_usd_per_million))}</td>
     <td><a href="${escapeHtml(price.source_url)}" target="_blank" rel="noreferrer">Source</a></td>
-    <td>${escapeHtml(price.creator ?? "System")}</td><td><span class="status">${price.is_active ? "Active" : "Historic"}</span></td>
+    <td>${escapeHtml(price.creator ?? "System")}</td><td>${statusBadge(price.is_active ? "Active" : "Historic")}</td>
   </tr>`).join("") : `<tr><td colspan="9" style="color:var(--text3)">No model prices recorded.</td></tr>`;
   const modelPricesPanel = `<section class="card"><div class="card-body">
     <div class="card-head" style="margin:-18px -18px 14px;border-radius:6px 6px 0 0">Model pricing</div>
@@ -222,7 +222,7 @@ async function systemBody(): Promise<string> {
           <span style="width:8px;height:8px;border-radius:99px;background:var(--t-${tone});flex-shrink:0"></span>
           <span style="flex:1;font-size:13px">${escapeHtml(project.name)}</span>
           <span class="mono" style="font-size:12px;color:var(--text3)">${escapeHtml(project.repository_path ?? "")}</span>
-          <span class="status">${escapeHtml(project.health_status)}</span>
+          ${statusBadge(project.health_status)}
         </a>`;
       }).join("")
     : `<div class="card-body"><p>No projects registered yet.</p></div>`;
