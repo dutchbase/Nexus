@@ -53,6 +53,7 @@ export function skillPresentation(skill: any) {
 export function approvalGatesCard(ticket: { status: string }) {
   const canAcknowledge = ticket.status === "Submitted";
   return `<section class="card"><div class="card-head">Approval gates</div><div class="card-body">
+    <p>Intake gate: acknowledging marks a submitted ticket as seen and moves it into triage. The button unlocks once the ticket is submitted.</p>
     <p><button class="button" type="button" data-acknowledge-ticket${canAcknowledge ? "" : " disabled"} title="${canAcknowledge ? "" : "Ticket must be Submitted"}">Acknowledge</button></p></div></section>`;
 }
 
@@ -419,7 +420,8 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       <div class="grid rail"><section class="card"><div class="card-head">Ticket</div><div class="card-body"><dl><dt>Project</dt><dd>${escapeHtml(ticket.project_name)}</dd><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Source form</dt><dd>${escapeHtml(ticket.form_name ?? "—")}</dd><dt>Created</dt><dd>${new Date(ticket.created_at).toLocaleDateString("nl-NL")}</dd></dl></div></section>
       <section class="card"><div class="card-head">Attachments</div><div class="card-body">${attachmentsResult.rows.map((a) => `<p><a href="/admin/attachments/${a.id}">${escapeHtml(a.original_name ?? "attachment")}</a> <span class="mono">${escapeHtml(a.media_type)} · ${Math.round(a.size_bytes / 1024)} kB</span></p>`).join("") || "<p>No attachments.</p>"}</div></section>
       ${approvalGatesCard(ticket)}
-      <section class="card"><div class="card-head">Danger zone</div><div class="card-body"><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reject-ticket${["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : " disabled"} title="${["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : "Can only reject early-stage tickets"}">Reject</button></p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-cancel-ticket${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : " disabled"} title="${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : "Can only cancel in-progress tickets"}">Cancel</button></p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-archive-ticket${["Completed", "Merged", "Rejected", "Cancelled"].includes(ticket.status) ? "" : " disabled"} title="${["Completed", "Merged", "Rejected", "Cancelled"].includes(ticket.status) ? "" : "Can only archive finished tickets"}">Archive</button></p></div></section></div>`;
+      <section class="card"><div class="card-head">Danger zone</div><div class="card-body"><p>Destructive actions are hard to undo — archiving lives outside this zone.</p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reject-ticket${["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : " disabled"} title="${
+        ["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : "Can only reject early-stage tickets"}">Reject</button></p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-cancel-ticket${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : " disabled"} title="${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : "Can only cancel in-progress tickets"}">Cancel</button></p></div></section></div>`;
     const aiPanel = `<section class="card"><div class="card-head">AI configuration</div><div class="card-body">
         <form id="ai-config" data-ticket-id="${ticket.id}"><label class="field"><span>Mode</span><select name="ai_configuration_mode"><option value="basic"${ticket.ai_configuration_mode !== "advanced" ? " selected" : ""}>Basic</option><option value="advanced"${ticket.ai_configuration_mode === "advanced" ? " selected" : ""}>Advanced</option></select></label>
         <div class="grid two"><label class="field"><span>Default model</span><select name="default_model">${modelOptions}</select></label><label class="field"><span>Default reasoning level</span><select name="default_reasoning_level">${reasoningOptions}</select></label></div>
@@ -487,6 +489,8 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
     const currentPlanLink = currentPlanVersion ? `/admin/tickets/${ticket.ticket_number}/plans/${currentPlanVersion.version}` : "";
     const approvedPlanVersion = planVersions.find((version) => version.id === ticket.approved_plan_version_id);
     const approvedPlanLink = approvedPlanVersion ? `/admin/tickets/${ticket.ticket_number}/plans/${approvedPlanVersion.version}` : "";
+    const canArchive = ["Completed", "Merged", "Rejected", "Cancelled"].includes(ticket.status);
+    const archiveButton = `<button class="button" type="button" data-archive-ticket${canArchive ? "" : " disabled"} title="${canArchive ? "" : "Can only archive finished tickets"}">Archive</button>`;
     const workflowAction = !currentPlanVersion && ["Triage", "Needs Information", "Planning Failed"].includes(ticket.status)
       ? `<button class="button primary" type="button" data-start-planning>Start planning</button>`
       : currentPlanLink && ["Needs Information", "Planning Failed"].includes(ticket.status)
@@ -500,7 +504,7 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
       : "";
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)}</div><h1>${escapeHtml(ticket.title)}</h1>
       <div class="toolbar">${statusBadge(ticket.status)}
-        ${["Completed", "Merged", "Closed Without Merge"].includes(ticket.status) ? `<button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reopen-ticket>Reopen</button>` : `<button class="button" type="button" data-open-preview>Preview prompt</button>
+        ${["Completed", "Merged", "Closed Without Merge"].includes(ticket.status) ? `<button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reopen-ticket>Reopen</button>${archiveButton}` : `${canArchive ? archiveButton : ""}<button class="button" type="button" data-open-preview>Preview prompt</button>
         ${workflowAction}`}</div>
       ${planningFailureBanner}
       <dialog data-preview-dialog aria-label="Prompt preview"><div class="card-head">Prompt preview</div><p>This is the exact, complete prompt sent to Claude — including global instructions, project context, resolved AI configuration, resolved skills, and ticket content.</p><pre class="references">Loading…</pre><button class="button" type="button" data-close-dialog>Close</button></dialog>
