@@ -1239,6 +1239,25 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const job = await enqueueJob({ type: "github.merge_branches", payload: { actor_id: session.user_id, project_id: project.id, head, base, ...(expectedHeadSha || expectedBaseSha ? { expected_head_sha: expectedHeadSha, expected_base_sha: expectedBaseSha } : {}) }, idempotencyKey: `g07:github.merge_branches:${project.id}:${head}:${base}:${requestToken}` });
     return json(response, 202, { job });
   }
+  const openPullRequestMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/open-pull-request$/i);
+  if (openPullRequestMatch && request.method === "POST") {
+    const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [openPullRequestMatch[1]])).rows[0];
+    if (!project) return json(response, 404, { error: "project not found" });
+    if (!project.github_owner || !project.github_repository) return json(response, 400, { error: "project has no GitHub repository configured" });
+    const body = await bodyOf(request);
+    const head = typeof body.head === "string" ? body.head.trim() : "";
+    const base = typeof body.base === "string" ? body.base.trim() : "";
+    const refPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+    if (!head || !base) return json(response, 400, { error: "head and base branch are required" });
+    if (!refPattern.test(head) || !refPattern.test(base)) return json(response, 400, { error: "invalid branch name" });
+    if (head === base) return json(response, 400, { error: "head and base must differ" });
+    const title = typeof body.title === "string" && body.title.trim() ? body.title.trim().slice(0, 200) : undefined;
+    // Same dedupe shape as merge-branches: double-clicks collapse, an explicit
+    // request_id lets an operator deliberately open another PR for the pair.
+    const requestToken = typeof body.request_id === "string" && body.request_id.trim() ? body.request_id.trim().slice(0, 64).replace(/[^A-Za-z0-9._:-]/g, "") : String(Math.floor(Date.now() / 3_600_000));
+    const job = await enqueueJob({ type: "github.open_pull_request", payload: { actor_id: session.user_id, project_id: project.id, head, base, ...(title ? { title } : {}) }, idempotencyKey: `g07:github.open_pull_request:${project.id}:${head}:${base}:${requestToken}` });
+    return json(response, 202, { job });
+  }
   const jobStatusMatch = url.pathname.match(/^\/api\/admin\/jobs\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
   if (jobStatusMatch && request.method === "GET") {
     const job = (await pool.query(

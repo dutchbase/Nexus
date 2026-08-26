@@ -566,6 +566,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         const intoSelect=document.getElementById("merge-into");
         const statusBox=document.querySelector("[data-merge-status]");
         const mergeButton=document.querySelector("[data-merge-button]");
+        const createPrButton=document.querySelector("[data-create-pr-button]");
         const reasonLine=document.querySelector("[data-merge-reason]");
         const retryButton=document.querySelector("[data-merge-retry]");
         let branches=[];let lastPreview=null;let previewToken=0;
@@ -573,6 +574,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
 
         function setStatus(text,tone){statusBox.textContent=text;statusBox.style.borderLeftColor=tone==="ok"?"var(--t-ok)":tone==="warn"?"var(--t-warn)":tone==="danger"?"var(--t-danger)":"var(--border2)";}
         function refresh(){
+          syncCreatePr();
           if(!projectSelect.value){mergeButton.disabled=true;setReason("Select a project.");return;}
           const head=fromSelect.value,base=intoSelect.value;
           if(!base){mergeButton.disabled=true;setReason("Select the branch to merge into.");return;}
@@ -582,7 +584,30 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           applyVerdict(lastPreview.result);
         }
         function setReason(text){reasonLine.textContent=text;}
+        // Creating a PR is the non-destructive sibling of merging: both refs
+        // must exist and differ, but conflicts or missing reviews do not block
+        // it — GitHub flags those on the PR. Only "already up to date" makes a
+        // PR pointless.
+        function prAvailability(){
+          const head=fromSelect.value,base=intoSelect.value;
+          if(!projectSelect.value||!head||!base)return {ok:false,reason:"Select both branches."};
+          if(head===base)return {ok:false,reason:"From and into are the same branch."};
+          if(!lastPreview||lastPreview.head!==head||lastPreview.base!==base)return {ok:false,reason:"Pre-flight check running…"};
+          const outcome=lastPreview.result.outcome;
+          if(outcome==="missing_head")return {ok:false,reason:"The source branch no longer exists on the remote."};
+          if(outcome==="missing_base")return {ok:false,reason:"The target branch no longer exists on the remote."};
+          if(outcome==="up_to_date")return {ok:false,reason:"Nothing to open — "+base+" already contains everything in "+head+"."};
+          if(outcome==="conflict")return {ok:true,reason:"Opens a pull request: "+head+" → "+base+" — GitHub will flag the conflicts to resolve."};
+          return {ok:true,reason:"Opens a pull request: "+head+" → "+base+"."};
+        }
+        function syncCreatePr(){
+          if(!createPrButton)return;
+          const availability=prAvailability();
+          createPrButton.disabled=!availability.ok;
+          createPrButton.title=availability.ok?availability.reason:availability.reason;
+        }
         function applyVerdict(result){
+          syncCreatePr();
           const head=fromSelect.value,base=intoSelect.value;
           if(result.outcome==="up_to_date"){mergeButton.disabled=true;setReason("Nothing to do — already up to date.");setStatus("Already up to date: "+base+" already contains everything in "+head+".","ok");return;}
           if(result.outcome==="conflict"){const files=result.conflicted_files&&result.conflicted_files.length?result.conflicted_files.join(", "):"unknown files";mergeButton.disabled=true;setReason("Resolving conflicts automatically is not supported for direct merges.");setStatus("Merge CONFLICT: merging "+head+" into "+base+" would conflict in: "+files,"danger");return;}
@@ -606,6 +631,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const projectId=projectSelect.value,head=fromSelect.value,base=intoSelect.value;
           mergeButton.disabled=true;
           showRetry(false);
+          syncCreatePr();
           setStatus("Reading live branches…");
           try{
             const queued=await fetch("/api/admin/projects/"+projectId+"/merge-preview",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({head:head||undefined,base:base||undefined})});
@@ -653,6 +679,23 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         fromSelect.addEventListener("change",runPreview);
         intoSelect.addEventListener("change",runPreview);
         retryButton?.addEventListener("click",()=>{showRetry(false);runPreview();});
+        createPrButton?.addEventListener("click",async()=>{
+          const projectId=projectSelect.value,head=fromSelect.value,base=intoSelect.value;
+          const preview=lastPreview&&lastPreview.head===head&&lastPreview.base===base?lastPreview.result:null;
+          if(!preview||["missing_head","missing_base","up_to_date"].includes(preview.outcome))return;
+          if(!confirm("Open a pull request "+head+" → "+base+" on GitHub?"))return;
+          createPrButton.disabled=true;setStatus("Opening pull request "+head+" → "+base+"…");
+          try{
+            const queued=await fetch("/api/admin/projects/"+projectId+"/open-pull-request",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({head,base})});
+            const queuedBody=await queued.json().catch(()=>({}));
+            if(!queued.ok){setStatus("Could not queue PR creation: "+(queuedBody.error||queued.status),"danger");syncCreatePr();return;}
+            const done=await pollJob(queuedBody.job.id,60000);
+            const result=done?.result_json||{};
+            if(done&&done.status==="completed"&&result.outcome==="created"){setStatus("Pull request #"+result.number+" opened: "+result.url,"ok");setReason("Done.");syncCreatePr();return;}
+            if(done&&done.status==="completed"&&result.outcome==="already_open"){setStatus("An open pull request for "+head+" already exists: "+result.url,"ok");setReason("Nothing to do.");syncCreatePr();return;}
+            setStatus("PR creation failed: "+((done&&done.error_json||{}).message||result.error||(done?"see worker logs":"timed out — use Retry")),"danger");setReason("PR was not created.");syncCreatePr();
+          }catch(error){setStatus("PR creation failed: "+error.message,"danger");syncCreatePr();}
+        });
         mergeButton.addEventListener("click",async()=>{
           const projectId=projectSelect.value,head=fromSelect.value,base=intoSelect.value;
           const preview=lastPreview&&lastPreview.head===head&&lastPreview.base===base?lastPreview.result:null;

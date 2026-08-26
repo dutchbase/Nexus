@@ -36,16 +36,20 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       </div>
       <button class="button" type="button" data-merge-retry hidden>Retry</button>
     </div>
-    <div style="display:flex;gap:12px;align-items:center">
+    <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
       <button class="button primary" type="button" data-merge-button disabled>Merge</button>
+      <button class="button" type="button" data-create-pr-button disabled>Create PR</button>
       <span data-merge-reason style="font-size:13px;color:var(--text3)"></span>
     </div>
   </div></section>
   <section class="card"><div class="card-head">How this works</div><div class="card-body" style="font-size:13px;color:var(--text2)">
-    Branches are read live from GitHub via the local clone. Before the button
-    unlocks, a dry-run merge computes whether it would apply cleanly, conflict,
-    or is already up to date — the button stays disabled with the reason shown
-    whenever a merge isn't possible.
+    Branches are read live from GitHub via the local clone. Before the buttons
+    unlock, a dry-run merge computes whether it would apply cleanly, conflict,
+    or is already up to date — each button stays disabled with the reason shown
+    whenever its action isn't possible. <strong>Merge</strong> applies head → base
+    directly on GitHub (no pull request). <strong>Create PR</strong> opens a pull request
+    for the same pair instead — it stays available even when a direct merge
+    would conflict or needs review, because GitHub flags those on the PR.
   </div></section>`;
   return { status: 200, title: "Merge branches", body };
 }

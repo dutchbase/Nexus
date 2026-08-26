@@ -2,7 +2,7 @@ import type pg from "pg";
 import {
   approveAndMergePullRequest, importGithubPullRequests, PullRequestMergeError, syncOpenPullRequests, syncPullRequest,
 } from "@dcc/domain";
-import { mergeBranch } from "@dcc/github-provider";
+import { createPullRequest, findOpenPullRequestForHead, mergeBranch } from "@dcc/github-provider";
 import { assertRemoteBranchName, lsRemoteHeads, previewRemoteBranchMerge } from "../../../packages/git-runner/src/index.ts";
 
 export const providerJobTypes = [
@@ -12,6 +12,7 @@ export const providerJobTypes = [
   "github.merge_pull_request",
   "github.merge_branches",
   "github.merge_preview",
+  "github.open_pull_request",
 ] as const;
 
 type ProviderJobType = typeof providerJobTypes[number];
@@ -178,6 +179,43 @@ export async function runProviderJob(
     const preview = await previewRemoteBranchMerge({ repositoryPath: project.repository_path, head, base });
     await assertOwned();
     await persistJobResult(db, job.id, { ...preview, generated_at: new Date().toISOString() });
+    return;
+  }
+
+  if (job.type === "github.open_pull_request") {
+    // Non-destructive sibling of merge_branches: open a pull request for the
+    // head→base pair instead of merging immediately. Opening is safe even
+    // with conflicts or missing reviews — GitHub itself flags those — so the
+    // only precondition is that both refs exist (verified by GitHub on
+    // creation). A pre-existing open PR for the head is linked, not duplicated.
+    const projectId = required(job.payload_json, "project_id");
+    const head = required(job.payload_json, "head");
+    const base = required(job.payload_json, "base");
+    await assertRemoteBranchName(head);
+    await assertRemoteBranchName(base);
+    const project = (await db.query("SELECT * FROM projects WHERE id=$1", [projectId])).rows[0];
+    if (!project?.github_owner || !project.github_repository) throw new Error("project has no GitHub repository configured");
+    await assertOwned();
+    const existing = await findOpenPullRequestForHead(project.github_owner, project.github_repository, head);
+    if (existing) {
+      await persistJobResult(db, job.id, { outcome: "already_open", number: existing.number, url: existing.html_url });
+      await audit(db, job, actorId, "project.open_pull_request", "project", projectId, { head, base, outcome: "already_open", number: existing.number });
+      return;
+    }
+    const title = typeof job.payload_json.title === "string" && job.payload_json.title.trim()
+      ? job.payload_json.title.trim().slice(0, 200) : `${head} → ${base}`;
+    const bodyText = typeof job.payload_json.body === "string" && job.payload_json.body.trim()
+      ? job.payload_json.body.trim().slice(0, 10000)
+      : `Opened from the Dev Control merge workbench to merge \`${head}\` into \`${base}\`.`;
+    try {
+      const created = await createPullRequest({ owner: project.github_owner, repository: project.github_repository, title, body: bodyText, head, base });
+      await assertOwned();
+      await persistJobResult(db, job.id, { outcome: "created", number: created.number, url: created.html_url, title });
+      await audit(db, job, actorId, "project.open_pull_request", "project", projectId, { head, base, outcome: "created", number: created.number, url: created.html_url });
+    } catch (error) {
+      await persistJobResult(db, job.id, { outcome: "failed", error: error instanceof Error ? error.message : String(error) }).catch(() => {});
+      throw error;
+    }
     return;
   }
 

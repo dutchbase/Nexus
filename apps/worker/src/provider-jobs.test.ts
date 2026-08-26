@@ -5,6 +5,8 @@ const syncPullRequest = vi.fn();
 const importGithubPullRequests = vi.fn();
 const approveAndMergePullRequest = vi.fn();
 const mergeBranch = vi.fn();
+const createPullRequest = vi.fn();
+const findOpenPullRequestForHead = vi.fn();
 
 vi.mock("@dcc/domain", () => {
   class PullRequestMergeError extends Error {
@@ -13,7 +15,7 @@ vi.mock("@dcc/domain", () => {
   }
   return { syncOpenPullRequests, syncPullRequest, importGithubPullRequests, approveAndMergePullRequest, PullRequestMergeError };
 });
-vi.mock("@dcc/github-provider", () => ({ mergeBranch }));
+vi.mock("@dcc/github-provider", () => ({ mergeBranch, createPullRequest, findOpenPullRequestForHead }));
 const previewRemoteBranchMerge = vi.fn();
 const lsRemoteHeads = vi.fn(async () => new Map());
 vi.mock("../../../packages/git-runner/src/index.ts", () => ({
@@ -215,4 +217,64 @@ test("merge_branches refuses without merging when a ref moved since the preview"
   expect(mergeBranch).not.toHaveBeenCalled();
   const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
   expect(resultUpdate!.values![1]).toMatchObject({ outcome: "refused", refusal_code: "refs_changed" });
+});
+
+test("open_pull_request creates a PR with a default title and records the result", async () => {
+  const database = db([{ id: "proj-1", repository_path: "/repos/widgets", github_owner: "acme", github_repository: "widgets" }]);
+  findOpenPullRequestForHead.mockResolvedValueOnce(null);
+  createPullRequest.mockResolvedValueOnce({ number: 9, html_url: "https://github.example/acme/widgets/pull/9" });
+
+  await runProviderJob({
+    id: "job-11", type: "github.open_pull_request",
+    idempotency_key: "g07:github.open_pull_request:once",
+    payload_json: { actor_id: "admin-1", project_id: "proj-1", head: "feature", base: "main" },
+  }, database as any);
+
+  expect(createPullRequest).toHaveBeenCalledWith(expect.objectContaining({
+    owner: "acme", repository: "widgets", head: "feature", base: "main", title: "feature → main",
+  }));
+  const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
+  expect(resultUpdate!.values![1]).toMatchObject({ outcome: "created", number: 9, url: "https://github.example/acme/widgets/pull/9" });
+  const auditInsert = database.queries.find((q) => q.text.includes("audit_events"));
+  expect(auditInsert!.values![2]).toBe("project.open_pull_request");
+  expect(auditInsert!.values![5]).toMatchObject({ head: "feature", base: "main", outcome: "created", number: 9 });
+});
+
+test("open_pull_request links the existing PR instead of duplicating it", async () => {
+  const database = db([{ id: "proj-1", repository_path: "/repos/widgets", github_owner: "acme", github_repository: "widgets" }]);
+  findOpenPullRequestForHead.mockResolvedValueOnce({ number: 4, html_url: "https://github.example/acme/widgets/pull/4" });
+
+  await runProviderJob({
+    id: "job-12", type: "github.open_pull_request",
+    idempotency_key: "g07:github.open_pull_request:once",
+    payload_json: { actor_id: "admin-1", project_id: "proj-1", head: "feature", base: "main" },
+  }, database as any);
+
+  expect(createPullRequest).not.toHaveBeenCalled();
+  const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
+  expect(resultUpdate!.values![1]).toMatchObject({ outcome: "already_open", number: 4, url: "https://github.example/acme/widgets/pull/4" });
+});
+
+test("open_pull_request records the failure and rethrows", async () => {
+  const database = db([{ id: "proj-1", repository_path: "/repos/widgets", github_owner: "acme", github_repository: "widgets" }]);
+  findOpenPullRequestForHead.mockResolvedValueOnce(null);
+  createPullRequest.mockRejectedValueOnce(new Error("branch not found"));
+
+  await expect(runProviderJob({
+    id: "job-13", type: "github.open_pull_request",
+    idempotency_key: "g07:github.open_pull_request:once",
+    payload_json: { actor_id: "admin-1", project_id: "proj-1", head: "feature", base: "main" },
+  }, database as any)).rejects.toThrow("branch not found");
+
+  const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
+  expect(resultUpdate!.values![1]).toMatchObject({ outcome: "failed", error: "branch not found" });
+});
+
+test("open_pull_request rejects a payload without branches", async () => {
+  const database = db([]);
+  await expect(runProviderJob({
+    id: "job-14", type: "github.open_pull_request",
+    idempotency_key: "g07:github.open_pull_request:once",
+    payload_json: { actor_id: "admin-1", project_id: "proj-1" },
+  }, database as any)).rejects.toThrow("head is required");
 });
