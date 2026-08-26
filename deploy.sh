@@ -155,13 +155,11 @@ record_event "processes_reloaded"
 curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 "$DCC_DEPLOY_HEALTH_URL"
 record_event "healthy"
 write_marker 0 reload_pending
-reload_app dcc-webhook
-# A vanished webhook can never finalize this attempt (marker stays
-# reloadPending forever) nor receive future pushes — fail loudly instead.
-for _ in $(seq 1 10); do [ "$(pm2 pid dcc-webhook 2>/dev/null)" -gt 0 ] 2>/dev/null && break; sleep 1; done
-if ! [ "$(pm2 pid dcc-webhook 2>/dev/null)" -gt 0 ] 2>/dev/null; then
-  echo "deploy.sh: dcc-webhook failed to stay up after reload" >&2
-  write_marker 75
-  exit 75
-fi
+# The next line tears down this script's ancestor (the old webhook), and pm2
+# tree-kills descendants — including us. Everything that matters is already
+# durable: release cut over, web/worker healthy, reloadPending marker on
+# disk. Ignore teardown signals; the fresh webhook finalizes this attempt
+# during its own boot recovery.
+trap '' HUP INT TERM
+reload_app dcc-webhook >/dev/null 2>&1 || true
 echo "deploy.sh: deployed $SHA"
