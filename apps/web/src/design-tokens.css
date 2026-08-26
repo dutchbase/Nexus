@@ -1,4 +1,5 @@
 :root {
+  color-scheme:light;
   --bg:#F7F7F5;--surface:#FFFFFF;--surface2:#F0F2F6;--raised:#FFFFFF;
   --border:rgba(11,35,86,.12);--border2:rgba(11,35,86,.22);
   --text:#0B2356;--text2:#3A4A66;--text3:#8791A5;
@@ -9,6 +10,7 @@
   --code-bg:#F0F2F6;--shadow:0 1px 2px rgba(11,35,86,.05),0 10px 30px rgba(11,35,86,.07);--overlay:rgba(7,24,64,.42);
 }
 :root[data-theme="dark"] {
+  color-scheme:dark;
   --bg:#061334;--surface:#0B2356;--surface2:#102C6B;--raised:#0E2657;
   --border:rgba(255,255,255,.11);--border2:rgba(255,255,255,.22);
   --text:#F2F4F8;--text2:rgba(242,244,248,.72);--text3:rgba(242,244,248,.46);

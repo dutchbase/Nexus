@@ -584,8 +584,8 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const head=fromSelect.value,base=intoSelect.value;
           if(result.outcome==="up_to_date"){mergeButton.disabled=true;setReason("Nothing to do — already up to date.");setStatus("Already up to date: "+base+" already contains everything in "+head+".","ok");return;}
           if(result.outcome==="conflict"){const files=result.conflicted_files&&result.conflicted_files.length?result.conflicted_files.join(", "):"unknown files";mergeButton.disabled=true;setReason("Resolving conflicts automatically is not supported for direct merges.");setStatus("Merge CONFLICT: merging "+head+" into "+base+" would conflict in: "+files,"danger");return;}
-          if(result.outcome==="missing_head"){mergeButton.disabled=true;setReason("The source branch no longer exists on the remote.");setStatus("Branch \""+head+"\" was not found on the remote — refresh and pick again.","danger");return;}
-          if(result.outcome==="missing_base"){mergeButton.disabled=true;setReason("The target branch no longer exists on the remote.");setStatus("Branch \""+base+"\" was not found on the remote — refresh and pick again.","danger");return;}
+          if(result.outcome==="missing_head"){mergeButton.disabled=true;setReason("The source branch no longer exists on the remote.");setStatus('Branch "'+head+'" was not found on the remote — refresh and pick again.',"danger");return;}
+          if(result.outcome==="missing_base"){mergeButton.disabled=true;setReason("The target branch no longer exists on the remote.");setStatus('Branch "'+base+'" was not found on the remote — refresh and pick again.',"danger");return;}
           if(result.outcome==="clean"){mergeButton.disabled=false;setReason("Ready: merges "+(result.commits_ahead??"?")+" commit(s) into "+base+".");setStatus("Merge is possible: "+head+" is "+(result.commits_ahead??"?")+" commit(s) ahead of "+base+" and merges cleanly.","ok");return;}
           mergeButton.disabled=true;setReason("Pre-flight check failed.");setStatus("Pre-flight check failed: "+(result.error||"unknown error"),"danger");
         }
