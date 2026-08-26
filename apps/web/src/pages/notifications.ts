@@ -31,11 +31,9 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   const eventRow = (event: string) =>
     `<div class="ticket-row"><span class="mono">${escapeHtml(event)}</span>${statusBadge(enabledEvents.includes(event) ? "Enabled" : "Disabled")}</div>`;
 
-  const whatsappCard = `<section class="card"><div class="card-head">WhatsApp server ${statusBadge("Placeholder")}</div><div class="card-body">
-      <p>The API contract is not specified yet. The provider interface is implemented; only base URL, endpoint and token remain.</p>
-      <p>Base URL: <span class="mono">${escapeHtml(whatsapp?.configuration_encrypted_json?.base_url ?? "not set")}</span></p>
-      <p>Endpoint: <span class="mono">${escapeHtml(whatsapp?.configuration_encrypted_json?.endpoint ?? "not set")}</span></p>
-      <p>State: ${whatsapp?.enabled ? "Enabled" : "Disabled"}</p>
+  const whatsappCard = `<section class="card"><div class="card-head">WhatsApp server ${statusBadge("Coming soon")}</div><div class="card-body">
+      <p>WhatsApp delivery is not available yet. The generic webhook provider handles notifications today — when the WhatsApp gateway goes live, its configuration will appear here.</p>
+      <p>State: ${statusBadge(whatsapp?.enabled ? "Enabled" : "Disabled")}</p>
     </div></section>`;
 
   const webhookCard = `<section class="card"><div class="card-head">Generic webhook ${statusBadge(webhook?.enabled ? "Enabled" : "Disabled")}</div><div class="card-body">

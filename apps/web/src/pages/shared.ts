@@ -27,6 +27,7 @@ const stateTones: Record<string, string> = {
   blocked_auth: "warn", blocked_auth_configuration: "warn",
   sent: "ok", pending: "info", exhausted: "danger",
   staged: "info", finalized: "ok",
+  passed: "ok", skipped: "muted",
   enabled: "ok", disabled: "muted", active: "ok", inactive: "muted", historic: "muted",
   captured: "ok", legacy: "muted", unpriced: "warn", unavailable: "warn",
   healthy: "ok", repository_dirty: "danger", stale: "warn", unknown: "muted",

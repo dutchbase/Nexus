@@ -1,4 +1,4 @@
-import { escapeHtml, pool, prFreshness, renderMarkdown, shortRef } from "./shared.ts";
+import { escapeHtml, pool, prFreshness, renderMarkdown, shortRef, statusBadge } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { aiModels, reasoningLevels } from "@dcc/domain";
 
@@ -11,6 +11,28 @@ const detailQuery = `SELECT pr.*,p.name project_name,p.slug project_slug,t.ticke
        LEFT JOIN execution_attempts ea ON ea.id=pr.execution_attempt_id
        LEFT JOIN agent_runs ar ON ar.id=ea.agent_run_id
        LEFT JOIN skill_snapshots ss ON ss.run_id=ar.id`;
+
+// Changed files & validation reads from the run's validation_output, which is
+// either a success record ({ results, changed_files }) or a failure record
+// ({ check, message, output, results }). Never dump the raw JSON — render
+// the human summary, or a plain sentence when nothing was recorded.
+function validationCard(validation: any): string {
+  const changedFiles: string[] = Array.isArray(validation?.changed_files) ? validation.changed_files : [];
+  const results: Array<{ check: string; status: string; detail?: string }> = Array.isArray(validation?.results) ? validation.results : [];
+  if (!changedFiles.length && !results.length && !validation?.message) {
+    return "<p>No changed files or validation results recorded.</p>";
+  }
+  const failure = validation?.message
+    ? `<div class="banner-danger" style="margin:0 0 14px">Validation failed at ${escapeHtml(validation.check ?? "unknown check")}: ${escapeHtml(validation.message)}</div>`
+    : "";
+  const files = changedFiles.length
+    ? `<p><strong>${changedFiles.length} changed file${changedFiles.length === 1 ? "" : "s"}</strong></p><ul>${changedFiles.map((file) => `<li class="mono">${escapeHtml(file)}</li>`).join("")}</ul>`
+    : "<p>No changed files recorded.</p>";
+  const checks = results.length
+    ? `<p><strong>Validation checks</strong></p><ul style="list-style:none;padding:0;margin:0">${results.map((result) => `<li style="padding:4px 0">${statusBadge(result.status ?? "")} <span class="mono">${escapeHtml(result.check)}</span>${result.detail ? ` <span style="color:var(--text3)">· ${escapeHtml(result.detail)}</span>` : ""}</li>`).join("")}</ul>`
+    : "";
+  return `${failure}${files}${checks}`;
+}
 
 // Shared by both the uuid route (/admin/pull-requests/{uuid}) and the slug
 // route (/admin/pull-requests/{projectSlug}/{number}) so the two never drift.
@@ -122,7 +144,7 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[], r
     <dt>Skills applied</dt><dd>${item.skills_applied != null ? escapeHtml(String(item.skills_applied)) : "—"}</dd>
     <dt>Created</dt><dd>${item.created_at_provider ? new Date(item.created_at_provider).toLocaleString() : "—"}</dd>
     <dt>Last synced</dt><dd>${item.last_synced_at ? new Date(item.last_synced_at).toLocaleString("nl-NL") : "Never"}</dd></dl></div></section>
-    <section class="card"><div class="card-head">Changed files & validation</div><div class="card-body"><pre>${escapeHtml(JSON.stringify({ changed_files: validation.changed_files ?? [], results: validation.results ?? [] }, null, 2))}</pre></div></section></div>
+    <section class="card"><div class="card-head">Changed files &amp; validation</div><div class="card-body">${validationCard(validation)}</div></section></div>
     ${item.body ? `<section class="card"><div class="card-head">Description</div><div class="card-body">${renderMarkdown(item.body)}</div></section>` : ""}
     <section class="card"><div class="card-head">Approved plan</div><div class="card-body">${item.approved_plan ? renderMarkdown(item.approved_plan) : "<p>No approved plan linked.</p>"}</div></section>
     <section class="card"><div class="card-head">Implementation & commits</div><div class="card-body"><p>${escapeHtml(item.metadata_json?.implementation_summary ?? "No separate implementation summary recorded.")}</p><p class="mono">${escapeHtml(item.result_commit ?? "No commit recorded")}</p></div></section>
