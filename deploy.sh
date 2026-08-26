@@ -39,7 +39,9 @@ write_marker() {
 # ("startOrReload") keeps the OLD cwd, silently running a stale release after
 # every cutover. Delete + start from $CURRENT so each deploy actually moves.
 reload_app() {
-  pm2 delete "$1" >/dev/null 2>&1
+  # Delete may legitimately hit an already-absent app (pm2 exits 1); under
+  # set -e that would kill the deploy between marker-write and restart.
+  pm2 delete "$1" >/dev/null 2>&1 || true
   pm2 start "$CURRENT/ecosystem.config.cjs" --only "$1" --update-env
 }
 
