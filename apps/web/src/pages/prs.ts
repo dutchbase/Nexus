@@ -1,4 +1,4 @@
-import { escapeHtml, pool, prFreshness, renderMarkdown, shortRef, statusBadge } from "./shared.ts";
+import { escapeHtml, fmtDateTime, pool, prFreshness, renderMarkdown, shortRef, statusBadge } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { aiModels, reasoningLevels } from "@dcc/domain";
 
@@ -142,7 +142,7 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[], r
     <dt>Run</dt><dd>${item.run_id ? `<a href="/admin/runs/${item.run_id}">${shortRef("RUN", item.run_id)}</a>` : "Not linked"}</dd>
     <dt>Plan hash</dt><dd class="mono">${item.approved_plan_hash ? escapeHtml(item.approved_plan_hash.slice(0, 12)) : "—"}</dd>
     <dt>Skills applied</dt><dd>${item.skills_applied != null ? escapeHtml(String(item.skills_applied)) : "—"}</dd>
-    <dt>Created</dt><dd>${item.created_at_provider ? new Date(item.created_at_provider).toLocaleString() : "—"}</dd>
+    <dt>Created</dt><dd>${item.created_at_provider ? fmtDateTime(item.created_at_provider) : "—"}</dd>
     <dt>Last synced</dt><dd>${item.last_synced_at ? new Date(item.last_synced_at).toLocaleString("nl-NL") : "Never"}</dd></dl></div></section>
     <section class="card"><div class="card-head">Changed files &amp; validation</div><div class="card-body">${validationCard(validation)}</div></section></div>
     ${item.body ? `<section class="card"><div class="card-head">Description</div><div class="card-body">${renderMarkdown(item.body)}</div></section>` : ""}
@@ -156,7 +156,7 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[], r
     </div></section>
     <section class="card"><div class="card-head">AI Review history</div><div class="card-body">${aiReviews.length === 0 ? "<p>No AI reviews yet.</p>" : aiReviews.map((r) => `
       <div class="ai-review-entry ai-review-${escapeHtml(r.status)}" style="padding:10px 0;border-bottom:1px solid var(--border)">
-        <strong>${escapeHtml(r.status.toUpperCase())}</strong> (${escapeHtml(r.mode)}, ${escapeHtml(r.model)}/${escapeHtml(r.reasoning_level)}) — ${new Date(r.created_at).toLocaleString()}
+        <strong>${escapeHtml(r.status.toUpperCase())}</strong> (${escapeHtml(r.mode)}, ${escapeHtml(r.model)}/${escapeHtml(r.reasoning_level)}) — ${fmtDateTime(r.created_at)}
         <p>${escapeHtml(r.status === "error" ? (r.error_message ?? r.last_publication_error ?? "Review failed.") : (r.summary ?? "Running…"))}</p>
         <p class="mono">Publication ${escapeHtml(r.publication_id ?? "—")} · GitHub comment ${escapeHtml(String(r.github_comment_id ?? "—"))}</p>
         ${r.raw_output ? `<pre>${escapeHtml(r.raw_output)}</pre>` : ""}

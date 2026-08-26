@@ -554,7 +554,11 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           priceForm.addEventListener("submit",async(event)=>{
             event.preventDefault();
             const data=new FormData(priceForm),rate=(name)=>Number(data.get(name));
-            const response=await fetch("/api/admin/ai-model-prices",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({model:data.get("model"),effective_from:data.get("effective_from"),input_usd_per_million:rate("input_usd_per_million"),output_usd_per_million:rate("output_usd_per_million"),cache_write_usd_per_million:rate("cache_write_usd_per_million"),cache_read_usd_per_million:rate("cache_read_usd_per_million"),source_url:data.get("source_url")})});
+            // dd-mm-yyyy hh:mm (house format) → ISO for the API.
+            const raw=String(data.get("effective_from")||"").trim();
+            const parsed=/^(\\d{1,2})-(\\d{1,2})-(\\d{4})\\s+(\\d{1,2}):(\\d{2})$/.exec(raw);
+            const effectiveFrom=parsed?parsed[3].padStart(4,"0")+"-"+parsed[2].padStart(2,"0")+"-"+parsed[1].padStart(2,"0")+"T"+parsed[4].padStart(2,"0")+":"+parsed[5]+":00":raw;
+            const response=await fetch("/api/admin/ai-model-prices",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({model:data.get("model"),effective_from:effectiveFrom,input_usd_per_million:rate("input_usd_per_million"),output_usd_per_million:rate("output_usd_per_million"),cache_write_usd_per_million:rate("cache_write_usd_per_million"),cache_read_usd_per_million:rate("cache_read_usd_per_million"),source_url:data.get("source_url")})});
             if(response.ok)location.reload();else{const result=await response.json();priceForm.querySelector(".error").textContent=result.error}
           });
         }
@@ -713,6 +717,21 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             if(done.status==="completed"&&(result.outcome==="conflict"||result.outcome==="refused")){setStatus(result.outcome==="conflict"?"GitHub reports a conflict for this pair.":"Refused: "+(result.message||result.refusal_code||"branches changed since the check")+" — re-check and retry.","danger");setReason("Merge did not happen.");lastPreview=null;runPreview();return;}
             setStatus("Merge failed: "+((done.error_json||{}).message||result.error||"see worker logs"),"danger");setReason("Merge did not happen.");
           }catch(error){setStatus("Merge failed: "+error.message,"danger");}
+        });
+      `:""}
+      ${path==="/admin/ai-usage"?`
+        const aiUsageForm=document.querySelector("[data-ai-usage-filters]");
+        aiUsageForm?.addEventListener("submit",(event)=>{
+          event.preventDefault();
+          const q=new URLSearchParams(new FormData(aiUsageForm));
+          // dd-mm-yyyy → ISO for the URL, so filtering works regardless of the browser locale.
+          for(const name of ["from","to"]){
+            const value=(q.get(name)||"").trim();
+            if(!value){q.delete(name);continue;}
+            const match=/^(\\d{1,2})-(\\d{1,2})-(\\d{4})$/.exec(value);
+            if(match)q.set(name,match[3].padStart(4,"0")+"-"+match[2].padStart(2,"0")+"-"+match[1].padStart(2,"0"));
+          }
+          location.href="/admin/ai-usage?"+q.toString();
         });
       `:""}
       ${path==="/admin/pull-requests"?`

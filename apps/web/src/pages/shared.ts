@@ -250,6 +250,36 @@ export function pagerHtml(url: URL, next: string | null): string {
   return `<div class="pager"><a class="button" data-pager-next href="${escapeHtml(`${url.pathname}?${params.toString()}`)}">Next</a></div>`;
 }
 
+// Dates render dd-mm-yyyy (the house standard) regardless of the visitor's
+// browser locale; UI copy stays English. Date-only ISO strings are formatted
+// manually so a UTC parse can never shift the day across timezones.
+export function fmtDate(value: unknown): string {
+  if (!value) return "—";
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split("-");
+    return `${day}-${month}-${year}`;
+  }
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleDateString("nl-NL");
+}
+
+export function fmtDateTime(value: unknown): string {
+  if (!value) return "—";
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString("nl-NL");
+}
+
+// dd-mm-yyyy → ISO yyyy-mm-dd for API round-trips; null when empty/invalid.
+export function parseDateInput(value: string): string | null {
+  const match = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(value.trim());
+  if (!match) return null;
+  const day = Number(match[1]); const month = Number(match[2]); const year = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+}
+
 export type Session = { username: string; user_id: string };
 export type PageResult = { status: number; title: string; body: string } | null;
 export type PageModule = { render(url: URL, session: Session, metrics: Record<string, number>): Promise<PageResult> };
