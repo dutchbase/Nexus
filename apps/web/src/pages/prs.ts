@@ -123,7 +123,7 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[], r
     <dt>Created</dt><dd>${item.created_at_provider ? new Date(item.created_at_provider).toLocaleString() : "—"}</dd>
     <dt>Last synced</dt><dd>${item.last_synced_at ? new Date(item.last_synced_at).toLocaleString("nl-NL") : "Never"}</dd></dl></div></section>
     <section class="card"><div class="card-head">Changed files & validation</div><div class="card-body"><pre>${escapeHtml(JSON.stringify({ changed_files: validation.changed_files ?? [], results: validation.results ?? [] }, null, 2))}</pre></div></section></div>
-    ${item.body ? `<section class="card"><h2>Description</h2>${renderMarkdown(item.body)}</section>` : ""}
+    ${item.body ? `<section class="card"><div class="card-head">Description</div><div class="card-body">${renderMarkdown(item.body)}</div></section>` : ""}
     <section class="card"><div class="card-head">Approved plan</div><div class="card-body">${item.approved_plan ? renderMarkdown(item.approved_plan) : "<p>No approved plan linked.</p>"}</div></section>
     <section class="card"><div class="card-head">Implementation & commits</div><div class="card-body"><p>${escapeHtml(item.metadata_json?.implementation_summary ?? "No separate implementation summary recorded.")}</p><p class="mono">${escapeHtml(item.result_commit ?? "No commit recorded")}</p></div></section>
     <section class="card"><div class="card-head">Repair</div><div class="card-body">
