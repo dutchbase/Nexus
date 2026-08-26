@@ -46,7 +46,7 @@ function runRow(runId: string, type: string, ticketNum: string, model: string, e
     </div>
     <div style="display:grid;grid-template-columns:1fr auto;gap:12px;align-items:center">
       ${progressCell}
-      <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text3);white-space:nowrap">${escapeHtml(model)} · ${escapeHtml(effort)}${hasTurn ? ` · turn ${turn}/${maxTurns ?? "?"}` : ""} · ${escapeHtml(elapsed)}</div>
+      <div style="font-family:'JetBrains Mono',monospace;font-size:12px;color:var(--text3);overflow-wrap:anywhere">${escapeHtml(model)} · ${escapeHtml(effort)}${hasTurn ? ` · turn ${turn}/${maxTurns ?? "?"}` : ""} · ${escapeHtml(elapsed)}</div>
     </div>
   </div>`;
 }
@@ -185,7 +185,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       ${kpiTile("Failed jobs", jobsCount, "", "danger", "/admin/queue")}
     </div>
 
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:22px;margin-top:22px">
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:22px;margin-top:22px;align-items:start">
       <section class="card" style="margin-top:0">
         <div class="card-head">Waiting on your decision</div>
         ${waitingRows ? `<div style="max-height:400px;overflow-y:auto">${waitingRows}</div>` : `<div style="padding:20px 18px;color:var(--text3);font-size:13px">No tickets waiting for your decision.</div>`}
