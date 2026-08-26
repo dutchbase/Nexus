@@ -78,7 +78,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         <button class="button primary" type="submit">Save settings</button>
       </form></div></section>`;
 
-    const previewPanel = `<div style="background:var(--surface2);padding:32px 16px;border-radius:6px"><div class="card public" style="max-width:620px;margin:0 auto;border-top:3px solid var(--accent)"><div class="card-body">
+    const previewPanel = `<div style="background:var(--surface2);padding:32px 16px;border-radius:6px"><div class="card public" style="max-width:620px;margin:0 auto;border-top:3px solid var(--primary)"><div class="card-body">
       <div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description ?? "")}</p>
       <div class="grid two">${fields.filter((field) => field.field_type !== "static").map(previewField).join("")}</div>
       <br><button class="button primary" disabled>Melding versturen</button>

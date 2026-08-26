@@ -162,7 +162,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
           const prioColor = prioTone[ticket.priority || "low"] ?? "muted";
           return `<a class="ticket-row" style="display:block;border-left:2px solid ${tone};padding:10px 12px;text-decoration:none;margin-bottom:8px;background:var(--surface);border-radius:4px" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}">
             <span class="mono" style="font-size:11px">${escapeHtml(ticket.ticket_number)}</span>
-            <span style="display:inline-block;font-size:11px;font-weight:700;padding:2px 6px;border-radius:3px;margin-left:4px;background:var(--accent-soft);color:var(--t-${prioColor})">${escapeHtml(ticket.priority || "—")}</span>
+            <span style="display:inline-block;font-size:11px;font-weight:700;padding:2px 6px;border-radius:3px;margin-left:4px;background:var(--primary-soft);color:var(--t-${prioColor})">${escapeHtml(ticket.priority || "—")}</span>
             <span style="display:block;font-weight:600;margin:4px 0">${escapeHtml(ticket.title)}</span>
             <span style="display:block;font-size:12px;color:var(--text2)">${escapeHtml(ticket.project_name)} · <span class="mono">${escapeHtml(ticket.default_model || "—")} · ${escapeHtml(ticket.default_reasoning_level || "—")}</span></span>
           </a>`;
@@ -176,7 +176,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       const body = `<div class="eyebrow">Work · intake</div><h1>Tickets</h1>
         <div class="toolbar">
           <a class="button" href="${escapeHtml(buildFilterUrl())}">Table</a>
-          <a class="button" style="background:var(--accent-soft);color:var(--accent)">Board</a>
+          <a class="button" style="background:var(--primary-soft);color:var(--primary)">Board</a>
           <span style="margin-left:auto">${createTicket}</span>
         </div>
         <form class="toolbar" id="filters" style="margin-top:16px">
@@ -207,7 +207,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     const emptyState = tickets.length === 0 ? `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No tickets match these filters.</div>` : "";
     const body = `<div class="eyebrow">Work · intake</div><h1>Tickets</h1>
       <div class="toolbar">
-        <a class="button" style="background:var(--accent-soft);color:var(--accent)">Table</a>
+        <a class="button" style="background:var(--primary-soft);color:var(--primary)">Table</a>
         <a class="button" href="${escapeHtml(buildFilterUrl("board"))}">Board</a>
         <span style="margin-left:auto">${createTicket}</span>
       </div>
@@ -274,7 +274,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     const target = versions.find((version) => version.version === Number(planVersionPageMatch[2]));
     if (!target) return { status: 404, title: "Plan version not found", body: "<h1>Plan version not found</h1>" };
     const previous = versions.find((version) => version.version === target.version - 1);
-    const versionsRail = versions.map((version) => `<a class="ticket-row"${version.id === target.id ? ' style="background:var(--accent-soft);border-left:2px solid var(--accent)"' : ""} href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans/${version.version}"><span class="mono">v${version.version}</span><span>${escapeHtml(version.model)} · ${escapeHtml(version.reasoning_level)}</span></a>`).join("");
+    const versionsRail = versions.map((version) => `<a class="ticket-row"${version.id === target.id ? ' style="background:var(--primary-soft);border-left:2px solid var(--primary)"' : ""} href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans/${version.version}"><span class="mono">v${version.version}</span><span>${escapeHtml(version.model)} · ${escapeHtml(version.reasoning_level)}</span></a>`).join("");
     const isApproved = ticket.approved_plan_version_id === target.id;
     const isCurrent = target.id === target.current_version_id;
     // ponytail: only the current version can ever be approved server-side —

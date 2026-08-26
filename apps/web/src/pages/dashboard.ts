@@ -173,7 +173,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       </div>
       <div style="display:flex;gap:8px">
         <a class="button" href="/admin/queue" style="border:1px solid var(--border);background:transparent;color:var(--text2);border-radius:4px;padding:9px 14px;font-size:13px;text-decoration:none;cursor:pointer" onmouseover="this.style.borderColor='var(--border2)';this.style.color='var(--text)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text2)'">Job queue</a>
-        <a class="button" href="/admin/tickets?status=Triage" style="border:0;background:var(--accent);color:var(--accent-fg);border-radius:4px;padding:9px 16px;font-size:13px;font-weight:600;text-decoration:none;cursor:pointer" onmouseover="this.style.filter='brightness(1.08)'" onmouseout="this.style.filter='brightness(1)'" >Open triage</a>
+        <a class="button" href="/admin/tickets?status=Triage" style="border:0;background:var(--primary);color:var(--primary-fg);border-radius:4px;padding:9px 16px;font-size:13px;font-weight:600;text-decoration:none;cursor:pointer" onmouseover="this.style.filter='brightness(1.08)'" onmouseout="this.style.filter='brightness(1)'" >Open triage</a>
       </div>
     </div>
 
@@ -194,7 +194,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <section class="card" style="margin-top:0">
         <div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
           <div style="font-size:11.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text2)">Active Claude runs</div>
-          <a href="/admin/runs" style="font-size:12px;color:var(--accent);text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">All runs →</a>
+          <a href="/admin/runs" style="font-size:12px;color:var(--primary);text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">All runs →</a>
         </div>
         ${runRows ? `<div style="max-height:400px;overflow-y:auto">${runRows}</div>` : `<div style="padding:20px 18px;color:var(--text3);font-size:13px">No active runs.</div>`}
         <a href="/admin/queue" style="display:block;padding:10px 18px;border-top:1px solid var(--border);font-size:12px;color:var(--text3);text-decoration:none">Queued behind: ${queuedCount} jobs · Inspect queue</a>
@@ -203,7 +203,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <section class="card" style="margin-top:0">
         <div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between">
           <div style="font-size:11.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text2)">System health</div>
-          <a href="/admin/system" style="font-size:12px;color:var(--accent);text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Details →</a>
+          <a href="/admin/system" style="font-size:12px;color:var(--primary);text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Details →</a>
         </div>
         ${healthRows}
       </section>

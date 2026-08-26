@@ -430,10 +430,10 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             fields.forEach((field,index)=>{
               const row=document.createElement("div");
               row.style.cssText="display:flex;align-items:center;gap:10px;padding:10px 4px;border-bottom:1px solid var(--border);cursor:pointer";
-              if(index===selected)row.style.cssText+="background:var(--accent-soft);border-left:2px solid var(--accent)";
+              if(index===selected)row.style.cssText+="background:var(--primary-soft);border-left:2px solid var(--primary)";
               row.innerHTML='<span class="mono" style="width:20px;color:var(--text3)">'+(index+1)+'</span>'
                 +'<span style="flex:1"><strong>'+field.label.replace(/</g,"&lt;")+'</strong><br><span class="mono" style="font-size:11px;color:var(--text3)">'+field.field_key.replace(/</g,"&lt;")+' · '+typeLabel(field.field_type)+'</span></span>'
-                +'<span class="status" style="background:'+(field.required?"var(--accent-soft)":"var(--s-muted)")+'">'+(field.required?"Required":"Optional")+'</span>';
+                +'<span class="status" style="background:'+(field.required?"var(--primary-soft)":"var(--s-muted)")+'">'+(field.required?"Required":"Optional")+'</span>';
               const up=document.createElement("button");up.type="button";up.className="button";up.textContent="↑";up.disabled=index===0;up.addEventListener("click",e=>{e.stopPropagation();moveField(index,-1)});
               const down=document.createElement("button");down.type="button";down.className="button";down.textContent="↓";down.disabled=index===fields.length-1;down.addEventListener("click",e=>{e.stopPropagation();moveField(index,1)});
               const remove=document.createElement("button");remove.type="button";remove.className="button";remove.textContent="×";remove.addEventListener("click",e=>{e.stopPropagation();removeField(index)});
@@ -782,8 +782,8 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         });
         categoryChips.forEach(chip=>chip.addEventListener("click",()=>{
           activeCategory=chip.dataset.category;
-          categoryChips.forEach(c=>c.style.background=c===chip?"var(--accent-soft)":"transparent");
-          categoryChips.forEach(c=>c.style.color=c===chip?"var(--accent)":"inherit");
+          categoryChips.forEach(c=>c.style.background=c===chip?"var(--primary-soft)":"transparent");
+          categoryChips.forEach(c=>c.style.color=c===chip?"var(--primary)":"inherit");
           filterRows();
         }));
         searchInput?.addEventListener("input",filterRows);
