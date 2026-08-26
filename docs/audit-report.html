@@ -1,0 +1,248 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dev-control · Audit 2026-08-25</title>
+<style>
+  :root{
+    --bg:#0e1116;--bg2:#151a22;--card:#1a2029;--border:#2a323d;--border2:#39434f;
+    --text:#e8edf2;--text2:#9aa7b4;--text3:#66727e;
+    --accent:#5eb0ff;--ok:#3fb96b;--warn:#e2a336;--danger:#e5534b;--purple:#b58cf5;
+    --mono:'JetBrains Mono',ui-monospace,Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font:15px/1.55 -apple-system,'Segoe UI',Roboto,sans-serif;padding-bottom:80px}
+  .wrap{max-width:1060px;margin:0 auto;padding:0 20px}
+  header{background:linear-gradient(180deg,#131824 0%,var(--bg) 100%);border-bottom:1px solid var(--border);padding:42px 0 30px;margin-bottom:28px}
+  .eyebrow{font-family:var(--mono);font-size:11px;letter-spacing:.16em;text-transform:uppercase;color:var(--accent)}
+  h1{font-size:32px;font-weight:700;margin:6px 0 10px}
+  .sub{color:var(--text2);max-width:760px}
+  .stats{display:flex;gap:12px;margin-top:24px;flex-wrap:wrap}
+  .stat{background:var(--card);border:1px solid var(--border);border-radius:8px;padding:14px 18px;min-width:130px}
+  .stat b{display:block;font-size:26px;font-weight:700}
+  .stat span{font-size:12px;color:var(--text2)}
+  .stat.p1 b{color:var(--danger)}.stat.p2 b{color:var(--warn)}.stat.gap b{color:var(--purple)}
+  h2{font-size:21px;margin:44px 0 6px;display:flex;align-items:center;gap:10px}
+  h2 .num{font-family:var(--mono);font-size:13px;color:var(--accent);background:rgba(94,176,255,.1);border:1px solid rgba(94,176,255,.3);border-radius:5px;padding:2px 8px}
+  .lead{color:var(--text2);margin-bottom:16px;max-width:800px}
+  .card{background:var(--card);border:1px solid var(--border);border-radius:10px;padding:20px 22px;margin-bottom:14px}
+  .card h3{font-size:15.5px;margin-bottom:8px}
+  .card p{color:var(--text2);font-size:14px}
+  .card code,.tbl code,li code{font-family:var(--mono);font-size:12.5px;background:#0d1117;border:1px solid var(--border);border-radius:4px;padding:1px 5px;color:#a5c8ec}
+  .flow{display:flex;align-items:center;gap:0;margin:14px 0 4px;flex-wrap:wrap}
+  .flow .node{font-family:var(--mono);font-size:12px;border:1px solid var(--border2);border-radius:6px;padding:8px 12px;background:var(--bg2);white-space:nowrap}
+  .flow .node.bad{border-color:var(--danger);color:var(--danger)}
+  .flow .node.good{border-color:var(--ok);color:var(--ok)}
+  .flow .node.new{border-color:var(--purple);color:var(--purple);box-shadow:0 0 0 3px rgba(181,140,245,.12)}
+  .flow .arr{color:var(--text3);padding:0 8px;font-family:var(--mono)}
+  .sev{display:inline-block;font-family:var(--mono);font-size:11px;font-weight:700;letter-spacing:.05em;border-radius:4px;padding:2px 8px;vertical-align:middle}
+  .sev.P1{background:rgba(229,83,75,.15);color:#ff8a84;border:1px solid rgba(229,83,75,.4)}
+  .sev.P2{background:rgba(226,163,54,.14);color:#f0bd63;border:1px solid rgba(226,163,54,.4)}
+  .sev.P3{background:rgba(154,167,180,.12);color:var(--text2);border:1px solid var(--border2)}
+  .filters{display:flex;gap:8px;margin:14px 0}
+  .filters button{background:var(--bg2);border:1px solid var(--border2);color:var(--text2);font:600 12.5px/1 inherit;padding:8px 14px;border-radius:20px;cursor:pointer}
+  .filters button.on{border-color:var(--accent);color:var(--accent);background:rgba(94,176,255,.08)}
+  table.tbl{width:100%;border-collapse:collapse;font-size:13.5px}
+  .tbl th{text-align:left;font-family:var(--mono);font-size:10.5px;letter-spacing:.12em;text-transform:uppercase;color:var(--text3);padding:8px 10px;border-bottom:1px solid var(--border2)}
+  .tbl td{padding:10px;border-bottom:1px solid var(--border);vertical-align:top;color:var(--text2)}
+  .tbl td:first-child{white-space:nowrap}
+  .tbl td b{color:var(--text)}
+  .fix{display:block;margin-top:5px;color:var(--ok);font-size:12.5px}
+  .fix::before{content:"→ fix: ";font-family:var(--mono);opacity:.7}
+  ol.road{counter-reset:r;list-style:none;margin-top:8px}
+  ol.road li{counter-increment:r;position:relative;padding:12px 16px 12px 52px;border-left:2px solid var(--border2);margin-left:14px}
+  ol.road li::before{content:counter(r);position:absolute;left:-14px;top:10px;width:26px;height:26px;border-radius:50%;background:var(--bg2);border:1px solid var(--border2);color:var(--accent);font-family:var(--mono);font-size:12.5px;font-weight:700;display:flex;align-items:center;justify-content:center}
+  ol.road li.star::before{border-color:var(--purple);color:var(--purple)}
+  ol.road li.star{border-left-color:var(--purple)}
+  ol.road b{color:var(--text)}
+  ol.road .why{color:var(--text2);font-size:13px;display:block;margin-top:2px}
+  .goodlist{columns:2;gap:26px;font-size:13.5px;color:var(--text2)}
+  .goodlist li{margin:0 0 8px 16px;break-inside:avoid}
+  .goodlist li::marker{content:"✓ ";color:var(--ok)}
+  .callout{border-left:3px solid var(--purple);background:rgba(181,140,245,.06);border-radius:0 8px 8px 0;padding:14px 18px;margin:14px 0;font-size:14px;color:var(--text2)}
+  .callout b{color:var(--text)}
+  footer{margin-top:48px;border-top:1px solid var(--border);padding-top:16px;color:var(--text3);font-size:12.5px;font-family:var(--mono)}
+  footer a{color:var(--accent)}
+  @media(max-width:720px){.goodlist{columns:1}.stats{gap:8px}.stat{flex:1;min-width:104px}}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <div class="eyebrow">Development Control Center · Codebase Audit</div>
+    <h1>PR Review &amp; Branch Merge Health Check</h1>
+    <p class="sub">Full analysis of the worker, web server, git-runner, domain and database layers — focused on your two missions:
+    <b style="color:var(--text)">automatic AI review of every GitHub PR</b> and <b style="color:var(--text)">merging branches into branches</b>.
+    Companion agent-readable report: <code>docs/audit-2026-08-25.md</code>.</p>
+    <div class="stats">
+      <div class="stat gap"><b>2</b><span>mission gaps to close</span></div>
+      <div class="stat p1"><b id="c-p1">·</b><span>P1 · fix first</span></div>
+      <div class="stat p2"><b id="c-p2">·</b><span>P2 · fix soon</span></div>
+      <div class="stat"><b id="c-p3">·</b><span>P3 · hygiene</span></div>
+      <div class="stat"><b>7</b><span>verified strengths ✓</span></div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+  <!-- ============ MISSION 1 ============ -->
+  <h2><span class="num">01</span>Mission: automatic AI review of every PR</h2>
+  <p class="lead">The review engine itself is excellent — immutable diffs, prompt-injection fencing, verdict parsing, GitHub comment publication all exist and work. What's missing is the spark: nothing ever <i>starts</i> a review on its own.</p>
+
+  <div class="card">
+    <h3><span class="sev P1">GAP</span>&nbsp; Reviews are manual-only today</h3>
+    <div class="flow">
+      <span class="node good">PR opened on GitHub</span><span class="arr">→</span>
+      <span class="node">worker polls every 2.5 s</span><span class="arr">→</span>
+      <span class="node">PR row updated in DB</span><span class="arr">→</span>
+      <span class="node bad">…sits unreviewed…</span><span class="arr">→</span>
+      <span class="node">admin clicks "AI review"</span><span class="arr">→</span>
+      <span class="node good">verdict → GitHub comment ✓</span>
+    </div>
+    <p>The only enqueue site is the admin route (<code>server.ts:1079</code>). Fix is small: when the sync pass sees an open PR whose head SHA has no review yet, auto-enqueue <code>pr.ai_review</code> keyed by <code>pull_request_id:head_sha</code>. New push ⇒ new SHA ⇒ automatic re-review; same SHA ⇒ skipped. Add an <code>auto_review_enabled</code> toggle to <code>ai_review_settings</code>.</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="sev P1">BUG</span>&nbsp; "Review &amp; merge" never merges</h3>
+    <p><code>mode="review_and_merge"</code> is consumed exactly once — to retarget the PR's base branch <i>before</i> reviewing (<code>worker.ts:1209</code>). The approved verdict goes nowhere. Worse, the base gets changed even when the review rejects. Fix: move the base change after an approved verdict, then enqueue <code>github.merge_pull_request</code> pinned to the reviewed head SHA so the existing policy gate still applies.</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="sev P2">BUG</span>&nbsp; Valid reviews thrown away by strict verdict parser</h3>
+    <p>If the model's output contains more than one fenced JSON block (e.g. it quotes the format inside findings), <code>parsePrReviewVerdict</code> discards a fully-completed review as <code>ambiguous_verdict</code> (<code>pr-review.ts:50</code>) and the row is terminal — retrying can't recover it. Scan blocks last-to-first instead.</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="sev P2">RISK</span>&nbsp; Sync loop hammers the GitHub API</h3>
+    <p>Every open PR re-syncs every 2.5 s; each deep sync costs ~6+ REST calls (reviews, checks, statuses, collaborator permissions). A few open PRs ⇒ thousands of calls/hour against the 5,000/h limit → permanent rate-limit churn. Add per-PR backoff + one cheap list call per project per pass to detect changes before deep-syncing.</p>
+  </div>
+
+  <div class="callout"><b>After the two P1 fixes:</b> new PR → AI review queued automatically → verdict posted as a GitHub comment → approved PRs merge through the policy gate. Zero clicks.</div>
+
+  <!-- ============ MISSION 2 ============ -->
+  <h2><span class="num">02</span>Mission: merging branches into other branches</h2>
+  <p class="lead">The GitHub merges-API path works, but every guardrail around it is missing or lying to you.</p>
+
+  <div class="card">
+    <h3><span class="sev P1">BUG</span>&nbsp; Conflicts and failures show as "Merged ✓"</h3>
+    <div class="flow">
+      <span class="node">Merge form</span><span class="arr">→</span>
+      <span class="node">API returns { job }</span><span class="arr">→</span>
+      <span class="node bad">UI checks result.outcome — never present</span><span class="arr">→</span>
+      <span class="node bad">alert("Merged X into Y.") — always</span>
+    </div>
+    <p><code>ui.ts:346</code> tests a field that only exists in the worker's audit payload. A conflicted, refused or crashed merge reports success. Fix: persist <code>{outcome, sha}</code> onto the job (new <code>result_json</code> column), poll it from the UI, surface terminal states honestly.</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="sev P1">GAP</span>&nbsp; No guardrails — and dedup defeated</h3>
+    <p><code>head</code>/<code>base</code> are any non-empty strings (<code>server.ts:1178</code>): typos become confusing failures, and merging straight into <code>master</code> bypasses the entire PR policy pipeline. The idempotency key embeds <code>randomUUID()</code>, so double-clicks enqueue duplicate real merges, and a lost HTTP response makes the retry merge again. Fix: ref-name regex + confirm flag for default-branch targets, deterministic keys (<code>project:head:base</code>), record-intent-before-call replay safety.</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="sev P2">GAP</span>&nbsp; Conflicted branch merges dead-end silently</h3>
+    <p><code>{outcome:"conflict"}</code> lands in an audit row nobody reads. No notification, no UI state, no remediation. Offer the escape hatch that already exists: auto-open a head→base PR (GitHub's merges API can't resolve conflicts; the PR + AI conflict-resolution flow can).</p>
+  </div>
+
+  <div class="card">
+    <h3><span class="sev P2">BUGS</span>&nbsp; Merge-path correctness</h3>
+    <p><code>mergeBaseIntoWorktree</code> labels <i>every</i> error as "conflicted" (<code>git-runner:333</code>) — AI resolution then runs against a clean tree. <code>recordProviderRefusal</code> can downgrade an attempt already <code>merged</code> (<code>pr-merge.ts:108</code>). <code>require_fresh_policy_binding</code> defaults <b>false</b>: until flipped, the legacy squash-merge path skips required-checks/review verification entirely. And a late-detected merged PR force-completes even admin-closed tickets.</p>
+  </div>
+
+  <!-- ============ ALL FINDINGS ============ -->
+  <h2><span class="num">03</span>All findings</h2>
+  <p class="lead">Click to filter. Every item names file:line and its fix; full detail in the markdown report.</p>
+
+  <div class="filters" id="filters">
+    <button data-f="all" class="on">All</button>
+    <button data-f="P1">P1 · critical</button>
+    <button data-f="P2">P2 · soon</button>
+    <button data-f="P3">P3 · hygiene</button>
+  </div>
+
+  <div class="card" style="padding:6px 14px">
+  <table class="tbl">
+    <thead><tr><th style="width:52px">Sev</th><th style="width:290px">Issue</th><th>Where</th></tr></thead>
+    <tbody id="rows">
+      <tr data-s="P1"><td><span class="sev P1">P1</span></td><td><b>No automatic PR review trigger</b><span class="fix">auto-enqueue pr.ai_review keyed by pull_request_id:head_sha + settings toggle</span></td><td><code>server.ts:1079</code> <code>worker.ts:1656</code></td></tr>
+      <tr data-s="P1"><td><span class="sev P1">P1</span></td><td><b>review_and_merge mode never merges</b> — only retargets base branch pre-review; verdict unused<span class="fix">on approve, enqueue merge pinned to reviewed head SHA via policy gate</span></td><td><code>worker.ts:1209</code></td></tr>
+      <tr data-s="P1"><td><span class="sev P1">P1</span></td><td><b>Merge UI always says success</b> — checks result.outcome on a {job} response<span class="fix">persist outcome on job, poll from UI, honest alerts</span></td><td><code>ui.ts:346</code> <code>server.ts:1183</code></td></tr>
+      <tr data-s="P1"><td><span class="sev P1">P1</span></td><td><b>Unhandled rejection kills whole worker</b> — execution cancellation poll has no try/catch<span class="fix">wrap like sibling poll at worker.ts:373</span></td><td><code>worker.ts:674</code></td></tr>
+      <tr data-s="P1"><td><span class="sev P1">P1</span></td><td><b>randomUUID idempotency keys defeat dedup</b> — double-click double-merges; lost response re-merges on retry<span class="fix">deterministic keys project:head:base (+client request id)</span></td><td><code>server.ts:852,1008,1183,1195</code></td></tr>
+      <tr data-s="P1"><td><span class="sev P1">P1</span></td><td><b>Git argument injection</b> — remote-controlled branch names as bare argv to git fetch (--upload-pack trick)<span class="fix">shared check-ref-format helper + refs/heads/ prefix everywhere</span></td><td><code>git-runner:80,268</code></td></tr>
+      <tr data-s="P1"><td><span class="sev P1">P1</span></td><td><b>Failed-execution retries deadlock</b> — orphaned local branch, worktree add -b fails forever<span class="fix">worktree add -B, or delete branch in removeManagedWorktree</span></td><td><code>git-runner:82,246</code></td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>Bare periodic calls in main loop</b> — syncOpenPullRequests scan rejection exits process<span class="fix">try/catch like siblings</span></td><td><code>worker.ts:1656-1700</code></td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>All mergeBaseIntoWorktree errors labelled "conflict"</b> — AI resolution runs against clean tree<span class="fix">only exit 1 + CONFLICT marker ⇒ conflicted; else throw</span></td><td><code>git-runner:333</code></td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>Conflict-resolution failure paths leak worktrees</b>; no cleanup() returned<span class="fix">mirror review-worktree cleanup pattern, finally on non-success</span></td><td><code>worker.ts:1459-1617</code> <code>git-runner:253</code></td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>Crash mid-review leaks worktree forever</b> — doubled data/data path escapes GC script<span class="fix">unified managedWorktreePath + stale sweep of terminal runs</span></td><td><code>git-runner:283 vs :25</code></td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>Public upload endpoint: zero rate limiting</b> — storage/DB DoS<span class="fix">consumeSubmissionAttempt bucket at top of upload()</span></td><td><code>server.ts:2426,500</code></td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>Merge-branches accepts arbitrary refs</b> — silent bypass of PR policy pipeline into master<span class="fix">ref regex + confirm_default_branch flag, audited</span></td><td><code>server.ts:1178</code></td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>Verdict parser rejects valid multi-block output</b> — completed reviews discarded terminally<span class="fix">accept last parseable {verdict,summary} block</span></td><td><code>pr-review.ts:50</code></td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>GitHub API thrash</b> — all open PRs deep-synced every 2.5 s (~6+ calls each)<span class="fix">per-PR backoff + cheap list-delta detection per pass</span></td><td><code>worker.ts:1656</code> <code>github-provider:267</code></td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>Conflicted branch merges dead-end</b> — outcome audited then dropped<span class="fix">notification + offer intermediate PR creation</span></td><td><code>provider-jobs:119</code></td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>Fresh policy binding off by default</b> — legacy merge path skips required-checks/reviews<span class="fix">after Task-4 shim removal flip default true</span></td><td><code>migration 051</code> <code>pr-merge.ts:74</code></td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>Late merge overrides admin-closed tickets</b> — any status forced Merged→Completed<span class="fix">exclude terminal statuses from Completed coercion (policy call)</span></td><td><code>pull-request-sync:135</code></td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>recordProviderRefusal can downgrade merged attempts</b><span class="fix">AND state &lt;&gt; 'merged' guard</span></td><td><code>pr-merge.ts:108</code></td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>tsc broken without explicit --noEmit</b> (TS5096 config error)<span class="fix">add noEmit:true to tsconfig</span></td><td><code>tsconfig.json:6</code></td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>236 stray compiled .test.js files collected alongside .test.ts</b> — doubled/stale local test runs, polluted status<span class="fix">delete artifacts + gitignore compiled output</span></td><td>working tree</td></tr>
+      <tr data-s="P2"><td><span class="sev P2">P2</span></td><td><b>AI jobs starve behind cheap-job trickle</b>; 500 ms busy-poll<span class="fix">priority-based single claim or alternating preference; LISTEN/NOTIFY later</span></td><td><code>worker.ts:1690</code></td></tr>
+      <tr data-s="P3"><td><span class="sev P3">P3</span></td><td><b>No HSTS header</b> despite enforced HTTPS base URL<span class="fix">one line in production securityHeaders()</span></td><td><code>security.ts:14</code></td></tr>
+      <tr data-s="P3"><td><span class="sev P3">P3</span></td><td><b>Login lockout per-IP only</b>; success wipes shared-NAT counter<span class="fix">add per-username counter</span></td><td><code>server.ts:296</code></td></tr>
+      <tr data-s="P3"><td><span class="sev P3">P3</span></td><td><b>Silent mode coercion + unvalidated target_branch retarget</b><span class="fix">400 on unknown mode; same ref regex</span></td><td><code>server.ts:1079,1093</code></td></tr>
+      <tr data-s="P3"><td><span class="sev P3">P3</span></td><td><b>Upload cap doc drift</b> (UI 8 MB vs server 5 MB); unbounded OpenCode stdout buffering; prompt seed drift repo↔DB; CSP unsafe-inline; missing hot-path indexes; notification recovery starves at ≥100 expired jobs; duplicate-comment narrow race<span class="fix">see markdown report B12-B18 + LOW items</span></td><td>misc</td></tr>
+    </tbody>
+  </table>
+  </div>
+
+  <!-- ============ STRENGTHS ============ -->
+  <h2><span class="num">04</span>What's already right ✓</h2>
+  <div class="card">
+    <ul class="goodlist">
+      <li>Lease-fenced job finalization + crash recovery sweeps (<code>SKIP LOCKED</code>)</li>
+      <li>Immutable review evidence: pinned SHAs + snapshot diff, expected-SHA verification</li>
+      <li>Prompt-injection fencing: JSON-escaped untrusted blocks, read-only toolsets</li>
+      <li>CSRF hashed-token timing-safe checks; hashed sessions; login throttling</li>
+      <li>Fully parameterized SQL everywhere probed; escaped GitHub-sourced HTML</li>
+      <li>Merge crash-window reconciliation before provider re-invocation</li>
+      <li>Squash-merge policy snapshots with optimistic sync tokens</li>
+    </ul>
+  </div>
+
+  <!-- ============ ROADMAP ============ -->
+  <h2><span class="num">05</span>Roadmap to "center for all development work"</h2>
+  <ol class="road">
+    <li class="star"><b>✅ SHIPPED — Auto-enqueue AI reviews</b> on PR open/push with settings toggles (auto_review_enabled, auto_merge_on_approve).<span class="why">Dedup key pr:head_sha — re-reviews on every push, ≤5 enqueued per pass.</span></li>
+    <li class="star"><b>✅ SHIPPED — Verdict → policy-gated merge job</b> pinned to the reviewed head SHA; concurrent pushes become head_changed refusals.<span class="why">New PR → review → comment → merge, zero clicks when auto-merge is on.</span></li>
+    <li class="star"><b>✅ SHIPPED — Branch-merge trustworthiness:</b> deterministic idempotency, ref regex + confirm_default_branch guard, jobs.result_json + GET /api/admin/jobs/:id, UI polls real outcomes (merged / up-to-date / CONFLICT / failed).<span class="why">The button tells the truth now.</span></li>
+    <li><b>✅ SHIPPED — Stability batch:</b> cancellation-poll guard, main-loop try/catch, worktree add -B, assertRemoteBranchName everywhere, conflict-worktree cleanup(), unified managed root + orphan sweep.<span class="why">Removes the ways a bad Tuesday takes the whole system down.</span></li>
+    <li><b>✅ SHIPPED — Sync efficiency:</b> 90s per-PR floor (+ partial index). <b>Deferred:</b> webhook pull_request events (phase 2 — polling pickup ≤ ~92s).</li>
+    <li><b>◐ PARTIAL — UX polish:</b> honest merge-outcome polling shipped. <b>Deferred:</b> branch pickers, merge preview, stale-PR one-click sync (needs branch-list endpoint).</li>
+    <li><b>◐ PARTIAL — Hygiene:</b> tsconfig noEmit, 391 stray .js twins deleted, vitest excludes .worktrees + 15s timeout. <b>Deferred:</b> router split & inline-JS externalization (own reviewed PR), prompt re-seed tooling.</li>
+  </ol>
+
+  <footer>
+    Generated 2026-08-25 · ox-alpha audit · companion file <a href="./audit-2026-08-25.md">docs/audit-2026-08-25.md</a> (agent-readable, with code-level fixes)
+  </footer>
+</div>
+
+<script>
+  const rows=[...document.querySelectorAll('#rows tr')];
+  const counts={all:rows.length,P1:0,P2:0,P3:0};
+  rows.forEach(r=>counts[r.dataset.s]++);
+  document.getElementById('c-p1').textContent=counts.P1;
+  document.getElementById('c-p2').textContent=counts.P2;
+  document.getElementById('c-p3').textContent=counts.P3;
+  document.querySelectorAll('.filters [data-f]').forEach(btn=>{
+    document.querySelector(`[data-f="${btn.dataset.f}"] .n`)?.remove();
+    btn.innerHTML+=` <span style="opacity:.6">${btn.dataset.f==='all'?counts.all:counts[btn.dataset.f]}</span>`;
+    btn.addEventListener('click',()=>{
+      document.querySelectorAll('.filters button').forEach(b=>b.classList.toggle('on',b===btn));
+      rows.forEach(r=>r.style.display=(btn.dataset.f==='all'||r.dataset.s===btn.dataset.f)?'':'none');
+    });
+  });
+</script>
+</body>
+</html>
