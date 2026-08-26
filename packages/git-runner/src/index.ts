@@ -22,6 +22,16 @@ export function executionBranchName(ticketNumber: string, title: string, attempt
   return `feedback/${safeSegment(ticketNumber, "ticket")}-${attemptNumber}-${safeSegment(title.toLowerCase(), "change")}`;
 }
 
+// Guards every git invocation that receives a provider- or config-controlled
+// branch name: a leading dash would let a crafted "ref" (--upload-pack=…)
+// parse as a git option. check-ref-format alone does not reject leading dashes.
+export async function assertRemoteBranchName(name: string) {
+  if (typeof name !== "string" || !name || name.startsWith("-") || /[\r\n\u0000]/.test(name)) {
+    throw new Error(`unsafe branch name: ${JSON.stringify(name)}`);
+  }
+  await exec("git", ["check-ref-format", "--allow-onelevel", `refs/heads/${name}`]);
+}
+
 function isWithin(root: string, target: string) {
   const relative = path.relative(root, target);
   return relative && relative !== ".." && !relative.startsWith(".." + path.sep) && !path.isAbsolute(relative);
@@ -76,10 +86,14 @@ export async function createExecutionWorktree(input: {
   const dirty = (await exec("git", ["-C", repository, "status", "--porcelain"])).stdout;
   if (dirty.trim()) throw new Error("repository has uncommitted changes");
   await exec("git", ["-C", repository, "remote", "get-url", "origin"]);
+  await assertRemoteBranchName(input.defaultBranch);
   const baseRef = `refs/remotes/origin/${input.defaultBranch}`;
   await exec("git", ["-C", repository, "fetch", "origin", `+refs/heads/${input.defaultBranch}:${baseRef}`]);
   const baseCommit = (await exec("git", ["-C", repository, "rev-parse", baseRef])).stdout.trim();
-  await exec("git", ["-C", repository, "worktree", "add", "-b", branchName, worktreePath, baseCommit]);
+  // ponytail: -B resets a leftover branch from a previously-failed attempt of
+  // the same execution_attempt (nothing deletes feedback/* branches), which
+  // otherwise made every retry fail with "branch already exists".
+  await exec("git", ["-C", repository, "worktree", "add", "-B", branchName, worktreePath, baseCommit]);
   return { worktreePath, branchName, baseCommit };
 }
 
@@ -210,7 +224,7 @@ async function git(worktreePath: string, args: string[], input?: string, safe = 
   });
 }
 
-export async function removeContainedWorktreePath(dataRoot: string, worktreePath: string) {
+export async function removeContainedWorktreePath(dataRoot: string, worktreePath: string): Promise<boolean> {
   try {
     await assertManagedWorktreePath(dataRoot, worktreePath);
   } catch (error: any) {
@@ -227,7 +241,15 @@ export async function removeContainedWorktreePath(dataRoot: string, worktreePath
     const [realRoot, realParent] = await Promise.all([realpath(root), realpath(parent)]);
     if (!isWithin(realRoot, realParent)) throw new Error("managed worktree path escapes controlled root");
   }
+  let existed = false;
+  try {
+    await access(worktreePath);
+    existed = true;
+  } catch {
+    // Nothing on disk: still report success so callers can deregister.
+  }
   await rm(worktreePath, { recursive: true, force: true });
+  return existed;
 }
 
 export async function removeManagedWorktree(repositoryPath: string, dataRoot: string, worktreePath: string) {
@@ -265,12 +287,30 @@ export async function createConflictResolutionWorktree(input: {
     safeSegment(input.projectSlug, "project"),
     "pr-" + input.pullRequestNumber + "-conflict-resolution",
   ], resolution);
-  await exec("git", ["-C", repository, "fetch", "--no-write-fetch-head", "origin", input.headBranch, input.baseBranch]);
-  await exec("git", [
-    "-C", repository, "worktree", "add", "--detach", worktreePath, `origin/${input.headBranch}`,
-  ]);
-  const headCommit = (await exec("git", ["-C", worktreePath, "rev-parse", "HEAD"])).stdout.trim();
-  return { worktreePath, branchName: input.headBranch, headCommit };
+  await assertRemoteBranchName(input.headBranch);
+  await assertRemoteBranchName(input.baseBranch);
+  try {
+    await exec("git", ["-C", repository, "fetch", "--no-write-fetch-head", "origin", input.headBranch, input.baseBranch]);
+    await exec("git", [
+      "-C", repository, "worktree", "add", "--detach", worktreePath, `origin/${input.headBranch}`,
+    ]);
+    const headCommit = (await exec("git", ["-C", worktreePath, "rev-parse", "HEAD"])).stdout.trim();
+    return {
+      worktreePath, branchName: input.headBranch, headCommit,
+      cleanup: async () => {
+        try {
+          await exec("git", ["-C", repository, "worktree", "remove", "--force", worktreePath]);
+        } finally {
+          await rm(worktreePath, { recursive: true, force: true }).catch(() => {});
+          await exec("git", ["-C", repository, "worktree", "prune"]).catch(() => {});
+        }
+      },
+    };
+  } catch (error) {
+    await rm(worktreePath, { recursive: true, force: true }).catch(() => {});
+    await exec("git", ["-C", repository, "worktree", "prune"]).catch(() => {});
+    throw error;
+  }
 }
 
 export async function createPullRequestReviewWorktree(input: {
@@ -283,7 +323,9 @@ export async function createPullRequestReviewWorktree(input: {
   expectedHeadSha?: string;
 }) {
   const repository = await realpath(input.repositoryPath);
-  const root = path.resolve(input.dataRoot, "data", "worktrees");
+  // Same managed root the other worktree classes use, so one GC
+  // (scripts/cleanup-worktrees.ts + the worker sweep) covers everything.
+  const root = path.resolve(input.dataRoot, "worktrees");
   const parent = path.resolve(root, safeSegment(input.projectSlug, "project"));
   const worktreePath = path.resolve(parent, `pr-${input.pullRequestNumber}-review-${randomUUID()}`);
   const relative = path.relative(root, worktreePath);
@@ -296,7 +338,7 @@ export async function createPullRequestReviewWorktree(input: {
   let baseCommit: string | null = null;
   let diff: string | null = null;
   try {
-    if (input.baseBranch) await exec("git", ["check-ref-format", `refs/heads/${input.baseBranch}`]);
+    if (input.baseBranch) await assertRemoteBranchName(input.baseBranch);
     await exec("git", [
       "-C", repository, "fetch", "origin", `+${ref}:${ref}`,
       ...(input.baseBranch ? [`+refs/heads/${input.baseBranch}:refs/remotes/origin/${input.baseBranch}`] : []),
@@ -331,12 +373,20 @@ export async function createPullRequestReviewWorktree(input: {
 }
 
 export async function mergeBaseIntoWorktree(worktreePath: string, baseBranch: string) {
+  await assertRemoteBranchName(baseBranch);
   try {
     await git(worktreePath, ["merge", `origin/${baseBranch}`, "--no-edit"]);
     const headCommit = (await git(worktreePath, ["rev-parse", "HEAD"])).stdout.trim();
     return { conflicted: false as const, headCommit };
-  } catch {
-    return { conflicted: true as const };
+  } catch (error: any) {
+    // Only a genuine merge conflict (exit 1 + CONFLICT output) means "AI, fix
+    // this". Ref/network/lock failures must propagate instead of masquerading
+    // as an empty conflict set downstream.
+    const output = `${error?.stdout ?? ""}${error?.stderr ?? ""}`;
+    if (error?.code === 1 && /(^|\s)CONFLICT|Automatic merge failed/.test(output)) {
+      return { conflicted: true as const };
+    }
+    throw error instanceof Error ? error : new Error(String(error));
   }
 }
 
@@ -771,4 +821,96 @@ export async function importPrivateExecutionClone(input: {
   } finally {
     await rm(importRoot, { recursive: true, force: true });
   }
+}
+
+export type RemoteBranch = { name: string; sha: string };
+
+export type BranchMergePreview = {
+  branches: RemoteBranch[];
+  head: RemoteBranch | null;
+  base: RemoteBranch | null;
+  outcome:
+    | "branches_only"   // no head/base pair requested — just the branch list
+    | "up_to_date"      // base already contains everything in head
+    | "clean"           // merge would apply without conflicts
+    | "conflict"        // merge would conflict
+    | "missing_head"
+    | "missing_base";
+  commits_ahead: number | null;
+  conflicted_files: string[];
+};
+
+// Read-only pre-flight for a direct branch→branch merge: live branch list via
+// ls-remote, then (when a pair is given) fetch both refs into the usual
+// remote-tracking slots and compute the outcome locally with git merge-tree.
+// Nothing here mutates the repository's checked-out state or the remote.
+export async function previewRemoteBranchMerge(input: {
+  repositoryPath: string;
+  head?: string;
+  base?: string;
+}): Promise<BranchMergePreview> {
+  const repository = await realpath(input.repositoryPath);
+  if (input.head !== undefined) await assertRemoteBranchName(input.head);
+  if (input.base !== undefined) await assertRemoteBranchName(input.base);
+
+  const lsRemote = await exec("git", ["-C", repository, "ls-remote", "--heads", "origin"]);
+  const branches = lsRemote.stdout.split("\n").flatMap((line) => {
+    const [sha, ref] = line.split("\t");
+    return sha && ref?.startsWith("refs/heads/") ? [{ name: ref.slice("refs/heads/".length), sha }] : [];
+  });
+
+  const empty: BranchMergePreview = { branches, head: null, base: null, outcome: "branches_only", commits_ahead: null, conflicted_files: [] };
+  if (!input.head || !input.base) return empty;
+
+  const head = branches.find((branch) => branch.name === input.head) ?? null;
+  const base = branches.find((branch) => branch.name === input.base) ?? null;
+  if (!head) return { ...empty, head, base, outcome: input.head === input.base && !base ? "missing_base" : "missing_head" };
+  if (!base) return { ...empty, head, base, outcome: "missing_base" };
+
+  await exec("git", [
+    "-C", repository, "fetch", "--no-write-fetch-head", "origin",
+    `+refs/heads/${head.name}:refs/remotes/origin/${head.name}`,
+    `+refs/heads/${base.name}:refs/remotes/origin/${base.name}`,
+  ]);
+  const fetchedHeadSha = (await exec("git", ["-C", repository, "rev-parse", `refs/remotes/origin/${head.name}`])).stdout.trim();
+  const fetchedBaseSha = (await exec("git", ["-C", repository, "rev-parse", `refs/remotes/origin/${base.name}`])).stdout.trim();
+
+  const result: BranchMergePreview = { ...empty, head, base };
+  // Identical tips = genuinely nothing to merge. A base strictly BEHIND head
+  // still merges (fast-forward) — that's the normal promote flow, not a no-op.
+  if (fetchedBaseSha === fetchedHeadSha) {
+    result.outcome = "up_to_date";
+    return result;
+  }
+  result.commits_ahead = Number(
+    (await exec("git", ["-C", repository, "rev-list", "--count", `${fetchedBaseSha}..${fetchedHeadSha}`])).stdout.trim(),
+  );
+
+  // --write-tree performs the whole merge in memory: exit 0 clean, exit 1 with
+  // conflicted files listed after the tree oid. Any other failure propagates.
+  const merged = await exec("git", [
+    "-C", repository, "merge-tree", "--write-tree", "--name-only",
+    `refs/remotes/origin/${head.name}`, `refs/remotes/origin/${base.name}`,
+  ]).catch((error: any) => error);
+  if (merged.code === 1) {
+    result.outcome = "conflict";
+    result.conflicted_files = String(merged.stdout ?? "").split("\n").slice(1).map((line) => line.trim()).filter(Boolean);
+    return result;
+  }
+  if (merged instanceof Error || merged.code) throw merged instanceof Error ? merged : new Error(`git merge-tree failed: ${JSON.stringify({ code: merged.code })}`);
+  result.outcome = "clean";
+  return result;
+}
+
+// name → sha map of the remote's live branch heads. Used both by the merge
+// preview and as a compare-and-swap check right before a real merge.
+export async function lsRemoteHeads(repositoryPath: string): Promise<Map<string, string>> {
+  const repository = await realpath(repositoryPath);
+  const lsRemote = await exec("git", ["-C", repository, "ls-remote", "--heads", "origin"]);
+  const heads = new Map<string, string>();
+  for (const line of lsRemote.stdout.split("\n")) {
+    const [sha, ref] = line.split("\t");
+    if (sha && ref?.startsWith("refs/heads/")) heads.set(ref.slice("refs/heads/".length), sha);
+  }
+  return heads;
 }

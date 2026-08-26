@@ -47,16 +47,30 @@ export class PrReviewVerdictError extends Error {
 }
 
 export function parsePrReviewVerdict(markdown: string): { verdict: "approved" | "rejected"; summary: string } {
+  // Scan fenced JSON blocks last-to-first and accept the first one that is a
+  // valid verdict. Requiring global uniqueness threw away fully-completed
+  // reviews whenever the model quoted the format or embedded a JSON snippet
+  // in its findings.
   const matches = [...markdown.matchAll(/```json\s*([\s\S]*?)```/g)];
+  let lastError: PrReviewVerdictError | null = null;
+  for (const match of matches.reverse()) {
+    try {
+      return validateVerdictJson(match[1]);
+    } catch (error) {
+      if (error instanceof PrReviewVerdictError) { lastError = error; continue; }
+      throw error;
+    }
+  }
   if (!matches.length) {
     throw new PrReviewVerdictError("No JSON verdict block found in review output", "missing_verdict");
   }
-  if (matches.length !== 1) {
-    throw new PrReviewVerdictError("Review output must contain exactly one JSON verdict block", "ambiguous_verdict");
-  }
+  throw lastError ?? new PrReviewVerdictError("No valid verdict block found", "invalid_verdict_json");
+}
+
+function validateVerdictJson(raw: string): { verdict: "approved" | "rejected"; summary: string } {
   let parsed: unknown;
   try {
-    parsed = JSON.parse(matches[0][1]);
+    parsed = JSON.parse(raw);
   } catch {
     throw new PrReviewVerdictError("Verdict JSON block is not valid JSON", "invalid_verdict_json");
   }

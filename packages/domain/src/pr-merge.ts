@@ -16,7 +16,9 @@ export class PullRequestMergeError extends Error {
 type MergeInput = {
   pullRequestId: string;
   jobId: string;
-  actor: { type: "worker" | "admin"; id: string };
+  // Null actor id = worker-originated merge (auto-merge after an approved AI
+  // review); uuid columns accept NULL, the text NOT NULL attempt columns get "".
+  actor: { type: "worker" | "admin"; id: string | null };
   expectedHeadSha: string;
   expectedPolicySnapshotId?: string;
 };
@@ -60,7 +62,7 @@ async function completeLinkedTicket(client: pg.PoolClient, input: MergeInput) {
       `INSERT INTO ticket_status_history
        (ticket_id,previous_status,new_status,reason,actor_type,actor_id,related_pull_request_id)
        VALUES ($1,$2,$3,'GitHub pull request merged',$4,$5,$6)`,
-      [ticket.ticket_id, ticket.ticket_status, next, input.actor.type, input.actor.id, input.pullRequestId],
+      [ticket.ticket_id, ticket.ticket_status, next, input.actor.type, input.actor.id || null, input.pullRequestId],
     );
     ticket.ticket_status = next;
   };
@@ -97,9 +99,11 @@ async function recordMerged(
 }
 
 async function recordProviderRefusal(db: pg.Pool, input: MergeInput, code: string, response: unknown) {
+  // Never downgrade an attempt that already recorded a merge (lease-overlap
+  // duplicate): merged is terminal and the source of truth for reconciliation.
   await db.query(
     `UPDATE pull_request_merge_attempts SET state='refused',refusal_code=$2,provider_response=$3,
-     refused_at=now(),completed_at=now(),updated_at=now() WHERE job_id=$1`,
+     refused_at=now(),completed_at=now(),updated_at=now() WHERE job_id=$1 AND state <> 'merged'`,
     [input.jobId, code, response],
   );
 }
@@ -160,7 +164,7 @@ export async function approveAndMergePullRequest(
            VALUES ($1,$2,NULL,NULL,$3,'refused','head_changed',$4,$5,now(),now(),now())
            ON CONFLICT (job_id) DO UPDATE SET state='refused',refusal_code='head_changed',verified_policy_snapshot_id=NULL,
             refused_at=now(),completed_at=now(),updated_at=now()`,
-          [mergeInput.jobId, mergeInput.pullRequestId, mergeInput.expectedHeadSha, mergeInput.actor.type, mergeInput.actor.id],
+          [mergeInput.jobId, mergeInput.pullRequestId, mergeInput.expectedHeadSha, mergeInput.actor.type, mergeInput.actor.id ?? ""],
         );
       });
       throw new PullRequestMergeError("merge refused: head_changed", "head_changed");
@@ -173,7 +177,7 @@ export async function approveAndMergePullRequest(
          VALUES ($1,$2,NULL,NULL,$3,'verified',NULL,$4,$5,now())
          ON CONFLICT (job_id) DO UPDATE SET state='verified',refusal_code=NULL,verified_policy_snapshot_id=NULL,
           verified_at=now(),refused_at=NULL,completed_at=NULL,updated_at=now()`,
-        [mergeInput.jobId, mergeInput.pullRequestId, mergeInput.expectedHeadSha, mergeInput.actor.type, mergeInput.actor.id],
+        [mergeInput.jobId, mergeInput.pullRequestId, mergeInput.expectedHeadSha, mergeInput.actor.type, mergeInput.actor.id ?? ""],
       );
     });
     await ownership();
@@ -272,7 +276,7 @@ export async function approveAndMergePullRequest(
         state=EXCLUDED.state,refusal_code=EXCLUDED.refusal_code,verified_at=now(),
         refused_at=EXCLUDED.refused_at,completed_at=EXCLUDED.completed_at,updated_at=now()`,
       [mergeInput.jobId, mergeInput.pullRequestId, mergeInput.expectedPolicySnapshotId, snapshot.id, mergeInput.expectedHeadSha,
-       refusalCode ? "refused" : "verified", refusalCode ?? null, mergeInput.actor.type, mergeInput.actor.id],
+       refusalCode ? "refused" : "verified", refusalCode ?? null, mergeInput.actor.type, mergeInput.actor.id ?? ""],
     );
     return { snapshotId: snapshot.id as string, refusalCode };
   });
@@ -302,7 +306,7 @@ export async function approveAndMergePullRequest(
   await recordMerged(db, mergeInput, verified.snapshotId, providerResponse.sha, providerResponse);
   try {
     await ownership();
-    await syncPullRequest(mergeInput.pullRequestId, mergeInput.actor.type, mergeInput.actor.id, ownership);
+    await syncPullRequest(mergeInput.pullRequestId, mergeInput.actor.type, mergeInput.actor.id ?? undefined, ownership);
   } catch {}
   return { mergedSha: providerResponse.sha, mergedHeadSha: mergeInput.expectedHeadSha, policySnapshotId: verified.snapshotId };
 }

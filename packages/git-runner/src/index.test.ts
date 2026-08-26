@@ -8,6 +8,7 @@ import { describe, expect, it } from "vitest";
 import {
   abortMerge,
   assertNoConflictMarkers,
+  assertRemoteBranchName,
   commitExecutionChanges,
   conflictedFiles,
   countCredentialShapes,
@@ -18,6 +19,7 @@ import {
   importPrivateExecutionClone,
   matchesProtectedPath,
   mergeBaseIntoWorktree,
+  previewRemoteBranchMerge,
   stageConflictResolutionPaths,
   sanitizeValidationOutput,
   validateEffectiveWorktree,
@@ -53,6 +55,36 @@ async function cloneRepo(originDir: string, repoDir: string) {
   await git(repoDir, ["config", "user.email", "git-runner-test@example.com"]);
   await git(repoDir, ["config", "user.name", "git-runner test"]);
 }
+
+describe("assertRemoteBranchName", () => {
+  it("rejects option-like, control-character and empty names before they reach git argv", async () => {
+    await expect(assertRemoteBranchName("--upload-pack=/bin/sh")).rejects.toThrow(/unsafe branch name/);
+    await expect(assertRemoteBranchName("main\n")).rejects.toThrow(/unsafe branch name/);
+    await expect(assertRemoteBranchName("")).rejects.toThrow(/unsafe branch name/);
+  });
+
+  it("accepts ordinary feature branch names", async () => {
+    await expect(assertRemoteBranchName("feature/fix-1.2.3")).resolves.toBeUndefined();
+  });
+});
+
+describe("mergeBaseIntoWorktree failure classification", () => {
+  it("propagates non-conflict failures instead of labelling them conflicted", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-mergefail-"));
+    try {
+      const originDir = path.join(tmp, "origin");
+      await initRepo(originDir);
+      await writeAndCommit(originDir, "shared.txt", "main line\n", "initial commit");
+      const repoDir = path.join(tmp, "repo");
+      await cloneRepo(originDir, repoDir);
+      // A ref that was never pushed is exit-code 128 noise, not a conflict:
+      // the caller must see the throw, not an empty conflict set.
+      await expect(mergeBaseIntoWorktree(repoDir, "never-pushed-branch")).rejects.toThrow();
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("createConflictResolutionWorktree / mergeBaseIntoWorktree", () => {
   it("creates a detached head worktree, detects a real conflict, lists conflicted files, then clears them on abort", async () => {
@@ -729,6 +761,86 @@ describe("createPullRequestReviewWorktree", () => {
         await worktree.cleanup();
       }
       await expect(readFile(path.join(worktree.worktreePath, "reviewed.txt"), "utf8")).rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("previewRemoteBranchMerge", () => {
+  async function setupTwoBranches(dirPrefix: string, diverge: boolean) {
+    const tmp = await mkdtemp(path.join(tmpdir(), dirPrefix));
+    const repoDir = path.join(tmp, "repo");
+    await initRepo(repoDir);
+    await writeAndCommit(repoDir, "shared.txt", "original\n", "initial");
+    await git(repoDir, ["checkout", "-b", "staging"]);
+    if (diverge) {
+      await writeAndCommit(repoDir, "shared.txt", "staging line\n", "staging edit");
+      await git(repoDir, ["checkout", "main"]);
+      await writeAndCommit(repoDir, "shared.txt", "main line\n", "main edit");
+    } else {
+      await writeAndCommit(repoDir, "other.txt", "new file\n", "staging addition");
+      await git(repoDir, ["checkout", "main"]);
+    }
+    // Bare mirror as the remote so ls-remote sees both branches without
+    // pushing into a checked-out ref.
+    const originDir = path.join(tmp, "origin.git");
+    await git(tmp, ["clone", "--bare", repoDir, originDir]);
+    await git(repoDir, ["remote", "add", "origin", originDir]);
+    return { tmp, repoDir };
+  }
+
+  it("lists live remote branches without a pair", async () => {
+    const { tmp, repoDir } = await setupTwoBranches("git-preview-list-", false);
+    try {
+      const preview = await previewRemoteBranchMerge({ repositoryPath: repoDir });
+      expect(preview.outcome).toBe("branches_only");
+      expect(preview.branches.map((b) => b.name).sort()).toEqual(["main", "staging"]);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("verdicts a fast-forwardable pair as clean with a commit count", async () => {
+    const { tmp, repoDir } = await setupTwoBranches("git-preview-clean-", false);
+    try {
+      const preview = await previewRemoteBranchMerge({ repositoryPath: repoDir, head: "staging", base: "main" });
+      expect(preview.outcome).toBe("clean");
+      expect(preview.commits_ahead).toBe(1);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("verdicts an already-contained pair as up_to_date", async () => {
+    const { tmp, repoDir } = await setupTwoBranches("git-preview-utd-", false);
+    try {
+      // staging was pushed at the same commit as main → nothing to merge.
+      await git(repoDir, ["branch", "same-as-main", "main"]);
+      await exec("git", ["-C", tmp + "/origin.git", "update-ref", "refs/heads/same-as-main", "main"]);
+      const preview = await previewRemoteBranchMerge({ repositoryPath: repoDir, head: "same-as-main", base: "main" });
+      expect(preview.outcome).toBe("up_to_date");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("detects a conflicting pair and names the files", async () => {
+    const { tmp, repoDir } = await setupTwoBranches("git-preview-conflict-", true);
+    try {
+      const preview = await previewRemoteBranchMerge({ repositoryPath: repoDir, head: "staging", base: "main" });
+      expect(preview.outcome).toBe("conflict");
+      expect(preview.conflicted_files).toContain("shared.txt");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("reports a missing target branch instead of attempting a merge", async () => {
+    const { tmp, repoDir } = await setupTwoBranches("git-preview-missing-", false);
+    try {
+      const preview = await previewRemoteBranchMerge({ repositoryPath: repoDir, head: "staging", base: "production" });
+      expect(preview.outcome).toBe("missing_base");
     } finally {
       await rm(tmp, { recursive: true, force: true });
     }

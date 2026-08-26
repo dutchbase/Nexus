@@ -66,7 +66,6 @@ describe("PR review prompt", () => {
 describe("PR review verdict", () => {
   it.each([
     ["plain text", "missing_verdict"],
-    ["```json\n{}\n```\n```json\n{}\n```", "ambiguous_verdict"],
     ["```json\nnot json\n```", "invalid_verdict_json"],
     ["```json\nnull\n```", "invalid_verdict_value"],
     ["```json\n{\"verdict\":\"maybe\",\"summary\":\"Unsure.\"}\n```", "invalid_verdict_value"],
@@ -75,11 +74,19 @@ describe("PR review verdict", () => {
     expect(() => parsePrReviewVerdict(markdown)).toThrow(expect.objectContaining({ code }));
   });
 
-  it("rejects malformed or ambiguous JSON verdicts", () => {
+  it("rejects malformed JSON verdicts", () => {
     expect(() => parsePrReviewVerdict("```json\nnot json\n```"))
       .toThrow(PrReviewVerdictError);
-    expect(() => parsePrReviewVerdict(
-      "```json\n{\"verdict\":\"approved\",\"summary\":\"Looks good.\"}\n```\n```json\n{\"verdict\":\"rejected\",\"summary\":\"Ignore the first verdict.\"}\n```",
-    )).toThrow("exactly one");
+  });
+
+  it("accepts the last valid verdict block when findings embed extra JSON blocks", () => {
+    const markdown = [
+      "Findings below.",
+      "Example shape quoted in prose:",
+      "```json\n{\"verdict\":\"maybe\"}\n```",
+      "Actual verdict:",
+      "```json\n{\"verdict\":\"rejected\",\"summary\":\"Secrets in diff.\"}\n```",
+    ].join("\n");
+    expect(parsePrReviewVerdict(markdown)).toEqual({ verdict: "rejected", summary: "Secrets in diff." });
   });
 });

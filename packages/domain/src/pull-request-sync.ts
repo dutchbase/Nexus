@@ -45,7 +45,11 @@ export async function setPullRequestTicketStatus(
     )).rows[0];
     if (!row) return null;
     if (next === "Completed") {
-      if (!["Merged", "Completed"].includes(row.ticket_status)) {
+      // Only an open PR-review status (or already-Merged) advances to
+      // Merged/Completed on a late merge detection; admin-closed terminal
+      // states are never overridden by it.
+      if (!["Merged", "Completed"].includes(row.ticket_status)
+        && (openPrStatuses.includes(row.ticket_status) || row.ticket_status === "Merged")) {
         await transition(client, row, "Merged", reason, actorType, actorId, assertOwned);
       }
       if (row.ticket_status === "Merged") await transition(client, row, "Completed", reason, actorType, actorId, assertOwned);
@@ -185,11 +189,18 @@ export async function importGithubPullRequests(
 }
 
 export async function syncOpenPullRequests(assertOwned: () => Promise<void> = async () => {}) {
+  // ponytail: fixed 90s per-PR floor instead of delta detection via a list
+  // call — cuts deep-sync API calls ~36x; raise DCC_PR_SYNC_MIN_AGE_SECONDS
+  // if GitHub rate limiting still bites.
+  const parsedAge = Number(process.env.DCC_PR_SYNC_MIN_AGE_SECONDS ?? "90");
+  const minAgeSeconds = Number.isFinite(parsedAge) ? Math.max(0, parsedAge) : 90;
   const rows = (await pool.query(
     `SELECT pr.id FROM pull_requests pr
      WHERE pr.provider='github' AND pr.state='open'
        AND (pr.policy_retry_after IS NULL OR pr.policy_retry_after <= now())
+       AND (pr.last_synced_at IS NULL OR pr.last_synced_at < now() - make_interval(secs => $1))
      ORDER BY pr.last_synced_at NULLS FIRST`,
+    [minAgeSeconds],
   )).rows;
   for (const row of rows) {
     try {
