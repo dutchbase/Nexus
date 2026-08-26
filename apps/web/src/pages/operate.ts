@@ -46,14 +46,14 @@ function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: bo
   const lockoutThreshold = 5;
   const lockoutWindowMinutes = 15;
 
-  const general = `<section class="card">${field("Public base URL (APP_BASE_URL)", process.env.APP_BASE_URL ?? "http://127.0.0.1:3000")}${field("Database (host/name only)", maskedDatabaseUrl())}</section>`;
+  const general = `<section class="card"><div class="card-body">${field("Public base URL (APP_BASE_URL)", process.env.APP_BASE_URL ?? "http://127.0.0.1:3000")}${field("Database (host/name only)", maskedDatabaseUrl())}</div></section>`;
 
-  const authentication = `<section class="card">
+  const authentication = `<section class="card"><div class="card-body">
     ${field("Session lifetime", `${sessionHours} hours`)}
     ${field("Login rate limit", `${lockoutThreshold} attempts / ${lockoutWindowMinutes} min`)}
     ${field("Lockout duration", `${lockoutWindowMinutes} minutes`)}
     <div style="padding-top:10px">${check("Argon2id password hashing")}${check("Secure + HttpOnly + SameSite session cookie")}${check("CSRF token on every mutating request")}</div>
-  </section>`;
+  </div></section>`;
 
   const claude = `<section class="card"><div class="card-body">
     <div class="card-head" style="margin:-18px -18px 14px;border-radius:6px 6px 0 0">Subscription-only authentication</div>
@@ -75,7 +75,7 @@ function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: bo
   </section>`;
 
   const backupRetention = /^[1-9][0-9]*$/.test(process.env.DCC_BACKUP_RETENTION_DAYS ?? "") ? process.env.DCC_BACKUP_RETENTION_DAYS + " days" : "not configured";
-  const retention = `<section class="card">${field("Worktree cleanup", "not configured")}${field("Run event retention", "not configured")}${field("Audit retention", "not configured")}${field("Backup retention", backupRetention)}${field("Backup schedule", "not configured · external cron")}</section>`;
+  const retention = `<section class="card"><div class="card-body">${field("Worktree cleanup", "not configured")}${field("Run event retention", "not configured")}${field("Audit retention", "not configured")}${field("Backup retention", backupRetention)}${field("Backup schedule", "not configured · external cron")}</div></section>`;
 
   const aiReview = `<section class="card"><div class="card-body">
     <div class="card-head" style="margin:-18px -18px 14px;border-radius:6px 6px 0 0">AI PR Review defaults</div>
