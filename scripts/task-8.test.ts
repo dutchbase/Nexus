@@ -54,9 +54,9 @@ exec /bin/mv "$@"
 `,
     pm2: `#!/bin/sh
 echo "pm2 $* current=$(readlink "$DCC_ROOT/.deploy-current" 2>/dev/null || true)" >> "$DCC_LOG"
-if [ "$DCC_FAIL_WORKER" = 1 ] && [ "$*" = "startOrReload $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-worker --update-env" ] && [ ! -f "$DCC_WORKER_FAILED" ]; then touch "$DCC_WORKER_FAILED"; exit 75; fi
-if [ "$DCC_FAIL_WEBHOOK" = 1 ] && [ "$*" = "startOrReload $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-webhook --update-env" ] && [ ! -f "$DCC_WEBHOOK_FAILED" ]; then touch "$DCC_WEBHOOK_FAILED"; exit 74; fi
-if [ "$*" = "startOrReload $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-webhook --update-env" ] && [ ! -f "$DCC_MARKER" ]; then exit 79; fi
+if [ "$DCC_FAIL_WORKER" = 1 ] && [ "$*" = "start $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-worker --update-env" ] && [ ! -f "$DCC_WORKER_FAILED" ]; then touch "$DCC_WORKER_FAILED"; exit 75; fi
+if [ "$DCC_FAIL_WEBHOOK" = 1 ] && [ "$*" = "start $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-webhook --update-env" ] && [ ! -f "$DCC_WEBHOOK_FAILED" ]; then touch "$DCC_WEBHOOK_FAILED"; exit 74; fi
+if [ "$*" = "start $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-webhook --update-env" ] && [ ! -f "$DCC_MARKER" ]; then exit 79; fi
 `,
   };
   await Promise.all(Object.entries(scripts).map(async ([command, script]) => {
@@ -142,7 +142,8 @@ describe("health-gated release deployment", () => {
     expect(await readlink(result.current)).toBe(result.previous);
     expect(result.commands).not.toContain("pnpm --filter database migrate");
     expect(result.commands).not.toContain("--set=stage=local_verification_passed");
-    expect(result.commands).not.toContain("pm2 startOrReload");
+    expect(result.commands).not.toContain("pm2 start");
+    expect(result.commands).not.toContain("pm2 delete");
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 73 });
   });
 
@@ -151,7 +152,8 @@ describe("health-gated release deployment", () => {
 
     expect(result.status).toBe(72);
     expect(await readlink(result.current)).toBe(result.previous);
-    expect(result.commands).not.toContain("pm2 startOrReload");
+    expect(result.commands).not.toContain("pm2 start");
+    expect(result.commands).not.toContain("pm2 delete");
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 72 });
   });
 
@@ -160,11 +162,11 @@ describe("health-gated release deployment", () => {
 
     expect(result.status).toBe(76);
     expect(await readlink(result.current)).toBe(result.previous);
-    expect(result.commands.match(/pm2 startOrReload .*dcc-web /g)).toHaveLength(2);
-    expect(result.commands.match(/pm2 startOrReload .*dcc-worker /g)).toHaveLength(2);
+    expect(result.commands.match(/pm2 start .*\--only dcc-web --update-env/g)).toHaveLength(2);
+    expect(result.commands.match(/pm2 start .*\--only dcc-worker --update-env/g)).toHaveLength(2);
     expect(result.commands.match(/curl /g)).toHaveLength(2);
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 76 });
-    expect(result.commands.match(/pm2 startOrReload .*dcc-webhook /g)).toHaveLength(1);
+    expect(result.commands.match(/pm2 start .*\--only dcc-webhook --update-env/g)).toHaveLength(1);
   });
 
   it("rolls back after a partial process restart", async () => {
@@ -172,9 +174,9 @@ describe("health-gated release deployment", () => {
 
     expect(result.status).toBe(75);
     expect(await readlink(result.current)).toBe(result.previous);
-    expect(result.commands.match(/pm2 startOrReload .*dcc-web /g)).toHaveLength(2);
-    expect(result.commands.match(/pm2 startOrReload .*dcc-worker /g)).toHaveLength(2);
-    expect(result.commands.match(/pm2 startOrReload .*dcc-webhook /g)).toHaveLength(1);
+    expect(result.commands.match(/pm2 start .*\--only dcc-web --update-env/g)).toHaveLength(2);
+    expect(result.commands.match(/pm2 start .*\--only dcc-worker --update-env/g)).toHaveLength(2);
+    expect(result.commands.match(/pm2 start .*\--only dcc-webhook --update-env/g)).toHaveLength(1);
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 75 });
   });
 
@@ -193,7 +195,7 @@ describe("health-gated release deployment", () => {
 
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 0, reloadPending: true });
     expect(result.commands).toContain("psql");
-    expect(result.commands.indexOf("pm2 startOrReload " + join(result.directory, ".deploy-current", "ecosystem.config.cjs") + " --only dcc-webhook"))
+    expect(result.commands.indexOf("pm2 start " + join(result.directory, ".deploy-current", "ecosystem.config.cjs") + " --only dcc-webhook"))
       .toBeGreaterThan(result.commands.indexOf("curl "));
   });
 
@@ -222,7 +224,7 @@ describe("health-gated release deployment", () => {
 
     expect(result.status).toBe(74);
     expect(await readlink(result.current)).toBe(result.previous);
-    expect(result.commands.match(/pm2 startOrReload .*dcc-webhook /g)).toHaveLength(2);
+    expect(result.commands.match(/pm2 start .*\--only dcc-webhook --update-env/g)).toHaveLength(2);
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 74 });
   });
 
