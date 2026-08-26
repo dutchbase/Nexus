@@ -17,7 +17,10 @@ function readConfig(env = process.env) {
     secret: env.WEBHOOK_SECRET,
     port: Number(env.WEBHOOK_PORT || 9003),
     protectedBranch: env.DEPLOY_PROTECTED_BRANCH,
-    deployShPath: env.DEPLOY_SH_PATH || '/home/deploy/projects/dev-control/deploy.sh',
+    // Execute the release's own deploy.sh, not the checkout root's: the root
+    // working tree only updates when someone pulls, so a stale copy would
+    // keep replaying old deploy logic on every future cutover.
+    deployShPath: env.DEPLOY_SH_PATH || path.join(env.DCC_ROOT || '/home/deploy/projects/dev-control', '.deploy-current', 'deploy.sh'),
     currentReleaseLink: env.DCC_DEPLOY_CURRENT_LINK || path.join(env.DCC_ROOT || '/home/deploy/projects/dev-control', '.deploy-current'),
     completionsDir: path.join(stateDir, 'completions'),
     logsDir: path.join(stateDir, 'logs'),
