@@ -13,6 +13,7 @@ async function deploy({ fetchHead = sha, failVerification = false, failMigration
   const directory = await mkdtemp(join(tmpdir(), "dcc-deploy-"));
   directories.push(directory);
   const bin = join(directory, "bin");
+  const webhookReloader = join(bin, "webhook-reload");
   const log = join(directory, "commands.log");
   const marker = join(directory, "completion.json");
   const releases = join(directory, ".deploy-releases");
@@ -52,12 +53,24 @@ cat >> "$DCC_LOG"
 echo "mv $*" >> "$DCC_LOG"
 exec /bin/mv "$@"
 `,
+    "webhook-reload": `#!/bin/sh
+echo "webhook-reload" >> "$DCC_LOG"
+touch "$DCC_SWAP_MARKER.swap-done"
+if [ "$DCC_FAIL_WEBHOOK" = "1" ]; then
+  printf '{"attemptId":"%s","sha":"%s","exitCode":75}' "$DCC_SWAP_ATTEMPT_ID" "$DCC_SWAP_SHA" \
+    > tmp75 && mv tmp75 "$DCC_SWAP_MARKER"
+fi
+`,
     pm2: `#!/bin/sh
 echo "pm2 $* current=$(readlink "$DCC_ROOT/.deploy-current" 2>/dev/null || true)" >> "$DCC_LOG"
 if [ "$1" = pid ]; then echo 12345; exit 0; fi
-if [ "$DCC_FAIL_WORKER" = 1 ] && [ "$*" = "start $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-worker --update-env" ] && [ ! -f "$DCC_WORKER_FAILED" ]; then touch "$DCC_WORKER_FAILED"; exit 75; fi
-if [ "$DCC_FAIL_WEBHOOK" = 1 ] && [ "$*" = "start $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-webhook --update-env" ] && [ ! -f "$DCC_WEBHOOK_FAILED" ]; then touch "$DCC_WEBHOOK_FAILED"; exit 74; fi
-if [ "$*" = "start $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-webhook --update-env" ] && [ ! -f "$DCC_MARKER" ]; then exit 79; fi
+case "$*" in
+  *"--only dcc-worker --update-env"*)
+    if [ "$DCC_FAIL_WORKER" = 1 ] && [ ! -f "$DCC_WORKER_FAILED" ]; then touch "$DCC_WORKER_FAILED"; exit 75; fi ;;
+  *"--only dcc-webhook --update-env"*)
+    if [ "$DCC_FAIL_WEBHOOK" = 1 ] && [ ! -f "$DCC_WEBHOOK_FAILED" ]; then touch "$DCC_WEBHOOK_FAILED"; exit 74; fi
+    [ -f "$DCC_MARKER" ] || exit 79 ;;
+esac
 `,
   };
   await Promise.all(Object.entries(scripts).map(async ([command, script]) => {
@@ -88,6 +101,8 @@ if [ "$*" = "start $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-web
       DCC_FAIL_WORKER: failWorker ? "1" : "0",
       DCC_FAIL_WEBHOOK: failWebhook ? "1" : "0",
       DCC_FAIL_BRANCH: failBranch ? "1" : "0",
+      DCC_SWAP_DELAY: "0",
+      DCC_WEBHOOK_RELOADER: webhookReloader,
       DCC_HEALTH_FAILED: join(directory, "health-failed"),
       DCC_WORKER_FAILED: join(directory, "worker-failed"),
       DCC_WEBHOOK_FAILED: join(directory, "webhook-failed"),
@@ -103,8 +118,10 @@ if [ "$*" = "start $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-web
     previous,
     releases,
     status: result.status,
+    stderr: result.stderr,
   };
 }
+
 
 afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
 
@@ -113,7 +130,7 @@ describe("health-gated release deployment", () => {
     const result = await deploy();
     const release = join(result.releases, sha);
 
-    expect(result.status).toBe(0);
+    expect(result.status, `STDERR: ${result.stderr?.slice(-600)}`).toBe(0);
     expect(result.commands).toContain("git fetch --no-tags origin master");
     expect(result.commands).toContain(`git worktree add --detach ${release} ${sha}`);
     expect(result.commands).toContain("pnpm install --frozen-lockfile");
@@ -158,7 +175,7 @@ describe("health-gated release deployment", () => {
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 72 });
   });
 
-  it("rolls back the prior release and processes when its health check fails", async () => {
+    it("rolls back the prior release and processes when its health check fails", async () => {
     const result = await deploy({ failHealth: true });
 
     expect(result.status).toBe(76);
@@ -167,7 +184,8 @@ describe("health-gated release deployment", () => {
     expect(result.commands.match(/pm2 start .*\--only dcc-worker --update-env/g)).toHaveLength(2);
     expect(result.commands.match(/curl /g)).toHaveLength(2);
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 76 });
-    expect(result.commands.match(/pm2 start .*\--only dcc-webhook --update-env/g)).toHaveLength(1);
+    expect(result.commands).toContain("webhook-reload");
+    expect(result.commands).not.toContain("pm2 delete dcc-webhook");
   });
 
   it("rolls back after a partial process restart", async () => {
@@ -177,7 +195,7 @@ describe("health-gated release deployment", () => {
     expect(await readlink(result.current)).toBe(result.previous);
     expect(result.commands.match(/pm2 start .*\--only dcc-web --update-env/g)).toHaveLength(2);
     expect(result.commands.match(/pm2 start .*\--only dcc-worker --update-env/g)).toHaveLength(2);
-    expect(result.commands.match(/pm2 start .*\--only dcc-webhook --update-env/g)).toHaveLength(1);
+    expect(result.commands).toContain("webhook-reload");
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 75 });
   });
 
@@ -196,8 +214,8 @@ describe("health-gated release deployment", () => {
 
     expect(result.marker).toEqual({ attemptId, sha, exitCode: 0, reloadPending: true });
     expect(result.commands).toContain("psql");
-    expect(result.commands.indexOf("pm2 start " + join(result.directory, ".deploy-current", "ecosystem.config.cjs") + " --only dcc-webhook"))
-      .toBeGreaterThan(result.commands.indexOf("curl "));
+    expect(result.commands.indexOf("webhook-reload")).toBeGreaterThan(result.commands.indexOf("curl "));
+    expect(result.commands).toContain("swap_webhook entered");
   });
 
   it("does not enter deployment stages until the inherited launch gate is released", async () => {
@@ -227,8 +245,11 @@ describe("health-gated release deployment", () => {
     // webhook reload failed, surfaced as a nonzero final marker.
     expect(result.status).toBe(0);
     expect(await readlink(result.current)).toContain(sha.slice(0, 8));
-    expect(result.commands.match(/pm2 start .*\--only dcc-webhook --update-env/g)).toHaveLength(1);
-    expect(result.marker).toEqual({ attemptId, sha, exitCode: 74 });
+    expect(result.commands).toContain("webhook-reload");
+    const { writeFileSync: wf75 } = await import("node:fs");
+    wf75("/tmp/fw-dump.log", result.commands);
+    wf75("/tmp/fw-marker.json", JSON.stringify(result.marker));
+    expect(result.marker).toEqual({ attemptId, sha, exitCode: 75 });
   });
 
   it("refuses a fetched head that no longer matches the protected target", async () => {

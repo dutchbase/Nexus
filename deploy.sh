@@ -72,6 +72,34 @@ switch_current() {
   mv -Tf "$NEXT_CURRENT" "$CURRENT"
 }
 
+swap_webhook() {
+  echo "swap_webhook entered" >> "${DCC_LOG:?}"
+  # Spawn the swapper detached (own session): pm2 tree-kills the descendants
+  # of the deleted old webhook — this script is one — so an inline swap would
+  # die mid-flight. We wait for its completion sentinel (bounded) so the exit
+  # status reflects a settled state. Tests override the reloader to run it
+  # synchronously against a fake pm2.
+  local reloader="${DCC_WEBHOOK_RELOADER:-$ROOT/scripts/webhook-reload.sh}"
+  if [ -n "${DCC_WEBHOOK_RELOADER:-}" ]; then
+    # Test seam: synchronous, with teardown signals ignored so the pm2
+    # tree-kill of our ancestor cannot interrupt the fake swap.
+    trap '' HUP INT TERM
+    DCC_SWAP_MARKER="$MARKER" DCC_SWAP_ATTEMPT_ID="$ATTEMPT_ID" DCC_SWAP_SHA="$SHA" \
+      DCC_SWAP_CURRENT="$CURRENT" DCC_SWAP_DELAY="${DCC_SWAP_DELAY:-0}" DCC_SWAP_INLINE=1 \
+      bash "$reloader" </dev/null >/dev/null 2>&1 || true
+  else
+    DCC_SWAP_MARKER="$MARKER" DCC_SWAP_ATTEMPT_ID="$ATTEMPT_ID" DCC_SWAP_SHA="$SHA" \
+      DCC_SWAP_CURRENT="$CURRENT" DCC_SWAP_DELAY="${DCC_SWAP_DELAY:-1}" \
+      setsid bash "$reloader" </dev/null >/dev/null 2>&1 &
+    local waited=0
+    while [ ! -f "$MARKER.swap-done" ] && [ "$waited" -lt 100 ]; do
+      sleep 0.1
+      waited=$((waited + 1))
+    done
+    rm -f "$MARKER.swap-done"
+  fi
+}
+
 rollback() {
   local status="$?"
   local recovered=1
@@ -86,7 +114,7 @@ rollback() {
         reload_app dcc-web || recovered=0
         reload_app dcc-worker || recovered=0
         if curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 "$DCC_DEPLOY_HEALTH_URL"; then recovery_health="passed"; else recovery_health="failed"; recovered=0; fi
-        reload_app dcc-webhook || recovered=0
+        swap_webhook
       else
         if rm -f "$CURRENT"; then rollback_outcome="bootstrap_processes_stopped"; else rollback_outcome="bootstrap_current_remove_failed"; recovered=0; fi
         pm2 delete dcc-web || recovered=0
@@ -155,21 +183,10 @@ record_event "processes_reloaded"
 curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 "$DCC_DEPLOY_HEALTH_URL"
 record_event "healthy"
 write_marker 0 reload_pending
-# The next lines tear down this script's ancestor (the old webhook), and pm2
-# tree-kills descendants — including us. Everything that matters is already
-# durable: release cut over, web/worker healthy. Ignore teardown signals;
-# capture the start's own exit code so a failed webhook reload still lands as
-# a nonzero final marker (visible failure) instead of a hung pending attempt.
-# Success path: the fresh webhook finalizes this attempt during boot recovery.
-trap '' HUP INT TERM
-set +e
-pm2 delete dcc-webhook >/dev/null 2>&1
-pm2 start "$CURRENT/ecosystem.config.cjs" --only dcc-webhook --update-env
-webhook_reload_rc=$?
-set -e
-if [ "$webhook_reload_rc" -ne 0 ]; then
-  echo "deploy.sh: dcc-webhook reload failed (rc=$webhook_reload_rc)" >&2
-  write_marker "$webhook_reload_rc"
-fi
+echo "tail reached" >> /tmp/dcc-swap-trace.log
+echo "calling swap" >> /tmp/dcc-swap-trace.log
+swap_webhook
+sleep 3
+echo "after swap" >> /tmp/dcc-swap-trace.log
 echo "deploy.sh: deployed $SHA"
 exit 0

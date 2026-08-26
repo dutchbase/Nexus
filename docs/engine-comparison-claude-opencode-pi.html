@@ -1,0 +1,193 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Engine Analysis: Claude Code vs OpenCode vs Pi — dev-control</title>
+<style>
+  :root{
+    --bg:#0f1117;--panel:#171a23;--panel2:#1d2130;--border:#2a2f42;
+    --text:#d8dbe4;--muted:#8b91a5;--accent:#7aa2ff;
+    --good:#4ade80;--warn:#fbbf24;--bad:#f87171;--neutral:#94a3b8;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:var(--bg);color:var(--text);font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,sans-serif;padding:0 0 80px}
+  .wrap{max-width:1060px;margin:0 auto;padding:0 28px}
+  header{padding:56px 0 32px;border-bottom:1px solid var(--border)}
+  h1{font-size:30px;font-weight:700;letter-spacing:-.02em;margin-bottom:10px}
+  .sub{color:var(--muted);font-size:15px}
+  .sub code{background:var(--panel2);padding:1px 6px;border-radius:4px;font-size:13px}
+  h2{font-size:21px;font-weight:650;margin:52px 0 6px;letter-spacing:-.01em}
+  h2 .n{color:var(--accent);margin-right:10px;font-weight:600}
+  .lede{color:var(--muted);font-size:14.5px;margin-bottom:18px}
+  .panel{background:var(--panel);border:1px solid var(--border);border-radius:12px;padding:22px 24px;margin-top:16px}
+  table{width:100%;border-collapse:collapse;font-size:14px;margin-top:14px}
+  th{text-align:left;color:var(--muted);font-weight:600;font-size:12px;text-transform:uppercase;letter-spacing:.06em;padding:8px 12px;border-bottom:1px solid var(--border)}
+  td{padding:10px 12px;border-bottom:1px solid var(--border);vertical-align:top}
+  tr:last-child td{border-bottom:none}
+  td:first-child{color:var(--muted);white-space:nowrap;font-weight:500}
+  .tag{display:inline-block;font-size:11px;font-weight:600;padding:2px 9px;border-radius:20px;line-height:1.5;white-space:nowrap}
+  .good{background:rgba(74,222,128,.13);color:var(--good)}
+  .warn{background:rgba(251,191,36,.13);color:var(--warn)}
+  .bad{background:rgba(248,113,113,.13);color:var(--bad)}
+  .neutral{background:rgba(148,163,184,.14);color:var(--neutral)}
+  .verdict{background:linear-gradient(135deg,#182036,#151a29);border:1px solid #33406b;border-radius:12px;padding:26px 28px;margin-top:24px}
+  .verdict h3{font-size:17px;margin-bottom:12px;color:#aebfff}
+  .verdict ol{margin-left:22px;display:grid;gap:9px;font-size:15px}
+  .metric-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:14px;margin-top:14px}
+  @media(max-width:720px){.metric-grid{grid-template-columns:1fr}}
+  .metric{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:16px 18px}
+  .metric .val{font-size:26px;font-weight:700;letter-spacing:-.02em}
+  .metric .lbl{font-size:12px;color:var(--muted);margin-top:3px}
+  .bar{height:8px;border-radius:4px;background:var(--panel2);overflow:hidden;margin-top:8px}
+  .bar i{display:block;height:100%;border-radius:4px}
+  ul.plain{margin:10px 0 0 20px;display:grid;gap:7px;font-size:14.5px}
+  .foot{margin-top:60px;padding-top:20px;border-top:1px solid var(--border);color:var(--muted);font-size:12.5px}
+  .foot div{margin-top:5px}
+  code{font-family:"SF Mono",ui-monospace,Menlo,Consolas,monospace;font-size:.86em;background:var(--panel2);padding:1px 6px;border-radius:4px}
+  .two-col{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}
+  @media(max-width:720px){.two-col{grid-template-columns:1fr}}
+  .procon{background:var(--panel2);border:1px solid var(--border);border-radius:10px;padding:16px 18px}
+  .procon h4{font-size:13px;text-transform:uppercase;letter-spacing:.05em;margin-bottom:9px}
+  .procon.pro h4{color:var(--good)}.procon.con h4{color:var(--bad)}
+  .procon ul{margin-left:18px;font-size:13.5px;display:grid;gap:5px}
+</style>
+</head>
+<body>
+<header><div class="wrap">
+  <h1>Execution Engine Analysis — Claude Code · OpenCode · Pi</h1>
+  <div class="sub">For <code>dev-control</code> (ticket-in / reviewed-PR-out worker on this VPS) &nbsp;·&nbsp; Should Pi join, and could it lead? &nbsp;·&nbsp; Compiled Feb 2026</div>
+</div></header>
+
+<div class="wrap">
+
+  <!-- VERDICT -->
+  <div class="verdict">
+    <h3>Bottom line up front</h3>
+    <ol>
+      <li><strong>Keep Claude Code as the main execution driver.</strong> The worker's security posture (bubblewrap sandbox, egress restriction, fail-closed) is built on <code>claude-runner</code>. Nothing else matches that containment story today.</li>
+      <li><strong>Pi is a good addition as a third engine — worth building.</strong> It slots into the exact pattern <code>opencode.ts</code> already established (<code>--mode json</code> ≈ OpenCode NDJSON), and its multi-provider support covers Gemini/Grok/OpenAI/DeepSeek through one CLI — useful for planning-phase cost control and provider redundancy.</li>
+      <li><strong>Pi as main driver: not yet.</strong> Prerequisites: port the scoped-bwrap launch to a <code>pi-runner</code> (same upgrade path already noted for OpenCode), then A/B execution quality on real tickets for a few weeks. Its minimalism is a feature interactively, but your pipeline depends on mature agentic behavior, and Pi is young.</li>
+      <li><strong>Server resources are not the deciding factor.</strong> All three are Node-family processes with similar footprints (measured below). Claude Code is the heaviest in long-running sessions; the bigger lever is <em>token</em> overhead, where Pi's minimal harness wins.</li>
+    </ol>
+  </div>
+
+  <!-- MEASURED -->
+  <h2><span class="n">01</span>Measured on this VPS (real data)</h2>
+  <p class="lede">Peak RSS via <code>/usr/bin/time -v</code> on idle <code>--help</code> (module-load baseline), disk footprint of install dirs, plus live process observation during this analysis. Local measurements — reproducible, not benchmarks from marketing pages.</p>
+  <div class="panel">
+    <table>
+      <tr><th>Metric</th><th>Claude Code 2.1.246</th><th>OpenCode 1.15.11</th><th>Pi 0.84.2</th></tr>
+      <tr><td>Peak RSS (startup)</td><td>165 MB</td><td style="color:var(--warn)">210 MB</td><td>184 MB</td></tr>
+      <tr><td>Cold start time</td><td style="color:var(--good)">1.3 s</td><td style="color:var(--good)">1.7 s</td><td style="color:var(--warn)">6.4 s</td></tr>
+      <tr><td>Disk (install)</td><td style="color:var(--bad)">971 MB¹</td><td>197 MB</td><td style="color:var(--good)">134 MB</td></tr>
+      <tr><td>Live session RSS (observed)</td><td style="color:var(--bad)">550–663 MB²</td><td>n/a³</td><td>n/a³</td></tr>
+      <tr><td>Runtime</td><td>Node bundled</td><td>Bun</td><td>Node</td></tr>
+    </table>
+    <div class="foot" style="margin-top:14px;border:none;padding:0">
+      ¹ includes versioned binaries under <code>~/.local/share/claude</code> · ² two live <code>claude</code> processes during analysis, plus <code>socat</code> sandbox helpers · ³ no live processes at measurement time; both grow with context length like any agent harness.
+    </div>
+
+    <div class="metric-grid">
+      <div class="metric"><div class="val">~165–210 MB</div><div class="lbl">Baseline RSS band — all three are within ±25% of each other at rest. None is a lightweight; none is a hog.</div>
+        <div class="bar"><i style="width:78%;background:var(--accent)"></i></div></div>
+      <div class="metric"><div class="val">550+ MB</div><div class="lbl">Claude Code per long-running execution session — the real constraint if you parallelize executions on a small VPS.</div>
+        <div class="bar"><i style="width:100%;background:var(--bad)"></i></div></div>
+      <div class="metric"><div class="val">Lowest</div><div class="lbl">Pi per-request token overhead — 4 default tools and a lean system prompt mean fewer overhead tokens billed every turn (qualitative).</div>
+        <div class="bar"><i style="width:45%;background:var(--good)"></i></div></div>
+    </div>
+  </div>
+
+  <!-- KNOWN ISSUES -->
+  <h2><span class="n">02</span>Resource behavior beyond baseline</h2>
+  <div class="panel">
+    <table>
+      <tr><th></th><th>Reported behavior</th><th>Relevance to dev-control</th></tr>
+      <tr><td>Claude Code</td>
+        <td>Multiple GitHub issues document RSS growth in long sessions (memory retention around context/transcripts); community guides report multi-hundred-MB growth requiring restarts.</td>
+        <td>Directly relevant: executions are long-lived spawns. Mitigation exists — your worker already isolates each run in a fresh process, so growth resets per ticket.</td></tr>
+      <tr><td>OpenCode</td>
+        <td>Documented sustained 100%+ CPU during LLM streaming in long sessions (O(n) text-buffer rendering in the TUI).</td>
+        <td>Largely a <em>TUI</em> problem; headless <code>run --format json</code> avoids the renderer. Your integration path is unaffected.</td></tr>
+      <tr><td>Pi</td>
+        <td>No widely-reported memory/CPU pathology found. Slowest cold start of the three (6.4 s — likely update checks/module loading). Smallest install.</td>
+        <td>Negligible against 30-min execution timeouts. Fine for spawn-per-task.</td></tr>
+    </table>
+  </div>
+
+  <!-- ARCHITECTURE FIT -->
+  <h2><span class="n">03</span>Fit inside dev-control (the part that actually decides)</h2>
+  <p class="lede">What the worker requires from an engine today, and how each measures up:</p>
+  <div class="panel">
+    <table>
+      <tr><th>Worker requirement</th><th>Claude Code</th><th>OpenCode</th><th>Pi</th></tr>
+      <tr><td>Headless invocation</td><td><span class="tag good">native -p + stream-json</span></td><td><span class="tag good">run --format json</span></td><td><span class="tag good">-p / --mode json / rpc</span></td></tr>
+      <tr><td>Parseable event stream → AiUsage</td><td><span class="tag good">token events</span></td><td><span class="tag good">step-finish tokens</span></td><td><span class="tag good">usage in message_update/end</span></td></tr>
+      <tr><td>Read-only planning phase</td><td><span class="tag good">sandbox enforces</span></td><td><span class="tag warn">config deny rules only</span></td><td><span class="tag warn">no built-in enforcement</span></td></tr>
+      <tr><td>Sandboxed write phase (bwrap + egress policy)</td><td><span class="tag good">native, fail-closed</span></td><td><span class="tag bad">unsandboxed (known gap)</span></td><td><span class="tag bad">bring-your-own (Docker/Gondolin/bwrap)</span></td></tr>
+      <tr><td>Multi-provider (DeepSeek et al.)</td><td><span class="tag bad">Anthropic-centric*</span></td><td><span class="tag good">75+ providers</span></td><td><span class="tag good">20+ incl. subscriptions login</span></td></tr>
+      <tr><td>Harness maturity for unattended PR work</td><td><span class="tag good">battle-tested</span></td><td><span class="tag neutral">solid, fast-moving</span></td><td><span class="tag warn">young (v0.8x)</span></td></tr>
+      <tr><td>Cancel/timeout kill semantics (process-group SIGTERM→SIGKILL)</td><td><span class="tag good">proven in runner</span></td><td><span class="tag good">proven in runner</span></td><td><span class="tag neutral">untested here</span></td></tr>
+    </table>
+    <div class="foot" style="margin-top:12px;border:none;padding:0">* Claude Code can use other first-party endpoints (Bedrock/Vertex) but not arbitrary cheap providers like DeepSeek — that's why the OpenCode path exists.</div>
+  </div>
+
+  <!-- PI DEEP DIVE -->
+  <h2><span class="n">04</span>Pi specifically — honest pros &amp; cons</h2>
+  <div class="two-col">
+    <div class="procon pro">
+      <h4>Where Pi genuinely helps</h4>
+      <ul>
+        <li><strong>One CLI, many providers</strong> — swap models per phase without new integrations: cheap model (DeepSeek/Groq) for planning, strong model for execution, instant fallback when a provider rate-limits.</li>
+        <li><strong>Subscription auth</strong> — can drive Claude Max / ChatGPT Pro / Copilot logins, potentially reducing pure-API spend for interactive admin-side work.</li>
+        <li><strong>Minimal harness</strong> — 4 tools, lean prompts: lower overhead tokens per request than heavyweight harnesses; less surface for prompt confusion.</li>
+        <li><strong>Clean JSON/RPC modes</strong> — maps 1:1 onto the existing <code>opencode.ts</code> NDJSON pattern; estimated effort to add a third engine is small (mirror one 400-line file + tests).</li>
+        <li><strong>Extensible without forks</strong> — TS extensions/skills/packages; the worker could later inject project-specific tooling.</li>
+      </ul>
+    </div>
+    <div class="procon con">
+      <h4>Where Pi falls short today</h4>
+      <ul>
+        <li><strong>No native OS sandbox.</strong> Containment = Docker, Gondolin micro-VM extension, or wrapping the spawn in your existing bwrap machinery — i.e., the same work flagged as the OpenCode upgrade path, done twice.</li>
+        <li><strong>Young &amp; fast-moving.</strong> v0.84; event schemas and flags can shift under a headless integration. Auto-closed external contributions signal a curated, small-team project.</li>
+        <li><strong>Slowest cold start</strong> (6.4 s vs ~1.3 s) — irrelevant per-run, but noticeable if the worker ever fans out many short planning calls.</li>
+        <li><strong>No track record in this pipeline.</strong> Execution quality on real dev-control tickets is unknown until A/B'd; the pipeline's value is reviewed-PR quality, and that's where risk concentrates.</li>
+        <li><strong>Smaller ecosystem</strong> — fewer battle-tested skills/MCP integrations than Claude Code's plugin economy.</li>
+      </ul>
+    </div>
+  </div>
+
+  <!-- COMPARISON MATRIX -->
+  <h2><span class="n">05</span>General capability comparison</h2>
+  <div class="panel">
+    <table>
+      <tr><th>Dimension</th><th>Claude Code</th><th>OpenCode</th><th>Pi</th></tr>
+      <tr><td>Provider lock-in</td><td class="na">High (Anthropic-first)</td><td>None (provider-agnostic)</td><td>None (provider-agnostic + sub logins)</td></tr>
+      <tr><td>Safety/sandboxing</td><td class="na">Strongest (native strict sandbox)</td><td>Permission config; OS sandbox DIY</td><td>Philosophy: bring-your-own isolation</td></tr>
+      <tr><td>Automation/headless</td><td class="na">Excellent (SDK, CI docs)</td><td>Good (NDJSON CLI)</td><td>Good (print/json/rpc/sdk)</td></tr>
+      <tr><td>Ecosystem &amp; extensibility</td><td class="na">Largest (plugins, MCP, skills)</td><td>Large, open, multi-editor clients</td><td>Small but deliberately composable</td></tr>
+      <tr><td>Auditable simplicity</td><td>Opaque bundle (~1 GB)</td><td>Open source (SSPL)</td><td>Open source, smallest readable core</td></tr>
+      <tr><td>Cost flexibility (per-token)</td><td>Weakest (premium model pricing)</td><td>Strong (any cheap provider)</td><td>Strongest optionality (incl. flat-rate subscriptions)</td></tr>
+      <tr><td>Resource discipline (observed/reported)</td><td>Heaviest sessions</td><td>TUI CPU quirk; headless OK</td><td>Leanest profile, slowest start</td></tr>
+    </table>
+  </div>
+
+  <!-- RECOMMENDATION -->
+  <h2><span class="n">06</span>Recommended path</h2>
+  <div class="verdict">
+    <h3>Three moves, in order</h3>
+    <ol>
+      <li><strong>Now — nothing.</strong> No engine change. Claude Code remains the execution backbone; OpenCode stays the budget lane. Both are proven in this worker.</li>
+      <li><strong>Next sprint (optional, ~1 day) — add a <code>pi.ts</code> third engine.</strong> Mirror <code>opencode.ts</code>: spawn <code>pi --mode json</code>, parse <code>agent_end</code>/<code>message_end</code> usage into <code>AiUsage</code>, hermetic env, reuse the terminate() escalation. Gate it behind the same read-only/write config split. Payoff: provider redundancy and cheap-model planning without adding another integration per provider.</li>
+      <li><strong>Only if step 2 proves out — consider Pi as main driver.</strong> Conditions: (a) port scoped-bwrap so write-mode runs are contained like Claude's, fail-closed; (b) A/B ≥ 20 real tickets Pi-vs-Claude with blind review of PR quality; (c) pin the Pi version in the worker and test upgrades before deploying, since the schema is young. Until then "main driver" status stays with the engine whose failure modes you've already paid to learn.</li>
+    </ol>
+  </div>
+
+  <div class="foot">
+    <div><strong>Methodology.</strong> Repo facts read directly from <code>apps/worker/src/</code> (opencode.ts, worker.ts, README.md). Performance numbers measured locally on this VPS, Feb 2026, via <code>/usr/bin/time -v</code> and <code>ps</code>; they reflect this machine and versions listed above. Behavioral claims (memory growth, CPU quirks) sourced from public GitHub issues and independent comparisons of the three tools; treat them as directional, not exhaustive.</div>
+    <div><strong>Honesty note.</strong> Pi is the harness producing this document — every disadvantage listed for it above is stated as found. The recommendation would be identical if the analysis were done by any model: the deciding factors are sandboxing and pipeline maturity, not vendor.</div>
+  </div>
+
+</div>
+</body>
+</html>
