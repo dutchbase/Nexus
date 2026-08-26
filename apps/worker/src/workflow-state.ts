@@ -141,7 +141,10 @@ export async function recoverExpiredWorkflowState(inTransaction: Transaction) {
       );
     }
 
-    const deliveries = jobs.length === 100 ? [] : (await client.query(
+    // Always run delivery recovery with its own budget — gating it on the jobs
+    // page having spare room starved stuck deliveries whenever ≥100 jobs
+    // expired in one pass.
+    const deliveries = (await client.query(
       `WITH expired AS (
          SELECT id FROM notification_deliveries
          WHERE status='sending' AND lease_expires_at <= now()
@@ -155,7 +158,7 @@ export async function recoverExpiredWorkflowState(inTransaction: Transaction) {
            error_message='Worker lease expired',updated_at=now()
        FROM expired WHERE nd.id=expired.id
        RETURNING nd.id,nd.status`,
-      [100 - jobs.length],
+      [50],
     )).rows;
 
     for (const delivery of deliveries) {

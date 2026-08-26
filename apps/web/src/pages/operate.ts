@@ -90,6 +90,10 @@ function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: bo
           ${reasoningLevels.map(r => `<option value="${r}" ${r === aiReviewSettings?.default_reasoning_level ? "selected" : ""}>${escapeHtml(r)}</option>`).join("")}
         </select>
       </label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:13.5px"><input type="checkbox" name="auto_review_enabled" ${aiReviewSettings?.auto_review_enabled ? "checked" : ""}>
+        <span>Automatically review every open pull request (re-reviews on new commits)</span></label>
+      <label style="display:flex;gap:8px;align-items:center;font-size:13.5px"><input type="checkbox" name="auto_merge_on_approve" ${aiReviewSettings?.auto_merge_on_approve ? "checked" : ""}>
+        <span>Merge automatically when the AI review approves (still passes the merge policy gate)</span></label>
       <div style="display:flex;gap:8px;margin-top:8px">
         <button class="button primary" type="submit">Save</button>
         <div class="error" style="flex:1;color:var(--t-danger);align-self:center;font-size:13px"></div>

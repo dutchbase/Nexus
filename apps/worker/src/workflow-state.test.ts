@@ -128,8 +128,8 @@ test("recovers an expired conflict job by its recorded job identifier", async ()
   ]);
 });
 
-test("shares the 100-row recovery budget across jobs and deliveries", async () => {
-  const jobs = Array.from({ length: 37 }, (_, index) => ({
+test("always runs delivery recovery with its own budget, even when the jobs page is full", async () => {
+  const jobs = Array.from({ length: 100 }, (_, index) => ({
     id: `job-${index}`, type: "project.validate", status: "queued", payload_json: {},
   }));
   const query = vi.fn(async (sql: string): Promise<Result> => {
@@ -141,9 +141,11 @@ test("shares the 100-row recovery budget across jobs and deliveries", async () =
   const client = { query };
   const inTransaction = (async (callback: (client: any) => unknown) => callback(client)) as Transaction;
 
-  await expect(recoverExpiredWorkflowState(inTransaction)).resolves.toEqual({ jobs: 37, deliveries: 1 });
+  await expect(recoverExpiredWorkflowState(inTransaction)).resolves.toEqual({ jobs: 100, deliveries: 1 });
 
-  expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE notification_deliveries nd"), [63]);
+  // A full jobs page must not starve stuck deliveries: the delivery sweep
+  // always gets its own LIMIT.
+  expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE notification_deliveries nd"), [50]);
 });
 
 test("fails an exhausted recovered job and reconciles its run, attempt, ticket, and history", async () => {

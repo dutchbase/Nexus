@@ -42,6 +42,7 @@ function uploadRequest() {
   return {
     method: "POST",
     headers: { "content-type": `multipart/form-data; boundary=${boundary}` },
+    socket: { remoteAddress: "127.0.0.1" },
     async *[Symbol.asyncIterator]() { yield body; },
   } as any;
 }

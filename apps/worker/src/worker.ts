@@ -1,8 +1,10 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import {
   assertSubscriptionOnlyEnvironment, ClaudeAuthError, ClaudePlanningError, invokePlanningClaude,
   ClaudeExecutionError, invokeExecutionClaude, parsePlanMarkdown, preflightClaudeAuthentication,
@@ -14,12 +16,12 @@ import {
   claimNotificationDelivery, completeNotificationDelivery, failNotificationDelivery, renewJobLease,
   renewNotificationDeliveryLease, recordWorkerHeartbeat, WORKER_HEARTBEAT_INTERVAL_MS,
   planningPromptInputs, renderConflictResolutionPrompt, renderFollowUpTicketPrompt, renderPrReviewPrompt, resolvedPromptFor, snapshotPrompt, syncOpenPullRequests,
-  createAiInvocation, isDeepSeekModel,
+  createAiInvocation, enqueueJob, isDeepSeekModel,
 } from "@dcc/domain";
 import { createNotificationProvider, redactNotificationError } from "../../../packages/notification-provider/src/index.ts";
 import {
   abortMerge, assertAttemptResultCommit, assertNoConflictMarkers, commitExecutionChanges, conflictedFiles, createConflictResolutionWorktree, createExecutionWorktree,
-  createPullRequestReviewWorktree, mergeBaseIntoWorktree, pushExecutionBranch, validateEffectiveWorktree,
+  createPullRequestReviewWorktree, mergeBaseIntoWorktree, pushExecutionBranch, removeContainedWorktreePath, validateEffectiveWorktree,
   stageConflictResolutionPaths, validateExecutionWorktree, WorktreeValidationError, worktreeDiff,
 } from "../../../packages/git-runner/src/index.ts";
 import {
@@ -55,6 +57,7 @@ const dataRoot = artifactDataRoot(REPO_ROOT);
 const legacyDataRoot = legacyArtifactDataRoot(REPO_ROOT);
 
 const workerId = `worker-${randomUUID()}`;
+const execFilePromisified = promisify(execFile);
 const planningJobTypes = ["planning.generate", "planning.revise"];
 const executionJobTypes = ["execution.run", "execution.repair"];
 const publicationJobTypes = ["pull-request.retry"];
@@ -90,6 +93,11 @@ process.on("SIGINT", () => { stopping = true; activeExecutionCancellation?.abort
 
 function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+async function pruneProjectWorktrees(repositoryPath: string) {
+  const repository = await realpath(repositoryPath);
+  await execFilePromisified("git", ["-C", repository, "worktree", "prune"]);
 }
 
 async function finalizeRegisteredArtifact(staged: StagedArtifact) {
@@ -672,15 +680,22 @@ async function runExecution(job: any, lease: LeaseGuard) {
   let lastPhase: string | null = null;
   let lastHeartbeatAt = 0;
   const cancellationPoll = setInterval(async () => {
-    const dueForHeartbeat = Date.now() - lastHeartbeatAt >= RUN_HEARTBEAT_INTERVAL_MS;
-    const row = dueForHeartbeat
-      ? (await pool.query(
-          `UPDATE agent_runs SET heartbeat_at=now(), phase=COALESCE($2,phase) WHERE id=$1 RETURNING status`,
-          [runId, lastPhase],
-        )).rows[0]
-      : (await pool.query("SELECT status FROM agent_runs WHERE id=$1", [runId])).rows[0];
-    if (dueForHeartbeat) lastHeartbeatAt = Date.now();
-    if (row?.status === "cancellation_requested") cancellation.abort();
+    // ponytail: an async setInterval callback that rejects kills the whole
+    // worker process (unhandled rejection) — e.g. one transient DB error
+    // during a 30-minute execution. Same guard as the planning poll below.
+    try {
+      const dueForHeartbeat = Date.now() - lastHeartbeatAt >= RUN_HEARTBEAT_INTERVAL_MS;
+      const row = dueForHeartbeat
+        ? (await pool.query(
+            `UPDATE agent_runs SET heartbeat_at=now(), phase=COALESCE($2,phase) WHERE id=$1 RETURNING status`,
+            [runId, lastPhase],
+          )).rows[0]
+        : (await pool.query("SELECT status FROM agent_runs WHERE id=$1", [runId])).rows[0];
+      if (dueForHeartbeat) lastHeartbeatAt = Date.now();
+      if (row?.status === "cancellation_requested") cancellation.abort();
+    } catch (error) {
+      console.error(`execution cancellation poll failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
   }, 250);
   let sequence = 0;
   let usedAgent = false;
@@ -1206,6 +1221,11 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     const isDeepSeek = isDeepSeekModel(model);
     const deepSeekApiKey = isDeepSeek ? deepSeekKeyOrThrow() : "";
     if (!isDeepSeek) await preflightClaudeAuthentication();
+    if (payload.target_branch !== undefined) {
+      if (typeof payload.target_branch !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(payload.target_branch)) {
+        throw new Error("invalid target_branch");
+      }
+    }
     if (payload.mode === "review_and_merge" && payload.target_branch && payload.target_branch !== pullRequest.base_branch) {
       await lease.assertOwned();
       await updatePullRequestBase(owner, repo, pullRequest.number, payload.target_branch);
@@ -1337,6 +1357,35 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
         createComment: (body) => createPullRequestComment(owner, repo, pullRequest.number, body),
         assertOwned: lease.assertOwned,
       });
+
+      // Close the review→merge loop: an approved verdict enqueues a merge
+      // pinned to the exact reviewed head SHA, so the policy-gated merge
+      // job still runs and any concurrent push turns the attempt into a
+      // head_changed refusal instead of merging blind.
+      const finalReview = (await pool.query("SELECT parsed_verdict FROM pr_ai_reviews WHERE id=$1", [payload.pr_ai_review_id])).rows[0];
+      if (finalReview?.parsed_verdict === "approved"
+        && (payload.mode === "review_and_merge" || settings.auto_merge_on_approve)) {
+        await lease.assertOwned();
+        const mergeJob = await enqueueJob({
+          type: "github.merge_pull_request",
+          payload: {
+            actor_id: existingReview.created_by ?? null,
+            origin: "pr_ai_review",
+            pr_ai_review_id: payload.pr_ai_review_id,
+            pull_request_id: payload.pull_request_id,
+            expected_head_sha: immutableReview.headCommit,
+            ...(pullRequest.current_policy_snapshot_id ? { policy_snapshot_id: pullRequest.current_policy_snapshot_id } : {}),
+          },
+          idempotencyKey: `pr-auto-merge:${payload.pull_request_id}:${immutableReview.headCommit}`,
+          maxAttempts: 3,
+        });
+        // enqueueJob's ON CONFLICT returns the pre-existing row unchanged:
+        // a terminal collision (e.g. earlier refused attempts for this exact
+        // head) means nothing will run — say so instead of failing silently.
+        if (mergeJob && !["queued", "running"].includes(mergeJob.status)) {
+          console.error(`auto-merge skipped for PR ${payload.pull_request_id}: prior merge job ${mergeJob.id} is ${mergeJob.status}; use the manual Approve & merge action`);
+        }
+      }
     } finally {
       await rm(temporary, { recursive: true, force: true });
     }
@@ -1439,6 +1488,9 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
   if (existing.status !== "running") return;
 
   let runId: string | null = null;
+  // Hoisted so the catch path can reclaim the registered worktree on any
+  // failure; the success path deliberately keeps it as a recorded artifact.
+  let conflictWorktree: Awaited<ReturnType<typeof createConflictResolutionWorktree>> | null = null;
   try {
     await lease.assertOwned();
 
@@ -1456,7 +1508,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
     const conflictDeepSeekKey = conflictIsDeepSeek ? deepSeekKeyOrThrow() : "";
     if (!conflictIsDeepSeek) await preflightClaudeAuthentication();
 
-    const worktree = await createConflictResolutionWorktree({
+    conflictWorktree = await createConflictResolutionWorktree({
       repositoryPath: project.repository_path,
       headBranch: pullRequest.head_branch,
       baseBranch: pullRequest.base_branch,
@@ -1465,6 +1517,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
       pullRequestNumber: pullRequest.number,
       conflictResolutionId: payload.pr_conflict_resolution_id,
     });
+    const worktree = conflictWorktree;
     const merge = await mergeBaseIntoWorktree(worktree.worktreePath, pullRequest.base_branch);
 
     if (!merge.conflicted) {
@@ -1477,7 +1530,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
          WHERE id=$1`,
         [payload.pr_conflict_resolution_id],
       );
-      await rm(worktree.worktreePath, { recursive: true, force: true }).catch((error) => console.error(`conflict worktree cleanup failed: ${error.message}`));
+      await conflictWorktree.cleanup();
       return;
     }
 
@@ -1603,6 +1656,7 @@ async function runPrConflictResolution(job: any, lease: LeaseGuard) {
       await rm(temporary, { recursive: true, force: true });
     }
   } catch (error: any) {
+    if (conflictWorktree) await conflictWorktree.cleanup().catch(() => {});
     await lease.assertOwned();
     if (runId) {
       await finalizeAiUsage(runId, error);
@@ -1638,6 +1692,98 @@ async function deliverDueNotification() {
   );
 }
 
+// Auto-review: enqueue an AI review for every open PR whose current head SHA
+// has never been reviewed (or queued). Dedup key is pull_request_id + head_sha,
+// so a force-push/new commit naturally triggers a fresh review and unchanged
+// PRs are skipped forever. Capped per pass to avoid herding after a big import.
+async function autoEnqueuePullRequestReviews() {
+  const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
+  if (!settings?.auto_review_enabled) return;
+  const candidates = (await pool.query(
+    `SELECT pr.id, pr.head_sha
+     FROM pull_requests pr
+     WHERE pr.provider='github' AND pr.state='open' AND pr.head_sha IS NOT NULL
+       AND NOT EXISTS (
+         -- Any prior AUTO-review job for this exact head (any status) blocks
+         -- re-enqueue: otherwise a terminally FAILED job (no raw_output, so
+         -- reviewed_head_sha stays NULL) would spawn a fresh 'running'
+         -- pr_ai_reviews row every sync pass, forever.
+         SELECT 1 FROM jobs j
+         WHERE j.idempotency_key = 'pr-auto-review:' || pr.id::text || ':' || pr.head_sha
+       )
+       AND NOT EXISTS (
+         -- No other review of this PR may be in flight, whatever triggered it.
+         SELECT 1 FROM jobs j
+         WHERE j.type='pr.ai_review' AND j.payload_json->>'pull_request_id'=pr.id::text
+           AND j.status IN ('queued','running')
+       )
+       AND NOT EXISTS (
+         -- This exact head was already reviewed to publication.
+         SELECT 1 FROM pr_ai_reviews r
+         WHERE r.pull_request_id=pr.id AND r.reviewed_head_sha=pr.head_sha
+       )
+     ORDER BY pr.updated_at DESC
+     LIMIT 5`,
+  )).rows;
+  for (const pr of candidates) {
+    try {
+      await inTransaction(async (client) => {
+        const row = (await client.query(
+          `INSERT INTO pr_ai_reviews (pull_request_id, mode, status, model, reasoning_level)
+           VALUES ($1,'review_only','running',$2,$3) RETURNING id`,
+          [pr.id, settings.default_model, settings.default_reasoning_level],
+        )).rows[0];
+        await enqueueJob({
+          type: "pr.ai_review",
+          payload: {
+            pr_ai_review_id: row.id,
+            pull_request_id: pr.id,
+            mode: "review_only",
+            model: settings.default_model,
+            reasoning_level: settings.default_reasoning_level,
+          },
+          idempotencyKey: `pr-auto-review:${pr.id}:${pr.head_sha}`,
+          maxAttempts: 3,
+        }, client);
+      });
+    } catch (error) {
+      console.error(`auto-review enqueue failed for ${pr.id}: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+}
+
+// Reclaim worktrees left behind when the worker died between creation and the
+// cleanup: registered paths of runs that finished ≥10 min ago (the delay keeps
+// the sweep away from a run whose publication is still finishing).
+// Containment-checked removal + prune on every project repository.
+async function sweepOrphanedManagedWorktrees() {
+  const stale = (await pool.query(
+    `SELECT DISTINCT ar.working_directory AS dir
+     FROM agent_runs ar
+     WHERE ar.status IN ('completed','failed','cancelled')
+       AND ar.finished_at IS NOT NULL AND ar.finished_at < now() - interval '10 minutes'
+       AND ar.working_directory LIKE '%/worktrees/%'
+       -- Tight prefixes: execution worktrees (<root>/<slug>/<ticket>/<n>) and
+       -- their lifecycle GC must never match this sweep.
+       AND (ar.working_directory LIKE '%/pr-%-review-%' OR ar.working_directory LIKE '%pr-%conflict-resolution%')`,
+  )).rows;
+  if (!stale.length) return;
+  const repositories = (await pool.query("SELECT repository_path FROM projects")).rows.map((row: any) => row.repository_path);
+  for (const { dir } of stale as Array<{ dir: string }>) {
+    try {
+      const existed = await removeContainedWorktreePath(dataRoot, dir);
+      if (!existed) continue;
+      for (const repository of repositories) {
+        try { await pruneProjectWorktrees(repository); } catch {}
+      }
+      // Deregister so the sweep converges instead of re-visiting forever.
+      await pool.query("UPDATE agent_runs SET working_directory=NULL WHERE working_directory=$1", [dir]);
+    } catch (error) {
+      console.error(`worktree sweep failed for ${dir}: ${error instanceof Error ? error.message : error}`);
+    }
+  }
+}
+
 while (!stopping) {
   if (Date.now() - lastWorkerHeartbeat >= WORKER_HEARTBEAT_INTERVAL_MS) {
     lastWorkerHeartbeat = Date.now();
@@ -1651,11 +1797,17 @@ while (!stopping) {
   }
   if (Date.now() - lastSessionCleanup >= 60_000) {
     lastSessionCleanup = Date.now();
-    await runSessionCleanup(pool);
+    try { await runSessionCleanup(pool); }
+    catch (error) { console.error(`session cleanup failed: ${error instanceof Error ? error.message : "unknown error"}`); }
+    try { await sweepOrphanedManagedWorktrees(); }
+    catch (error) { console.error(`worktree sweep failed: ${error instanceof Error ? error.message : "unknown error"}`); }
   }
   if (Date.now() - lastPullRequestSync >= 2500) {
     lastPullRequestSync = Date.now();
-    await syncOpenPullRequests();
+    try { await syncOpenPullRequests(); }
+    catch (error) { console.error(`pull-request sync pass failed: ${error instanceof Error ? error.message : "unknown error"}`); }
+    try { await autoEnqueuePullRequestReviews(); }
+    catch (error) { console.error(`auto-review enqueue pass failed: ${error instanceof Error ? error.message : "unknown error"}`); }
   }
   if (Date.now() - lastNotificationDelivery >= 1000) {
     lastNotificationDelivery = Date.now();
@@ -1667,14 +1819,21 @@ while (!stopping) {
   }
   if (Date.now() - lastGithubImport >= 5 * 60 * 1000) {
     lastGithubImport = Date.now();
-    const projects = (await pool.query(
-      "SELECT * FROM projects WHERE github_owner IS NOT NULL AND github_repository IS NOT NULL",
-    )).rows;
-    for (const project of projects) {
-      try { await importGithubPullRequests(pool, project); }
-      catch (error) { console.error(`github import failed for ${project.name}:`, error); }
+    try {
+      const projects = (await pool.query(
+        "SELECT * FROM projects WHERE github_owner IS NOT NULL AND github_repository IS NOT NULL",
+      )).rows;
+      for (const project of projects) {
+        try { await importGithubPullRequests(pool, project); }
+        catch (error) { console.error(`github import failed for ${project.name}:`, error); }
+      }
+    } catch (error) {
+      console.error(`github import pass failed: ${error instanceof Error ? error.message : "unknown error"}`);
     }
-    const probeProject = projects.find((project) => project.github_owner && project.github_repository);
+    const allProjects = (await pool.query(
+      "SELECT github_owner, github_repository FROM projects WHERE github_owner IS NOT NULL AND github_repository IS NOT NULL LIMIT 1",
+    ).catch(() => ({ rows: [] as any[] }))).rows;
+    const probeProject = allProjects[0] && { github_owner: allProjects[0].github_owner, github_repository: allProjects[0].github_repository };
     try {
       const capability = probeProject
         ? await probeGitHubCapability(probeProject.github_owner, probeProject.github_repository)
@@ -1697,14 +1856,17 @@ while (!stopping) {
       }
     }
   }
-  let job = await claimJob(workerId, ["project.validate", ...publicationJobTypes, ...providerJobTypes]);
+  let job = await claimJob(workerId, ["project.validate", ...publicationJobTypes, ...providerJobTypes]).catch((error) => {
+    console.error(`job claim failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    return null;
+  });
   if (!job) {
-    const waiting = (await pool.query(
+    const waiting = await pool.query(
       "SELECT 1 FROM jobs WHERE status='queued' AND type=ANY($1::text[]) LIMIT 1",
       [[...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes]],
-    )).rowCount;
+    ).then((result) => result.rowCount).catch(() => 0);
     if (waiting && (await subscriptionPreflightOrRefuse())) {
-      job = await claimJob(workerId, [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes]);
+      job = await claimJob(workerId, [...planningJobTypes, ...executionJobTypes, ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes]).catch(() => null);
     }
   }
   if (!job) {

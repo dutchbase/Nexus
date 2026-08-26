@@ -1,8 +1,9 @@
 import type pg from "pg";
 import {
-  approveAndMergePullRequest, importGithubPullRequests, syncOpenPullRequests, syncPullRequest,
+  approveAndMergePullRequest, importGithubPullRequests, PullRequestMergeError, syncOpenPullRequests, syncPullRequest,
 } from "@dcc/domain";
 import { mergeBranch } from "@dcc/github-provider";
+import { assertRemoteBranchName, lsRemoteHeads, previewRemoteBranchMerge } from "../../../packages/git-runner/src/index.ts";
 
 export const providerJobTypes = [
   "github.sync_open",
@@ -10,6 +11,7 @@ export const providerJobTypes = [
   "github.import",
   "github.merge_pull_request",
   "github.merge_branches",
+  "github.merge_preview",
 ] as const;
 
 type ProviderJobType = typeof providerJobTypes[number];
@@ -30,7 +32,7 @@ function required(payload: Record<string, unknown>, key: string) {
 async function audit(
   db: Database,
   job: ProviderJob,
-  actorId: string,
+  actorId: string | null,
   action: string,
   entityType: string,
   entityId: string | null,
@@ -49,7 +51,10 @@ export async function runProviderJob(
   db: Database,
   assertOwned: () => Promise<void> = async () => {},
 ): Promise<void> {
-  const actorId = required(job.payload_json, "actor_id");
+  // Worker-originated jobs (auto-merge after an approved AI review) have no
+  // admin actor; audit rows keep actor_id NULL for them.
+  const rawActorId = job.payload_json.actor_id;
+  const actorId = typeof rawActorId === "string" && rawActorId.trim() ? rawActorId.trim() : null;
 
   if (job.type === "github.sync_open") {
     await assertOwned();
@@ -62,7 +67,7 @@ export async function runProviderJob(
   if (job.type === "github.sync_one") {
     const pullRequestId = required(job.payload_json, "pull_request_id");
     await assertOwned();
-    await syncPullRequest(pullRequestId, "admin", actorId, assertOwned);
+    await syncPullRequest(pullRequestId, "admin", actorId ?? undefined, assertOwned);
     await assertOwned();
     await audit(db, job, actorId, "github.sync_one", "pull_request", pullRequestId, {});
     return;
@@ -94,31 +99,93 @@ export async function runProviderJob(
     const expectedPolicySnapshotId = typeof job.payload_json.policy_snapshot_id === "string" && job.payload_json.policy_snapshot_id.trim()
       ? job.payload_json.policy_snapshot_id.trim() : undefined;
     await assertOwned();
-    await approveAndMergePullRequest(
-      db as pg.Pool,
-      {
-        pullRequestId, jobId: job.id, actor: { type: "admin", id: actorId },
-        expectedHeadSha, expectedPolicySnapshotId,
-      },
-      assertOwned,
-    );
-    await assertOwned();
-    await audit(db, job, actorId, "github.merge_pull_request", "pull_request", pullRequestId, {
-      expected_head_sha: expectedHeadSha,
-      ...(expectedPolicySnapshotId ? { policy_snapshot_id: expectedPolicySnapshotId } : {}),
-    });
+    try {
+      const mergeResult = await approveAndMergePullRequest(
+        db as pg.Pool,
+        {
+          pullRequestId, jobId: job.id, actor: { type: "admin", id: actorId },
+          expectedHeadSha, expectedPolicySnapshotId,
+        },
+        assertOwned,
+      );
+      await persistJobResult(db, job.id, { outcome: "merged", ...(mergeResult ?? {}) });
+      await audit(db, job, actorId, "github.merge_pull_request", "pull_request", pullRequestId, {
+        expected_head_sha: expectedHeadSha,
+        ...(mergeResult?.mergedSha ? { merged_sha: mergeResult.mergedSha } : {}),
+        ...(expectedPolicySnapshotId ? { policy_snapshot_id: expectedPolicySnapshotId } : {}),
+      });
+    } catch (error) {
+      const code = error instanceof PullRequestMergeError ? error.code : undefined;
+      if (code) await persistJobResult(db, job.id, { outcome: "refused", refusal_code: code });
+      throw error;
+    }
     return;
   }
 
-  const projectId = required(job.payload_json, "project_id");
-  const head = required(job.payload_json, "head");
-  const base = required(job.payload_json, "base");
-  const project = (await db.query("SELECT * FROM projects WHERE id=$1", [projectId])).rows[0];
-  if (!project?.github_owner || !project.github_repository) throw new Error("project has no GitHub repository configured");
-  await assertOwned();
-  const result = await mergeBranch(project.github_owner, project.github_repository, base, head);
-  await assertOwned();
-  await audit(db, job, actorId, "project.merge_branches", "project", projectId, {
-    head, base, outcome: result.outcome, ...("sha" in result ? { sha: result.sha } : {}),
-  });
+  if (job.type === "github.merge_branches") {
+    const projectId = required(job.payload_json, "project_id");
+    const head = required(job.payload_json, "head");
+    const base = required(job.payload_json, "base");
+    await assertRemoteBranchName(head);
+    await assertRemoteBranchName(base);
+    const project = (await db.query("SELECT * FROM projects WHERE id=$1", [projectId])).rows[0];
+    if (!project?.github_owner || !project.github_repository) throw new Error("project has no GitHub repository configured");
+
+    // Compare-and-swap: refuse when either ref moved since the preview the
+    // user based their decision on. A stale pair merges something they never saw.
+    if (typeof job.payload_json.expected_head_sha === "string"
+      || typeof job.payload_json.expected_base_sha === "string") {
+      await assertOwned();
+      const heads = await lsRemoteHeads(project.repository_path);
+      const liveHead = typeof job.payload_json.expected_head_sha === "string" ? heads.get(head) : undefined;
+      const liveBase = typeof job.payload_json.expected_base_sha === "string" ? heads.get(base) : undefined;
+      if ((liveHead && liveHead !== job.payload_json.expected_head_sha)
+        || (liveBase && liveBase !== job.payload_json.expected_base_sha)) {
+        await persistJobResult(db, job.id, { outcome: "refused", refusal_code: "refs_changed",
+          message: "A branch moved since the pre-flight check — re-check before merging." });
+        await audit(db, job, actorId, "project.merge_branches", "project", projectId,
+          { head, base, outcome: "refused", refusal_code: "refs_changed" });
+        return;
+      }
+    }
+
+    await assertOwned();
+    try {
+      const result = await mergeBranch(project.github_owner, project.github_repository, base, head);
+      await assertOwned();
+      await persistJobResult(db, job.id, { outcome: result.outcome, ...("sha" in result ? { sha: result.sha } : {}) });
+      await audit(db, job, actorId, "project.merge_branches", "project", projectId, {
+        head, base, outcome: result.outcome, ...("sha" in result ? { sha: result.sha } : {}),
+      });
+    } catch (error) {
+      await persistJobResult(db, job.id, { outcome: "failed", error: error instanceof Error ? error.message : String(error) }).catch(() => {});
+      throw error;
+    }
+    return;
+  }
+
+  if (job.type === "github.merge_preview") {
+    // Read-only pre-flight powering the merge workbench. Cheap enough to run
+    // freely; results land in jobs.result_json for the UI to poll.
+    const projectId = required(job.payload_json, "project_id");
+    const head = typeof job.payload_json.head === "string" && job.payload_json.head.trim() ? job.payload_json.head.trim() : undefined;
+    const base = typeof job.payload_json.base === "string" && job.payload_json.base.trim() ? job.payload_json.base.trim() : undefined;
+    if (head) await assertRemoteBranchName(head);
+    if (base) await assertRemoteBranchName(base);
+    const project = (await db.query("SELECT * FROM projects WHERE id=$1", [projectId])).rows[0];
+    if (!project?.repository_path) throw new Error("project has no local repository configured");
+    await assertOwned();
+    const preview = await previewRemoteBranchMerge({ repositoryPath: project.repository_path, head, base });
+    await assertOwned();
+    await persistJobResult(db, job.id, { ...preview, generated_at: new Date().toISOString() });
+    return;
+  }
+
+  throw new Error(`unknown provider job type: ${job.type}`);
+}
+
+// Terminal outcome written onto the job row so the admin UI (and agents) can
+// report the truth instead of assuming success.
+async function persistJobResult(db: Database, jobId: string, result_json: Record<string, unknown>) {
+  await db.query("UPDATE jobs SET result_json=$2,updated_at=now() WHERE id=$1", [jobId, result_json]);
 }

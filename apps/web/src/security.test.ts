@@ -33,6 +33,11 @@ describe("web security", () => {
     });
   });
 
+  test("adds HSTS in production only", () => {
+    expect(securityHeaders(false)["strict-transport-security"]).toBeUndefined();
+    expect(securityHeaders(true)["strict-transport-security"]).toBe("max-age=31536000");
+  });
+
   test("uses one secure-cookie baseline for production and development", () => {
     expect(secureCookieAttributes(false)).toEqual(["Path=/", "SameSite=Lax"]);
     expect(secureCookieAttributes(true)).toEqual(["Path=/", "SameSite=Lax", "Secure"]);

@@ -33,7 +33,7 @@ export function loginPage() {
 
 const groups = [
   ["Overview", [["Dashboard", "/admin", ""]]],
-  ["Work", [["Tickets", "/admin/tickets", "tickets"], ["Runs", "/admin/runs", "runs"], ["Queue", "/admin/queue", "jobs"], ["Pull requests", "/admin/pull-requests", "prs"]]],
+  ["Work", [["Tickets", "/admin/tickets", "tickets"], ["Runs", "/admin/runs", "runs"], ["Queue", "/admin/queue", "jobs"], ["Pull requests", "/admin/pull-requests", "prs"], ["Merge branches", "/admin/merge", ""]]],
   ["Configure", [["Projects", "/admin/projects", "projects"], ["Forms", "/admin/forms", "forms"], ["Prompts", "/admin/prompts", ""], ["Skills", "/admin/skills", "skills"]]],
   ["Operate", [["Notifications", "/admin/notifications", "notifications"], ["AI usage", "/admin/ai-usage", ""], ["Audit log", "/admin/audit", ""], ["Settings", "/admin/settings", ""], ["System", "/admin/system", ""]]],
 ] as const;
@@ -340,11 +340,41 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         });
         document.querySelector("[data-merge-branches-form]")?.addEventListener("submit",async(event)=>{
           event.preventDefault();
-          const payload=Object.fromEntries(new FormData(event.currentTarget));
-          const response=await fetch("/api/admin/projects/"+projectId+"/merge-branches",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
-          const result=await response.json();
-          if(response.ok)alert(result.outcome==="already_up_to_date"?"Already up to date — nothing to merge.":"Merged "+payload.head+" into "+payload.base+".");
-          else alert(result.error);
+          const form=event.currentTarget,button=form.querySelector("button[type=submit]");
+          const payload=Object.fromEntries(new FormData(form));
+          button.disabled=true;
+          // First attempt shares the hourly idempotency bucket (double-click
+          // dedupe). After a failure, a fresh request_id escapes the bucket so
+          // the merge can actually be retried.
+          let requestId="";
+          const send=(extra)=>fetch("/api/admin/projects/"+projectId+"/merge-branches",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({...payload,...(requestId?{request_id:requestId}:{}),...extra})});
+          let response=await send({});
+          if(response.status===409&&((await response.clone().json().catch(()=>({}))).code)==="confirm_default_branch"){
+            button.disabled=false;
+            if(!confirm("This merges directly into the default branch, bypassing PR review. Continue?"))return;
+            button.disabled=true;response=await send({confirm_default_branch:true});
+          }
+          const result=await response.json().catch(()=>({}));
+          if(!response.ok){button.disabled=false;alert(result.error||"Merge failed to queue");return}
+          // The merge runs in the worker — poll the job until it is terminal
+          // instead of pretending it succeeded.
+          const jobId=result.job&&result.job.id;
+          let settled=false;
+          for(let i=0;i<60;i++){
+            await new Promise(r=>setTimeout(r,1000));
+            const status=await fetch("/api/admin/jobs/"+jobId,{headers:{"x-csrf-token":csrf}}).then(r=>r.json()).catch(()=>null);
+            const s=status&&status.job&&status.job.status;
+            if(s==="completed"){
+              settled=true;
+              const outcome=status.job.result_json?status.job.result_json.outcome:null;
+              alert(outcome==="merged"?"Merged into "+payload.base+" ("+(status.job.result_json.sha||"").slice(0,7)+").":outcome==="already_up_to_date"?"Already up to date — nothing to merge.":outcome==="conflict"?"Merge CONFLICT: "+payload.head+" could not be merged into "+payload.base+" cleanly. Open a pull request to resolve it.":"Merge finished with unknown outcome: "+JSON.stringify(status.job.result_json||{}));
+              break;
+            }
+            if(s==="failed"){settled=true;alert("Merge failed: "+((status.job.error_json||{}).message||"see worker logs")+" — submitting again will retry with a fresh job.");break}
+          }
+          if(!settled)alert("Merge still running after a minute — check the Operate page for the job result.");
+          button.disabled=false;
+          if(settled&&s==="failed")requestId=crypto.randomUUID();
         });
         document.querySelector("[data-add-override-form]")?.addEventListener("submit",async(event)=>{
           event.preventDefault();
@@ -420,7 +450,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
               +'<label class="field"><span>Type</span><select data-f-type>'+fieldTypes.map(t=>'<option value="'+t[0]+'"'+(t[0]===field.field_type?" selected":"")+'>'+t[1]+'</option>').join("")+'</select></label>'
               +(optionTypes.has(field.field_type)?'<label class="field"><span>Options (one per line)</span><textarea data-f-options rows="4">'+(field.options_json||[]).join("\\n").replace(/</g,"&lt;")+'</textarea></label>':"")
               +'<label style="display:flex;gap:9px;align-items:center;font-size:13px;margin:10px 0"><input type="checkbox" data-f-required'+(field.required?" checked":"")+'> Required</label>'
-              +'<p style="font-size:12px;color:var(--text3)">Every field is validated server-side. Uploads are image-only, renamed randomly and capped at 8 MB; SVG is rejected.</p>';
+              +'<p style="font-size:12px;color:var(--text3)">Every field is validated server-side. Uploads are image-only, renamed randomly and capped at 5 MB; SVG is rejected.</p>';
             settingsBox.querySelector("[data-f-label]").addEventListener("input",e=>{field.label=e.target.value;save();renderList()});
             settingsBox.querySelector("[data-f-key]").addEventListener("change",e=>{field.field_key=e.target.value;save();renderList()});
             settingsBox.querySelector("[data-f-type]").addEventListener("change",e=>{field.field_type=e.target.value;save();renderSettings();renderList()});
@@ -499,7 +529,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           form.addEventListener("submit",async(event)=>{
             event.preventDefault();
             const data=new FormData(form);
-            const response=await fetch("/api/admin/settings/ai-review",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({default_model:data.get("default_model"),default_reasoning_level:data.get("default_reasoning_level")})});
+            const response=await fetch("/api/admin/settings/ai-review",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({default_model:data.get("default_model"),default_reasoning_level:data.get("default_reasoning_level"),auto_review_enabled:form.querySelector('[name=auto_review_enabled]').checked,auto_merge_on_approve:form.querySelector('[name=auto_merge_on_approve]').checked})});
             if(response.ok)location.reload();else{const result=await response.json();form.querySelector(".error").textContent=result.error}
           });
         }
@@ -528,6 +558,107 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             if(response.ok)location.reload();else{const result=await response.json();priceForm.querySelector(".error").textContent=result.error}
           });
         }
+      `:""}
+      ${path==="/admin/merge"?`
+        const csrf=sessionStorage.getItem("dccCsrf")||"";
+        const projectSelect=document.getElementById("merge-project");
+        const fromSelect=document.getElementById("merge-from");
+        const intoSelect=document.getElementById("merge-into");
+        const statusBox=document.querySelector("[data-merge-status]");
+        const mergeButton=document.querySelector("[data-merge-button]");
+        const reasonLine=document.querySelector("[data-merge-reason]");
+        let branches=[];let lastPreview=null;let previewToken=0;
+
+        function setStatus(text,tone){statusBox.textContent=text;statusBox.style.borderLeftColor=tone==="ok"?"var(--t-ok)":tone==="warn"?"var(--t-warn)":tone==="danger"?"var(--t-danger)":"var(--border2)";}
+        function refresh(){
+          if(!projectSelect.value){mergeButton.disabled=true;setReason("Select a project.");return;}
+          const head=fromSelect.value,base=intoSelect.value;
+          if(!base){mergeButton.disabled=true;setReason("Select the branch to merge into.");return;}
+          if(!head){mergeButton.disabled=true;setReason("Select the branch to merge from.");return;}
+          if(head===base){mergeButton.disabled=true;setReason(\"From and into are the same branch.\");return;}
+          if(!lastPreview||lastPreview.head!==head||lastPreview.base!==base){mergeButton.disabled=true;setReason("Pre-flight check running…");return;}
+          applyVerdict(lastPreview.result);
+        }
+        function setReason(text){reasonLine.textContent=text;}
+        function applyVerdict(result){
+          const head=fromSelect.value,base=intoSelect.value;
+          if(result.outcome==="up_to_date"){mergeButton.disabled=true;setReason("Nothing to do — already up to date.");setStatus("Already up to date: "+base+" already contains everything in "+head+".","ok");return;}
+          if(result.outcome==="conflict"){const files=result.conflicted_files&&result.conflicted_files.length?result.conflicted_files.join(", "):"unknown files";mergeButton.disabled=true;setReason("Resolving conflicts automatically is not supported for direct merges.");setStatus("Merge CONFLICT: merging "+head+" into "+base+" would conflict in: "+files,"danger");return;}
+          if(result.outcome==="missing_head"){mergeButton.disabled=true;setReason("The source branch no longer exists on the remote.");setStatus("Branch \""+head+"\" was not found on the remote — refresh and pick again.","danger");return;}
+          if(result.outcome==="missing_base"){mergeButton.disabled=true;setReason("The target branch no longer exists on the remote.");setStatus("Branch \""+base+"\" was not found on the remote — refresh and pick again.","danger");return;}
+          if(result.outcome==="clean"){mergeButton.disabled=false;setReason("Ready: merges "+(result.commits_ahead??"?")+" commit(s) into "+base+".");setStatus("Merge is possible: "+head+" is "+(result.commits_ahead??"?")+" commit(s) ahead of "+base+" and merges cleanly.","ok");return;}
+          mergeButton.disabled=true;setReason("Pre-flight check failed.");setStatus("Pre-flight check failed: "+(result.error||"unknown error"),"danger");
+        }
+        async function pollJob(jobId,maxMs){
+          for(let i=0;i<Math.ceil(maxMs/700);i++){
+            await new Promise(r=>setTimeout(r,i===0?300:700));
+            const payload=await fetch("/api/admin/jobs/"+jobId,{headers:{"x-csrf-token":csrf}}).then(r=>r.json()).catch(()=>null);
+            const job=payload&&payload.job;if(!job)continue;
+            if(["completed","failed","cancelled","blocked_auth","blocked_auth_configuration"].includes(job.status))return job;
+          }
+          return null;
+        }
+        async function runPreview(){
+          if(!projectSelect.value)return;
+          const token=++previewToken;
+          const projectId=projectSelect.value,head=fromSelect.value,base=intoSelect.value;
+          mergeButton.disabled=true;
+          setStatus("Reading live branches…");
+          try{
+            const queued=await fetch("/api/admin/projects/"+projectId+"/merge-preview",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({head:head||undefined,base:base||undefined})});
+            if(!queued.ok){const err=await queued.json().catch(()=>({}));setStatus("Pre-flight could not start: "+(err.error||queued.status),"danger");setReason("Fix the error above.");return;}
+            const {job}=await queued.json();
+            const done=await pollJob(job.id,20000);
+            if(token!==previewToken)return;
+            if(!done||done.status!=="completed"){setStatus(done&&done.status!=="completed"?"Pre-flight job "+done.status+": "+((done.error_json||{}).message||""):"Pre-flight check timed out — try again.","danger");setReason("No pre-flight verdict.");return;}
+            const result=done.result_json||{};
+            if(result.branches){
+              branches=result.branches;
+              for(const select of [fromSelect,intoSelect]){
+                const previous=select.value;
+                select.innerHTML='<option value="">Select a branch…</option>'+branches.map(b=>'<option value="'+b.name+'">'+b.name+'</option>').join("");
+                if(previous&&branches.some(b=>b.name===previous))select.value=previous;
+              }
+              // Default "from" to the project's default branch (typically master).
+              if(!fromSelect.value){
+                const preferred=projectSelect.selectedOptions[0]?.dataset.defaultBranch||"master";
+                if(branches.some(b=>b.name===preferred))fromSelect.value=preferred;
+                else if(branches.length===1)fromSelect.value=branches[0].name;
+              }
+            }
+            lastPreview={head,base,result};
+            setStatus(branches.length?"Branches loaded. Pick a pair to check the merge.":"This repository has no remote branches.");
+            setReason(branches.length?"":"Nothing can be merged from an empty remote.");
+            refresh();
+          }catch(error){if(token===previewToken){setStatus("Pre-flight failed: "+error.message,"danger");setReason("No pre-flight verdict.");}}
+        }
+
+        projectSelect.addEventListener("change",()=>{
+          lastPreview=null;
+          fromSelect.innerHTML='<option value="">Loading…</option>';intoSelect.innerHTML='<option value="">Loading…</option>';
+          fromSelect.disabled=!projectSelect.value;intoSelect.disabled=!projectSelect.value;
+          if(projectSelect.value)runPreview();else{setStatus("Select a project to list its branches.");refresh();}
+        });
+        fromSelect.addEventListener("change",runPreview);
+        intoSelect.addEventListener("change",runPreview);
+        mergeButton.addEventListener("click",async()=>{
+          const projectId=projectSelect.value,head=fromSelect.value,base=intoSelect.value;
+          const preview=lastPreview&&lastPreview.head===head&&lastPreview.base===base?lastPreview.result:null;
+          if(!preview||preview.outcome!=="clean"||!confirm("Merge "+head+" into "+base+" directly on GitHub (no pull request)?"))return;
+          mergeButton.disabled=true;setStatus("Merging "+head+" into "+base+"…");
+          try{
+            const queued=await fetch("/api/admin/projects/"+projectId+"/merge-branches",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({head,base,expected_head_sha:preview.head.sha,expected_base_sha:preview.base.sha})});
+            const queuedBody=await queued.json().catch(()=>({}));
+            if(!queued.ok){setStatus("Merge could not be queued: "+(queuedBody.error||queued.status),"danger");return;}
+            const done=await pollJob(queuedBody.job.id,120000);
+            if(!done){setStatus("Merge still running — check the Queue page for job "+queuedBody.job.id.slice(0,8)+".","warn");return;}
+            const result=done.result_json||{};
+            if(done.status==="completed"&&result.outcome==="merged"){setStatus("Merged into "+base+" as "+(result.sha||"").slice(0,7)+".","ok");setReason("Done.");lastPreview=null;runPreview();return;}
+            if(done.status==="completed"&&result.outcome==="already_up_to_date"){setStatus("Already up to date — nothing to merge.","ok");setReason("Nothing to do.");lastPreview=null;runPreview();return;}
+            if(done.status==="completed"&&(result.outcome==="conflict"||result.outcome==="refused")){setStatus(result.outcome==="conflict"?"GitHub reports a conflict for this pair.":"Refused: "+(result.message||result.refusal_code||"branches changed since the check")+" — re-check and retry.","danger");setReason("Merge did not happen.");lastPreview=null;runPreview();return;}
+            setStatus("Merge failed: "+((done.error_json||{}).message||result.error||"see worker logs"),"danger");setReason("Merge did not happen.");
+          }catch(error){setStatus("Merge failed: "+error.message,"danger");}
+        });
       `:""}
       ${path==="/admin/pull-requests"?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";

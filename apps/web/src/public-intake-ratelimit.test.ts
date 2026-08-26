@@ -78,7 +78,7 @@ describe("consumeSubmissionAttempt", () => {
     expect(result).toEqual({ allowed: true, resetSeconds: 0 });
     const insertCall = mockClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO public_submission_attempts"));
     expect(insertCall).toBeDefined();
-    expect(insertCall![1]).toEqual(["form-1", "127.0.0.1"]);
+    expect(insertCall![1]).toEqual(["form-1", "127.0.0.1", "submission"]);
   });
 });
 

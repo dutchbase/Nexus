@@ -25,7 +25,7 @@ export function validateWebRuntime(env: Environment = process.env) {
   return { production, trustedProxyHops };
 }
 
-export function securityHeaders() {
+export function securityHeaders(production = process.env.NODE_ENV === "production") {
   return {
     // ponytail: per-page inline scripts still need unsafe-inline; externalize scripts to drop it
     // ponytail: 295 inline style="" attributes app-wide still need unsafe-inline on style-src; style-src-elem blocks injected <style> blocks instead
@@ -34,6 +34,7 @@ export function securityHeaders() {
     "x-content-type-options": "nosniff",
     "referrer-policy": "no-referrer",
     "permissions-policy": "camera=(), geolocation=(), microphone=(), payment=(), usb=()",
+    ...(production ? { "strict-transport-security": "max-age=31536000" } : {}),
   };
 }
 

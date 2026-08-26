@@ -29,6 +29,7 @@ import * as dashboardPage from "./pages/dashboard.ts";
 import * as ticketsPage from "./pages/tickets.ts";
 import * as runsPage from "./pages/runs.ts";
 import * as prsPage from "./pages/prs.ts";
+import * as mergePage from "./pages/merge.ts";
 import * as projectsPage from "./pages/projects.ts";
 import * as formsPage from "./pages/forms.ts";
 import * as promptsPage from "./pages/prompts.ts";
@@ -397,18 +398,18 @@ export function sanitizeFormSettings(settings: any): Record<string, any> {
   };
 }
 
-export async function consumeSubmissionAttempt(formId: string, ip: string, limit: number) {
+export async function consumeSubmissionAttempt(formId: string, ip: string, limit: number, kind: "submission" | "upload" = "submission") {
   return inTransaction(async (client) => {
-    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text || '/' || $2, 0))", [formId, ip]);
+    await client.query("SELECT pg_advisory_xact_lock(hashtextextended($1::text || '/' || $2 || '/' || $3, 0))", [formId, ip, kind]);
     const recent = await client.query(
       `SELECT count(*)::integer AS count,
               coalesce(ceil(extract(epoch FROM min(created_at) + interval '1 hour' - now()))::integer, 0) AS reset_seconds
        FROM public_submission_attempts
-       WHERE form_id = $1 AND ip_address = $2 AND created_at > now() - interval '1 hour'`,
-      [formId, ip],
+       WHERE form_id = $1 AND ip_address = $2 AND kind = $4 AND created_at > now() - interval '1 hour'`,
+      [formId, ip, limit, kind],
     );
     if (recent.rows[0].count >= limit) return { allowed: false, resetSeconds: Math.max(1, recent.rows[0].reset_seconds) };
-    await client.query("INSERT INTO public_submission_attempts (form_id, ip_address, accepted) VALUES ($1,$2,true)", [formId, ip]);
+    await client.query("INSERT INTO public_submission_attempts (form_id, ip_address, accepted, kind) VALUES ($1,$2,true,$3)", [formId, ip, kind]);
     return { allowed: true, resetSeconds: 0 };
   });
 }
@@ -498,6 +499,14 @@ function sniffImage(buffer: Buffer) {
 }
 
 export async function upload(request: IncomingMessage, response: ServerResponse, form: any) {
+  // Uploads get their own abuse budget, separate from form submissions —
+  // both live in public_submission_attempts, discriminated by kind.
+  const ip = ipOf(request);
+  const uploadLimit = Math.max(3, Math.min(Number(form.settings_json?.upload_rate_limit ?? 10) || 10, 30));
+  const attempt = await consumeSubmissionAttempt(form.id, ip, uploadLimit, "upload");
+  if (!attempt.allowed) {
+    return json(response, 429, { error: "upload rate limit exceeded", code: "rate_limited", retry_after_seconds: attempt.resetSeconds }, { "retry-after": String(attempt.resetSeconds) });
+  }
   const contentType = request.headers["content-type"] ?? "";
   const boundary = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType)?.slice(1).find(Boolean);
   if (!boundary) return json(response, 400, { error: "multipart form data required" });
@@ -678,7 +687,7 @@ export async function adminHtml(request: IncomingMessage, response: ServerRespon
   }
   const metrics = await counts();
   const pageModules = [
-    dashboardPage, ticketsPage, runsPage, prsPage, projectsPage, formsPage, promptsPage, skillsPage, notificationsPage, queuePage, auditPage, aiUsagePage, operatePage,
+    dashboardPage, ticketsPage, runsPage, prsPage, mergePage, projectsPage, formsPage, promptsPage, skillsPage, notificationsPage, queuePage, auditPage, aiUsagePage, operatePage,
   ];
   for (const pageModule of pageModules) {
     const result = await pageModule.render(url, session, metrics);
@@ -861,14 +870,22 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   }
   if (url.pathname === "/api/admin/settings/ai-review" && request.method === "POST") {
     const body = await bodyOf(request);
+    if (body.auto_review_enabled !== undefined && typeof body.auto_review_enabled !== "boolean") return json(response, 400, { error: "auto_review_enabled must be a boolean" });
+    if (body.auto_merge_on_approve !== undefined && typeof body.auto_merge_on_approve !== "boolean") return json(response, 400, { error: "auto_merge_on_approve must be a boolean" });
     const selection = validateAiSelection({
       model: typeof body.default_model === "string" ? body.default_model : "",
       reasoning_level: typeof body.default_reasoning_level === "string" ? body.default_reasoning_level : "",
     });
     await pool.query(
-      `UPDATE ai_review_settings SET default_model=$1,default_reasoning_level=$2,updated_at=now(),updated_by=$3 WHERE id=1`,
-      [selection.model, selection.reasoning_level, session.user_id],
+      `UPDATE ai_review_settings
+       SET default_model=$1,default_reasoning_level=$2,
+         auto_review_enabled=COALESCE($4,auto_review_enabled),
+         auto_merge_on_approve=COALESCE($5,auto_merge_on_approve),
+         updated_at=now(),updated_by=$3 WHERE id=1`,
+      [selection.model, selection.reasoning_level, session.user_id,
+       body.auto_review_enabled ?? null, body.auto_merge_on_approve ?? null],
     );
+    await audit({ actorType: "admin", actorId: session.user_id, action: "ai_review_settings.update", entityType: "ai_review_settings", entityId: "1", after: { ...selection, auto_review_enabled: body.auto_review_enabled ?? null, auto_merge_on_approve: body.auto_merge_on_approve ?? null }, ip: ipOf(request) });
     return json(response, 200, { ok: true });
   }
   if (url.pathname === "/api/admin/settings/system-ai" && request.method === "POST") {
@@ -1005,7 +1022,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
           actor_id: session.user_id, pull_request_id: pullRequest.id,
           expected_head_sha: expectedHeadSha, ...(requireFreshPolicyBinding ? { policy_snapshot_id: policySnapshotId } : {}),
         },
-        idempotencyKey: `g07:github.merge_pull_request:${pullRequest.id}:${randomUUID()}`,
+        idempotencyKey: `g07:github.merge_pull_request:${pullRequest.id}:${expectedHeadSha}:${Math.floor(Date.now() / 3_600_000)}`,
       });
       return json(response, 202, { job });
     } else if (action === "request-changes") {
@@ -1076,6 +1093,12 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       const target: "Completed" | "Closed Without Merge" = pullRequest.merged_at ? "Completed" : "Closed Without Merge";
       await setPullRequestTicketStatus(pullRequest.id, target, "Ticket closed manually after external pull-request completion", "admin", session.user_id);
     } else if (action === "ai-review") {
+      if (body.mode !== undefined && body.mode !== "review_only" && body.mode !== "review_and_merge") {
+        return json(response, 400, { error: "mode must be review_only or review_and_merge" });
+      }
+      if (body.target_branch !== undefined && (typeof body.target_branch !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(body.target_branch.trim()))) {
+        return json(response, 400, { error: "invalid target_branch" });
+      }
       const mode = body.mode === "review_and_merge" ? "review_and_merge" : "review_only";
       const targetBranch = typeof body.target_branch === "string" && body.target_branch.trim() ? body.target_branch.trim() : undefined;
       const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
@@ -1171,6 +1194,21 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const updated = (await pool.query("SELECT * FROM pull_requests WHERE id=$1", [pullRequest.id])).rows[0];
     return json(response, 200, { pull_request: updated });
   }
+  const mergePreviewMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\/merge-preview$/i);
+  if (mergePreviewMatch && request.method === "POST") {
+    const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [mergePreviewMatch[1]])).rows[0];
+    if (!project) return json(response, 404, { error: "project not found" });
+    if (!project.repository_path) return json(response, 400, { error: "project has no local repository configured" });
+    const body = await bodyOf(request);
+    const refPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+    const head = typeof body.head === "string" && body.head.trim() ? body.head.trim() : undefined;
+    const base = typeof body.base === "string" && body.base.trim() ? body.base.trim() : undefined;
+    if ((head && !refPattern.test(head)) || (base && !refPattern.test(base))) return json(response, 400, { error: "invalid branch name" });
+    // Previews are cheap reads — a fresh job per request is fine (no dedup bucket).
+    const job = await enqueueJob({ type: "github.merge_preview", payload: { actor_id: session.user_id, project_id: project.id, ...(head ? { head } : {}), ...(base ? { base } : {}) }, idempotencyKey: `g07:github.merge_preview:${randomUUID()}`, maxAttempts: 2 });
+    return json(response, 202, { job });
+  }
+
   const mergeBranchesMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/merge-branches$/i);
   if (mergeBranchesMatch && request.method === "POST") {
     const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [mergeBranchesMatch[1]])).rows[0];
@@ -1179,9 +1217,36 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const body = await bodyOf(request);
     const head = typeof body.head === "string" ? body.head.trim() : "";
     const base = typeof body.base === "string" ? body.base.trim() : "";
+    // Leading dash would parse as a git/REST option downstream; the rest is
+    // the valid-ref-shape whitelist.
+    const refPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
     if (!head || !base) return json(response, 400, { error: "head and base branch are required" });
-    const job = await enqueueJob({ type: "github.merge_branches", payload: { actor_id: session.user_id, project_id: project.id, head, base }, idempotencyKey: `g07:github.merge_branches:${project.id}:${randomUUID()}` });
+    if (!refPattern.test(head) || !refPattern.test(base)) return json(response, 400, { error: "invalid branch name" });
+    if (head === base) return json(response, 400, { error: "head and base must differ" });
+    const defaultBranch = project.default_branch ?? "main";
+    if (base === defaultBranch && body.confirm_default_branch !== true) {
+      return json(response, 409, { error: `merging into the default branch (${defaultBranch}) bypasses PR review — set confirm_default_branch=true to proceed`, code: "confirm_default_branch" });
+    }
+    // Deterministic key: double-clicks dedupe; an explicit requestId (any
+    // non-empty token) lets an operator repeat a pair deliberately. Hourly
+    // bucket keeps the UNIQUE constraint from blocking legitimate re-merges.
+    const requestToken = typeof body.request_id === "string" && body.request_id.trim() ? body.request_id.trim().slice(0, 64).replace(/[^A-Za-z0-9._:-]/g, "") : String(Math.floor(Date.now() / 3_600_000));
+    // Expected SHAs make the worker re-verify both refs right before merging,
+    // so the click can't act on a stale pre-flight result.
+    const shaPattern = /^[0-9a-f]{40}$/;
+    const expectedHeadSha = typeof body.expected_head_sha === "string" && shaPattern.test(body.expected_head_sha) ? body.expected_head_sha : undefined;
+    const expectedBaseSha = typeof body.expected_base_sha === "string" && shaPattern.test(body.expected_base_sha) ? body.expected_base_sha : undefined;
+    const job = await enqueueJob({ type: "github.merge_branches", payload: { actor_id: session.user_id, project_id: project.id, head, base, ...(expectedHeadSha || expectedBaseSha ? { expected_head_sha: expectedHeadSha, expected_base_sha: expectedBaseSha } : {}) }, idempotencyKey: `g07:github.merge_branches:${project.id}:${head}:${base}:${requestToken}` });
     return json(response, 202, { job });
+  }
+  const jobStatusMatch = url.pathname.match(/^\/api\/admin\/jobs\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
+  if (jobStatusMatch && request.method === "GET") {
+    const job = (await pool.query(
+      "SELECT id,type,status,payload_json,error_json,result_json,attempt,max_attempts,created_at,updated_at,completed_at FROM jobs WHERE id=$1",
+      [jobStatusMatch[1]],
+    )).rows[0];
+    if (!job) return json(response, 404, { error: "job not found" });
+    return json(response, 200, { job });
   }
   if (url.pathname === "/api/admin/projects/import-github-prs" && request.method === "POST") {
     const job = await enqueueJob({ type: "github.import", payload: { actor_id: session.user_id }, idempotencyKey: `g07:github.import:all:${randomUUID()}` });

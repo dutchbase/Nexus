@@ -6,13 +6,21 @@ const importGithubPullRequests = vi.fn();
 const approveAndMergePullRequest = vi.fn();
 const mergeBranch = vi.fn();
 
-vi.mock("@dcc/domain", () => ({
-  syncOpenPullRequests,
-  syncPullRequest,
-  importGithubPullRequests,
-  approveAndMergePullRequest,
-}));
+vi.mock("@dcc/domain", () => {
+  class PullRequestMergeError extends Error {
+    code: string;
+    constructor(message: string, code = "merge_failed") { super(message); this.code = code; }
+  }
+  return { syncOpenPullRequests, syncPullRequest, importGithubPullRequests, approveAndMergePullRequest, PullRequestMergeError };
+});
 vi.mock("@dcc/github-provider", () => ({ mergeBranch }));
+const previewRemoteBranchMerge = vi.fn();
+const lsRemoteHeads = vi.fn(async () => new Map());
+vi.mock("../../../packages/git-runner/src/index.ts", () => ({
+  assertRemoteBranchName: vi.fn(async () => {}),
+  lsRemoteHeads,
+  previewRemoteBranchMerge,
+}));
 
 const { runProviderJob } = await import("./provider-jobs.ts");
 
@@ -174,4 +182,37 @@ test("requires a merge job head binding", async () => {
   }, database as any)).rejects.toThrow("expected_head_sha is required");
 
   expect(approveAndMergePullRequest).not.toHaveBeenCalled();
+});
+
+test("merge_preview persists a read-only preview into result_json", async () => {
+  const database = db([{ id: "proj-1", repository_path: "/repos/widgets", github_owner: "acme", github_repository: "widgets" }]);
+  previewRemoteBranchMerge.mockResolvedValueOnce({
+    branches: [{ name: "main", sha: "a".repeat(40) }], head: null, base: null,
+    outcome: "branches_only", commits_ahead: null, conflicted_files: [],
+  });
+
+  await runProviderJob({
+    id: "job-9", type: "github.merge_preview",
+    idempotency_key: "g07:github.merge_preview:one", payload_json: { actor_id: "admin-1", project_id: "proj-1" },
+  }, database as any);
+
+  expect(previewRemoteBranchMerge).toHaveBeenCalledWith({ repositoryPath: "/repos/widgets", head: undefined, base: undefined });
+  const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
+  expect(resultUpdate).toBeDefined();
+  expect(resultUpdate!.values![1]).toMatchObject({ outcome: "branches_only" });
+});
+
+test("merge_branches refuses without merging when a ref moved since the preview", async () => {
+  lsRemoteHeads.mockResolvedValueOnce(new Map([["staging", "b".repeat(40)]]));
+  const database = db([{ id: "proj-1", repository_path: "/repos/widgets", github_owner: "acme", github_repository: "widgets" }]);
+
+  await runProviderJob({
+    id: "job-10", type: "github.merge_branches",
+    idempotency_key: "g07:github.merge_branches:once",
+    payload_json: { actor_id: "admin-1", project_id: "proj-1", head: "staging", base: "main", expected_head_sha: "a".repeat(40) },
+  }, database as any);
+
+  expect(mergeBranch).not.toHaveBeenCalled();
+  const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
+  expect(resultUpdate!.values![1]).toMatchObject({ outcome: "refused", refusal_code: "refs_changed" });
 });
