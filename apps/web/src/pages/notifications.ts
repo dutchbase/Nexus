@@ -1,4 +1,4 @@
-import { escapeHtml, keysetCondition, nextCursor, pageRequest, pagerHtml, pool, shortRefs } from "./shared.ts";
+import { escapeHtml, keysetCondition, nextCursor, pageRequest, pagerHtml, pool, shortRefs, statusBadge } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { safeNotificationProvider } from "../../../../packages/notification-provider/src/index.ts";
 import { NOTIFICATION_EVENTS } from "@dcc/domain";
@@ -29,16 +29,14 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   const enabledEvents: string[] = webhook ? (webhook.enabled_events ?? []) : [...NOTIFICATION_EVENTS];
 
   const eventRow = (event: string) =>
-    `<div class="ticket-row"><span class="mono">${escapeHtml(event)}</span><span class="status">${enabledEvents.includes(event) ? "Enabled" : "Disabled"}</span></div>`;
+    `<div class="ticket-row"><span class="mono">${escapeHtml(event)}</span>${statusBadge(enabledEvents.includes(event) ? "Enabled" : "Disabled")}</div>`;
 
-  const whatsappCard = `<section class="card"><div class="card-head">WhatsApp server <span class="status">Placeholder</span></div><div class="card-body">
-      <p>The API contract is not specified yet. The provider interface is implemented; only base URL, endpoint and token remain.</p>
-      <p>Base URL: <span class="mono">${escapeHtml(whatsapp?.configuration_encrypted_json?.base_url ?? "not set")}</span></p>
-      <p>Endpoint: <span class="mono">${escapeHtml(whatsapp?.configuration_encrypted_json?.endpoint ?? "not set")}</span></p>
-      <p>State: ${whatsapp?.enabled ? "Enabled" : "Disabled"}</p>
+  const whatsappCard = `<section class="card"><div class="card-head">WhatsApp server ${statusBadge("Coming soon")}</div><div class="card-body">
+      <p>WhatsApp delivery is not available yet. The generic webhook provider handles notifications today — when the WhatsApp gateway goes live, its configuration will appear here.</p>
+      <p>State: ${statusBadge(whatsapp?.enabled ? "Enabled" : "Disabled")}</p>
     </div></section>`;
 
-  const webhookCard = `<section class="card"><div class="card-head">Generic webhook <span class="status">${webhook?.enabled ? "Enabled" : "Disabled"}</span></div><div class="card-body">
+  const webhookCard = `<section class="card"><div class="card-head">Generic webhook ${statusBadge(webhook?.enabled ? "Enabled" : "Disabled")}</div><div class="card-body">
       <form data-webhook-provider-form data-provider-id="${webhook?.id ?? ""}">
         <label class="field"><span>Name</span><input name="name" value="${escapeHtml(webhook?.name ?? "Generic webhook")}" required></label>
         <label class="field"><span>Base URL</span><input name="base_url" value="${escapeHtml(webhookConfig.base_url ?? "")}" placeholder="https://ops-hooks.internal"></label>
@@ -59,7 +57,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
 
   const deliveryLabels = shortRefs("ND", deliveries.rows);
   const deliveryRows = deliveries.rows.map((delivery) =>
-    `<div class="ticket-row deliveries-row"><span class="mono">${deliveryLabels.get(delivery.id)}</span><span>${escapeHtml(delivery.event_type ?? "")}</span><span>${escapeHtml(delivery.provider ?? "")}</span><span class="status">${escapeHtml(delivery.status ?? "")}</span><span>${delivery.response_status ?? ""}</span><span>${escapeHtml(delivery.error_message ?? "")}</span>${delivery.status === "failed" || delivery.status === "exhausted" ? `<button class="button" type="button" data-retry-delivery="${delivery.id}">Retry</button>` : ""}</div>`,
+    `<div class="ticket-row deliveries-row"><span class="mono">${deliveryLabels.get(delivery.id)}</span><span>${escapeHtml(delivery.event_type ?? "")}</span><span>${escapeHtml(delivery.provider ?? "")}</span>${statusBadge(delivery.status ?? "")}<span>${delivery.response_status ?? ""}</span><span>${escapeHtml(delivery.error_message ?? "")}</span>${delivery.status === "failed" || delivery.status === "exhausted" ? `<button class="button" type="button" data-retry-delivery="${delivery.id}">Retry</button>` : ""}</div>`,
   ).join("");
 
   // Panel document order is Deliveries, Providers, Templates, Event rules —

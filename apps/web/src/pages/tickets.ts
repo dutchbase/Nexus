@@ -1,4 +1,4 @@
-import { escapeHtml, fieldsFor, keysetCondition, lineDiff, nextCursor, pageRequest, PAGE_SIZE_MAX, pagerHtml, pool, renderMarkdown, shortRef, standardFields, validStatuses } from "./shared.ts";
+import { escapeHtml, fieldsFor, keysetCondition, lineDiff, nextCursor, pageRequest, PAGE_SIZE_MAX, pagerHtml, pool, renderMarkdown, shortRef, standardFields, statusBadge, statusTone, validStatuses } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { checkPlanApprovalGate, aiInvocationPhases, aiLifecycleGroup, aiModels } from "@dcc/domain";
 import { formControls } from "../ui.ts";
@@ -29,7 +29,7 @@ export function ticketAiUsagePanel(runs: any[]) {
     ["PR work", aiRuns.filter((run) => aiLifecycleGroup(run.run_type) === "pr_work")],
     ["All AI work", aiRuns],
   ] as const;
-  const rows = runs.map((run) => `<a class="ticket-row" href="/admin/runs/${escapeHtml(run.id)}"><span class="mono">${escapeHtml(shortRef("RUN", run.id))}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.model ?? "—")} · ${escapeHtml(run.reasoning_level ?? "—")}</span><span>${run.ai_usage_status === "captured" ? `${escapeHtml(run.total_tokens)} tokens · ${escapeHtml(run.estimated_cost_usd == null ? "Unpriced" : usd(Number(run.estimated_cost_usd)))}` : coverageLabel(run)}</span><span class="status">${escapeHtml(run.status ?? "—")} · ${escapeHtml(coverageLabel(run))}</span></a>`).join("");
+  const rows = runs.map((run) => `<a class="ticket-row" href="/admin/runs/${escapeHtml(run.id)}"><span class="mono">${escapeHtml(shortRef("RUN", run.id))}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.model ?? "—")} · ${escapeHtml(run.reasoning_level ?? "—")}</span><span>${run.ai_usage_status === "captured" ? `${escapeHtml(run.total_tokens)} tokens · ${escapeHtml(run.estimated_cost_usd == null ? "Unpriced" : usd(Number(run.estimated_cost_usd)))}` : coverageLabel(run)}</span><span class="status ${statusTone(run.status)}">${escapeHtml(run.status ?? "—")} · ${escapeHtml(coverageLabel(run))}</span></a>`).join("");
   return `<section class="grid two">${groups.map(([label, selected]) => summary(label, selected)).join("")}</section><section class="card" style="margin-top:16px"><div class="card-head">Runs</div>${rows || '<div class="card-body"><p>No runs yet.</p></div>'}</section>`;
 }
 
@@ -53,6 +53,7 @@ export function skillPresentation(skill: any) {
 export function approvalGatesCard(ticket: { status: string }) {
   const canAcknowledge = ticket.status === "Submitted";
   return `<section class="card"><div class="card-head">Approval gates</div><div class="card-body">
+    <p>Intake gate: acknowledging marks a submitted ticket as seen and moves it into triage. The button unlocks once the ticket is submitted.</p>
     <p><button class="button" type="button" data-acknowledge-ticket${canAcknowledge ? "" : " disabled"} title="${canAcknowledge ? "" : "Ticket must be Submitted"}">Acknowledge</button></p></div></section>`;
 }
 
@@ -124,11 +125,11 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     </details>`;
 
     const statusToneMap: Record<string, string> = {
-      "Submitted": "var(--t-info)", "Triage": "var(--t-info)", "Needs Information": "var(--t-warn)",
-      "Approved for Planning": "var(--t-ok)", "Planning Queued": "var(--t-info)", "Planning": "var(--t-run)", "Planning Failed": "var(--t-danger)", "Plan Ready for Review": "var(--t-run)", "Plan Revision Requested": "var(--t-warn)", "Plan Revision Queued": "var(--t-run)", "Plan Approved": "var(--t-ok)",
-      "Execution Queued": "var(--t-info)", "Executing": "var(--t-run)", "Validating": "var(--t-run)", "Validation Failed": "var(--t-danger)", "Execution Failed": "var(--t-danger)", "PR Creation Failed": "var(--t-danger)",
-      "PR Ready for Review": "var(--t-warn)", "PR Changes Requested": "var(--t-warn)", "PR Approved": "var(--t-ok)",
-      "Merged": "var(--t-ok)", "Completed": "var(--t-ok)", "Rejected": "var(--t-danger)", "Cancelled": "var(--t-muted)", "Archived": "var(--t-muted)", "Closed Without Merge": "var(--t-muted)",
+      "Submitted": "info", "Triage": "info", "Needs Information": "warn",
+      "Approved for Planning": "ok", "Planning Queued": "info", "Planning": "run", "Planning Failed": "danger", "Plan Ready for Review": "run", "Plan Revision Requested": "warn", "Plan Revision Queued": "run", "Plan Approved": "ok",
+      "Execution Queued": "info", "Executing": "run", "Validating": "run", "Validation Failed": "danger", "Execution Failed": "danger", "PR Creation Failed": "danger",
+      "PR Ready for Review": "warn", "PR Changes Requested": "warn", "PR Approved": "ok",
+      "Merged": "ok", "Completed": "ok", "Rejected": "danger", "Cancelled": "muted", "Archived": "muted", "Closed Without Merge": "muted",
     };
 
     const prioTone = { critical: "danger", high: "warn", medium: "info", low: "muted" } as Record<string, string>;
@@ -158,11 +159,11 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       const boardColumnsHtml = Object.entries(boardColumns).map(([columnName, statuses]) => {
         const columnTickets = statuses.flatMap(status => groupedByStatus[status] || []);
         const cardsHtml = columnTickets.map((ticket) => {
-          const tone = statusToneMap[ticket.status] || "var(--t-text)";
+          const tone = `var(--t-${statusToneMap[ticket.status] ?? "muted"})`;
           const prioColor = prioTone[ticket.priority || "low"] ?? "muted";
           return `<a class="ticket-row" style="display:block;border-left:2px solid ${tone};padding:10px 12px;text-decoration:none;margin-bottom:8px;background:var(--surface);border-radius:4px" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}">
             <span class="mono" style="font-size:11px">${escapeHtml(ticket.ticket_number)}</span>
-            <span style="display:inline-block;font-size:11px;font-weight:700;padding:2px 6px;border-radius:3px;margin-left:4px;background:var(--accent-soft);color:var(--t-${prioColor})">${escapeHtml(ticket.priority || "—")}</span>
+            <span style="display:inline-block;font-size:11px;font-weight:700;padding:2px 6px;border-radius:3px;margin-left:4px;background:var(--primary-soft);color:var(--t-${prioColor})">${escapeHtml(ticket.priority || "—")}</span>
             <span style="display:block;font-weight:600;margin:4px 0">${escapeHtml(ticket.title)}</span>
             <span style="display:block;font-size:12px;color:var(--text2)">${escapeHtml(ticket.project_name)} · <span class="mono">${escapeHtml(ticket.default_model || "—")} · ${escapeHtml(ticket.default_reasoning_level || "—")}</span></span>
           </a>`;
@@ -176,7 +177,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       const body = `<div class="eyebrow">Work · intake</div><h1>Tickets</h1>
         <div class="toolbar">
           <a class="button" href="${escapeHtml(buildFilterUrl())}">Table</a>
-          <a class="button" style="background:var(--accent-soft);color:var(--accent)">Board</a>
+          <a class="button" style="background:var(--primary-soft);color:var(--primary)">Board</a>
           <span style="margin-left:auto">${createTicket}</span>
         </div>
         <form class="toolbar" id="filters" style="margin-top:16px">
@@ -203,11 +204,11 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     }
 
     // Table view
-    const rows = tickets.map((ticket) => `<a class="ticket-row tickets7" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}"><span class="mono">${escapeHtml(ticket.ticket_number)}</span><strong>${escapeHtml(ticket.title)}</strong><span>${escapeHtml(ticket.project_name)}</span><span>${escapeHtml(ticket.priority || "—")}</span><span class="mono">${escapeHtml(ticket.default_model || "—")} · ${escapeHtml(ticket.default_reasoning_level || "—")}</span><span class="status">${escapeHtml(ticket.status)}</span><time>${new Date(ticket.updated_at).toLocaleDateString("nl-NL")}</time></a>`).join("");
+    const rows = tickets.map((ticket) => `<a class="ticket-row tickets7" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}"><span class="mono">${escapeHtml(ticket.ticket_number)}</span><strong>${escapeHtml(ticket.title)}</strong><span>${escapeHtml(ticket.project_name)}</span><span>${escapeHtml(ticket.priority || "—")}</span><span class="mono">${escapeHtml(ticket.default_model || "—")} · ${escapeHtml(ticket.default_reasoning_level || "—")}</span>${statusBadge(ticket.status)}<time>${new Date(ticket.updated_at).toLocaleDateString("nl-NL")}</time></a>`).join("");
     const emptyState = tickets.length === 0 ? `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No tickets match these filters.</div>` : "";
     const body = `<div class="eyebrow">Work · intake</div><h1>Tickets</h1>
       <div class="toolbar">
-        <a class="button" style="background:var(--accent-soft);color:var(--accent)">Table</a>
+        <a class="button" style="background:var(--primary-soft);color:var(--primary)">Table</a>
         <a class="button" href="${escapeHtml(buildFilterUrl("board"))}">Board</a>
         <span style="margin-left:auto">${createTicket}</span>
       </div>
@@ -274,14 +275,14 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     const target = versions.find((version) => version.version === Number(planVersionPageMatch[2]));
     if (!target) return { status: 404, title: "Plan version not found", body: "<h1>Plan version not found</h1>" };
     const previous = versions.find((version) => version.version === target.version - 1);
-    const versionsRail = versions.map((version) => `<a class="ticket-row"${version.id === target.id ? ' style="background:var(--accent-soft);border-left:2px solid var(--accent)"' : ""} href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans/${version.version}"><span class="mono">v${version.version}</span><span>${escapeHtml(version.model)} · ${escapeHtml(version.reasoning_level)}</span></a>`).join("");
+    const versionsRail = versions.map((version) => `<a class="ticket-row"${version.id === target.id ? ' style="background:var(--primary-soft);border-left:2px solid var(--primary)"' : ""} href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans/${version.version}"><span class="mono">v${version.version}</span><span>${escapeHtml(version.model)} · ${escapeHtml(version.reasoning_level)}</span></a>`).join("");
     const isApproved = ticket.approved_plan_version_id === target.id;
     const isCurrent = target.id === target.current_version_id;
     // ponytail: only the current version can ever be approved server-side —
     // gating the button on the same condition avoids the misleading "still
     // clickable" state the user hit after approving.
     const approveDisabledReason = isApproved ? "Already approved" : !isCurrent ? "A newer version exists — only the current version can be approved" : "";
-    const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)} <span class="status">${escapeHtml(ticket.status)}</span></div>
+    const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)} ${statusBadge(ticket.status)}</div>
       <h1>Plan review · v${target.version}</h1>
       <div class="toolbar"><a class="button" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}/plans">Back to plans</a>
         <button class="button" type="button" data-open-revision-dialog>Request revision</button>
@@ -419,7 +420,8 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       <div class="grid rail"><section class="card"><div class="card-head">Ticket</div><div class="card-body"><dl><dt>Project</dt><dd>${escapeHtml(ticket.project_name)}</dd><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Source form</dt><dd>${escapeHtml(ticket.form_name ?? "—")}</dd><dt>Created</dt><dd>${new Date(ticket.created_at).toLocaleDateString("nl-NL")}</dd></dl></div></section>
       <section class="card"><div class="card-head">Attachments</div><div class="card-body">${attachmentsResult.rows.map((a) => `<p><a href="/admin/attachments/${a.id}">${escapeHtml(a.original_name ?? "attachment")}</a> <span class="mono">${escapeHtml(a.media_type)} · ${Math.round(a.size_bytes / 1024)} kB</span></p>`).join("") || "<p>No attachments.</p>"}</div></section>
       ${approvalGatesCard(ticket)}
-      <section class="card"><div class="card-head">Danger zone</div><div class="card-body"><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reject-ticket${["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : " disabled"} title="${["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : "Can only reject early-stage tickets"}">Reject</button></p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-cancel-ticket${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : " disabled"} title="${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : "Can only cancel in-progress tickets"}">Cancel</button></p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-archive-ticket${["Completed", "Merged", "Rejected", "Cancelled"].includes(ticket.status) ? "" : " disabled"} title="${["Completed", "Merged", "Rejected", "Cancelled"].includes(ticket.status) ? "" : "Can only archive finished tickets"}">Archive</button></p></div></section></div>`;
+      <section class="card"><div class="card-head">Danger zone</div><div class="card-body"><p>Destructive actions are hard to undo — archiving lives outside this zone.</p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reject-ticket${["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : " disabled"} title="${
+        ["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : "Can only reject early-stage tickets"}">Reject</button></p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-cancel-ticket${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : " disabled"} title="${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : "Can only cancel in-progress tickets"}">Cancel</button></p></div></section></div>`;
     const aiPanel = `<section class="card"><div class="card-head">AI configuration</div><div class="card-body">
         <form id="ai-config" data-ticket-id="${ticket.id}"><label class="field"><span>Mode</span><select name="ai_configuration_mode"><option value="basic"${ticket.ai_configuration_mode !== "advanced" ? " selected" : ""}>Basic</option><option value="advanced"${ticket.ai_configuration_mode === "advanced" ? " selected" : ""}>Advanced</option></select></label>
         <div class="grid two"><label class="field"><span>Default model</span><select name="default_model">${modelOptions}</select></label><label class="field"><span>Default reasoning level</span><select name="default_reasoning_level">${reasoningOptions}</select></label></div>
@@ -454,7 +456,7 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
     ).join("") : '<div class="card-body"><p>No plan has been generated yet.</p></div>'}</section>`;
     const runsPanel = ticketAiUsagePanel(runsResult.rows);
     const validationPanel = `<section class="card"><div class="card-head">Validation</div><div class="card-body">${execRuns.map((run) =>
-      `<p><span class="status">${escapeHtml(run.status)}</span> ${run.error_code === "validation_failed" ? "<strong>Validation failed</strong> — " : ""}${escapeHtml(run.error_message ?? "")}</p>`,
+      `<p>${statusBadge(run.status)} ${run.error_code === "validation_failed" ? "<strong>Validation failed</strong> — " : ""}${escapeHtml(run.error_message ?? "")}</p>`,
     ).join("") || "<p>Greyed out until an execution attempt exists.</p>"}</div></section>`;
     const prPanel = `<section class="card"><div class="card-head">Pull request</div>${prsResult.rows.map((item) => {
       const policy = !item.current_policy_snapshot_id || !item.head_sha
@@ -465,7 +467,7 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
         ? "Incomplete"
         : item.review_state ?? "Unknown";
       const synced = item.policy_synced_at ? ` · ${new Date(item.policy_synced_at).toLocaleString("nl-NL")}` : "";
-      return `<a class="ticket-row" href="/admin/pull-requests/${item.id}"><span class="mono">#${item.number}</span><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.head_branch)}</span><span class="status">GitHub: ${escapeHtml(policy)}${synced}</span><time>${new Date(item.created_at).toLocaleDateString("nl-NL")}</time></a>`;
+      return `<a class="ticket-row" href="/admin/pull-requests/${item.id}"><span class="mono">#${item.number}</span><strong>${escapeHtml(item.title)}</strong><span>${escapeHtml(item.head_branch)}</span><span class="status ${policy === "Current" ? "ok" : "warn"}">GitHub: ${escapeHtml(policy)}${synced}</span><time>${new Date(item.created_at).toLocaleDateString("nl-NL")}</time></a>`;
     }).join("") || '<div class="card-body"><p>No pull request yet — the worker opens a draft PR after a validated execution.</p></div>'}</section>`;
     const activityPanel = `<section class="card"><div class="card-head">Status history</div><div class="card-body">${history.map((item) => `<p><span class="mono">${new Date(item.created_at).toLocaleString("nl-NL")}</span> ${escapeHtml(item.previous_status ?? "New")} → <strong>${escapeHtml(item.new_status)}</strong>${item.reason ? `<br><span style="color:var(--text2)">${escapeHtml(item.reason)}</span>` : ""}</p>`).join("") || "<p>No recorded transitions.</p>"}</div></section>
       <section class="card"><div class="card-head">Notification history</div><div class="card-body">${notificationsResult.rows.map((item) =>
@@ -487,6 +489,8 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
     const currentPlanLink = currentPlanVersion ? `/admin/tickets/${ticket.ticket_number}/plans/${currentPlanVersion.version}` : "";
     const approvedPlanVersion = planVersions.find((version) => version.id === ticket.approved_plan_version_id);
     const approvedPlanLink = approvedPlanVersion ? `/admin/tickets/${ticket.ticket_number}/plans/${approvedPlanVersion.version}` : "";
+    const canArchive = ["Completed", "Merged", "Rejected", "Cancelled"].includes(ticket.status);
+    const archiveButton = `<button class="button" type="button" data-archive-ticket${canArchive ? "" : " disabled"} title="${canArchive ? "" : "Can only archive finished tickets"}">Archive</button>`;
     const workflowAction = !currentPlanVersion && ["Triage", "Needs Information", "Planning Failed"].includes(ticket.status)
       ? `<button class="button primary" type="button" data-start-planning>Start planning</button>`
       : currentPlanLink && ["Needs Information", "Planning Failed"].includes(ticket.status)
@@ -499,8 +503,8 @@ ${escapeHtml(referenceLines)}</pre></div></section>`;
       ? `<button class="button primary" type="button" data-start-execution${executionGate.valid ? "" : " disabled"} title="${executionGate.valid ? "" : executionGate.message}">Retry execution</button><a class="button" href="${approvedPlanLink}">Update plan</a>`
       : "";
     const body = `<div class="eyebrow">${escapeHtml(ticket.ticket_number)} · ${escapeHtml(ticket.project_name)}</div><h1>${escapeHtml(ticket.title)}</h1>
-      <div class="toolbar"><span class="status">${escapeHtml(ticket.status)}</span>
-        ${["Completed", "Merged", "Closed Without Merge"].includes(ticket.status) ? `<button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reopen-ticket>Reopen</button>` : `<button class="button" type="button" data-open-preview>Preview prompt</button>
+      <div class="toolbar">${statusBadge(ticket.status)}
+        ${["Completed", "Merged", "Closed Without Merge"].includes(ticket.status) ? `<button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reopen-ticket>Reopen</button>${archiveButton}` : `${archiveButton}<button class="button" type="button" data-open-preview>Preview prompt</button>
         ${workflowAction}`}</div>
       ${planningFailureBanner}
       <dialog data-preview-dialog aria-label="Prompt preview"><div class="card-head">Prompt preview</div><p>This is the exact, complete prompt sent to Claude — including global instructions, project context, resolved AI configuration, resolved skills, and ticket content.</p><pre class="references">Loading…</pre><button class="button" type="button" data-close-dialog>Close</button></dialog>

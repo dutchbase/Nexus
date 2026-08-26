@@ -47,9 +47,8 @@ test("run an AI review from the PR page and see its verdict", async ({ page }) =
   expect(review.parsed_verdict).toBe("approved");
   expect(review.github_comment_url).toBeTruthy();
 
-  // The page polls while running and reloads with the verdict badge.
-  await page.reload();
-  await expect(page.locator("[data-ai-review-status]")).toContainText(/AI: Approved/i);
+  // The page polls while running and auto-reloads with the verdict badge.
+  await expect(page.locator("[data-ai-review-status]")).toContainText(/AI: Approved/i, { timeout: 20_000 });
 });
 
 test("approve & merge merges the PR and the ticket ends up Merged, then reopens", async ({ page }) => {

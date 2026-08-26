@@ -1,4 +1,4 @@
-import { escapeHtml, fieldsFor, pool, standardFields } from "./shared.ts";
+import { escapeHtml, fieldsFor, pool, standardFields, statusBadge } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 
 export const fieldTypeLabels: [string, string][] = [
@@ -24,7 +24,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     )).rows;
     const body = `<div class="eyebrow">Public intake</div><h1>Forms</h1><div class="toolbar"><a class="button primary" href="/admin/forms/new">+ New form</a></div>
       ${forms.length ? `<div class="grid two">${forms.map((form) => `<a class="card" href="/admin/forms/${escapeHtml(form.slug)}"><div class="card-body">
-        <span class="status">${escapeHtml(form.status)}</span>
+        ${statusBadge(form.status)}
         <h2 style="font-family:'Cormorant Garamond',serif;font-size:21px;margin:8px 0 2px">${escapeHtml(form.name)}</h2>
         <p class="mono" style="color:var(--text3);font-size:12px">feedback.example.com/f/${escapeHtml(form.slug)}</p>
         <p style="display:flex;justify-content:space-between;margin:10px 0 0"><span>${form.field_count || standardFields.length} fields · ${form.submission_count} submissions</span><span style="color:var(--text3)">${escapeHtml(form.project_name || "Submitter selects")}</span></p>
@@ -78,7 +78,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         <button class="button primary" type="submit">Save settings</button>
       </form></div></section>`;
 
-    const previewPanel = `<div style="background:var(--surface2);padding:32px 16px;border-radius:6px"><div class="card public" style="max-width:620px;margin:0 auto;border-top:3px solid var(--accent)"><div class="card-body">
+    const previewPanel = `<div style="background:var(--surface2);padding:32px 16px;border-radius:6px"><div class="card public" style="max-width:620px;margin:0 auto;border-top:3px solid var(--primary)"><div class="card-body">
       <div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description ?? "")}</p>
       <div class="grid two">${fields.filter((field) => field.field_type !== "static").map(previewField).join("")}</div>
       <br><button class="button primary" disabled>Melding versturen</button>
@@ -86,7 +86,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
 
     const body = `<p><a href="/admin/forms">← Forms</a></p><div class="eyebrow mono">feedback.example.com/f/${escapeHtml(form.slug)}</div>
       <h1>${escapeHtml(form.name)}</h1>
-      <div class="toolbar"><span class="status">${escapeHtml(form.status)}</span>
+      <div class="toolbar">${statusBadge(form.status)}
         <a class="button" href="/f/${escapeHtml(form.slug)}" target="_blank" rel="noopener">Open public form ↗</a>
         <button class="button primary" type="button" data-publish-toggle data-form-id="${form.id}" data-status="${escapeHtml(form.status)}">${form.status === "published" ? "Unpublish" : "Publish changes"}</button></div>
       <div class="tabs" role="tablist">${["Fields", "Settings", "Preview"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>

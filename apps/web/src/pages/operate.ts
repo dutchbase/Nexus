@@ -2,7 +2,7 @@ import { statfsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { artifactDataRoot } from "../../../../packages/database/src/artifacts.ts";
-import { escapeHtml, pool, shortRef, workerHealth } from "./shared.ts";
+import { escapeHtml, fmtDateTime, pool, shortRef, statusBadge, workerHealth } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { aiModels, reasoningLevels } from "@dcc/domain";
 
@@ -46,14 +46,14 @@ function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: bo
   const lockoutThreshold = 5;
   const lockoutWindowMinutes = 15;
 
-  const general = `<section class="card">${field("Public base URL (APP_BASE_URL)", process.env.APP_BASE_URL ?? "http://127.0.0.1:3000")}${field("Database (host/name only)", maskedDatabaseUrl())}</section>`;
+  const general = `<section class="card"><div class="card-body">${field("Public base URL (APP_BASE_URL)", process.env.APP_BASE_URL ?? "http://127.0.0.1:3000")}${field("Database (host/name only)", maskedDatabaseUrl())}</div></section>`;
 
-  const authentication = `<section class="card">
+  const authentication = `<section class="card"><div class="card-body">
     ${field("Session lifetime", `${sessionHours} hours`)}
     ${field("Login rate limit", `${lockoutThreshold} attempts / ${lockoutWindowMinutes} min`)}
     ${field("Lockout duration", `${lockoutWindowMinutes} minutes`)}
     <div style="padding-top:10px">${check("Argon2id password hashing")}${check("Secure + HttpOnly + SameSite session cookie")}${check("CSRF token on every mutating request")}</div>
-  </section>`;
+  </div></section>`;
 
   const claude = `<section class="card"><div class="card-body">
     <div class="card-head" style="margin:-18px -18px 14px;border-radius:6px 6px 0 0">Subscription-only authentication</div>
@@ -75,7 +75,7 @@ function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: bo
   </section>`;
 
   const backupRetention = /^[1-9][0-9]*$/.test(process.env.DCC_BACKUP_RETENTION_DAYS ?? "") ? process.env.DCC_BACKUP_RETENTION_DAYS + " days" : "not configured";
-  const retention = `<section class="card">${field("Worktree cleanup", "not configured")}${field("Run event retention", "not configured")}${field("Audit retention", "not configured")}${field("Backup retention", backupRetention)}${field("Backup schedule", "not configured · external cron")}</section>`;
+  const retention = `<section class="card"><div class="card-body">${field("Worktree cleanup", "not configured")}${field("Run event retention", "not configured")}${field("Audit retention", "not configured")}${field("Backup retention", backupRetention)}${field("Backup schedule", "not configured · external cron")}</div></section>`;
 
   const aiReview = `<section class="card"><div class="card-body">
     <div class="card-head" style="margin:-18px -18px 14px;border-radius:6px 6px 0 0">AI PR Review defaults</div>
@@ -127,18 +127,18 @@ function settingsBody(aiReviewSettings: any, cap: { status: string; can_read: bo
 
   const rate = (value: unknown) => `$${Number(value).toLocaleString("en-US", { maximumFractionDigits: 8 })}`;
   const priceRows = modelPrices.length ? modelPrices.map((price) => `<tr>
-    <td>${escapeHtml(price.model)}</td><td>${escapeHtml(new Date(price.effective_from).toLocaleString())}</td>
+    <td>${escapeHtml(price.model)}</td><td>${fmtDateTime(price.effective_from)}</td>
     <td>${escapeHtml(rate(price.input_usd_per_million))}</td><td>${escapeHtml(rate(price.output_usd_per_million))}</td>
     <td>${escapeHtml(rate(price.cache_write_usd_per_million))}</td><td>${escapeHtml(rate(price.cache_read_usd_per_million))}</td>
     <td><a href="${escapeHtml(price.source_url)}" target="_blank" rel="noreferrer">Source</a></td>
-    <td>${escapeHtml(price.creator ?? "System")}</td><td><span class="status">${price.is_active ? "Active" : "Historic"}</span></td>
+    <td>${escapeHtml(price.creator ?? "System")}</td><td>${statusBadge(price.is_active ? "Active" : "Historic")}</td>
   </tr>`).join("") : `<tr><td colspan="9" style="color:var(--text3)">No model prices recorded.</td></tr>`;
   const modelPricesPanel = `<section class="card"><div class="card-body">
     <div class="card-head" style="margin:-18px -18px 14px;border-radius:6px 6px 0 0">Model pricing</div>
     <p style="font-size:13px;color:var(--text2)">Rates are USD per million tokens. Prices are append-only; create a new effective date to preserve history.</p>
     <div style="overflow:auto"><table style="width:100%;font-size:12px;border-collapse:collapse"><thead><tr><th>Model</th><th>Effective from</th><th>Input</th><th>Output</th><th>Cache write</th><th>Cache read</th><th>Source</th><th>Creator</th><th>Status</th></tr></thead><tbody>${priceRows}</tbody></table></div>
     <form data-ai-model-price-form style="display:flex;flex-direction:column;gap:12px;margin-top:18px">
-      <div class="grid two"><label class="field"><span>Model</span><select name="model">${modelOptions(null)}</select></label><label class="field"><span>Effective from</span><input name="effective_from" type="datetime-local" required></label></div>
+      <div class="grid two"><label class="field"><span>Model</span><select name="model">${modelOptions(null)}</select></label><label class="field"><span>Effective from</span><input name="effective_from" placeholder="dd-mm-yyyy hh:mm" required></label></div>
       <div class="grid two"><label class="field"><span>Input rate</span><input name="input_usd_per_million" type="number" min="0" step="any" required></label><label class="field"><span>Output rate</span><input name="output_usd_per_million" type="number" min="0" step="any" required></label><label class="field"><span>Cache write rate</span><input name="cache_write_usd_per_million" type="number" min="0" step="any" required></label><label class="field"><span>Cache read rate</span><input name="cache_read_usd_per_million" type="number" min="0" step="any" required></label></div>
       <label class="field"><span>HTTPS pricing source</span><input name="source_url" type="url" placeholder="https://…" required></label>
       <div style="display:flex;gap:8px"><button class="button primary" type="submit">Add price</button><div class="error" style="flex:1;color:var(--t-danger);align-self:center;font-size:13px"></div></div>
@@ -222,7 +222,7 @@ async function systemBody(): Promise<string> {
           <span style="width:8px;height:8px;border-radius:99px;background:var(--t-${tone});flex-shrink:0"></span>
           <span style="flex:1;font-size:13px">${escapeHtml(project.name)}</span>
           <span class="mono" style="font-size:12px;color:var(--text3)">${escapeHtml(project.repository_path ?? "")}</span>
-          <span class="status">${escapeHtml(project.health_status)}</span>
+          ${statusBadge(project.health_status)}
         </a>`;
       }).join("")
     : `<div class="card-body"><p>No projects registered yet.</p></div>`;

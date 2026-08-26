@@ -1,4 +1,4 @@
-import { escapeHtml, pool, promptVersionsLabel, runProgress, shortRef, shortRefs } from "./shared.ts";
+import { escapeHtml, pool, promptVersionsLabel, runProgress, shortRef, shortRefs, statusBadge } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
@@ -10,7 +10,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     )).rows;
     const runLabels = shortRefs("RUN", runs);
     const rows = runs.map((run) =>
-      `<a class="ticket-row runs-row" href="/admin/runs/${run.id}"><span class="mono">${runLabels.get(run.id)}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.ticket_number ?? "")} · ${escapeHtml(run.project_name ?? "")}</span><span>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}</span><span class="status">${escapeHtml(run.status)}</span><time>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : ""}</time></a>`,
+      `<a class="ticket-row runs-row" href="/admin/runs/${run.id}"><span class="mono">${runLabels.get(run.id)}</span><strong>${escapeHtml(run.run_type)}</strong><span>${escapeHtml(run.ticket_number ?? "")} · ${escapeHtml(run.project_name ?? "")}</span><span>${escapeHtml(run.model)} · ${escapeHtml(run.reasoning_level)}</span>${statusBadge(run.status)}<time>${run.started_at ? new Date(run.started_at).toLocaleString("nl-NL") : ""}</time></a>`,
     ).join("");
     const body = `<div class="eyebrow">Work</div><h1>Runs</h1><section class="card"><div class="list-head runs-head"><span>Run</span><span>Type</span><span>Ticket</span><span>AI</span><span>Status</span><span>Started</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No runs recorded.</div>`}</section>`;
     return { status: 200, title: "Runs", body };
@@ -55,7 +55,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const body = `<div class="eyebrow">${escapeHtml(run.ticket_number ?? "")} · ${escapeHtml(run.project_name ?? "")}</div>
       <h1>${shortRef("RUN", run.id)} · ${escapeHtml(run.run_type)}</h1>
       <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
-        <span class="status">${escapeHtml(run.status)}</span>
+        ${statusBadge(run.status)}
         <span>${statusLine}</span>
         <a href="/api/admin/runs/${run.id}/log" class="button secondary" download>Download logs</a>
         <button data-run-cancel data-run-id="${run.id}" class="button secondary" style="color:var(--t-danger);border-color:var(--t-danger)" ${!canCancel ? `disabled title="Run is not active"` : ""}>Cancel run</button>
@@ -77,7 +77,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         <dt>Rates</dt><dd>${run.ai_model_price_id ? `input ${escapeHtml(run.input_usd_per_million)} · output ${escapeHtml(run.output_usd_per_million)} · cache write ${escapeHtml(run.cache_write_usd_per_million)} · cache read ${escapeHtml(run.cache_read_usd_per_million)} per million${run.price_source_url ? ` · <a href="${escapeHtml(run.price_source_url)}">source</a>` : ""}` : "Not captured"}</dd>
       </dl><details><summary>Task prompt</summary><pre>${escapeHtml(run.task_prompt ?? "Not captured")}</pre></details><details><summary>Rendered prompt${run.prompt_name ? ` · ${escapeHtml(run.prompt_name)}${promptVersionsLabel(run.prompt_versions) ? ` · ${escapeHtml(promptVersionsLabel(run.prompt_versions))}` : ""}` : ""}</summary><pre>${escapeHtml(run.rendered_prompt ?? "Not captured")}</pre></details></div></section>
       <section class="card"><div class="card-head">Attempt logs</div>${attemptLogs.length ? attemptLogs.map((log) =>
-        `<a class="ticket-row" href="/api/admin/runs/${log.agent_run_id}/log" download><span class="mono">Attempt ${log.attempt_number}</span><span class="status">${escapeHtml(log.status)}</span><time>${new Date(log.created_at).toLocaleString("nl-NL")}</time></a>`,
+        `<a class="ticket-row" href="/api/admin/runs/${log.agent_run_id}/log" download><span class="mono">Attempt ${log.attempt_number}</span>${statusBadge(log.status)}<time>${new Date(log.created_at).toLocaleString("nl-NL")}</time></a>`,
       ).join("") : '<div class="card-body"><p>No attempt logs recorded.</p></div>'}</section>
       <dialog data-repair-dialog style="border:none;border-radius:8px;box-shadow:var(--shadow);width:100%;max-width:660px">
         <div style="padding:20px;border-bottom:1px solid var(--border)"><h2 style="font-size:16px;font-weight:600;margin:0">Repair with instructions</h2></div>

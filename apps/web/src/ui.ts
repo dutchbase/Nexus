@@ -62,7 +62,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
   return document(title, `<div class="shell"><aside class="sidebar" id="sidebar"><div class="brand"><span class="brand-mark">D</span><div><div class="brand-title">Development hub</div><div class="brand-sub">Internet Nederland</div></div></div>
     <nav class="nav" aria-label="Primary">${nav}</nav><footer class="sidebar-footer"><div class="theme"><button data-theme-choice="light">Light</button><button data-theme-choice="auto">Auto</button><button data-theme-choice="dark">Dark</button></div><p>${escapeHtml(username)} · administrator</p></footer></aside>
     <button class="scrim" type="button" data-scrim hidden aria-label="Close navigation menu"></button>
-    <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}<span class="worker">● worker-01 healthy</span><a class="button" href="/f/website-feedback">Public form</a></header><main class="main">${body}</main></div></div>`, `
+    <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}<span class="worker">● worker-01 healthy</span>${path === "/admin/forms" || path.startsWith("/admin/forms/") ? `<a class="button" href="/f/website-feedback">Public form</a>` : ""}</header><main class="main">${body}</main></div></div>`, `
       const cc=document.cookie.match(/(?:^|;\\s*)dcc_csrf=([^;]*)/);if(cc)sessionStorage.setItem("dccCsrf",cc[1]);
       const choice=localStorage.getItem("dccTheme")||"auto";
       const apply=(value)=>{const dark=value==="dark"||(value==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light";document.querySelectorAll("[data-theme-choice]").forEach(b=>b.classList.toggle("selected",b.dataset.themeChoice===value))};
@@ -430,10 +430,10 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             fields.forEach((field,index)=>{
               const row=document.createElement("div");
               row.style.cssText="display:flex;align-items:center;gap:10px;padding:10px 4px;border-bottom:1px solid var(--border);cursor:pointer";
-              if(index===selected)row.style.cssText+="background:var(--accent-soft);border-left:2px solid var(--accent)";
+              if(index===selected)row.style.cssText+="background:var(--primary-soft);border-left:2px solid var(--primary)";
               row.innerHTML='<span class="mono" style="width:20px;color:var(--text3)">'+(index+1)+'</span>'
                 +'<span style="flex:1"><strong>'+field.label.replace(/</g,"&lt;")+'</strong><br><span class="mono" style="font-size:11px;color:var(--text3)">'+field.field_key.replace(/</g,"&lt;")+' · '+typeLabel(field.field_type)+'</span></span>'
-                +'<span class="status" style="background:'+(field.required?"var(--accent-soft)":"var(--s-muted)")+'">'+(field.required?"Required":"Optional")+'</span>';
+                +'<span class="status" style="background:'+(field.required?"var(--primary-soft)":"var(--s-muted)")+'">'+(field.required?"Required":"Optional")+'</span>';
               const up=document.createElement("button");up.type="button";up.className="button";up.textContent="↑";up.disabled=index===0;up.addEventListener("click",e=>{e.stopPropagation();moveField(index,-1)});
               const down=document.createElement("button");down.type="button";down.className="button";down.textContent="↓";down.disabled=index===fields.length-1;down.addEventListener("click",e=>{e.stopPropagation();moveField(index,1)});
               const remove=document.createElement("button");remove.type="button";remove.className="button";remove.textContent="×";remove.addEventListener("click",e=>{e.stopPropagation();removeField(index)});
@@ -554,7 +554,11 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           priceForm.addEventListener("submit",async(event)=>{
             event.preventDefault();
             const data=new FormData(priceForm),rate=(name)=>Number(data.get(name));
-            const response=await fetch("/api/admin/ai-model-prices",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({model:data.get("model"),effective_from:data.get("effective_from"),input_usd_per_million:rate("input_usd_per_million"),output_usd_per_million:rate("output_usd_per_million"),cache_write_usd_per_million:rate("cache_write_usd_per_million"),cache_read_usd_per_million:rate("cache_read_usd_per_million"),source_url:data.get("source_url")})});
+            // dd-mm-yyyy hh:mm (house format) → ISO for the API.
+            const raw=String(data.get("effective_from")||"").trim();
+            const parsed=/^(\\d{1,2})-(\\d{1,2})-(\\d{4})\\s+(\\d{1,2}):(\\d{2})$/.exec(raw);
+            const effectiveFrom=parsed?parsed[3].padStart(4,"0")+"-"+parsed[2].padStart(2,"0")+"-"+parsed[1].padStart(2,"0")+"T"+parsed[4].padStart(2,"0")+":"+parsed[5]+":00":raw;
+            const response=await fetch("/api/admin/ai-model-prices",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({model:data.get("model"),effective_from:effectiveFrom,input_usd_per_million:rate("input_usd_per_million"),output_usd_per_million:rate("output_usd_per_million"),cache_write_usd_per_million:rate("cache_write_usd_per_million"),cache_read_usd_per_million:rate("cache_read_usd_per_million"),source_url:data.get("source_url")})});
             if(response.ok)location.reload();else{const result=await response.json();priceForm.querySelector(".error").textContent=result.error}
           });
         }
@@ -566,11 +570,15 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         const intoSelect=document.getElementById("merge-into");
         const statusBox=document.querySelector("[data-merge-status]");
         const mergeButton=document.querySelector("[data-merge-button]");
+        const createPrButton=document.querySelector("[data-create-pr-button]");
         const reasonLine=document.querySelector("[data-merge-reason]");
+        const retryButton=document.querySelector("[data-merge-retry]");
         let branches=[];let lastPreview=null;let previewToken=0;
+        function showRetry(show){if(retryButton)retryButton.hidden=!show;}
 
         function setStatus(text,tone){statusBox.textContent=text;statusBox.style.borderLeftColor=tone==="ok"?"var(--t-ok)":tone==="warn"?"var(--t-warn)":tone==="danger"?"var(--t-danger)":"var(--border2)";}
         function refresh(){
+          syncCreatePr();
           if(!projectSelect.value){mergeButton.disabled=true;setReason("Select a project.");return;}
           const head=fromSelect.value,base=intoSelect.value;
           if(!base){mergeButton.disabled=true;setReason("Select the branch to merge into.");return;}
@@ -580,7 +588,30 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           applyVerdict(lastPreview.result);
         }
         function setReason(text){reasonLine.textContent=text;}
+        // Creating a PR is the non-destructive sibling of merging: both refs
+        // must exist and differ, but conflicts or missing reviews do not block
+        // it — GitHub flags those on the PR. Only "already up to date" makes a
+        // PR pointless.
+        function prAvailability(){
+          const head=fromSelect.value,base=intoSelect.value;
+          if(!projectSelect.value||!head||!base)return {ok:false,reason:"Select both branches."};
+          if(head===base)return {ok:false,reason:"From and into are the same branch."};
+          if(!lastPreview||lastPreview.head!==head||lastPreview.base!==base)return {ok:false,reason:"Pre-flight check running…"};
+          const outcome=lastPreview.result.outcome;
+          if(outcome==="missing_head")return {ok:false,reason:"The source branch no longer exists on the remote."};
+          if(outcome==="missing_base")return {ok:false,reason:"The target branch no longer exists on the remote."};
+          if(outcome==="up_to_date")return {ok:false,reason:"Nothing to open — "+base+" already contains everything in "+head+"."};
+          if(outcome==="conflict")return {ok:true,reason:"Opens a pull request: "+head+" → "+base+" — GitHub will flag the conflicts to resolve."};
+          return {ok:true,reason:"Opens a pull request: "+head+" → "+base+"."};
+        }
+        function syncCreatePr(){
+          if(!createPrButton)return;
+          const availability=prAvailability();
+          createPrButton.disabled=!availability.ok;
+          createPrButton.title=availability.ok?availability.reason:availability.reason;
+        }
         function applyVerdict(result){
+          syncCreatePr();
           const head=fromSelect.value,base=intoSelect.value;
           if(result.outcome==="up_to_date"){mergeButton.disabled=true;setReason("Nothing to do — already up to date.");setStatus("Already up to date: "+base+" already contains everything in "+head+".","ok");return;}
           if(result.outcome==="conflict"){const files=result.conflicted_files&&result.conflicted_files.length?result.conflicted_files.join(", "):"unknown files";mergeButton.disabled=true;setReason("Resolving conflicts automatically is not supported for direct merges.");setStatus("Merge CONFLICT: merging "+head+" into "+base+" would conflict in: "+files,"danger");return;}
@@ -603,14 +634,23 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const token=++previewToken;
           const projectId=projectSelect.value,head=fromSelect.value,base=intoSelect.value;
           mergeButton.disabled=true;
+          showRetry(false);
+          syncCreatePr();
           setStatus("Reading live branches…");
           try{
             const queued=await fetch("/api/admin/projects/"+projectId+"/merge-preview",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({head:head||undefined,base:base||undefined})});
-            if(!queued.ok){const err=await queued.json().catch(()=>({}));setStatus("Pre-flight could not start: "+(err.error||queued.status),"danger");setReason("Fix the error above.");return;}
+            if(!queued.ok){const err=await queued.json().catch(()=>({}));setStatus("Pre-flight could not start: "+(err.error||queued.status),"danger");setReason("Fix the error above.");showRetry(true);return;}
             const {job}=await queued.json();
             const done=await pollJob(job.id,20000);
             if(token!==previewToken)return;
-            if(!done||done.status!=="completed"){setStatus(done&&done.status!=="completed"?"Pre-flight job "+done.status+": "+((done.error_json||{}).message||""):"Pre-flight check timed out — try again.","danger");setReason("No pre-flight verdict.");return;}
+            if(!done||done.status!=="completed"){
+              setStatus(done&&done.status!=="completed"?"Pre-flight job "+done.status+": "+((done.error_json||{}).message||""):"Pre-flight check timed out — try again.","danger");
+              setReason("No pre-flight verdict.");
+              showRetry(true);
+              // The branch dropdowns must never hang on Loading… forever.
+              if(!branches.length){for(const select of [fromSelect,intoSelect])select.innerHTML='<option value="">Could not load branches</option>';}
+              return;
+            }
             const result=done.result_json||{};
             if(result.branches){
               branches=result.branches;
@@ -629,18 +669,37 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             lastPreview={head,base,result};
             setStatus(branches.length?"Branches loaded. Pick a pair to check the merge.":"This repository has no remote branches.");
             setReason(branches.length?"":"Nothing can be merged from an empty remote.");
+            showRetry(false);
             refresh();
-          }catch(error){if(token===previewToken){setStatus("Pre-flight failed: "+error.message,"danger");setReason("No pre-flight verdict.");}}
+          }catch(error){if(token===previewToken){setStatus("Pre-flight failed: "+error.message,"danger");setReason("No pre-flight verdict.");showRetry(true);}}
         }
 
         projectSelect.addEventListener("change",()=>{
-          lastPreview=null;
+          lastPreview=null;branches=[];
           fromSelect.innerHTML='<option value="">Loading…</option>';intoSelect.innerHTML='<option value="">Loading…</option>';
           fromSelect.disabled=!projectSelect.value;intoSelect.disabled=!projectSelect.value;
-          if(projectSelect.value)runPreview();else{setStatus("Select a project to list its branches.");refresh();}
+          if(projectSelect.value)runPreview();else{setStatus("Select a project to list its branches.");showRetry(false);refresh();}
         });
         fromSelect.addEventListener("change",runPreview);
         intoSelect.addEventListener("change",runPreview);
+        retryButton?.addEventListener("click",()=>{showRetry(false);runPreview();});
+        createPrButton?.addEventListener("click",async()=>{
+          const projectId=projectSelect.value,head=fromSelect.value,base=intoSelect.value;
+          const preview=lastPreview&&lastPreview.head===head&&lastPreview.base===base?lastPreview.result:null;
+          if(!preview||["missing_head","missing_base","up_to_date"].includes(preview.outcome))return;
+          if(!confirm("Open a pull request "+head+" → "+base+" on GitHub?"))return;
+          createPrButton.disabled=true;setStatus("Opening pull request "+head+" → "+base+"…");
+          try{
+            const queued=await fetch("/api/admin/projects/"+projectId+"/open-pull-request",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({head,base})});
+            const queuedBody=await queued.json().catch(()=>({}));
+            if(!queued.ok){setStatus("Could not queue PR creation: "+(queuedBody.error||queued.status),"danger");syncCreatePr();return;}
+            const done=await pollJob(queuedBody.job.id,60000);
+            const result=done?.result_json||{};
+            if(done&&done.status==="completed"&&result.outcome==="created"){setStatus("Pull request #"+result.number+" opened: "+result.url,"ok");setReason("Done.");syncCreatePr();return;}
+            if(done&&done.status==="completed"&&result.outcome==="already_open"){setStatus("An open pull request for "+head+" already exists: "+result.url,"ok");setReason("Nothing to do.");syncCreatePr();return;}
+            setStatus("PR creation failed: "+((done&&done.error_json||{}).message||result.error||(done?"see worker logs":"timed out — use Retry")),"danger");setReason("PR was not created.");syncCreatePr();
+          }catch(error){setStatus("PR creation failed: "+error.message,"danger");syncCreatePr();}
+        });
         mergeButton.addEventListener("click",async()=>{
           const projectId=projectSelect.value,head=fromSelect.value,base=intoSelect.value;
           const preview=lastPreview&&lastPreview.head===head&&lastPreview.base===base?lastPreview.result:null;
@@ -658,6 +717,21 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             if(done.status==="completed"&&(result.outcome==="conflict"||result.outcome==="refused")){setStatus(result.outcome==="conflict"?"GitHub reports a conflict for this pair.":"Refused: "+(result.message||result.refusal_code||"branches changed since the check")+" — re-check and retry.","danger");setReason("Merge did not happen.");lastPreview=null;runPreview();return;}
             setStatus("Merge failed: "+((done.error_json||{}).message||result.error||"see worker logs"),"danger");setReason("Merge did not happen.");
           }catch(error){setStatus("Merge failed: "+error.message,"danger");}
+        });
+      `:""}
+      ${path==="/admin/ai-usage"?`
+        const aiUsageForm=document.querySelector("[data-ai-usage-filters]");
+        aiUsageForm?.addEventListener("submit",(event)=>{
+          event.preventDefault();
+          const q=new URLSearchParams(new FormData(aiUsageForm));
+          // dd-mm-yyyy → ISO for the URL, so filtering works regardless of the browser locale.
+          for(const name of ["from","to"]){
+            const value=(q.get(name)||"").trim();
+            if(!value){q.delete(name);continue;}
+            const match=/^(\\d{1,2})-(\\d{1,2})-(\\d{4})$/.exec(value);
+            if(match)q.set(name,match[3].padStart(4,"0")+"-"+match[2].padStart(2,"0")+"-"+match[1].padStart(2,"0"));
+          }
+          location.href="/admin/ai-usage?"+q.toString();
         });
       `:""}
       ${path==="/admin/pull-requests"?`
@@ -782,8 +856,8 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         });
         categoryChips.forEach(chip=>chip.addEventListener("click",()=>{
           activeCategory=chip.dataset.category;
-          categoryChips.forEach(c=>c.style.background=c===chip?"var(--accent-soft)":"transparent");
-          categoryChips.forEach(c=>c.style.color=c===chip?"var(--accent)":"inherit");
+          categoryChips.forEach(c=>c.style.background=c===chip?"var(--primary-soft)":"transparent");
+          categoryChips.forEach(c=>c.style.color=c===chip?"var(--primary)":"inherit");
           filterRows();
         }));
         searchInput?.addEventListener("input",filterRows);

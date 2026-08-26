@@ -250,7 +250,11 @@ const server = http.createServer((req, res) => {
         const head = url.searchParams.get('head');
         let filtered = Array.from(repoData.prs.values());
         if (state !== 'all') filtered = filtered.filter((pr) => pr.state === state);
-        if (head) filtered = filtered.filter((pr) => pr.head.ref === head);
+        if (head) {
+          // Real GitHub takes head as "owner:branch" — match on the ref part.
+          const ref = head.includes(':') ? head.split(':').pop() : head;
+          filtered = filtered.filter((pr) => pr.head.ref === ref);
+        }
         log(method, pathname, null, 200);
         respond(res, 200, filtered);
         return;

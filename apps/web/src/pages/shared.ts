@@ -4,6 +4,46 @@ import { WORKER_STALE_AFTER_MS } from "@dcc/domain";
 
 export { pool, adminPage, escapeHtml };
 
+// One semantic color scale for every status/state badge in the app:
+// ok=green done/approved/enabled, danger=red failed/rejected, warn=amber
+// needs attention/blocked, info=blue queued/intake, run=purple actively
+// executing, muted=gray organizational/unknown. Ticket statuses use their
+// exact display casing; worker-side states (runs, jobs, deliveries) are
+// matched lowercase. Unknown labels fall back to muted so a new status can
+// never render as the alarming default.
+const ticketStatusTones: Record<string, string> = {
+  "Submitted": "info", "Triage": "info", "Needs Information": "warn",
+  "Approved for Planning": "ok", "Planning Queued": "info", "Planning": "run", "Planning Failed": "danger",
+  "Plan Ready for Review": "run", "Plan Revision Requested": "warn", "Plan Revision Queued": "run", "Plan Approved": "ok",
+  "Execution Queued": "info", "Executing": "run", "Validating": "run", "Validation Failed": "danger",
+  "Execution Failed": "danger", "PR Creation Failed": "danger",
+  "PR Ready for Review": "warn", "PR Changes Requested": "warn", "PR Approved": "ok",
+  "Merged": "ok", "Completed": "ok", "Rejected": "danger", "Cancelled": "muted", "Archived": "muted",
+  "Closed Without Merge": "muted",
+};
+const stateTones: Record<string, string> = {
+  queued: "info", running: "run", completed: "ok", failed: "danger", cancelled: "muted",
+  timed_out: "warn", cancellation_requested: "warn",
+  blocked_auth: "warn", blocked_auth_configuration: "warn",
+  sent: "ok", pending: "info", exhausted: "danger",
+  staged: "info", finalized: "ok",
+  passed: "ok", skipped: "muted",
+  enabled: "ok", disabled: "muted", active: "ok", inactive: "muted", historic: "muted",
+  captured: "ok", legacy: "muted", unpriced: "warn", unavailable: "warn",
+  healthy: "ok", repository_dirty: "danger", stale: "warn", unknown: "muted",
+  published: "ok", draft: "muted", placeholder: "muted",
+  approved: "ok", rejected: "danger", error: "danger", resolved: "ok", open: "info", closed: "muted",
+};
+
+export function statusTone(label: unknown): string {
+  const value = String(label ?? "").trim();
+  return ticketStatusTones[value] ?? stateTones[value.toLowerCase()] ?? "muted";
+}
+
+export function statusBadge(label: unknown, extraClass = ""): string {
+  return `<span class="status ${statusTone(label)}${extraClass ? ` ${extraClass}` : ""}">${escapeHtml(String(label ?? ""))}</span>`;
+}
+
 export function promptVersionsLabel(value: unknown) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return "";
   return Object.entries(value as Record<string, unknown>)
@@ -208,6 +248,36 @@ export function pagerHtml(url: URL, next: string | null): string {
   const params = new URLSearchParams(url.search);
   params.set("cursor", next);
   return `<div class="pager"><a class="button" data-pager-next href="${escapeHtml(`${url.pathname}?${params.toString()}`)}">Next</a></div>`;
+}
+
+// Dates render dd-mm-yyyy (the house standard) regardless of the visitor's
+// browser locale; UI copy stays English. Date-only ISO strings are formatted
+// manually so a UTC parse can never shift the day across timezones.
+export function fmtDate(value: unknown): string {
+  if (!value) return "—";
+  if (typeof value === "string" && /^\d{4}-\d{2}-\d{2}$/.test(value)) {
+    const [year, month, day] = value.split("-");
+    return `${day}-${month}-${year}`;
+  }
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleDateString("nl-NL");
+}
+
+export function fmtDateTime(value: unknown): string {
+  if (!value) return "—";
+  const date = value instanceof Date ? value : new Date(String(value));
+  if (Number.isNaN(date.getTime())) return "—";
+  return date.toLocaleString("nl-NL");
+}
+
+// dd-mm-yyyy → ISO yyyy-mm-dd for API round-trips; null when empty/invalid.
+export function parseDateInput(value: string): string | null {
+  const match = /^(\d{1,2})-(\d{1,2})-(\d{4})$/.exec(value.trim());
+  if (!match) return null;
+  const day = Number(match[1]); const month = Number(match[2]); const year = Number(match[3]);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return null;
+  return `${String(year).padStart(4, "0")}-${String(month).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
 }
 
 export type Session = { username: string; user_id: string };

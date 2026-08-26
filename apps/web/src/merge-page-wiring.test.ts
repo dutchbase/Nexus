@@ -23,6 +23,7 @@ function makeElement(id: string | null) {
     innerHTML: "",
     textContent: "",
     disabled: false,
+    hidden: false,
     style: {} as Record<string, string>,
     dataset: {} as Record<string, string>,
     selectedOptions: [] as Array<{ dataset: Record<string, string> }>,
@@ -43,6 +44,8 @@ function stubDocument() {
   const statusBox = makeElement(null);
   const button = makeElement(null);
   const reason = makeElement(null);
+  const retry = makeElement(null);
+  retry.hidden = true;
   const documentStub = {
     cookie: "",
     getElementById: (id: string) =>
@@ -51,13 +54,14 @@ function stubDocument() {
       selector === "[data-merge-status]" ? statusBox
         : selector === "[data-merge-button]" ? button
         : selector === "[data-merge-reason]" ? reason
+        : selector === "[data-merge-retry]" ? retry
         : null,
     querySelectorAll: () => [],
     documentElement: { dataset: {} as Record<string, string> },
     addEventListener: () => undefined,
     matchMedia: () => ({ matches: false, addEventListener: () => undefined }),
   };
-  return { documentStub, projectSelect, fromSelect, intoSelect, statusBox, button, reason };
+  return { documentStub, projectSelect, fromSelect, intoSelect, statusBox, button, reason, retry };
 }
 
 describe("merge workbench page wiring", () => {
@@ -190,6 +194,62 @@ describe("merge workbench page wiring", () => {
       expect(stubs.button.disabled).toBe(verdict.expectDisabled);
       if (verdict.expectDisabled) expect(stubs.statusBox.textContent.toLowerCase()).toContain("conflict");
       else expect(stubs.reason.textContent).toContain("3 commit");
+    }
+  });
+
+  test("a timed-out branch load surfaces Retry, clears Loading, and Retry re-runs the check", async () => {
+    const page = await mergePage.render(new URL("http://x/admin/merge"), { username: "a", user_id: "u" }, {});
+    const shell = adminPage("/admin/merge", page!.title, page!.body, {}, "a");
+    const wired = [...shell.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).find((s) => s.includes("merge-project"))!;
+
+    const stubs = stubDocument();
+    stubs.projectSelect.value = "p1";
+    let previewCalls = 0;
+    globalThis.fetch = vi.fn(async (url: string): Promise<any> => {
+      if (url.includes("/merge-preview")) {
+        previewCalls += 1;
+        return { ok: true, status: 202, json: async () => ({ job: { id: "j" } }) };
+      }
+      if (url.includes("/api/admin/jobs/")) {
+        // Job never completes within the poll window.
+        return { ok: true, json: async () => ({ job: { status: "running" } }) };
+      }
+      throw new Error("unexpected " + url);
+    }) as unknown as typeof fetch;
+
+    vi.useFakeTimers();
+    try {
+      new Function("document", "fetch", "sessionStorage", "localStorage", "location", "confirm", "alert", "matchMedia", "window", wired)(
+        stubs.documentStub,
+        globalThis.fetch,
+        { getItem: () => "csrf" },
+        { getItem: () => null, setItem: () => undefined },
+        { href: "" },
+        () => true,
+        () => undefined,
+        () => ({ matches: false, addEventListener: () => undefined }),
+        { location: { pathname: "/admin/merge" } },
+      );
+
+      stubs.projectSelect.dispatch("change");
+      await vi.advanceTimersByTimeAsync(21_500);
+
+      // Timeout message shown, Retry visible, dropdowns left the Loading state.
+      expect(stubs.statusBox.textContent).toContain("timed out");
+      expect(stubs.retry.hidden).toBe(false);
+      expect(stubs.fromSelect.innerHTML).not.toContain("Loading");
+      expect(stubs.fromSelect.innerHTML).toContain("Could not load branches");
+      expect(stubs.intoSelect.innerHTML).toContain("Could not load branches");
+      expect(stubs.button.disabled).toBe(true);
+
+      // Retry re-runs the whole check (fresh preview job) and hides itself meanwhile.
+      stubs.retry.dispatch("click");
+      expect(stubs.retry.hidden).toBe(true);
+      await vi.advanceTimersByTimeAsync(21_500);
+      expect(previewCalls).toBe(2);
+      expect(stubs.retry.hidden).toBe(false);
+    } finally {
+      vi.useRealTimers();
     }
   });
 });

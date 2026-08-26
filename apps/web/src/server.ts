@@ -405,8 +405,8 @@ export async function consumeSubmissionAttempt(formId: string, ip: string, limit
       `SELECT count(*)::integer AS count,
               coalesce(ceil(extract(epoch FROM min(created_at) + interval '1 hour' - now()))::integer, 0) AS reset_seconds
        FROM public_submission_attempts
-       WHERE form_id = $1 AND ip_address = $2 AND kind = $4 AND created_at > now() - interval '1 hour'`,
-      [formId, ip, limit, kind],
+       WHERE form_id = $1 AND ip_address = $2 AND kind = $3 AND created_at > now() - interval '1 hour'`,
+      [formId, ip, kind],
     );
     if (recent.rows[0].count >= limit) return { allowed: false, resetSeconds: Math.max(1, recent.rows[0].reset_seconds) };
     await client.query("INSERT INTO public_submission_attempts (form_id, ip_address, accepted, kind) VALUES ($1,$2,true,$3)", [formId, ip, kind]);
@@ -1237,6 +1237,25 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const expectedHeadSha = typeof body.expected_head_sha === "string" && shaPattern.test(body.expected_head_sha) ? body.expected_head_sha : undefined;
     const expectedBaseSha = typeof body.expected_base_sha === "string" && shaPattern.test(body.expected_base_sha) ? body.expected_base_sha : undefined;
     const job = await enqueueJob({ type: "github.merge_branches", payload: { actor_id: session.user_id, project_id: project.id, head, base, ...(expectedHeadSha || expectedBaseSha ? { expected_head_sha: expectedHeadSha, expected_base_sha: expectedBaseSha } : {}) }, idempotencyKey: `g07:github.merge_branches:${project.id}:${head}:${base}:${requestToken}` });
+    return json(response, 202, { job });
+  }
+  const openPullRequestMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/open-pull-request$/i);
+  if (openPullRequestMatch && request.method === "POST") {
+    const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [openPullRequestMatch[1]])).rows[0];
+    if (!project) return json(response, 404, { error: "project not found" });
+    if (!project.github_owner || !project.github_repository) return json(response, 400, { error: "project has no GitHub repository configured" });
+    const body = await bodyOf(request);
+    const head = typeof body.head === "string" ? body.head.trim() : "";
+    const base = typeof body.base === "string" ? body.base.trim() : "";
+    const refPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
+    if (!head || !base) return json(response, 400, { error: "head and base branch are required" });
+    if (!refPattern.test(head) || !refPattern.test(base)) return json(response, 400, { error: "invalid branch name" });
+    if (head === base) return json(response, 400, { error: "head and base must differ" });
+    const title = typeof body.title === "string" && body.title.trim() ? body.title.trim().slice(0, 200) : undefined;
+    // Same dedupe shape as merge-branches: double-clicks collapse, an explicit
+    // request_id lets an operator deliberately open another PR for the pair.
+    const requestToken = typeof body.request_id === "string" && body.request_id.trim() ? body.request_id.trim().slice(0, 64).replace(/[^A-Za-z0-9._:-]/g, "") : String(Math.floor(Date.now() / 3_600_000));
+    const job = await enqueueJob({ type: "github.open_pull_request", payload: { actor_id: session.user_id, project_id: project.id, head, base, ...(title ? { title } : {}) }, idempotencyKey: `g07:github.open_pull_request:${project.id}:${head}:${base}:${requestToken}` });
     return json(response, 202, { job });
   }
   const jobStatusMatch = url.pathname.match(/^\/api\/admin\/jobs\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i);
