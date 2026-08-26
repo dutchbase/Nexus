@@ -156,4 +156,12 @@ curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1
 record_event "healthy"
 write_marker 0 reload_pending
 reload_app dcc-webhook
+# A vanished webhook can never finalize this attempt (marker stays
+# reloadPending forever) nor receive future pushes — fail loudly instead.
+for _ in $(seq 1 10); do [ "$(pm2 pid dcc-webhook 2>/dev/null)" -gt 0 ] 2>/dev/null && break; sleep 1; done
+if ! [ "$(pm2 pid dcc-webhook 2>/dev/null)" -gt 0 ] 2>/dev/null; then
+  echo "deploy.sh: dcc-webhook failed to stay up after reload" >&2
+  write_marker 75
+  exit 75
+fi
 echo "deploy.sh: deployed $SHA"
