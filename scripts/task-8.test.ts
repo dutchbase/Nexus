@@ -54,6 +54,7 @@ exec /bin/mv "$@"
 `,
     pm2: `#!/bin/sh
 echo "pm2 $* current=$(readlink "$DCC_ROOT/.deploy-current" 2>/dev/null || true)" >> "$DCC_LOG"
+if [ "$1" = pid ]; then echo 12345; exit 0; fi
 if [ "$DCC_FAIL_WORKER" = 1 ] && [ "$*" = "start $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-worker --update-env" ] && [ ! -f "$DCC_WORKER_FAILED" ]; then touch "$DCC_WORKER_FAILED"; exit 75; fi
 if [ "$DCC_FAIL_WEBHOOK" = 1 ] && [ "$*" = "start $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-webhook --update-env" ] && [ ! -f "$DCC_WEBHOOK_FAILED" ]; then touch "$DCC_WEBHOOK_FAILED"; exit 74; fi
 if [ "$*" = "start $DCC_ROOT/.deploy-current/ecosystem.config.cjs --only dcc-webhook --update-env" ] && [ ! -f "$DCC_MARKER" ]; then exit 79; fi
