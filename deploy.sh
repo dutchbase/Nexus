@@ -35,6 +35,14 @@ write_marker() {
   mv -f "$temporary" "$MARKER"
 }
 
+# pm2 bakes exec cwd to the resolved release directory on start; restart
+# ("startOrReload") keeps the OLD cwd, silently running a stale release after
+# every cutover. Delete + start from $CURRENT so each deploy actually moves.
+reload_app() {
+  pm2 delete "$1" >/dev/null 2>&1
+  pm2 start "$CURRENT/ecosystem.config.cjs" --only "$1" --update-env
+}
+
 record_event() {
   local stage="$1"
   psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=attempt_id="$ATTEMPT_ID" --set=event_key="deploy:$stage" --set=event_type=stage --set=stage="$stage" <<'SQL'
@@ -73,10 +81,10 @@ rollback() {
     if [ "$CUTOVER" -eq 1 ]; then
       if [ -n "$PRIOR_RELEASE" ]; then
         if switch_current "$PRIOR_RELEASE"; then rollback_outcome="prior_release_restored"; else rollback_outcome="prior_release_restore_failed"; recovered=0; fi
-        pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-web --update-env || recovered=0
-        pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-worker --update-env || recovered=0
+        reload_app dcc-web || recovered=0
+        reload_app dcc-worker || recovered=0
         if curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 "$DCC_DEPLOY_HEALTH_URL"; then recovery_health="passed"; else recovery_health="failed"; recovered=0; fi
-        pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-webhook --update-env || recovered=0
+        reload_app dcc-webhook || recovered=0
       else
         if rm -f "$CURRENT"; then rollback_outcome="bootstrap_processes_stopped"; else rollback_outcome="bootstrap_current_remove_failed"; recovered=0; fi
         pm2 delete dcc-web || recovered=0
@@ -139,11 +147,11 @@ record_cutover_target
 switch_current "$RELEASE"
 CUTOVER=1
 record_event "cutover"
-pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-web --update-env
-pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-worker --update-env
+reload_app dcc-web
+reload_app dcc-worker
 record_event "processes_reloaded"
 curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 "$DCC_DEPLOY_HEALTH_URL"
 record_event "healthy"
 write_marker 0 reload_pending
-pm2 startOrReload "$CURRENT/ecosystem.config.cjs" --only dcc-webhook --update-env
+reload_app dcc-webhook
 echo "deploy.sh: deployed $SHA"
