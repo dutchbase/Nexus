@@ -567,7 +567,9 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         const statusBox=document.querySelector("[data-merge-status]");
         const mergeButton=document.querySelector("[data-merge-button]");
         const reasonLine=document.querySelector("[data-merge-reason]");
+        const retryButton=document.querySelector("[data-merge-retry]");
         let branches=[];let lastPreview=null;let previewToken=0;
+        function showRetry(show){if(retryButton)retryButton.hidden=!show;}
 
         function setStatus(text,tone){statusBox.textContent=text;statusBox.style.borderLeftColor=tone==="ok"?"var(--t-ok)":tone==="warn"?"var(--t-warn)":tone==="danger"?"var(--t-danger)":"var(--border2)";}
         function refresh(){
@@ -603,14 +605,22 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const token=++previewToken;
           const projectId=projectSelect.value,head=fromSelect.value,base=intoSelect.value;
           mergeButton.disabled=true;
+          showRetry(false);
           setStatus("Reading live branches…");
           try{
             const queued=await fetch("/api/admin/projects/"+projectId+"/merge-preview",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({head:head||undefined,base:base||undefined})});
-            if(!queued.ok){const err=await queued.json().catch(()=>({}));setStatus("Pre-flight could not start: "+(err.error||queued.status),"danger");setReason("Fix the error above.");return;}
+            if(!queued.ok){const err=await queued.json().catch(()=>({}));setStatus("Pre-flight could not start: "+(err.error||queued.status),"danger");setReason("Fix the error above.");showRetry(true);return;}
             const {job}=await queued.json();
             const done=await pollJob(job.id,20000);
             if(token!==previewToken)return;
-            if(!done||done.status!=="completed"){setStatus(done&&done.status!=="completed"?"Pre-flight job "+done.status+": "+((done.error_json||{}).message||""):"Pre-flight check timed out — try again.","danger");setReason("No pre-flight verdict.");return;}
+            if(!done||done.status!=="completed"){
+              setStatus(done&&done.status!=="completed"?"Pre-flight job "+done.status+": "+((done.error_json||{}).message||""):"Pre-flight check timed out — try again.","danger");
+              setReason("No pre-flight verdict.");
+              showRetry(true);
+              // The branch dropdowns must never hang on Loading… forever.
+              if(!branches.length){for(const select of [fromSelect,intoSelect])select.innerHTML='<option value="">Could not load branches</option>';}
+              return;
+            }
             const result=done.result_json||{};
             if(result.branches){
               branches=result.branches;
@@ -629,18 +639,20 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             lastPreview={head,base,result};
             setStatus(branches.length?"Branches loaded. Pick a pair to check the merge.":"This repository has no remote branches.");
             setReason(branches.length?"":"Nothing can be merged from an empty remote.");
+            showRetry(false);
             refresh();
-          }catch(error){if(token===previewToken){setStatus("Pre-flight failed: "+error.message,"danger");setReason("No pre-flight verdict.");}}
+          }catch(error){if(token===previewToken){setStatus("Pre-flight failed: "+error.message,"danger");setReason("No pre-flight verdict.");showRetry(true);}}
         }
 
         projectSelect.addEventListener("change",()=>{
-          lastPreview=null;
+          lastPreview=null;branches=[];
           fromSelect.innerHTML='<option value="">Loading…</option>';intoSelect.innerHTML='<option value="">Loading…</option>';
           fromSelect.disabled=!projectSelect.value;intoSelect.disabled=!projectSelect.value;
-          if(projectSelect.value)runPreview();else{setStatus("Select a project to list its branches.");refresh();}
+          if(projectSelect.value)runPreview();else{setStatus("Select a project to list its branches.");showRetry(false);refresh();}
         });
         fromSelect.addEventListener("change",runPreview);
         intoSelect.addEventListener("change",runPreview);
+        retryButton?.addEventListener("click",()=>{showRetry(false);runPreview();});
         mergeButton.addEventListener("click",async()=>{
           const projectId=projectSelect.value,head=fromSelect.value,base=intoSelect.value;
           const preview=lastPreview&&lastPreview.head===head&&lastPreview.base===base?lastPreview.result:null;

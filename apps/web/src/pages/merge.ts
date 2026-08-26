@@ -30,8 +30,11 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       <span style="padding-bottom:10px;color:var(--text3)">→</span>
       <label class="field"><span>Into (base)</span><select id="merge-into" disabled><option value="">Select a project first</option></select></label>
     </div>
-    <div data-merge-status role="status" style="border:1px solid var(--border);border-left:3px solid var(--border2);border-radius:5px;padding:11px 14px;font-size:13.5px;color:var(--text2)">
-      Select a project to list its branches.
+    <div style="display:flex;gap:10px;align-items:stretch">
+      <div data-merge-status role="status" style="flex:1;border:1px solid var(--border);border-left:3px solid var(--border2);border-radius:5px;padding:11px 14px;font-size:13.5px;color:var(--text2)">
+        Select a project to list its branches.
+      </div>
+      <button class="button" type="button" data-merge-retry hidden>Retry</button>
     </div>
     <div style="display:flex;gap:12px;align-items:center">
       <button class="button primary" type="button" data-merge-button disabled>Merge</button>
