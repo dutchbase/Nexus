@@ -627,11 +627,33 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         const csrf=sessionStorage.getItem("dccCsrf")||"";
         const form=document.querySelector("[data-ai-review-settings-form]");
         if(form){
+          let aiReviewSaving=false;
+          const aiReviewSubmit=form.querySelector('button[type="submit"]'),aiReviewError=form.querySelector(".error");
           form.addEventListener("submit",async(event)=>{
             event.preventDefault();
+            if(aiReviewSaving)return;
+            aiReviewSaving=true;
+            if(aiReviewSubmit)aiReviewSubmit.disabled=true;
+            aiReviewError.style.color="";aiReviewError.textContent="";
             const data=new FormData(form);
-            const response=await fetch("/api/admin/settings/ai-review",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({default_model:data.get("default_model"),default_reasoning_level:data.get("default_reasoning_level"),auto_review_enabled:form.querySelector('[name=auto_review_enabled]').checked,auto_merge_on_approve:form.querySelector('[name=auto_merge_on_approve]').checked})});
-            if(response.ok)location.reload();else{const result=await response.json();form.querySelector(".error").textContent=result.error}
+            try{
+              const response=await fetch("/api/admin/settings/ai-review",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({default_model:data.get("default_model"),default_reasoning_level:data.get("default_reasoning_level"),auto_review_enabled:form.querySelector('[name=auto_review_enabled]').checked,auto_merge_on_approve:form.querySelector('[name=auto_merge_on_approve]').checked})});
+              const result=await response.json();
+              if(response.ok){
+                form.querySelector('[name=default_model]').value=result.settings.default_model;
+                form.querySelector('[name=default_reasoning_level]').value=result.settings.default_reasoning_level;
+                form.querySelector('[name=auto_review_enabled]').checked=result.settings.auto_review_enabled;
+                form.querySelector('[name=auto_merge_on_approve]').checked=result.settings.auto_merge_on_approve;
+                aiReviewError.style.color="var(--t-ok)";aiReviewError.textContent="Saved";
+              }else{
+                aiReviewError.textContent=result.error;
+              }
+            }catch(networkError){
+              aiReviewError.textContent="Could not reach the server. Please retry.";
+            }finally{
+              aiReviewSaving=false;
+              if(aiReviewSubmit)aiReviewSubmit.disabled=false;
+            }
           });
         }
         const mergeSettingsForm=document.querySelector("[data-pull-request-merge-settings-form]");
