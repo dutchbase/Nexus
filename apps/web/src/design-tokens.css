@@ -40,6 +40,7 @@ button,input,select,textarea { font:inherit;color:inherit }
 button,a,input,select,textarea { outline-color:var(--primary) }
 button,a,input,select,textarea { transition:background-color .15s ease,border-color .15s ease,color .15s ease,box-shadow .15s ease,transform .15s ease }
 :focus-visible { outline:2px solid var(--primary);outline-offset:1px }
+input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible { box-shadow:var(--ring) }
 a { color:var(--primary);text-decoration:none }
 a:hover { color:var(--text) }
 ::placeholder { color:var(--text3) }

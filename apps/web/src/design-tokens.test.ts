@@ -18,4 +18,8 @@ describe("design tokens: elevation, focus, interaction", () => {
   it("reduced-motion query still zeroes transition-duration for all elements", () => {
     expect(styles).toContain("transition-duration:.01ms !important");
   });
+  it("adds a focus-visible ring glow to form controls and buttons without removing the outline", () => {
+    expect(styles).toContain(":focus-visible { outline:2px solid var(--primary);outline-offset:1px }");
+    expect(styles).toContain("input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible { box-shadow:var(--ring) }");
+  });
 });
