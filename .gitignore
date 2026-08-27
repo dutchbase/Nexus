@@ -6,6 +6,7 @@ worktrees/
 .worktrees/
 .env
 .env.*
+!.env.example
 secrets/
 dist/
 .next/
