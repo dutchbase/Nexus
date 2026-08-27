@@ -156,7 +156,7 @@ async function responseFor(url: string, init: RequestInit = {}, allowStatuses: n
   throw lastError;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return jsonFor<T>(await responseFor(`${apiBaseUrl()}${path}`, init));
 }
 
