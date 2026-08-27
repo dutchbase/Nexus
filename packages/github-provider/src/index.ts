@@ -1,4 +1,9 @@
 export { checkImageExists, type ImageExistenceResult, checkImageExistsDetailed, type ImageExistenceDetailedResult } from "./registry.ts";
+export {
+  findWorkflowRun, type WorkflowRunSummary,
+  getWorkflowRunJobs, type WorkflowJobSummary,
+  compareCommits, type CommitComparison,
+} from "./actions.ts";
 
 export type CreatePullRequestInput = {
   owner: string;
