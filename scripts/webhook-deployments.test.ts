@@ -183,9 +183,35 @@ integration("webhook deployment store", () => {
 
   it("allows only one running attempt", async () => {
     const first = await deployments.enqueueDeploymentAttempt(pool, attempt("a"));
-    await deployments.enqueueDeploymentAttempt(pool, attempt("b"));
-    await expect(deployments.claimDeploymentAttempt(pool, { owner: "webhook-a", leaseMs: 60_000 })).resolves.toMatchObject({ kind: "claimed", attempt: { id: first.attempt.id, state: "running" } });
-    await expect(deployments.claimDeploymentAttempt(pool, { owner: "webhook-b", leaseMs: 60_000 })).resolves.toMatchObject({ kind: "busy", attempt: { id: first.attempt.id } });
+    await deployments.claimDeploymentAttempt(pool, { owner: "webhook-a", leaseMs: 60_000 });
+    await deployments.completeDeploymentAttempt(pool, { attemptId: first.attempt.id, owner: "webhook-a", state: "succeeded" });
+    const second = await deployments.enqueueDeploymentAttempt(pool, attempt("b"));
+    await expect(deployments.claimDeploymentAttempt(pool, { owner: "webhook-b", leaseMs: 60_000 })).resolves.toMatchObject({ kind: "claimed", attempt: { id: second.attempt.id, state: "running" } });
+    await expect(deployments.claimDeploymentAttempt(pool, { owner: "webhook-c", leaseMs: 60_000 })).resolves.toMatchObject({ kind: "busy", attempt: { id: second.attempt.id } });
+  });
+
+  it("supersedes older queued attempts for the same branch instead of chasing every stale SHA", async () => {
+    const first = await deployments.enqueueDeploymentAttempt(pool, attempt("a"));
+    const second = await deployments.enqueueDeploymentAttempt(pool, attempt("b"));
+    const third = await deployments.enqueueDeploymentAttempt(pool, attempt("c"));
+
+    await expect(deployments.claimDeploymentAttempt(pool, { owner: "webhook-a", leaseMs: 60_000 }))
+      .resolves.toMatchObject({ kind: "claimed", attempt: { id: third.attempt.id, state: "running" } });
+
+    await expect(pool.query("SELECT id,state,completed_at IS NOT NULL AS completed FROM deployment_attempts WHERE id=ANY($1) ORDER BY target_sha", [[first.attempt.id, second.attempt.id]]))
+      .resolves.toMatchObject({ rows: [{ state: "superseded", completed: true }, { state: "superseded", completed: true }] });
+    await expect(pool.query("SELECT event_type FROM deployment_events WHERE attempt_id=$1 AND event_type='superseded'", [first.attempt.id]))
+      .resolves.toMatchObject({ rows: [{ event_type: "superseded" }] });
+  });
+
+  it("does not supersede a queued attempt on a different branch", async () => {
+    const master = await deployments.enqueueDeploymentAttempt(pool, attempt("a"));
+    const other = await deployments.enqueueDeploymentAttempt(pool, { ...attempt("b"), protectedBranch: "release", targetRef: "refs/heads/release" });
+
+    await deployments.claimDeploymentAttempt(pool, { owner: "webhook-a", leaseMs: 60_000 });
+
+    await expect(pool.query("SELECT state FROM deployment_attempts WHERE id=$1", [other.attempt.id])).resolves.toMatchObject({ rows: [{ state: "queued" }] });
+    await expect(pool.query("SELECT state FROM deployment_attempts WHERE id=$1", [master.attempt.id])).resolves.toMatchObject({ rows: [{ state: "running" }] });
   });
 
   it("renews once, recovers once, then blocks without promoting the queue", async () => {

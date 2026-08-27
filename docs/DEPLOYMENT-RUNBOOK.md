@@ -37,6 +37,13 @@ State meanings:
 - `failed` — read the attempt log; almost always `pnpm verify` (fix code,
   push again) or a transient network error during install/fetch (just
   re-trigger, §3-C).
+- `superseded` — normal; a newer push landed for the same branch while this
+  one was still queued, so it was skipped rather than run. Only the newest
+  queued attempt per branch ever runs. If a burst of merges left production
+  looking stale, check the *newest* attempt's state, not an older one that
+  shows `failed` with `deploy.sh: fetched protected head does not match
+  target SHA` — that specific error on an attempt superseded by a newer push
+  is expected and does not need retriggering.
 
 ## 2. Is the live release actually current?
 

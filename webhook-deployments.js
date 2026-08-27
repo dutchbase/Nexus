@@ -3,7 +3,7 @@ const pg = require('pg');
 
 const SHA = /^[0-9a-f]{40}$/;
 const EVENT_TYPES = new Set(['push', 'check_run']);
-const TERMINAL_STATES = new Set(['succeeded', 'failed', 'blocked']);
+const TERMINAL_STATES = new Set(['succeeded', 'failed', 'blocked', 'superseded']);
 const UNSAFE_METADATA_KEYS = /^(authorization|token|secret|recipient|body|payload|webhook_body|response_body)$/i;
 const DEPLOYMENT_LOCK = 827618744172;
 
@@ -118,6 +118,22 @@ async function claimDeploymentAttempt(pool, { owner, leaseMs }) {
       )).rows[0];
       await insertEvent(client, { attemptId: blocked.id, eventKey: `blocked:${randomUUID()}`, eventType: 'blocked', metadata: { reason: 'lease_expired_twice' } });
       return { kind: 'blocked', attempt: blocked };
+    }
+    // A burst of rapid pushes enqueues one attempt per SHA; only the newest
+    // per branch is still worth running (deploy.sh will always ship whatever
+    // origin/master resolves to when it runs, so an older queued SHA is
+    // moot the moment a newer one lands). Without this, each stale attempt
+    // would run in turn and die on deploy.sh's fetched-head-must-match
+    // guard, cascading failures across an entire merge burst.
+    const superseded = (await client.query(
+      `UPDATE deployment_attempts SET state='superseded',completed_at=now(),updated_at=now()
+       WHERE state='queued' AND id NOT IN (
+         SELECT DISTINCT ON (protected_branch) id FROM deployment_attempts
+         WHERE state='queued' ORDER BY protected_branch, queued_at DESC, id DESC
+       ) RETURNING id`,
+    )).rows;
+    for (const row of superseded) {
+      await insertEvent(client, { attemptId: row.id, eventKey: `superseded:${randomUUID()}`, eventType: 'superseded', metadata: { reason: 'newer_attempt_queued_for_branch' } });
     }
     const queued = (await client.query("SELECT * FROM deployment_attempts WHERE state='queued' ORDER BY queued_at,id FOR UPDATE SKIP LOCKED LIMIT 1")).rows[0];
     if (!queued) return { kind: 'idle', attempt: null };
