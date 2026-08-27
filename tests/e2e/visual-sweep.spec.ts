@@ -72,14 +72,29 @@ test("no route overflows the viewport at common widths", async ({ page }) => {
           const viewportHeight = await page.evaluate(() => window.innerHeight);
           expect(scrollHeight, `${label}: page-level vertical scroll`).toBeLessThanOrEqual(viewportHeight);
 
-          const cardBoxes = await page.locator(".dashboard-rows .card").evaluateAll(
-            (cards) => cards.map((c) => c.getBoundingClientRect().bottom),
-          );
-          // Every card's bottom edge should land within a few pixels of the viewport bottom
-          // (allowing for border-box rounding), confirming they all stretch to fill it.
-          for (const bottom of cardBoxes) {
-            expect(Math.abs(bottom - viewportHeight), `${label}: card bottom vs viewport bottom`).toBeLessThan(4);
+          // "Filled to the bottom" is two facts: every card stretches to its own
+          // row's full height, and the last row lands on the bottom of .main's
+          // content box (.main's 72px bottom padding sits below the dashboard, so
+          // the cards stop there, not at the viewport edge).
+          const fill = await page.evaluate(() => {
+            const main = document.querySelector(".main")!;
+            const contentBottom =
+              main.getBoundingClientRect().bottom - parseFloat(getComputedStyle(main).paddingBottom);
+            const bottoms = [...document.querySelectorAll(".dashboard-rows .card")].map((card) => ({
+              card: card.getBoundingClientRect().bottom,
+              row: card.parentElement!.getBoundingClientRect().bottom,
+            }));
+            return { contentBottom, bottoms };
+          });
+          expect(fill.bottoms.length, `${label}: no dashboard cards found`).toBeGreaterThan(0);
+          for (const { card, row } of fill.bottoms) {
+            expect(Math.abs(card - row), `${label}: card does not fill its row`).toBeLessThan(2);
           }
+          const lastCardBottom = Math.max(...fill.bottoms.map((b) => b.card));
+          expect(
+            Math.abs(lastCardBottom - fill.contentBottom),
+            `${label}: dashboard does not fill down to the bottom of the content area`,
+          ).toBeLessThan(2);
         }
 
         await page.screenshot({ path: `tests/e2e/.results/visual-sweep/${label}.png`, fullPage: false });
