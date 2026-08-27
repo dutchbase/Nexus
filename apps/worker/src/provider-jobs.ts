@@ -4,7 +4,7 @@ import {
   checkProductionHealth, evaluatePromotionEligibility,
 } from "@dcc/domain";
 import {
-  createPullRequest, findOpenPullRequestForHead, mergeBranch,
+  createPullRequest, findOpenPullRequestForHead, mergeBranch, closePullRequest,
   getBranchHeadCommit, getCommitCheckStatus, getPullRequestsForCommit, updateBranchReference, getPendingDeployments, checkImageExists,
 } from "@dcc/github-provider";
 import type { DeploymentConfig } from "@dcc/project-config";
@@ -15,6 +15,7 @@ export const providerJobTypes = [
   "github.sync_one",
   "github.import",
   "github.merge_pull_request",
+  "github.close_pull_request",
   "github.merge_branches",
   "github.merge_preview",
   "github.open_pull_request",
@@ -152,6 +153,27 @@ export async function runProviderJob(
       if (code) await persistJobResult(db, job.id, { outcome: "refused", refusal_code: code });
       throw error;
     }
+    return;
+  }
+
+  if (job.type === "github.close_pull_request") {
+    const pullRequestId = required(job.payload_json, "pull_request_id");
+    await assertOwned();
+    const pr = (await db.query(
+      `SELECT pr.id,pr.number,pr.state,p.github_owner,p.github_repository
+       FROM pull_requests pr JOIN projects p ON p.id=pr.project_id WHERE pr.id=$1`,
+      [pullRequestId],
+    )).rows[0];
+    if (!pr) throw new Error("pull request not found");
+    if (pr.state !== "open") {
+      await persistJobResult(db, job.id, { outcome: "skipped", reason: `pull request state is ${pr.state}, not open` });
+      return;
+    }
+    await assertOwned();
+    await closePullRequest(pr.github_owner, pr.github_repository, pr.number);
+    await db.query("UPDATE pull_requests SET state='closed',closed_at=now(),updated_at=now() WHERE id=$1", [pullRequestId]);
+    await persistJobResult(db, job.id, { outcome: "closed" });
+    await audit(db, job, actorId, "github.close_pull_request", "pull_request", pullRequestId, {});
     return;
   }
 
