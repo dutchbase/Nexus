@@ -881,6 +881,20 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             }else alert(result.error);
           }finally{button.disabled=false}
         });
+        document.querySelector('[data-pr-bulk="close"]')?.addEventListener("click",async(event)=>{
+          const ids=selectedPrIds();if(!ids.length)return;
+          if(!confirm(\`Close \${ids.length} pull request\${ids.length===1?"":"s"}?\n\nThis will close the selected PRs on GitHub.\nNo branches or commits will be deleted.\`))return;
+          const button=event.currentTarget;button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/bulk",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({action:"close",ids})});
+            const result=await response.json();
+            if(response.ok){
+              const queued=result.results.filter(r=>r.outcome==="queued").length,skipped=result.results.filter(r=>r.outcome!=="queued");
+              alert(\`Closing \${queued} pull request\${queued===1?"":"s"}.\${skipped.length?\` \${skipped.length} skipped: \${skipped.map(r=>r.reason).join("; ")}\`:""}\`);
+              location.reload();
+            }else alert(result.error);
+          }finally{button.disabled=false}
+        });
       `:""}
       ${/^\/admin\/pull-requests\/[^/]+(\/\d+)?$/.test(path)?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";
