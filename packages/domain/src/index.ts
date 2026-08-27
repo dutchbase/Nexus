@@ -6,6 +6,7 @@ export * from "./plan-approval.ts";
 export * from "./pull-request.ts";
 export * from "./pull-request-sync.ts";
 export * from "./pull-request-policy.ts";
+export * from "./pull-request-policy-status.ts";
 export * from "./pr-merge.ts";
 export * from "./pull-request-merge-settings.ts";
 export * from "./notifications.ts";
