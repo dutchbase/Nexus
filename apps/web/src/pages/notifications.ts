@@ -29,7 +29,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   const enabledEvents: string[] = webhook ? (webhook.enabled_events ?? []) : [...NOTIFICATION_EVENTS];
 
   const eventRow = (event: string) =>
-    `<div class="ticket-row"><span class="mono">${escapeHtml(event)}</span>${statusBadge(enabledEvents.includes(event) ? "Enabled" : "Disabled")}</div>`;
+    `<div class="event-row"><span class="mono">${escapeHtml(event)}</span>${statusBadge(enabledEvents.includes(event) ? "Enabled" : "Disabled")}</div>`;
 
   const whatsappCard = `<section class="card"><div class="card-head">WhatsApp server ${statusBadge("Coming soon")}</div><div class="card-body">
       <p>WhatsApp delivery is not available yet. The generic webhook provider handles notifications today — when the WhatsApp gateway goes live, its configuration will appear here.</p>

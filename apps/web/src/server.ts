@@ -1,5 +1,5 @@
 import { execFile } from "node:child_process";
-import { createHash, randomBytes, randomUUID } from "node:crypto";
+import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
 import { clientIpOf, csrfMatches, secureCookieAttributes, securityHeaders, validateWebRuntime } from "./security.ts";
 import { rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
@@ -22,7 +22,7 @@ import {
   resolveSkills, snapshotSkillSet, snapshotSkills, SkillResolutionError, validateFilesystemPath,
 } from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
-import { normalizeAgentStartPath, validateAgentStartPath, validateProject } from "@dcc/project-config";
+import { cronWebhookSecretReferencePattern, normalizeAgentStartPath, validateAgentStartPath, validateDeploymentConfig, validateProject } from "@dcc/project-config";
 import { adminPage, escapeHtml, loginPage, publicFormPage, styles, submittedPage } from "./ui.ts";
 import { allowedTemplateVariables, fieldsFor, lineDiff, validStatuses } from "./pages/shared.ts";
 import * as dashboardPage from "./pages/dashboard.ts";
@@ -1239,6 +1239,66 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const job = await enqueueJob({ type: "github.merge_branches", payload: { actor_id: session.user_id, project_id: project.id, head, base, ...(expectedHeadSha || expectedBaseSha ? { expected_head_sha: expectedHeadSha, expected_base_sha: expectedBaseSha } : {}) }, idempotencyKey: `g07:github.merge_branches:${project.id}:${head}:${base}:${requestToken}` });
     return json(response, 202, { job });
   }
+  const deploymentStatusMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/deployment$/i);
+  if (deploymentStatusMatch && request.method === "GET") {
+    const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [deploymentStatusMatch[1]])).rows[0];
+    if (!project) return json(response, 404, { error: "project not found" });
+    if (!project.config_json?.deployment?.enabled) return json(response, 404, { error: "project has no deployment configured" });
+    const [snapshot, releases] = await Promise.all([
+      pool.query("SELECT * FROM deployment_status_snapshots WHERE project_id=$1", [project.id]),
+      pool.query("SELECT * FROM production_releases WHERE project_id=$1 ORDER BY created_at DESC LIMIT 20", [project.id]),
+    ]);
+    return json(response, 200, { snapshot: snapshot.rows[0] ?? null, releases: releases.rows });
+  }
+
+  const deploymentSyncMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/deployment\/sync$/i);
+  if (deploymentSyncMatch && request.method === "POST") {
+    const project = (await pool.query("SELECT id, config_json FROM projects WHERE id=$1", [deploymentSyncMatch[1]])).rows[0];
+    if (!project) return json(response, 404, { error: "project not found" });
+    if (!project.config_json?.deployment?.enabled) return json(response, 404, { error: "project has no deployment configured" });
+    const job = await enqueueJob({ type: "deployment.sync_status", payload: { project_id: project.id },
+      idempotencyKey: `g07:deployment.sync_status:${project.id}:${Math.floor(Date.now() / 60000)}` });
+    return json(response, 202, { job });
+  }
+
+  const deploymentPromoteCheckMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/deployment\/promote-check$/i);
+  if (deploymentPromoteCheckMatch && request.method === "POST") {
+    const project = (await pool.query("SELECT id, config_json FROM projects WHERE id=$1", [deploymentPromoteCheckMatch[1]])).rows[0];
+    if (!project) return json(response, 404, { error: "project not found" });
+    if (!project.config_json?.deployment?.enabled) return json(response, 404, { error: "project has no deployment configured" });
+    const job = await enqueueJob({ type: "deployment.promote_check", payload: { project_id: project.id },
+      idempotencyKey: `g07:deployment.promote_check:${project.id}:${randomUUID()}` });
+    return json(response, 202, { job });
+  }
+
+  const deploymentPromoteMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/deployment\/promote$/i);
+  if (deploymentPromoteMatch && request.method === "POST") {
+    const project = (await pool.query("SELECT id, config_json FROM projects WHERE id=$1", [deploymentPromoteMatch[1]])).rows[0];
+    if (!project) return json(response, 404, { error: "project not found" });
+    if (!project.config_json?.deployment?.enabled) return json(response, 404, { error: "project has no deployment configured" });
+    const body = await bodyOf(request);
+    if (typeof body.commit_sha !== "string" || !/^[0-9a-f]{40}$/.test(body.commit_sha)) return json(response, 400, { error: "commit_sha must be a 40-character hex SHA" });
+    if (typeof body.expected_master_sha !== "string" || !/^[0-9a-f]{40}$/.test(body.expected_master_sha)) return json(response, 400, { error: "expected_master_sha must be a 40-character hex SHA" });
+    const job = await enqueueJob({ type: "deployment.promote",
+      payload: { project_id: project.id, actor_id: session.user_id, commit_sha: body.commit_sha, expected_master_sha: body.expected_master_sha },
+      idempotencyKey: `g07:deployment.promote:${project.id}:${body.commit_sha}:${Math.floor(Date.now() / 3600000)}` });
+    return json(response, 202, { job });
+  }
+
+  const deploymentRollbackMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/deployment\/rollback$/i);
+  if (deploymentRollbackMatch && request.method === "POST") {
+    const project = (await pool.query("SELECT id, config_json FROM projects WHERE id=$1", [deploymentRollbackMatch[1]])).rows[0];
+    if (!project) return json(response, 404, { error: "project not found" });
+    if (!project.config_json?.deployment?.enabled) return json(response, 404, { error: "project has no deployment configured" });
+    const body = await bodyOf(request);
+    if (typeof body.target_commit_sha !== "string" || !/^[0-9a-f]{40}$/.test(body.target_commit_sha)) return json(response, 400, { error: "target_commit_sha must be a 40-character hex SHA" });
+    if (typeof body.expected_production_sha !== "string" || !/^[0-9a-f]{40}$/.test(body.expected_production_sha)) return json(response, 400, { error: "expected_production_sha must be a 40-character hex SHA" });
+    const job = await enqueueJob({ type: "deployment.rollback",
+      payload: { project_id: project.id, actor_id: session.user_id, target_commit_sha: body.target_commit_sha, expected_production_sha: body.expected_production_sha },
+      idempotencyKey: `g07:deployment.rollback:${project.id}:${body.target_commit_sha}:${randomUUID()}` });
+    return json(response, 202, { job });
+  }
+
   const openPullRequestMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/open-pull-request$/i);
   if (openPullRequestMatch && request.method === "POST") {
     const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [openPullRequestMatch[1]])).rows[0];
@@ -1466,6 +1526,10 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (Object.hasOwn(body, "agent_start_path")) {
       const agentStartPathErrors = await validateAgentStartPath(body.agent_start_path);
       if (agentStartPathErrors.length) return json(response, 400, { error: agentStartPathErrors.join("; ") });
+    }
+    if (body.config_json && typeof body.config_json === "object" && "deployment" in body.config_json) {
+      const deploymentErrors = validateDeploymentConfig(body.config_json.deployment);
+      if (deploymentErrors.length) return json(response, 400, { error: deploymentErrors.join("; ") });
     }
     const allowed = ["name", "description", "enabled", "repository_path", "agent_start_path", "github_owner", "github_repository", "default_branch", "config_json"];
     const entries = Object.entries(body).filter(([key]) => allowed.includes(key)).map(([key, value]) => [key, key === "agent_start_path" ? agentStartPath : value]);
@@ -2513,6 +2577,32 @@ export async function route(request: IncomingMessage, response: ServerResponse) 
     if (!form) return json(response, 404, { error: "form not found" });
     if (form.settings_json?.allow_image_attachments === false) return json(response, 403, { error: "attachments disabled" });
     return upload(request, response, form);
+  }
+  const cronCheckInMatch = url.pathname.match(/^\/api\/public\/deployment\/([a-z0-9-]+)\/cron-check-in$/i);
+  if (cronCheckInMatch && request.method === "POST") {
+    const project = (await pool.query("SELECT id, config_json FROM projects WHERE slug=$1", [cronCheckInMatch[1]])).rows[0];
+    if (!project) return json(response, 404, { error: "project not found" });
+    const secretReference = project.config_json?.deployment?.cron_webhook_secret_reference;
+    if (typeof secretReference !== "string" || !secretReference.trim() || !cronWebhookSecretReferencePattern.test(secretReference)) {
+      return json(response, 404, { error: "cron check-ins are not configured for this project" });
+    }
+    const expectedToken = process.env[secretReference];
+    if (!expectedToken) return json(response, 500, { error: "configured cron secret env var is not set" });
+    const providedToken = (request.headers["x-dcc-cron-token"] as string | undefined) ?? "";
+    const providedBuffer = Buffer.from(providedToken);
+    const expectedBuffer = Buffer.from(expectedToken);
+    const tokensMatch = providedBuffer.length === expectedBuffer.length && timingSafeEqual(providedBuffer, expectedBuffer);
+    if (!tokensMatch) return json(response, 401, { error: "invalid cron token" });
+    const body = await bodyOf(request);
+    if (typeof body.route_key !== "string" || !body.route_key.trim()) return json(response, 400, { error: "route_key is required" });
+    if (body.status !== "success" && body.status !== "failure") return json(response, 400, { error: "status must be success or failure" });
+    const idempotencyKey = `${project.id}:${body.route_key}:${typeof body.run_id === "string" && body.run_id.trim() ? body.run_id.trim() : Math.floor(Date.now() / 3600000)}`;
+    await pool.query(
+      `INSERT INTO cron_check_ins (project_id, route_key, status, duration_ms, detail_json, idempotency_key)
+       VALUES ($1,$2,$3,$4,$5,$6) ON CONFLICT (idempotency_key) DO NOTHING`,
+      [project.id, body.route_key, body.status, typeof body.duration_ms === "number" ? body.duration_ms : null, body.detail ?? null, idempotencyKey],
+    );
+    return json(response, 200, { ok: true });
   }
   const publicPageMatch = url.pathname.match(/^\/f\/([^/]+)(\/submitted)?$/);
   if (publicPageMatch && request.method === "GET") {

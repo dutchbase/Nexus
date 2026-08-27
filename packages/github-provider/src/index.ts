@@ -1,3 +1,5 @@
+export { checkImageExists, type ImageExistenceResult } from "./registry.ts";
+
 export type CreatePullRequestInput = {
   owner: string;
   repository: string;
@@ -296,6 +298,41 @@ export async function listPullRequests(
   return listPages(`${apiBaseUrl()}${pullsPath(owner, repository)}?state=${state}&per_page=100`, (page) => page, (item: ProviderPullRequest) => item.number);
 }
 
+export type CommitCheckStatus = {
+  sha: string;
+  checks: Array<{ context: string; appId: number | null; state: "success" | "pending" | "failure"; updatedAt: string }>;
+  overallState: "success" | "pending" | "failure" | "none";
+  fetchedAt: string;
+};
+
+export async function getCommitCheckStatus(owner: string, repository: string, sha: string): Promise<CommitCheckStatus> {
+  const repoPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`;
+  const checkRunsResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(sha)}/check-runs?per_page=100`, (page) => page.check_runs ?? []);
+  const statusesResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(sha)}/status?per_page=100`, (page) => page.statuses ?? []);
+  for (const result of [checkRunsResult, statusesResult]) {
+    if (!result.complete) throw new GitHubProviderError(result.errorCode ?? "transient", "GitHub check status fetch failed", undefined, result.retryAt, result.cursor ?? undefined);
+  }
+  const checks: CommitCheckStatus["checks"] = [
+    ...checkRunsResult.items.map((check: any) => ({
+      context: check.name,
+      appId: check.app?.id ?? null,
+      state: check.status !== "completed" ? "pending" as const : check.conclusion === "success" ? "success" as const : "failure" as const,
+      updatedAt: check.completed_at ?? check.started_at ?? check.created_at,
+    })),
+    ...statusesResult.items.map((status: any) => ({
+      context: status.context,
+      appId: null,
+      state: status.state === "success" ? "success" as const : status.state === "pending" ? "pending" as const : "failure" as const,
+      updatedAt: status.updated_at ?? status.created_at,
+    })),
+  ];
+  const overallState: CommitCheckStatus["overallState"] = checks.length === 0 ? "none"
+    : checks.some((c) => c.state === "failure") ? "failure"
+    : checks.some((c) => c.state === "pending") ? "pending"
+    : "success";
+  return { sha, checks, overallState, fetchedAt: new Date().toISOString() };
+}
+
 export async function getPullRequestPolicyInputs(owner: string, repository: string, number: number): Promise<ProviderGitHubPolicyInputs> {
   const pullRequest = await getPullRequest(owner, repository, number);
   const repoPath = `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}`;
@@ -327,11 +364,8 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
     fetchedAt: new Date().toISOString(),
   };
   const reviewsResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/pulls/${number}/reviews?per_page=100`, (page) => page);
-  const checkRunsResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(headSha)}/check-runs?per_page=100`, (page) => page.check_runs ?? []);
-  const statusesResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/commits/${encodeURIComponent(headSha)}/status?per_page=100`, (page) => page.statuses ?? []);
-  for (const result of [reviewsResult, checkRunsResult, statusesResult]) {
-    if (!result.complete) throw new GitHubProviderError(result.errorCode ?? "transient", "GitHub policy input fetch failed", undefined, result.retryAt, result.cursor ?? undefined);
-  }
+  if (!reviewsResult.complete) throw new GitHubProviderError(reviewsResult.errorCode ?? "transient", "GitHub policy input fetch failed", undefined, reviewsResult.retryAt, reviewsResult.cursor ?? undefined);
+  const commitChecks = await getCommitCheckStatus(owner, repository, headSha);
   const reviewerPermissions = new Map(await Promise.all([...new Set(reviewsResult.items
     .filter((review: any) => ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state?.toUpperCase()) && review.user?.login && review.user?.type !== "Bot")
     .map((review: any) => review.user.login as string))]
@@ -347,20 +381,6 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
   const requiredChecks = (protection?.required_status_checks?.checks
     ?? protection?.required_status_checks?.contexts?.map((context: string) => ({ context, app_id: null }))
     ?? []).map((check: any) => ({ context: check.context, appId: check.app_id ?? null }));
-  const checks: ProviderGitHubPolicyInputs["checks"] = [
-    ...checkRunsResult.items.map((check: any) => ({
-      context: check.name,
-      appId: check.app?.id ?? null,
-      state: check.status !== "completed" ? "pending" as const : check.conclusion === "success" ? "success" as const : "failure" as const,
-      updatedAt: check.completed_at ?? check.started_at ?? check.created_at,
-    })),
-    ...statusesResult.items.map((status: any) => ({
-      context: status.context,
-      appId: null,
-      state: status.state === "success" ? "success" as const : status.state === "pending" ? "pending" as const : "failure" as const,
-      updatedAt: status.updated_at ?? status.created_at,
-    })),
-  ];
   return {
     pullRequest,
     protected: protection !== null,
@@ -375,11 +395,45 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
     })).filter((review) => review.reviewer),
     requestedReviewers,
     requiredChecks,
-    checks,
+    checks: commitChecks.checks,
     complete: unsupported.length === 0,
     ...(unsupported.length ? { incompleteReason: unsupported.join(",") } : {}),
     fetchedAt: new Date().toISOString(),
   };
+}
+
+export async function getBranchHeadCommit(owner: string, repository: string, branch: string):
+  Promise<{ sha: string; committedAt: string; message: string }> {
+  const commit = await request<any>(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/commits/${encodeURIComponent(branch)}`);
+  return { sha: commit.sha, committedAt: commit.commit?.committer?.date ?? commit.commit?.author?.date, message: commit.commit?.message ?? "" };
+}
+
+export async function getPullRequestsForCommit(owner: string, repository: string, sha: string):
+  Promise<Array<{ number: number; merged: boolean; labels: string[] }>> {
+  const items = await request<any[]>(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/commits/${encodeURIComponent(sha)}/pulls`, {
+    headers: { accept: "application/vnd.github.groot-preview+json" },
+  });
+  return items.map((pr) => ({ number: pr.number, merged: pr.merged_at != null, labels: (pr.labels ?? []).map((l: any) => l.name) }));
+}
+
+export async function updateBranchReference(owner: string, repository: string, branch: string, sha: string, force = false): Promise<{ sha: string }> {
+  const response = await responseFor(
+    `${apiBaseUrl()}/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/git/refs/heads/${encodeURIComponent(branch)}`,
+    { method: "PATCH", body: JSON.stringify({ sha, force }) },
+    [422],
+  );
+  if (response.status === 422) throw new GitHubProviderError("http_error", `branch ref update was rejected (force:${force})`, 422);
+  const body = await jsonFor<{ object: { sha: string } }>(response);
+  return { sha: body.object.sha };
+}
+
+export async function getPendingDeployments(owner: string, repository: string, sha: string):
+  Promise<Array<{ environment: string; waiting: boolean }>> {
+  const runs = await request<{ workflow_runs: any[] }>(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/actions/runs?head_sha=${encodeURIComponent(sha)}&per_page=5`);
+  const newestRun = runs.workflow_runs?.[0];
+  if (!newestRun) return [];
+  const pending = await request<any[]>(`/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/actions/runs/${newestRun.id}/pending_deployments`);
+  return pending.map((entry) => ({ environment: entry.environment?.name ?? "unknown", waiting: entry.current_user_can_approve !== undefined || entry.reviewers?.length > 0 }));
 }
 
 export type BranchMergeResult =

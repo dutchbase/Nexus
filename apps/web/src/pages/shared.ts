@@ -33,6 +33,8 @@ const stateTones: Record<string, string> = {
   healthy: "ok", repository_dirty: "danger", stale: "warn", unknown: "muted",
   published: "ok", draft: "muted", placeholder: "muted",
   approved: "ok", rejected: "danger", error: "danger", resolved: "ok", open: "info", closed: "muted",
+  unhealthy: "danger", unreachable: "warn", "pending_approval": "warn", deploying: "run",
+  requested: "info", "on schedule": "ok", "never reported": "muted", overdue: "warn", "last run failed": "danger",
 };
 
 export function statusTone(label: unknown): string {

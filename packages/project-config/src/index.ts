@@ -82,3 +82,67 @@ export async function validateProject(input: ProjectValidationInput) {
   }
   return { valid: errors.length === 0, errors, changedFiles };
 }
+
+export type DeploymentConfig = {
+  enabled: boolean;
+  production_branch: string;
+  image: { registry: string; repository: string; tag_template: string };
+  health: { host: string; health_path: string; version_path: string; version_field?: string };
+  promotion: { require_e2e_gate_label: boolean; e2e_gate_label?: string };
+  auto_rollback_on_failed_health_check?: boolean;
+  cron_jobs?: Array<{ key: string; description?: string; expected_interval_minutes: number; grace_minutes?: number }>;
+  cron_webhook_secret_reference?: string;
+};
+
+// Mirrors notification-provider's secretReferencePattern: only env vars with this
+// exact prefix may be nominated as the cron webhook secret, so admin-authored
+// config can never point an unauthenticated public endpoint at an arbitrary
+// env var (DATABASE_URL, session secrets, etc).
+export const cronWebhookSecretReferencePattern = /^DCC_DEPLOYMENT_SECRET_[A-Za-z_][A-Za-z0-9_]*$/;
+
+// Pure shape check — no I/O, no network, never throws. Returns [] when
+// `value` is either absent (deployment is fully optional per project) or a
+// well-formed DeploymentConfig; otherwise returns human-readable messages
+// naming exactly what's wrong, in the order checked.
+export function validateDeploymentConfig(value: unknown): string[] {
+  if (value === undefined || value === null) return [];
+  if (typeof value !== "object" || Array.isArray(value)) return ["deployment must be an object"];
+  const v = value as Record<string, unknown>;
+  const errors: string[] = [];
+  if (typeof v.enabled !== "boolean") errors.push("deployment.enabled must be a boolean");
+  if (v.enabled !== true) return errors; // disabled/absent config needs no further shape checking
+  if (typeof v.production_branch !== "string" || !v.production_branch.trim()) errors.push("deployment.production_branch is required");
+  const image = v.image as Record<string, unknown> | undefined;
+  if (!image || typeof image !== "object") errors.push("deployment.image is required");
+  else {
+    if (typeof image.registry !== "string" || !image.registry.trim()) errors.push("deployment.image.registry is required");
+    if (typeof image.repository !== "string" || !image.repository.trim()) errors.push("deployment.image.repository is required");
+    if (typeof image.tag_template !== "string" || !image.tag_template.includes("{{commit}}")) errors.push("deployment.image.tag_template must contain {{commit}}");
+  }
+  const health = v.health as Record<string, unknown> | undefined;
+  if (!health || typeof health !== "object") errors.push("deployment.health is required");
+  else {
+    if (typeof health.host !== "string" || !/^https?:\/\//.test(health.host)) errors.push("deployment.health.host must be an http(s) URL");
+    if (typeof health.health_path !== "string" || !health.health_path.startsWith("/")) errors.push("deployment.health.health_path must start with /");
+    if (typeof health.version_path !== "string" || !health.version_path.startsWith("/")) errors.push("deployment.health.version_path must start with /");
+  }
+  const promotion = v.promotion as Record<string, unknown> | undefined;
+  if (!promotion || typeof promotion !== "object") errors.push("deployment.promotion is required");
+  else if (typeof promotion.require_e2e_gate_label !== "boolean") errors.push("deployment.promotion.require_e2e_gate_label must be a boolean");
+  if (v.cron_jobs !== undefined) {
+    if (!Array.isArray(v.cron_jobs)) errors.push("deployment.cron_jobs must be an array");
+    else v.cron_jobs.forEach((job: any, i: number) => {
+      if (typeof job?.key !== "string" || !job.key.trim()) errors.push(`deployment.cron_jobs[${i}].key is required`);
+      if (typeof job?.expected_interval_minutes !== "number" || job.expected_interval_minutes <= 0) errors.push(`deployment.cron_jobs[${i}].expected_interval_minutes must be a positive number`);
+    });
+  }
+  if (v.cron_webhook_secret_reference !== undefined) {
+    if (typeof v.cron_webhook_secret_reference !== "string" || !cronWebhookSecretReferencePattern.test(v.cron_webhook_secret_reference)) {
+      errors.push("deployment.cron_webhook_secret_reference must match DCC_DEPLOYMENT_SECRET_<NAME>");
+    }
+  }
+  if (image && typeof image === "object" && typeof image.registry === "string" && image.registry.trim() && image.registry !== "ghcr.io") {
+    errors.push("deployment.image.registry must be ghcr.io (only registry currently supported)");
+  }
+  return errors;
+}

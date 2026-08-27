@@ -1,6 +1,7 @@
 import { escapeHtml, pool, statusBadge } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
 import { globalPromptTypes } from "@dcc/domain";
+import type { DeploymentConfig } from "@dcc/project-config";
 
 function generateYaml(project: any) {
   const config = project.config_json || {};
@@ -22,6 +23,56 @@ function generateYaml(project: any) {
     }
   }
   return lines.join("\n");
+}
+
+function deploymentPanel(project: any, deployment: DeploymentConfig): string {
+  return `<div class="grid two">
+    <section class="card">
+      <div class="card-head">Pipeline status <button class="button" type="button" data-refresh-deployment>Refresh</button></div>
+      <div class="card-body" data-deployment-pipeline data-project-id="${project.id}">
+        <p style="color:var(--text3);font-size:13px">Loading…</p>
+      </div>
+    </section>
+    <section class="card">
+      <div class="card-head">Production</div>
+      <div class="card-body" data-deployment-production>
+        <p style="color:var(--text3);font-size:13px">Loading…</p>
+      </div>
+    </section>
+    <section class="card" style="grid-column:1 / -1">
+      <div class="card-head">Promote</div>
+      <div class="card-body" style="display:flex;flex-direction:column;gap:10px">
+        <div style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+          <button class="button primary" type="button" data-promote-button disabled>Promote to production</button>
+          <button class="button" type="button" data-promote-retry hidden>Retry</button>
+          <span data-promote-reason style="font-size:13px;color:var(--text3)"></span>
+        </div>
+      </div>
+    </section>
+    <section class="card" style="grid-column:1 / -1">
+      <div class="card-head">Rollback</div>
+      <div class="card-body" data-deployment-rollback style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+        <p style="color:var(--text3);font-size:13px">Loading…</p>
+      </div>
+    </section>
+    <!-- Cron/background-job monitoring: config support exists (deployment.cron_jobs,
+         cron_check_ins rows written by the webhook), but there is no read path yet —
+         no API route reads cron_check_ins and nothing renders it. Real spec gap,
+         intentionally left unbuilt rather than half-wired; someone should pick this
+         up later (add a GET route + render logic here). -->
+    <section class="card" style="grid-column:1 / -1">
+      <div class="card-head">Release history</div>
+      <div data-deployment-releases></div>
+    </section>
+    <dialog data-promote-dialog>
+      <h3>Promote to production</h3>
+      <p>This pushes <code data-promote-dialog-sha></code> (<span data-promote-dialog-message></span>) to the <code>${escapeHtml(deployment.production_branch)}</code> branch, deploying image <code data-promote-dialog-tag></code>.</p>
+      <div style="display:flex;gap:10px;justify-content:flex-end">
+        <button class="button" type="button" data-promote-dialog-cancel>Cancel</button>
+        <button class="button primary" type="button" data-promote-dialog-confirm>Promote</button>
+      </div>
+    </dialog>
+  </div>`;
 }
 
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
@@ -100,11 +151,14 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       ).join("")}` : "<p>This project uses the global prompts. Add an override to customize a prompt type.</p>"}
       ${availableTypes.length > 0 ? `<form data-add-override-form style="display:flex;gap:8px;align-items:center;padding:13px 18px;border-top:1px solid var(--border)"><select name="prompt_type" data-add-override-select aria-label="Prompt type to override" style="flex:1">${availableTypes.map((type) => `<option value="${type}">${type}</option>`).join("")}</select><button class="button" type="submit">+ Add override</button></form>` : ""}
     </div></section>`;
+    const deployment = project.config_json?.deployment as DeploymentConfig | undefined;
+    const tabLabels = ["Overview", "YAML config", "Skills", "Validation", "Prompts", ...(deployment?.enabled ? ["Deployment"] : [])];
+    const panelContents = [overviewPanel + mergeBranchesPanel, yamlPanel, skillsPanel, validationPanel, promptsPanel, ...(deployment?.enabled ? [deploymentPanel(project, deployment)] : [])];
     const body = `<div class="eyebrow">Configure / Projects</div><h1>${escapeHtml(project.name)}</h1>
       <div class="toolbar"><button class="button" data-validate-button>Run validation</button><button class="button primary" data-save-button>Save configuration</button></div>
       ${dirty ? `<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px"><strong>Planning and execution are blocked.</strong> <em>The primary checkout has ${escapeHtml(String(config.uncommitted_count || 3))} uncommitted files. Resolve them on the server — the platform never resets a checkout automatically.</em></div>` : ""}
-      <div class="tabs" role="tablist">${["Overview", "YAML config", "Skills", "Validation", "Prompts"].map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
-      ${[overviewPanel + mergeBranchesPanel, yamlPanel, skillsPanel, validationPanel, promptsPanel].map((content, index) => panel(index, content)).join("")}`;
+      <div class="tabs" role="tablist">${tabLabels.map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
+      ${panelContents.map((content, index) => panel(index, content)).join("")}`;
     return { status: 200, title: project.name, body };
   }
   return null;

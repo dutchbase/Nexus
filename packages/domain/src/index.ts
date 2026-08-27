@@ -14,6 +14,7 @@ export * from "./pr-review-publication.ts";
 export * from "./pr-conflict-resolution.ts";
 export * from "./follow-up-ticket.ts";
 export * from "./planning-inputs.ts";
+export * from "./deployment.ts";
 
 export const aiModels = ["fable", "opus", "sonnet", "haiku", "deepseek-v4-flash", "deepseek-v4-pro"] as const;
 export const reasoningLevels = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;
