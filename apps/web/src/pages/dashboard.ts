@@ -166,54 +166,58 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
   const dateStr = new Date().toLocaleDateString("en-US", { weekday: "long", month: "long", day: "numeric", year: "numeric" });
 
   const body = `
-    <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:18px;flex-wrap:wrap">
-      <div>
-        <div style="font-size:10px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:var(--text3);margin-bottom:6px">${escapeHtml(dateStr)}</div>
-        <h1>${escapeHtml(totalNeedAttention)} ${escapeHtml(needsPlural)} need you.</h1>
-      </div>
-      <div style="display:flex;gap:8px">
-        <a class="button" href="/admin/queue" style="border:1px solid var(--border);background:transparent;color:var(--text2);border-radius:4px;padding:9px 14px;font-size:13px;text-decoration:none;cursor:pointer" onmouseover="this.style.borderColor='var(--border2)';this.style.color='var(--text)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text2)'">Job queue</a>
-        <a class="button" href="/admin/tickets?status=Triage" style="border:0;background:var(--primary);color:var(--primary-fg);border-radius:4px;padding:9px 16px;font-size:13px;font-weight:600;text-decoration:none;cursor:pointer" onmouseover="this.style.filter='brightness(1.08)'" onmouseout="this.style.filter='brightness(1)'" >Open triage</a>
-      </div>
-    </div>
-
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:1px;background:var(--border);margin-top:18px;border-radius:6px;overflow:hidden">
-      ${kpiTile("Awaiting triage", awaitingCount, "", "text", "/admin/tickets?status=Triage")}
-      ${kpiTile("Plans to review", plansCount, "", "warn", "/admin/tickets?status=Plan%20Ready%20for%20Review")}
-      ${kpiTile("Active runs", runsCount, "", "run", "/admin/runs")}
-      ${kpiTile("PRs to review", prsCount, "", "text", "/admin/pull-requests")}
-      ${kpiTile("Failed jobs", jobsCount, "", "danger", "/admin/queue")}
-    </div>
-
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:22px;margin-top:22px;align-items:start">
-      <section class="card" style="margin-top:0">
-        <div class="card-head">Waiting on your decision</div>
-        ${waitingRows ? `<div style="max-height:400px;overflow-y:auto">${waitingRows}</div>` : `<div style="padding:20px 18px;color:var(--text3);font-size:13px">No tickets waiting for your decision.</div>`}
-      </section>
-
-      <section class="card" style="margin-top:0">
-        <div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
-          <div style="font-size:11.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text2)">Active Claude runs</div>
-          <a href="/admin/runs" style="font-size:12px;color:var(--primary);text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">All runs →</a>
+    <div class="dashboard-shell">
+      <div style="display:flex;align-items:flex-end;justify-content:space-between;gap:18px;flex-wrap:wrap">
+        <div>
+          <div style="font-size:10px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;color:var(--text3);margin-bottom:6px">${escapeHtml(dateStr)}</div>
+          <h1>${escapeHtml(totalNeedAttention)} ${escapeHtml(needsPlural)} need you.</h1>
         </div>
-        ${runRows ? `<div style="max-height:400px;overflow-y:auto">${runRows}</div>` : `<div style="padding:20px 18px;color:var(--text3);font-size:13px">No active runs.</div>`}
-        <a href="/admin/queue" style="display:block;padding:10px 18px;border-top:1px solid var(--border);font-size:12px;color:var(--text3);text-decoration:none">Queued behind: ${queuedCount} jobs · Inspect queue</a>
-      </section>
-    </div>
-
-    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:22px;margin-top:22px;align-items:start">
-      <section class="card" style="margin-top:0">
-        <div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between">
-          <div style="font-size:11.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text2)">System health</div>
-          <a href="/admin/system" style="font-size:12px;color:var(--primary);text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Details →</a>
+        <div style="display:flex;gap:8px">
+          <a class="button" href="/admin/queue" style="border:1px solid var(--border);background:transparent;color:var(--text2);border-radius:4px;padding:9px 14px;font-size:13px;text-decoration:none;cursor:pointer" onmouseover="this.style.borderColor='var(--border2)';this.style.color='var(--text)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text2)'">Job queue</a>
+          <a class="button" href="/admin/tickets?status=Triage" style="border:0;background:var(--primary);color:var(--primary-fg);border-radius:4px;padding:9px 16px;font-size:13px;font-weight:600;text-decoration:none;cursor:pointer" onmouseover="this.style.filter='brightness(1.08)'" onmouseout="this.style.filter='brightness(1)'" >Open triage</a>
         </div>
-        ${healthRows}
-      </section>
+      </div>
 
-      ${blockedRows ? `<section class="card" style="margin-top:0">
-        <div class="card-head">Blocked</div>
-        ${blockedRows}
-      </section>` : ''}
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(168px,1fr));gap:1px;background:var(--border);margin-top:18px;border-radius:6px;overflow:hidden">
+        ${kpiTile("Awaiting triage", awaitingCount, "", "text", "/admin/tickets?status=Triage")}
+        ${kpiTile("Plans to review", plansCount, "", "warn", "/admin/tickets?status=Plan%20Ready%20for%20Review")}
+        ${kpiTile("Active runs", runsCount, "", "run", "/admin/runs")}
+        ${kpiTile("PRs to review", prsCount, "", "text", "/admin/pull-requests")}
+        ${kpiTile("Failed jobs", jobsCount, "", "danger", "/admin/queue")}
+      </div>
+
+      <div class="dashboard-rows">
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:22px;margin-top:22px">
+          <section class="card" style="margin-top:0">
+            <div class="card-head">Waiting on your decision</div>
+            ${waitingRows ? `<div style="flex:1;min-height:0;overflow-y:auto">${waitingRows}</div>` : `<div style="padding:20px 18px;color:var(--text3);font-size:13px">No tickets waiting for your decision.</div>`}
+          </section>
+
+          <section class="card" style="margin-top:0">
+            <div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
+              <div style="font-size:11.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text2)">Active Claude runs</div>
+              <a href="/admin/runs" style="font-size:12px;color:var(--primary);text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">All runs →</a>
+            </div>
+            ${runRows ? `<div style="flex:1;min-height:0;overflow-y:auto">${runRows}</div>` : `<div style="padding:20px 18px;color:var(--text3);font-size:13px">No active runs.</div>`}
+            <a href="/admin/queue" style="display:block;padding:10px 18px;border-top:1px solid var(--border);font-size:12px;color:var(--text3);text-decoration:none">Queued behind: ${queuedCount} jobs · Inspect queue</a>
+          </section>
+        </div>
+
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:22px;margin-top:22px">
+          <section class="card" style="margin-top:0">
+            <div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between">
+              <div style="font-size:11.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text2)">System health</div>
+              <a href="/admin/system" style="font-size:12px;color:var(--primary);text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Details →</a>
+            </div>
+            <div style="flex:1;min-height:0;overflow-y:auto">${healthRows}</div>
+          </section>
+
+          ${blockedRows ? `<section class="card" style="margin-top:0">
+            <div class="card-head">Blocked</div>
+            <div style="flex:1;min-height:0;overflow-y:auto">${blockedRows}</div>
+          </section>` : ''}
+        </div>
+      </div>
     </div>
   `;
 
