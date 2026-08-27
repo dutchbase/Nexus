@@ -22,7 +22,7 @@ import {
   resolveSkills, snapshotSkillSet, snapshotSkills, SkillResolutionError, validateFilesystemPath,
 } from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
-import { normalizeAgentStartPath, validateAgentStartPath, validateDeploymentConfig, validateProject } from "@dcc/project-config";
+import { cronWebhookSecretReferencePattern, normalizeAgentStartPath, validateAgentStartPath, validateDeploymentConfig, validateProject } from "@dcc/project-config";
 import { adminPage, escapeHtml, loginPage, publicFormPage, styles, submittedPage } from "./ui.ts";
 import { allowedTemplateVariables, fieldsFor, lineDiff, validStatuses } from "./pages/shared.ts";
 import * as dashboardPage from "./pages/dashboard.ts";
@@ -2583,12 +2583,15 @@ export async function route(request: IncomingMessage, response: ServerResponse) 
     const project = (await pool.query("SELECT id, config_json FROM projects WHERE slug=$1", [cronCheckInMatch[1]])).rows[0];
     if (!project) return json(response, 404, { error: "project not found" });
     const secretReference = project.config_json?.deployment?.cron_webhook_secret_reference;
-    if (typeof secretReference !== "string" || !secretReference.trim()) return json(response, 404, { error: "cron check-ins are not configured for this project" });
+    if (typeof secretReference !== "string" || !secretReference.trim() || !cronWebhookSecretReferencePattern.test(secretReference)) {
+      return json(response, 404, { error: "cron check-ins are not configured for this project" });
+    }
     const expectedToken = process.env[secretReference];
     if (!expectedToken) return json(response, 500, { error: "configured cron secret env var is not set" });
     const providedToken = (request.headers["x-dcc-cron-token"] as string | undefined) ?? "";
-    const tokensMatch = providedToken.length === expectedToken.length
-      && timingSafeEqual(Buffer.from(providedToken), Buffer.from(expectedToken));
+    const providedBuffer = Buffer.from(providedToken);
+    const expectedBuffer = Buffer.from(expectedToken);
+    const tokensMatch = providedBuffer.length === expectedBuffer.length && timingSafeEqual(providedBuffer, expectedBuffer);
     if (!tokensMatch) return json(response, 401, { error: "invalid cron token" });
     const body = await bodyOf(request);
     if (typeof body.route_key !== "string" || !body.route_key.trim()) return json(response, 400, { error: "route_key is required" });
