@@ -3,7 +3,7 @@ set -euo pipefail
 
 (($# == 4)) || { echo "deploy.sh: expected <sha> <marker-path> <attempt-uuid> <protected-branch>" >&2; exit 1; }
 
-ROOT="${DCC_ROOT:-/home/deploy/projects/dev-control}"
+ROOT="${DCC_ROOT:-/opt/nexus}"
 SHA="${1:-}"
 MARKER="${2:-}"
 ATTEMPT_ID="${3:-}"

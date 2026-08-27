@@ -12,7 +12,7 @@ const MAX_BODY_BYTES = 1024 * 1024;
 function respond(res, code, body) { res.writeHead(code).end(body); }
 
 function readConfig(env = process.env) {
-  const stateDir = env.DEPLOY_STATE_DIR || '/home/deploy/projects/dev-control/.deploy-state';
+  const stateDir = env.DEPLOY_STATE_DIR || '/opt/nexus/.deploy-state';
   return {
     secret: env.WEBHOOK_SECRET,
     port: Number(env.WEBHOOK_PORT || 9003),
@@ -20,8 +20,8 @@ function readConfig(env = process.env) {
     // Execute the release's own deploy.sh, not the checkout root's: the root
     // working tree only updates when someone pulls, so a stale copy would
     // keep replaying old deploy logic on every future cutover.
-    deployShPath: env.DEPLOY_SH_PATH || path.join(env.DCC_ROOT || '/home/deploy/projects/dev-control', '.deploy-current', 'deploy.sh'),
-    currentReleaseLink: env.DCC_DEPLOY_CURRENT_LINK || path.join(env.DCC_ROOT || '/home/deploy/projects/dev-control', '.deploy-current'),
+    deployShPath: env.DEPLOY_SH_PATH || path.join(env.DCC_ROOT || '/opt/nexus', '.deploy-current', 'deploy.sh'),
+    currentReleaseLink: env.DCC_DEPLOY_CURRENT_LINK || path.join(env.DCC_ROOT || '/opt/nexus', '.deploy-current'),
     completionsDir: path.join(stateDir, 'completions'),
     logsDir: path.join(stateDir, 'logs'),
     leaseMs: Number(env.DEPLOY_STUCK_TIMEOUT_MS || 1800000),

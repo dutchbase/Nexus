@@ -1,18 +1,76 @@
 // Shared helpers for the end-user journey suite (tests/e2e/*.spec.ts).
-//
-// DB access, mock-claude scenario writing, and job scenario routing are
-// reused from the eval harness (read-only imports — HARNESS_CONVENTIONS.md
-// forbids modifying those files, not importing them).
 import type { Page } from "@playwright/test";
-import {
-  queryOne,
-  queryAll,
-  waitFor,
-  DEFAULT_PLAN_MARKDOWN,
-  type MockClaudeScenario,
-} from "../../.lfd/dcc-build/harness/tests/helpers";
+import { Client } from "pg";
 
-export { queryOne, queryAll, waitFor, DEFAULT_PLAN_MARKDOWN };
+async function withDb<T>(fn: (db: Client) => Promise<T>): Promise<T> {
+  const db = new Client({ connectionString: process.env.DATABASE_URL });
+  await db.connect();
+  try {
+    return await fn(db);
+  } finally {
+    await db.end();
+  }
+}
+
+export async function queryOne(sql: string, params: any[] = []): Promise<any | null> {
+  return withDb(async (db) => {
+    const res = await db.query(sql, params);
+    return res.rows[0] ?? null;
+  });
+}
+
+export async function queryAll(sql: string, params: any[] = []): Promise<any[]> {
+  return withDb(async (db) => {
+    const res = await db.query(sql, params);
+    return res.rows;
+  });
+}
+
+export async function waitFor(
+  predicate: () => Promise<boolean>,
+  { timeoutMs = 15000, intervalMs = 200 } = {},
+): Promise<void> {
+  const start = Date.now();
+  while (Date.now() - start < timeoutMs) {
+    if (await predicate()) return;
+    await new Promise((r) => setTimeout(r, intervalMs));
+  }
+  throw new Error(`waitFor: timed out after ${timeoutMs}ms`);
+}
+
+export type MockClaudeScenario = {
+  mode: "plan_valid" | "plan_invalid" | "timeout" | "exec_stream" | "invalid_model_combo";
+  plan_markdown?: string;
+  invalid_plan_text?: string;
+  session_id_expected?: string;
+  events?: any[];
+  timeout_after_events?: number;
+  exit_code?: number;
+};
+
+export const DEFAULT_PLAN_MARKDOWN = [
+  "# Implementation Plan",
+  "",
+  "## 1. Summary",
+  "Mock plan for eval purposes.",
+  "## 2. Problem Definition",
+  "## 3. Current Behaviour",
+  "## 4. Expected Behaviour",
+  "## 5. Relevant Architecture",
+  "## 6. Relevant Files",
+  "## 7. Proposed Changes",
+  "## 8. Implementation Steps",
+  "## 9. Database or Migration Changes",
+  "## 10. Testing Strategy",
+  "## 11. Security Considerations",
+  "## 12. Performance Considerations",
+  "## 13. Risks and Edge Cases",
+  "## 14. Rollback Strategy",
+  "## 15. Acceptance Criteria Mapping",
+  "## 16. Out of Scope",
+  "## 17. Open Questions",
+  "",
+].join("\n");
 
 // Scenario "path" handed to the app's test-only mock_scenario_path field.
 // Inline JSON rather than a file: scoped executions run inside bubblewrap
