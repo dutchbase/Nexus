@@ -230,6 +230,13 @@ export async function updatePullRequestBase(owner: string, repository: string, n
   });
 }
 
+export async function closePullRequest(owner: string, repository: string, number: number) {
+  return request<ProviderPullRequest>(`${pullsPath(owner, repository)}/${number}`, {
+    method: "PATCH",
+    body: JSON.stringify({ state: "closed" }),
+  });
+}
+
 export async function createPullRequestComment(
   owner: string,
   repo: string,

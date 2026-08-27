@@ -934,6 +934,95 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           }finally{button.disabled=false}
         });
         document.querySelector("select[name=repository]")?.addEventListener("change",function(){this.form.submit()});
+        const prChecks=()=>[...document.querySelectorAll("[data-pr-check]")];
+        const prToolbar=document.querySelector("[data-pr-bulk-toolbar]"),prSelectedCount=document.querySelector("[data-pr-selected-count]");
+        const updatePrSelection=()=>{
+          const selected=prChecks().filter(c=>c.checked);
+          if(prSelectedCount)prSelectedCount.textContent=String(selected.length);
+          if(prToolbar)prToolbar.hidden=selected.length===0;
+        };
+        prChecks().forEach(checkbox=>{
+          checkbox.addEventListener("click",event=>event.stopPropagation());
+          checkbox.addEventListener("change",updatePrSelection);
+        });
+        document.querySelector("[data-pr-check-all]")?.addEventListener("change",event=>{
+          prChecks().forEach(checkbox=>{checkbox.checked=event.target.checked});
+          updatePrSelection();
+        });
+        document.querySelector("[data-pr-clear-selection]")?.addEventListener("click",()=>{
+          prChecks().forEach(checkbox=>{checkbox.checked=false});
+          const checkAll=document.querySelector("[data-pr-check-all]");if(checkAll)checkAll.checked=false;
+          updatePrSelection();
+        });
+        const selectedPrIds=()=>prChecks().filter(c=>c.checked).map(c=>c.value);
+
+        document.querySelector('[data-pr-bulk="ai-review"]')?.addEventListener("click",async(event)=>{
+          const ids=selectedPrIds();if(!ids.length)return;
+          const button=event.currentTarget;button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/bulk",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({action:"ai-review",ids})});
+            const result=await response.json();
+            if(response.ok){
+              const queued=result.results.filter(r=>r.outcome==="queued").length,skipped=result.results.length-queued;
+              alert(\`AI review started for \${queued} pull request\${queued===1?"":"s"}\${skipped?\`, \${skipped} skipped\`:""}.\`);
+              location.reload();
+            }else alert(result.error);
+          }finally{button.disabled=false}
+        });
+        document.querySelector('[data-pr-bulk="close"]')?.addEventListener("click",async(event)=>{
+          const ids=selectedPrIds();if(!ids.length)return;
+          if(!confirm(\`Close \${ids.length} pull request\${ids.length===1?"":"s"}?\n\nThis will close the selected PRs on GitHub.\nNo branches or commits will be deleted.\`))return;
+          const button=event.currentTarget;button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/bulk",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({action:"close",ids})});
+            const result=await response.json();
+            if(response.ok){
+              const queued=result.results.filter(r=>r.outcome==="queued").length,skipped=result.results.filter(r=>r.outcome!=="queued");
+              alert(\`Closing \${queued} pull request\${queued===1?"":"s"}.\${skipped.length?\` \${skipped.length} skipped: \${skipped.map(r=>r.reason).join("; ")}\`:""}\`);
+              location.reload();
+            }else alert(result.error);
+          }finally{button.disabled=false}
+        });
+        const preflightDialog=document.querySelector("[data-pr-merge-preflight-dialog]");
+        let preflightReadyIds=[];
+        document.querySelector('[data-pr-bulk="merge"]')?.addEventListener("click",async(event)=>{
+          const ids=selectedPrIds();if(!ids.length)return;
+          const button=event.currentTarget;button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/bulk/merge-preflight",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({ids})});
+            const result=await response.json();
+            if(!response.ok){alert(result.error);return}
+            const ready=result.results.filter(r=>r.eligible),blocked=result.results.filter(r=>!r.eligible);
+            preflightReadyIds=ready.map(r=>r.id);
+            preflightDialog.querySelector("[data-pr-preflight-summary]").textContent=\`\${ready.length} ready, \${blocked.length} blocked\`;
+            preflightDialog.querySelector("[data-pr-preflight-list]").replaceChildren(
+              ...result.results.map(r=>{
+                const li=document.createElement("li");
+                li.textContent=(r.eligible?"✓ ":"✕ ")+"#"+(r.number??"?")+" "+(r.title??"")+(r.eligible?"":" — "+r.reason);
+                return li;
+              }),
+            );
+            const confirmButton=preflightDialog.querySelector("[data-pr-preflight-confirm]");
+            confirmButton.textContent=\`Merge \${ready.length} PR\${ready.length===1?"":"s"}\`;
+            confirmButton.disabled=ready.length===0;
+            preflightDialog.showModal();
+          }finally{button.disabled=false}
+        });
+        preflightDialog?.querySelector("[data-pr-preflight-confirm]")?.addEventListener("click",async()=>{
+          if(!preflightReadyIds.length)return;
+          const button=preflightDialog.querySelector("[data-pr-preflight-confirm]");button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/bulk",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({action:"merge",ids:preflightReadyIds})});
+            const result=await response.json();
+            preflightDialog.close();
+            if(response.ok){
+              const queued=result.results.filter(r=>r.outcome==="queued").length,skipped=result.results.filter(r=>r.outcome!=="queued");
+              alert(\`Merging \${queued} pull request\${queued===1?"":"s"}.\${skipped.length?\` \${skipped.length} could not be merged: \${skipped.map(r=>r.reason).join("; ")}\`:""}\`);
+              location.reload();
+            }else alert(result.error);
+          }finally{button.disabled=false}
+        });
+        preflightDialog?.querySelector("[data-close-dialog]")?.addEventListener("click",()=>preflightDialog.close());
       `:""}
       ${/^\/admin\/pull-requests\/[^/]+(\/\d+)?$/.test(path)?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";

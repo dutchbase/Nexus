@@ -261,6 +261,69 @@ async function audit(values: {
   );
 }
 
+type ApproveEligibility =
+  | { eligible: true; expectedHeadSha: string; policySnapshotId: string | undefined }
+  | { eligible: false; reason: string };
+
+async function evaluateApproveEligibility(
+  pullRequest: any,
+  provided?: { expectedHeadSha?: string; policySnapshotId?: string },
+): Promise<ApproveEligibility> {
+  const { requireFreshPolicyBinding } = await getPullRequestMergeSettings(pool);
+  // Bulk path: derive "expected" values from the freshly-fetched row itself — there is
+  // no browser-rendered snapshot to compare-and-swap against for a list-page bulk action.
+  const expectedHeadSha = provided?.expectedHeadSha ?? pullRequest.head_sha ?? "";
+  const policySnapshotId = provided?.policySnapshotId ?? pullRequest.current_policy_snapshot_id ?? "";
+  if (!expectedHeadSha || expectedHeadSha !== pullRequest.head_sha || (requireFreshPolicyBinding && (!policySnapshotId || pullRequest.policy_stale
+    || policySnapshotId !== pullRequest.current_policy_snapshot_id))) {
+    return { eligible: false, reason: "pull request policy binding is missing or stale" };
+  }
+  return { eligible: true, expectedHeadSha, policySnapshotId: requireFreshPolicyBinding ? policySnapshotId : undefined };
+}
+
+async function startAiReview(
+  pullRequestId: string,
+  options: { mode?: string; model?: string; reasoningLevel?: string; targetBranch?: string },
+  actorUserId: string,
+) {
+  const mode = options.mode === "review_and_merge" ? "review_and_merge" : "review_only";
+  const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
+  const selection = validateAiSelection({
+    model: options.model ?? settings.default_model,
+    reasoning_level: options.reasoningLevel ?? settings.default_reasoning_level,
+  });
+  return inTransaction(async (client) => {
+    await client.query("SELECT id FROM pull_requests WHERE id=$1 FOR UPDATE", [pullRequestId]);
+    const previous = (await client.query(
+      `SELECT r.id,j.id job_id,j.status job_status
+       FROM pr_ai_reviews r
+       LEFT JOIN LATERAL (
+         SELECT id,status FROM jobs
+         WHERE type='pr.ai_review' AND payload_json->>'pr_ai_review_id'=r.id::text
+         ORDER BY created_at DESC LIMIT 1
+       ) j ON true
+       WHERE r.pull_request_id=$1
+       ORDER BY CASE WHEN j.status IN ('queued','running') THEN 0 ELSE 1 END,r.created_at DESC LIMIT 1
+       FOR UPDATE OF r`,
+      [pullRequestId],
+    )).rows[0];
+    if (previous && ["queued", "running"].includes(previous.job_status)) return { id: previous.id, alreadyRunning: true };
+    const row = (await client.query(
+      `INSERT INTO pr_ai_reviews (pull_request_id, mode, status, model, reasoning_level, created_by)
+       VALUES ($1,$2,'running',$3,$4,$5) RETURNING id`,
+      [pullRequestId, mode, selection.model, selection.reasoning_level, actorUserId],
+    )).rows[0];
+    await enqueueJob({
+      type: "pr.ai_review",
+      payload: { pr_ai_review_id: row.id, pull_request_id: pullRequestId, mode, model: selection.model, reasoning_level: selection.reasoning_level, target_branch: options.targetBranch },
+      idempotencyKey: `pr-ai-review:${row.id}`,
+      maxAttempts: 3,
+      rerunOf: previous?.job_id,
+    }, client);
+    return { id: row.id, alreadyRunning: false };
+  });
+}
+
 async function sessionFor(request: IncomingMessage) {
   const token = cookieValue(request, "dcc_session");
   if (!token) return null;
@@ -740,6 +803,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       params.push(`%${search}%`);
       where.push(`(pr.title ILIKE $${params.length} OR t.ticket_number ILIKE $${params.length})`);
     }
+    const ids = url.searchParams.getAll("id").filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
+    if (ids.length) { params.push(ids); where.push(`pr.id = ANY($${params.length}::uuid[])`); }
     const pullRequests = (await pool.query(
       `SELECT pr.*,p.name project_name,p.slug project_slug,
               t.ticket_number,t.title ticket_title,t.status ticket_status,
@@ -994,6 +1059,82 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       ...(typeof error === "string" ? { error } : {}),
     });
   }
+  if (url.pathname === "/api/admin/pull-requests/bulk/merge-preflight" && request.method === "POST") {
+    const body = await bodyOf(request);
+    const ids = Array.isArray(body.ids) && body.ids.every((id: unknown): id is string => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) ? body.ids : [];
+    if (!ids.length) return json(response, 400, { error: "no pull requests selected" });
+    const { requireFreshPolicyBinding } = await getPullRequestMergeSettings(pool);
+    const rows = (await pool.query("SELECT * FROM pull_requests WHERE id = ANY($1::uuid[])", [ids])).rows;
+    const byId = new Map(rows.map((row: any) => [row.id, row]));
+    const results = ids.map((id: string) => {
+      const row = byId.get(id);
+      if (!row) return { id, number: null, title: null, eligible: false, reason: "pull request not found" };
+      const classification = prsPage.classifyBulkMergeEligibility(row, requireFreshPolicyBinding);
+      return { id, number: row.number, title: row.title, eligible: classification.eligible, ...(classification.eligible ? {} : { reason: classification.reason }) };
+    });
+    return json(response, 200, { results });
+  }
+  if (url.pathname === "/api/admin/pull-requests/bulk" && request.method === "POST") {
+    const body = await bodyOf(request);
+    const action = body.action;
+    if (!["ai-review", "close", "merge"].includes(action)) return json(response, 400, { error: "invalid action" });
+    const ids = Array.isArray(body.ids) && body.ids.every((id: unknown): id is string => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) ? body.ids : [];
+    if (!ids.length) return json(response, 400, { error: "no pull requests selected" });
+    if (ids.length > 100) return json(response, 400, { error: "select at most 100 pull requests at once" });
+    const batchId = typeof body.batch_id === "string" && body.batch_id.trim() ? body.batch_id.trim() : randomUUID();
+    const rows = (await pool.query(
+      `SELECT pr.*,p.github_owner,p.github_repository FROM pull_requests pr JOIN projects p ON p.id=pr.project_id WHERE pr.id = ANY($1::uuid[])`,
+      [ids],
+    )).rows;
+    const byId = new Map(rows.map((row: any) => [row.id, row]));
+    const results: Array<{ id: string; outcome: string; reason?: string; job_id?: string }> = [];
+    const { requireFreshPolicyBinding } = action === "merge" ? await getPullRequestMergeSettings(pool) : { requireFreshPolicyBinding: false };
+    // Audit logging is best-effort: the job is already enqueued by the time we get here,
+    // so a failed audit insert must never turn a queued PR into a "skipped" result entry.
+    const auditBulk = async (auditAction: string, id: string) => {
+      try {
+        await audit({
+          actorType: "admin", actorId: session.user_id, action: auditAction,
+          entityType: "pull_request", entityId: id, metadata: { batch_id: batchId }, ip: ipOf(request),
+        });
+      } catch (auditError) {
+        console.error(`bulk ${action} succeeded for pull request ${id} but audit logging failed`, auditError);
+      }
+    };
+    for (const id of ids) {
+      const row = byId.get(id);
+      if (!row) { results.push({ id, outcome: "not_found" }); continue; }
+      try {
+        if (action === "ai-review") {
+          if (row.state !== "open") { results.push({ id, outcome: "skipped", reason: `pull request is ${row.state}, not open` }); continue; }
+          const started = await startAiReview(row.id, {}, session.user_id);
+          results.push({ id, outcome: started.alreadyRunning ? "skipped" : "queued", ...(started.alreadyRunning ? { reason: "AI review already running" } : {}) });
+          await auditBulk("ai_review.bulk_start", id);
+        } else if (action === "close") {
+          if (row.state !== "open") { results.push({ id, outcome: "skipped", reason: `pull request is ${row.state}, not open` }); continue; }
+          const job = await enqueueJob({ type: "github.close_pull_request", payload: { actor_id: session.user_id, pull_request_id: row.id }, idempotencyKey: `bulk-close:${row.id}:${batchId}` });
+          results.push({ id, outcome: "queued", job_id: job.id });
+          await auditBulk("pull_request.bulk_close", id);
+        } else {
+          const classification = prsPage.classifyBulkMergeEligibility(row, requireFreshPolicyBinding);
+          if (!classification.eligible) { results.push({ id, outcome: "skipped", reason: classification.reason }); continue; }
+          const eligibility = await evaluateApproveEligibility(row);
+          if (!eligibility.eligible) { results.push({ id, outcome: "skipped", reason: eligibility.reason }); continue; }
+          const job = await enqueueJob({
+            type: "github.merge_pull_request",
+            payload: { actor_id: session.user_id, pull_request_id: row.id, expected_head_sha: eligibility.expectedHeadSha, ...(eligibility.policySnapshotId ? { policy_snapshot_id: eligibility.policySnapshotId } : {}) },
+            idempotencyKey: `g07:github.merge_pull_request:${row.id}:${eligibility.expectedHeadSha}:${Math.floor(Date.now() / 3_600_000)}`,
+          });
+          results.push({ id, outcome: "queued", job_id: job.id });
+          await auditBulk("pull_request.bulk_merge", id);
+        }
+      } catch (error) {
+        results.push({ id, outcome: "skipped", reason: "an unexpected error occurred — see server logs" });
+        console.error(`bulk ${action} failed for pull request ${id}`, error);
+      }
+    }
+    return json(response, 200, { batch_id: batchId, results });
+  }
   const pullRequestActionMatch = url.pathname.match(
     /^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/(mark-reviewed|approve|request-changes|repair-instructions|start-repair|refresh|close-ticket|ai-review|resolve-conflicts)$/i,
   );
@@ -1014,20 +1155,17 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     } else if (action === "mark-reviewed") {
       await pool.query("UPDATE pull_requests SET internal_review_state='reviewed',updated_at=now() WHERE id=$1", [pullRequest.id]);
     } else if (action === "approve") {
-      const expectedHeadSha = typeof body.expected_head_sha === "string" ? body.expected_head_sha.trim() : "";
-      const policySnapshotId = typeof body.policy_snapshot_id === "string" ? body.policy_snapshot_id.trim() : "";
-      const { requireFreshPolicyBinding } = await getPullRequestMergeSettings(pool);
-      if (!expectedHeadSha || expectedHeadSha !== pullRequest.head_sha || (requireFreshPolicyBinding && (!policySnapshotId || pullRequest.policy_stale
-        || policySnapshotId !== pullRequest.current_policy_snapshot_id))) {
-        return json(response, 409, { error: "pull request policy binding is missing or stale" });
-      }
+      const providedHeadSha = typeof body.expected_head_sha === "string" ? body.expected_head_sha.trim() : "";
+      const providedSnapshotId = typeof body.policy_snapshot_id === "string" ? body.policy_snapshot_id.trim() : "";
+      const eligibility = await evaluateApproveEligibility(pullRequest, { expectedHeadSha: providedHeadSha, policySnapshotId: providedSnapshotId });
+      if (!eligibility.eligible) return json(response, 409, { error: eligibility.reason });
       const job = await enqueueJob({
         type: "github.merge_pull_request",
         payload: {
           actor_id: session.user_id, pull_request_id: pullRequest.id,
-          expected_head_sha: expectedHeadSha, ...(requireFreshPolicyBinding ? { policy_snapshot_id: policySnapshotId } : {}),
+          expected_head_sha: eligibility.expectedHeadSha, ...(eligibility.policySnapshotId ? { policy_snapshot_id: eligibility.policySnapshotId } : {}),
         },
-        idempotencyKey: `g07:github.merge_pull_request:${pullRequest.id}:${expectedHeadSha}:${Math.floor(Date.now() / 3_600_000)}`,
+        idempotencyKey: `g07:github.merge_pull_request:${pullRequest.id}:${eligibility.expectedHeadSha}:${Math.floor(Date.now() / 3_600_000)}`,
       });
       return json(response, 202, { job });
     } else if (action === "request-changes") {
@@ -1104,53 +1242,13 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       if (body.target_branch !== undefined && (typeof body.target_branch !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(body.target_branch.trim()))) {
         return json(response, 400, { error: "invalid target_branch" });
       }
-      const mode = body.mode === "review_and_merge" ? "review_and_merge" : "review_only";
-      const targetBranch = typeof body.target_branch === "string" && body.target_branch.trim() ? body.target_branch.trim() : undefined;
-      const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
-      const selection = validateAiSelection({
-        model: typeof body.model === "string" ? body.model : settings.default_model,
-        reasoning_level: typeof body.reasoning_level === "string" ? body.reasoning_level : settings.default_reasoning_level,
-      });
-      const reviewRow = await inTransaction(async (client) => {
-        await client.query("SELECT id FROM pull_requests WHERE id=$1 FOR UPDATE", [pullRequest.id]);
-        const previous = (await client.query(
-          `SELECT r.id,j.id job_id,j.status job_status
-           FROM pr_ai_reviews r
-           LEFT JOIN LATERAL (
-             SELECT id,status FROM jobs
-             WHERE type='pr.ai_review' AND payload_json->>'pr_ai_review_id'=r.id::text
-             ORDER BY created_at DESC LIMIT 1
-           ) j ON true
-           WHERE r.pull_request_id=$1
-           ORDER BY CASE WHEN j.status IN ('queued','running') THEN 0 ELSE 1 END,r.created_at DESC LIMIT 1
-           FOR UPDATE OF r`,
-          [pullRequest.id],
-        )).rows[0];
-        if (previous && ["queued", "running"].includes(previous.job_status)) return previous;
-        const row = (
-          await client.query(
-            `INSERT INTO pr_ai_reviews (pull_request_id, mode, status, model, reasoning_level, created_by)
-             VALUES ($1,$2,'running',$3,$4,$5) RETURNING id`,
-            [pullRequest.id, mode, selection.model, selection.reasoning_level, session.user_id],
-          )
-        ).rows[0];
-        await enqueueJob({
-          type: "pr.ai_review",
-          payload: {
-            pr_ai_review_id: row.id,
-            pull_request_id: pullRequest.id,
-            mode,
-            model: selection.model,
-            reasoning_level: selection.reasoning_level,
-            target_branch: targetBranch,
-          },
-          idempotencyKey: `pr-ai-review:${row.id}`,
-          maxAttempts: 3,
-          rerunOf: previous?.job_id,
-        }, client);
-        return row;
-      });
-      return json(response, 200, { id: reviewRow.id });
+      const result = await startAiReview(pullRequest.id, {
+        mode: body.mode,
+        model: typeof body.model === "string" ? body.model : undefined,
+        reasoningLevel: typeof body.reasoning_level === "string" ? body.reasoning_level : undefined,
+        targetBranch: typeof body.target_branch === "string" && body.target_branch.trim() ? body.target_branch.trim() : undefined,
+      }, session.user_id);
+      return json(response, 200, { id: result.id });
     } else if (action === "resolve-conflicts") {
       const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
       const selection = validateAiSelection({
