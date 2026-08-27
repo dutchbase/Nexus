@@ -7,15 +7,29 @@ const approveAndMergePullRequest = vi.fn();
 const mergeBranch = vi.fn();
 const createPullRequest = vi.fn();
 const findOpenPullRequestForHead = vi.fn();
+const checkProductionHealth = vi.fn();
+const evaluatePromotionEligibility = vi.fn();
+const getBranchHeadCommit = vi.fn();
+const getCommitCheckStatus = vi.fn();
+const getPullRequestsForCommit = vi.fn();
+const updateBranchReference = vi.fn();
+const getPendingDeployments = vi.fn();
+const checkImageExists = vi.fn();
 
 vi.mock("@dcc/domain", () => {
   class PullRequestMergeError extends Error {
     code: string;
     constructor(message: string, code = "merge_failed") { super(message); this.code = code; }
   }
-  return { syncOpenPullRequests, syncPullRequest, importGithubPullRequests, approveAndMergePullRequest, PullRequestMergeError };
+  return {
+    syncOpenPullRequests, syncPullRequest, importGithubPullRequests, approveAndMergePullRequest, PullRequestMergeError,
+    checkProductionHealth, evaluatePromotionEligibility,
+  };
 });
-vi.mock("@dcc/github-provider", () => ({ mergeBranch, createPullRequest, findOpenPullRequestForHead }));
+vi.mock("@dcc/github-provider", () => ({
+  mergeBranch, createPullRequest, findOpenPullRequestForHead,
+  getBranchHeadCommit, getCommitCheckStatus, getPullRequestsForCommit, updateBranchReference, getPendingDeployments, checkImageExists,
+}));
 const previewRemoteBranchMerge = vi.fn();
 const lsRemoteHeads = vi.fn(async () => new Map());
 vi.mock("../../../packages/git-runner/src/index.ts", () => ({
