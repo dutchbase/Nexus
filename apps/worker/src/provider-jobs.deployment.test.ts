@@ -101,6 +101,35 @@ test("deployment.sync_status happy path writes a status snapshot", async () => {
   expect(resultUpdate!.values![1]).toMatchObject({ outcome: "synced" });
 });
 
+test("deployment.sync_status marks a stalled in-flight release failed after 15 minutes with no resolution", async () => {
+  const database = db([project]);
+  const staleRelease = { id: "release-9", commit_sha: "9".repeat(40), updated_at: new Date(Date.now() - 20 * 60 * 1000).toISOString() };
+  database.query.mockImplementation(async (text: string, values?: unknown[]) => {
+    database.queries.push({ text, values });
+    if (text.includes("FROM production_releases")) return { rows: [staleRelease], rowCount: 1 };
+    return { rows: [project], rowCount: 1 };
+  });
+  getBranchHeadCommit.mockResolvedValue({ sha: "a".repeat(40), committedAt: "2026-01-01T00:00:00Z", message: "fix things" });
+  getCommitCheckStatus.mockResolvedValue({ sha: "a".repeat(40), checks: [], overallState: "success", fetchedAt: "2026-01-01T00:00:00Z" });
+  checkImageExists.mockResolvedValue({ exists: true, checkedAt: "2026-01-01T00:00:00Z", authRequired: false });
+  // Health reports a different, unrelated commit as live — the in-flight
+  // release never resolved to healthy.
+  checkProductionHealth.mockResolvedValue({ state: "healthy", healthy: true, commit_sha: "b".repeat(40), raw: null });
+  getPendingDeployments.mockResolvedValue([]);
+
+  await runProviderJob({
+    id: "job-stalled", type: "deployment.sync_status",
+    idempotency_key: "g11:deployment.sync_status:project-1:stalled",
+    payload_json: { actor_id: "admin-1", project_id: "project-1" },
+  } as any, database as any);
+
+  const releaseUpdate = database.queries.find((q) => q.text.includes("UPDATE production_releases") && q.text.includes("health_checked_at"));
+  expect(releaseUpdate).toBeDefined();
+  expect(releaseUpdate!.text).toContain("failure_reason=$4");
+  expect(releaseUpdate!.values![1]).toBe("failed");
+  expect(releaseUpdate!.values![3]).toBe("stalled — no resolution within 15 minutes");
+});
+
 test("deployment.promote_check reports ineligible with reasons when CI is red", async () => {
   const database = db([project]);
   getBranchHeadCommit.mockResolvedValue({ sha: "b".repeat(40), committedAt: "2026-01-01T00:00:00Z", message: "broken build" });
@@ -174,6 +203,69 @@ test("deployment.promote refuses with promotion_in_progress on a unique-violatio
   expect(updateBranchReference).not.toHaveBeenCalled();
   const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
   expect(resultUpdate!.values![1]).toMatchObject({ outcome: "refused", refusal_code: "promotion_in_progress" });
+});
+
+test("deployment.promote refuses with commit_not_master when commit_sha does not match the fresh master head", async () => {
+  const database = db([project]);
+  const masterSha = "5".repeat(40);
+  getBranchHeadCommit.mockResolvedValue({ sha: masterSha, committedAt: "2026-01-01T00:00:00Z", message: "ready to ship" });
+
+  await runProviderJob({
+    id: "job-6", type: "deployment.promote",
+    idempotency_key: "g11:deployment.promote:project-1:once",
+    payload_json: {
+      actor_id: "admin-1", project_id: "project-1",
+      // expected_master_sha matches the fresh head, but commit_sha is an
+      // unrelated value — this must be refused, not silently written to the
+      // production branch, or the eligibility check would be gating a
+      // different commit than the one actually promoted.
+      commit_sha: "6".repeat(40), expected_master_sha: masterSha,
+    },
+  } as any, database as any);
+
+  expect(updateBranchReference).not.toHaveBeenCalled();
+  expect(checkProductionHealth).not.toHaveBeenCalled();
+  const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
+  expect(resultUpdate!.values![1]).toMatchObject({ outcome: "refused", refusal_code: "commit_not_master", expected: masterSha, received: "6".repeat(40) });
+  const auditInsert = database.queries.find((q) => q.text.includes("audit_events"));
+  expect(auditInsert!.values![5]).toMatchObject({ outcome: "refused", refusal_code: "commit_not_master" });
+});
+
+test("deployment.promote marks the release failed (not stuck at requested) when the ref write throws", async () => {
+  const database = db([project]);
+  const masterSha = "7".repeat(40);
+  getBranchHeadCommit.mockResolvedValue({ sha: masterSha, committedAt: "2026-01-01T00:00:00Z", message: "ready to ship" });
+  getCommitCheckStatus.mockResolvedValue({ sha: masterSha, checks: [], overallState: "success", fetchedAt: "2026-01-01T00:00:00Z" });
+  checkImageExists.mockResolvedValue({ exists: true, checkedAt: "2026-01-01T00:00:00Z", authRequired: false });
+  checkProductionHealth.mockResolvedValue({ state: "healthy", healthy: true, commit_sha: "8".repeat(40), raw: null });
+  evaluatePromotionEligibility.mockReturnValue({ eligible: true, reasons: [] });
+  lsRemoteHeads.mockResolvedValue(new Map([["production", "8".repeat(40)]]));
+  updateBranchReference.mockRejectedValue(new Error("422 not a fast-forward"));
+
+  database.query.mockImplementation(async (text: string, values?: unknown[]) => {
+    database.queries.push({ text, values });
+    if (text.includes("INSERT INTO production_releases")) return { rows: [{ id: "release-1" }], rowCount: 1 };
+    return { rows: [project], rowCount: 1 };
+  });
+
+  await expect(runProviderJob({
+    id: "job-7", type: "deployment.promote",
+    idempotency_key: "g11:deployment.promote:project-1:once",
+    payload_json: {
+      actor_id: "admin-1", project_id: "project-1",
+      commit_sha: masterSha, expected_master_sha: masterSha,
+    },
+  } as any, database as any)).rejects.toThrow("422 not a fast-forward");
+
+  // The release row must be flipped to 'failed', never left at 'requested' —
+  // otherwise the partial unique index permanently deadlocks every future
+  // promote/rollback for this project with promotion_in_progress.
+  const failedUpdate = database.queries.find((q) => q.text.includes("SET status='failed'"));
+  expect(failedUpdate).toBeDefined();
+  expect(failedUpdate!.values).toEqual(["release-1", "422 not a fast-forward"]);
+  const resultUpdates = database.queries.filter((q) => q.text.includes("result_json"));
+  const resultUpdate = resultUpdates[resultUpdates.length - 1];
+  expect(resultUpdate!.values![1]).toMatchObject({ outcome: "failed", refusal_code: "ref_update_failed", error: "422 not a fast-forward" });
 });
 
 test("deployment.rollback refuses with image_gone when the target image no longer exists", async () => {
