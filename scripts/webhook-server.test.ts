@@ -19,6 +19,8 @@ const config = (dir: string, overrides: Record<string, unknown> = {}) => ({
   completionsDir: join(dir, "completions"),
   logsDir: join(dir, "logs"),
   leaseMs: 60_000,
+  staleThresholdMs: 900_000,
+  staleCheckIntervalMs: 300_000,
   notification: { url: "https://notify.test", secret: "notify-secret", phone: "recipient-secret" },
   ...overrides,
 });
@@ -47,6 +49,7 @@ function fakeStore(overrides: Record<string, unknown> = {}) {
     renewDeploymentLease: vi.fn(async () => ({})),
     completeDeploymentAttempt: vi.fn(async () => ({})),
     appendDeploymentEvent: vi.fn(async () => ({})),
+    findStaleDeploymentAttempt: vi.fn(async () => null),
     ...overrides,
   };
 }
@@ -458,5 +461,36 @@ describe("deployment webhook", () => {
       notificationStatus: "failed_http", notificationErrorCode: "http_503",
     }));
     await expect(require("node:fs/promises").access(marker)).rejects.toThrow();
+  });
+
+  it("sends a stale-deploy alert once per time bucket and not again for the same bucket", async () => {
+    const staleAttempt = { id: "attempt-stale", state: "running", target_sha: sha("b"), protected_branch: "master", created_at: new Date(0).toISOString() };
+    const appendDeploymentEvent = vi.fn()
+      .mockResolvedValueOnce({ id: 1 })
+      .mockResolvedValueOnce(null);
+    const notificationFetchFn = vi.fn(async (_url: string, options: { body: string }) => ({ ok: true }));
+    const ctx = await webhook({
+      store: { findStaleDeploymentAttempt: vi.fn(async () => staleAttempt), appendDeploymentEvent },
+      notificationFetchFn,
+    }); dirs.push(ctx.dir);
+
+    await expect(ctx.app.checkStaleDeployment()).resolves.toBe(true);
+    expect(notificationFetchFn).toHaveBeenCalledTimes(1);
+    expect(notificationFetchFn.mock.calls[0][1].body).toContain("running");
+    expect(notificationFetchFn.mock.calls[0][1].body).toContain(sha("b").slice(0, 8));
+
+    await expect(ctx.app.checkStaleDeployment()).resolves.toBe(false);
+    expect(notificationFetchFn).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not alert when nothing is stale", async () => {
+    const notificationFetchFn = vi.fn(async () => ({ ok: true }));
+    const ctx = await webhook({
+      store: { findStaleDeploymentAttempt: vi.fn(async () => null) },
+      notificationFetchFn,
+    }); dirs.push(ctx.dir);
+
+    await expect(ctx.app.checkStaleDeployment()).resolves.toBe(false);
+    expect(notificationFetchFn).not.toHaveBeenCalled();
   });
 });

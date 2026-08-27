@@ -25,6 +25,8 @@ function readConfig(env = process.env) {
     completionsDir: path.join(stateDir, 'completions'),
     logsDir: path.join(stateDir, 'logs'),
     leaseMs: Number(env.DEPLOY_STUCK_TIMEOUT_MS || 1800000),
+    staleThresholdMs: Number(env.DEPLOY_STALE_ALERT_THRESHOLD_MS || 900000),
+    staleCheckIntervalMs: Number(env.DEPLOY_STALE_ALERT_INTERVAL_MS || 300000),
     owner: `webhook-${process.pid}`,
     notification: { url: env.WHATSAPP_API_URL, secret: env.WHATSAPP_API_SECRET, phone: env.WHATSAPP_PHONE },
   };
@@ -229,6 +231,22 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
     return false;
   }
 
+  async function checkStaleDeployment() {
+    const stale = await store.findStaleDeploymentAttempt(pool, { protectedBranch: config.protectedBranch, staleAfterMs: config.staleThresholdMs });
+    if (!stale) return false;
+    const bucket = Math.floor(Date.now() / config.staleCheckIntervalMs);
+    const alerted = await store.appendDeploymentEvent(pool, {
+      attemptId: stale.id,
+      eventKey: `stale_alert:${bucket}`,
+      eventType: 'stale_alert',
+      metadata: { state: stale.state, protected_branch: stale.protected_branch },
+    });
+    if (!alerted) return false;
+    const ageMinutes = Math.round((Date.now() - new Date(stale.created_at).getTime()) / 60000);
+    await sendNotification(`dev-control deploy stuck: ${stale.state} for ${ageMinutes}m (sha ${stale.target_sha.slice(0, 8)}, branch ${stale.protected_branch})`);
+    return true;
+  }
+
   async function handleDeploy(res, { sha, deliveryId, targetRef }) {
     const queued = await store.enqueueDeploymentAttempt(pool, {
       deliveryId, eventType: 'push', targetRef, targetSha: sha, protectedBranch: config.protectedBranch, protectedHeadSha: sha, checkEvidence: { trigger: 'signed_push' },
@@ -275,7 +293,7 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
     });
   }
 
-  return { finalizeAttempt, handleHttp, handleRequest, launchDeploy, processNext, recoverOnBoot, sendNotification };
+  return { checkStaleDeployment, finalizeAttempt, handleHttp, handleRequest, launchDeploy, processNext, recoverOnBoot, sendNotification };
 }
 
 function start() {
@@ -284,6 +302,8 @@ function start() {
   const pool = deployments.createDeploymentPool();
   const app = createWebhook({ config, pool });
   app.recoverOnBoot().catch(() => console.error('[webhook] recovery failed'));
+  app.checkStaleDeployment().catch(() => console.error('[webhook] stale check failed'));
+  setInterval(() => { app.checkStaleDeployment().catch(() => console.error('[webhook] stale check failed')); }, config.staleCheckIntervalMs).unref();
   http.createServer((req, res) => {
     if (req.method !== 'POST' || req.url !== '/deploy') { res.writeHead(404).end(); return; }
     app.handleHttp(req, res);

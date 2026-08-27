@@ -45,6 +45,25 @@ State meanings:
   target SHA` — that specific error on an attempt superseded by a newer push
   is expected and does not need retriggering.
 
+### Automated staleness alert
+
+`dcc-webhook` checks, once at boot and then every `DEPLOY_STALE_ALERT_INTERVAL_MS`
+(default 5 min), whether the newest `deployment_attempts` row for
+`DEPLOY_PROTECTED_BRANCH` is older than `DEPLOY_STALE_ALERT_THRESHOLD_MS`
+(default 15 min) without reaching `succeeded` (a `queued`, `running`,
+`failed`, or `blocked` newest attempt counts as stale; `succeeded`,
+`superseded`, and `rejected` don't). When it is, a WhatsApp message goes out
+over the same channel deploy-completion notifications already use. It
+re-alerts roughly once per interval window while the condition persists —
+not a single fire-and-forget, not a continuous spam.
+
+**Known blind spot:** this check runs *inside* `dcc-webhook` itself, so if
+that process is fully down or crash-looping (as happened in the
+`DEPLOY_STATE_DIR`/`DCC_ROOT` incident on 2026-08-27), no alert fires —
+there's no external dead-man's-switch yet. `cron_check_ins` has a write path
+for exactly this kind of external liveness check but no read path built —
+that's a separate, larger gap, not covered here.
+
 ## 2. Is the live release actually current?
 
 The historical failure mode: `.deploy-current` points at the new SHA but pm2

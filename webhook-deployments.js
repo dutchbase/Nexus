@@ -146,6 +146,21 @@ async function claimDeploymentAttempt(pool, { owner, leaseMs }) {
   });
 }
 
+const HEALTHY_LATEST_STATES = new Set(['succeeded', 'superseded', 'rejected']);
+
+async function findStaleDeploymentAttempt(pool, { protectedBranch, staleAfterMs }) {
+  assertString(protectedBranch, 'protectedBranch');
+  if (!Number.isSafeInteger(staleAfterMs) || staleAfterMs <= 0) throw new Error('staleAfterMs must be a positive integer');
+  const result = await pool.query(
+    'SELECT * FROM deployment_attempts WHERE protected_branch=$1 ORDER BY created_at DESC LIMIT 1',
+    [protectedBranch],
+  );
+  const latest = result.rows[0];
+  if (!latest || HEALTHY_LATEST_STATES.has(latest.state)) return null;
+  const ageMs = Date.now() - new Date(latest.created_at).getTime();
+  return ageMs >= staleAfterMs ? latest : null;
+}
+
 async function renewDeploymentLease(pool, { attemptId, owner, leaseMs }) {
   assertString(attemptId, 'attemptId');
   assertString(owner, 'owner');
@@ -211,6 +226,7 @@ module.exports = {
   completeDeploymentAttempt,
   createDeploymentPool,
   enqueueDeploymentAttempt,
+  findStaleDeploymentAttempt,
   recordDeploymentLaunchIntent,
   recordDeploymentLaunch,
   renewDeploymentLease,
