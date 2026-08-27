@@ -1,8 +1,8 @@
 import { chmod, mkdtemp, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { normalizeAgentStartPath, validateAgentStartPath } from "./index.ts";
+import { describe, expect, it, test } from "vitest";
+import { getGithubPolicyEnforcementMode, normalizeAgentStartPath, validateAgentStartPath } from "./index.ts";
 
 describe("planning agent start path", () => {
   it("normalizes blank input to no configured path", async () => {
@@ -33,4 +33,20 @@ describe("planning agent start path", () => {
 
     await expect(validateAgentStartPath(directory)).resolves.toEqual(["planning agent start path is not a readable and searchable directory"]);
   });
+});
+
+test("defaults to auto when config_json has no github_policy key", () => {
+  expect(getGithubPolicyEnforcementMode({})).toBe("auto");
+  expect(getGithubPolicyEnforcementMode(null)).toBe("auto");
+  expect(getGithubPolicyEnforcementMode(undefined)).toBe("auto");
+});
+
+test("reads a valid enforcement value", () => {
+  expect(getGithubPolicyEnforcementMode({ github_policy: { enforcement: "required" } })).toBe("required");
+  expect(getGithubPolicyEnforcementMode({ github_policy: { enforcement: "optional" } })).toBe("optional");
+});
+
+test("falls back to auto on an invalid/unexpected value", () => {
+  expect(getGithubPolicyEnforcementMode({ github_policy: { enforcement: "bogus" } })).toBe("auto");
+  expect(getGithubPolicyEnforcementMode({ github_policy: "not-an-object" })).toBe("auto");
 });
