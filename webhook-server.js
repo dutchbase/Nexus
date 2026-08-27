@@ -62,7 +62,7 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
     try {
       const child = spawnFn(config.deployShPath, [sha, markerPath, attemptId, protectedBranch], {
         detached: true,
-        env: { ...process.env, DCC_DEPLOY_LAUNCH_FD: '3' },
+        env: { ...process.env, DCC_DEPLOY_LAUNCH_FD: '3', DCC_LOG: logPath },
         shell: false,
         stdio: ['ignore', logFd, logFd, 'pipe'],
       });
