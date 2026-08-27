@@ -91,7 +91,14 @@ export type DeploymentConfig = {
   promotion: { require_e2e_gate_label: boolean; e2e_gate_label?: string };
   auto_rollback_on_failed_health_check?: boolean;
   cron_jobs?: Array<{ key: string; description?: string; expected_interval_minutes: number; grace_minutes?: number }>;
+  cron_webhook_secret_reference?: string;
 };
+
+// Mirrors notification-provider's secretReferencePattern: only env vars with this
+// exact prefix may be nominated as the cron webhook secret, so admin-authored
+// config can never point an unauthenticated public endpoint at an arbitrary
+// env var (DATABASE_URL, session secrets, etc).
+export const cronWebhookSecretReferencePattern = /^DCC_DEPLOYMENT_SECRET_[A-Za-z_][A-Za-z0-9_]*$/;
 
 // Pure shape check — no I/O, no network, never throws. Returns [] when
 // `value` is either absent (deployment is fully optional per project) or a
@@ -128,6 +135,14 @@ export function validateDeploymentConfig(value: unknown): string[] {
       if (typeof job?.key !== "string" || !job.key.trim()) errors.push(`deployment.cron_jobs[${i}].key is required`);
       if (typeof job?.expected_interval_minutes !== "number" || job.expected_interval_minutes <= 0) errors.push(`deployment.cron_jobs[${i}].expected_interval_minutes must be a positive number`);
     });
+  }
+  if (v.cron_webhook_secret_reference !== undefined) {
+    if (typeof v.cron_webhook_secret_reference !== "string" || !cronWebhookSecretReferencePattern.test(v.cron_webhook_secret_reference)) {
+      errors.push("deployment.cron_webhook_secret_reference must match DCC_DEPLOYMENT_SECRET_<NAME>");
+    }
+  }
+  if (image && typeof image === "object" && typeof image.registry === "string" && image.registry.trim() && image.registry !== "ghcr.io") {
+    errors.push("deployment.image.registry must be ghcr.io (only registry currently supported)");
   }
   return errors;
 }
