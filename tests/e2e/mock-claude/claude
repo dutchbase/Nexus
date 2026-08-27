@@ -1,17 +1,15 @@
 #!/usr/bin/env node
 // Self-contained mock `claude` CLI for the e2e journey suite.
 //
-// Why not reuse .lfd/dcc-build/harness/mock-claude directly?
-// 1. Its `auth status` output predates the app's preflight fix
+// Requirements this mock has to satisfy:
+// 1. `auth status` must match the app's preflight shape
 //    (packages/claude-runner/src/index.ts:106 expects {loggedIn, authMethod}).
-// 2. It lacks `--version`, which the execution sandbox preflight requires
+// 2. `--version` is required by the execution sandbox preflight
 //    (requireClaudeSandboxVersion, claude-runner/src/index.ts:494).
 // 3. Scoped executions run inside bubblewrap where only /usr, the node root
-//    and the worktree are bound — the harness mock (under .lfd/) and any
-//    scenario FILE under tests/e2e/ are unreadable there. This mock therefore
-//    also accepts the scenario as inline JSON in MOCK_CLAUDE_SCENARIO.
-//
-// Scenario shapes and modes mirror harness/mock-claude/README.md.
+//    and the worktree are bound, so a scenario FILE under tests/e2e/ is
+//    unreadable there. This mock therefore also accepts the scenario as
+//    inline JSON in MOCK_CLAUDE_SCENARIO.
 const fs = require("fs");
 
 const FORBIDDEN = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_USE_BEDROCK", "CLAUDE_CODE_USE_VERTEX", "CLAUDE_CODE_USE_FOUNDRY"];

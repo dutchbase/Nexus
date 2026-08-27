@@ -41,6 +41,7 @@ import {
 } from "./worker-boundary.ts";
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
+import { runProjectValidateJob } from "./project-validate-job.ts";
 import {
   finalizePlanningCancellation, finalizePlanningFailure, finalizePlanningSuccess, initializePlanningAttempt, isPlanningCancellation, LeaseLostError, recoverExpiredWorkflowState, refuseClaudeJobs, runLeaseFencedBatch, terminalizePrReview,
   withContainedLeaseHeartbeat, withLeaseHeartbeat, type LeaseGuard,
@@ -328,6 +329,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
   const repository = await validateProject({
     repositoryPath: input.project.repository_path, defaultBranch: input.project.default_branch, requireRemote: false, agentStartPath: input.project.agent_start_path,
   });
+  if (!repository.ok) throw new Error(`repository is not available for planning: ${repository.message}`);
   if (!repository.valid) throw new Error(`repository is not available for planning: ${repository.errors.join("; ")}`);
 
   const planningStartPath = input.project.agent_start_path ?? input.project.repository_path;
@@ -575,6 +577,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
         defaultBranch: approvedProject.defaultBranch,
         requireRemote: true,
       });
+      if (!repository.ok) throw new Error(`repository is not available for execution: ${repository.message}`);
       if (!repository.valid) throw new Error(`repository is not available for execution: ${repository.errors.join("; ")}`);
       worktree = await createExecutionWorktree({
         repositoryPath: approvedProject.repositoryPath,
@@ -1876,16 +1879,7 @@ while (!stopping) {
   await withContainedLeaseHeartbeat(() => renewJobLease(job.id, workerId), async (lease) => {
     try {
       if (job.type === "project.validate") {
-      const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [job.payload_json.project_id])).rows[0];
-      if (!project) throw new Error("project not found");
-      const result = await validateProject({
-        repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: true, agentStartPath: project.agent_start_path,
-      });
-      await lease.run(() => pool.query(
-        "UPDATE projects SET health_status=$2,last_validated_at=now(),updated_at=now() WHERE id=$1",
-        [project.id, result.valid ? "healthy" : result.changedFiles.length ? "repository_dirty" : "invalid"],
-      ));
-      if (!result.valid) throw new Error(result.errors.join("; "));
+        await runProjectValidateJob(job, pool, lease.assertOwned);
       } else if (providerJobTypes.includes(job.type as typeof providerJobTypes[number])) {
         await runProviderJob(job as Parameters<typeof runProviderJob>[0], pool, lease.assertOwned);
       } else if (publicationJobTypes.includes(job.type)) {

@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
 import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
-  buildExecutionPrompt, checkPlanApprovalGate, derivePolicyStatus, ensurePolicySnapshot, enqueueJob, getPullRequestMergeSettings, getSystemAiSettings,
+  allowlistMismatches, buildExecutionPrompt, checkPlanApprovalGate, derivePolicyStatus, ensurePolicySnapshot, enqueueJob, findAllowlistEntry, getPullRequestMergeSettings, getSystemAiSettings,
   globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
   unionSkills, validateAiSelection, providerForModel, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
@@ -259,6 +259,127 @@ async function audit(values: {
     [values.actorType, values.actorId ?? null, values.action, values.entityType ?? null, values.entityId ?? null,
       values.before ?? null, values.after ?? null, values.metadata ?? {}, values.ip ?? null],
   );
+}
+
+type ApproveEligibility =
+  | { eligible: true; expectedHeadSha: string; policySnapshotId: string | undefined }
+  | { eligible: false; reason: string };
+
+async function evaluateApproveEligibility(
+  pullRequest: any,
+  provided?: { expectedHeadSha?: string; policySnapshotId?: string },
+): Promise<ApproveEligibility> {
+  const { requireFreshPolicyBinding } = await getPullRequestMergeSettings(pool);
+  // Bulk path: derive "expected" values from the freshly-fetched row itself — there is
+  // no browser-rendered snapshot to compare-and-swap against for a list-page bulk action.
+  const expectedHeadSha = provided?.expectedHeadSha ?? pullRequest.head_sha ?? "";
+  if (!expectedHeadSha || expectedHeadSha !== pullRequest.head_sha) {
+    return { eligible: false, reason: "pull request policy binding is missing or stale" };
+  }
+  if (!requireFreshPolicyBinding) {
+    return { eligible: true, expectedHeadSha, policySnapshotId: undefined };
+  }
+  const enforcementMode = getGithubPolicyEnforcementMode(pullRequest.config_json);
+  let policySnapshotId = pullRequest.current_policy_snapshot_id as string | null;
+  let policyStale = Boolean(pullRequest.policy_stale);
+  let policyComplete = pullRequest.policy_complete ?? null;
+  let reviewState = pullRequest.review_state ?? null;
+  let checkState = pullRequest.check_state ?? null;
+  let policyErrorCode = pullRequest.policy_error_code ?? null;
+  let policyRetryAfter = pullRequest.policy_retry_after ?? null;
+  // Closes the common "policy sync job hasn't run once yet" race: an
+  // unprotected repo with no snapshot gets a real, synchronous check
+  // right now instead of waiting for the next poll cycle. Never do this
+  // for a project that explicitly requires enforcement — a missing
+  // snapshot must stay blocking there regardless of what a fresh fetch
+  // would show.
+  // projects is outer-joined (pull_requests.project_id is nullable), so a PR
+  // with no owning project has nothing to fetch against and falls through to
+  // derivePolicyStatus, which refuses it.
+  if (!policySnapshotId && enforcementMode !== "required"
+    && pullRequest.github_owner && pullRequest.github_repository) {
+    const synced = await ensurePolicySnapshot(pool, {
+      pullRequestId: pullRequest.id, owner: pullRequest.github_owner,
+      repo: pullRequest.github_repository, number: pullRequest.number,
+    });
+    if (synced.outcome === "synced") {
+      policySnapshotId = synced.snapshotId;
+      // ensurePolicySnapshot wrote review_state/check_state/policy_complete
+      // to the row but didn't return them — re-read rather than trust the
+      // in-memory pullRequest, which was fetched before the sync ran.
+      const refreshed = (await pool.query(
+        "SELECT review_state, check_state, policy_complete FROM pull_requests WHERE id=$1",
+        [pullRequest.id],
+      )).rows[0];
+      reviewState = refreshed?.review_state ?? null;
+      checkState = refreshed?.check_state ?? null;
+      policyComplete = refreshed?.policy_complete ?? null;
+      policyStale = false;
+      policyErrorCode = null;
+      policyRetryAfter = null;
+    } else {
+      policyErrorCode = synced.errorCode;
+      policyRetryAfter = synced.retryAfter;
+    }
+  }
+  const status = derivePolicyStatus({
+    headSha: pullRequest.head_sha ?? null,
+    currentPolicySnapshotId: policySnapshotId,
+    policyStale,
+    policyComplete,
+    reviewState,
+    checkState,
+    policyErrorCode,
+    policyRetryAfter,
+    enforcementMode,
+  });
+  if (!status.allowsMerge) {
+    return { eligible: false, reason: `pull request policy binding is missing or stale: ${status.label}` };
+  }
+  return { eligible: true, expectedHeadSha, policySnapshotId: policySnapshotId ?? undefined };
+}
+
+async function startAiReview(
+  pullRequestId: string,
+  options: { mode?: string; model?: string; reasoningLevel?: string; targetBranch?: string },
+  actorUserId: string,
+) {
+  const mode = options.mode === "review_and_merge" ? "review_and_merge" : "review_only";
+  const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
+  const selection = validateAiSelection({
+    model: options.model ?? settings.default_model,
+    reasoning_level: options.reasoningLevel ?? settings.default_reasoning_level,
+  });
+  return inTransaction(async (client) => {
+    await client.query("SELECT id FROM pull_requests WHERE id=$1 FOR UPDATE", [pullRequestId]);
+    const previous = (await client.query(
+      `SELECT r.id,j.id job_id,j.status job_status
+       FROM pr_ai_reviews r
+       LEFT JOIN LATERAL (
+         SELECT id,status FROM jobs
+         WHERE type='pr.ai_review' AND payload_json->>'pr_ai_review_id'=r.id::text
+         ORDER BY created_at DESC LIMIT 1
+       ) j ON true
+       WHERE r.pull_request_id=$1
+       ORDER BY CASE WHEN j.status IN ('queued','running') THEN 0 ELSE 1 END,r.created_at DESC LIMIT 1
+       FOR UPDATE OF r`,
+      [pullRequestId],
+    )).rows[0];
+    if (previous && ["queued", "running"].includes(previous.job_status)) return { id: previous.id, alreadyRunning: true };
+    const row = (await client.query(
+      `INSERT INTO pr_ai_reviews (pull_request_id, mode, status, model, reasoning_level, created_by)
+       VALUES ($1,$2,'running',$3,$4,$5) RETURNING id`,
+      [pullRequestId, mode, selection.model, selection.reasoning_level, actorUserId],
+    )).rows[0];
+    await enqueueJob({
+      type: "pr.ai_review",
+      payload: { pr_ai_review_id: row.id, pull_request_id: pullRequestId, mode, model: selection.model, reasoning_level: selection.reasoning_level, target_branch: options.targetBranch },
+      idempotencyKey: `pr-ai-review:${row.id}`,
+      maxAttempts: 3,
+      rerunOf: previous?.job_id,
+    }, client);
+    return { id: row.id, alreadyRunning: false };
+  });
 }
 
 async function sessionFor(request: IncomingMessage) {
@@ -740,6 +861,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       params.push(`%${search}%`);
       where.push(`(pr.title ILIKE $${params.length} OR t.ticket_number ILIKE $${params.length})`);
     }
+    const ids = url.searchParams.getAll("id").filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
+    if (ids.length) { params.push(ids); where.push(`pr.id = ANY($${params.length}::uuid[])`); }
     const pullRequests = (await pool.query(
       `SELECT pr.*,p.name project_name,p.slug project_slug,
               t.ticket_number,t.title ticket_title,t.status ticket_status,
@@ -876,17 +999,22 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       model: typeof body.default_model === "string" ? body.default_model : "",
       reasoning_level: typeof body.default_reasoning_level === "string" ? body.default_reasoning_level : "",
     });
-    await pool.query(
+    const { rows: [saved] } = await pool.query(
       `UPDATE ai_review_settings
        SET default_model=$1,default_reasoning_level=$2,
          auto_review_enabled=COALESCE($4,auto_review_enabled),
          auto_merge_on_approve=COALESCE($5,auto_merge_on_approve),
-         updated_at=now(),updated_by=$3 WHERE id=1`,
+         updated_at=now(),updated_by=$3 WHERE id=1
+       RETURNING default_model, default_reasoning_level, auto_review_enabled, auto_merge_on_approve`,
       [selection.model, selection.reasoning_level, session.user_id,
        body.auto_review_enabled ?? null, body.auto_merge_on_approve ?? null],
     );
-    await audit({ actorType: "admin", actorId: session.user_id, action: "ai_review_settings.update", entityType: "ai_review_settings", entityId: "1", after: { ...selection, auto_review_enabled: body.auto_review_enabled ?? null, auto_merge_on_approve: body.auto_merge_on_approve ?? null }, ip: ipOf(request) });
-    return json(response, 200, { ok: true });
+    try {
+      await audit({ actorType: "admin", actorId: session.user_id, action: "ai_review_settings.update", entityType: "ai_review_settings", entityId: "1", after: saved, ip: ipOf(request) });
+    } catch (auditError) {
+      console.error("ai_review_settings.update: settings saved but audit logging failed", auditError);
+    }
+    return json(response, 200, { ok: true, settings: saved });
   }
   if (url.pathname === "/api/admin/settings/system-ai" && request.method === "POST") {
     const body = await bodyOf(request);
@@ -989,6 +1117,82 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       ...(typeof error === "string" ? { error } : {}),
     });
   }
+  if (url.pathname === "/api/admin/pull-requests/bulk/merge-preflight" && request.method === "POST") {
+    const body = await bodyOf(request);
+    const ids = Array.isArray(body.ids) && body.ids.every((id: unknown): id is string => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) ? body.ids : [];
+    if (!ids.length) return json(response, 400, { error: "no pull requests selected" });
+    const { requireFreshPolicyBinding } = await getPullRequestMergeSettings(pool);
+    const rows = (await pool.query("SELECT * FROM pull_requests WHERE id = ANY($1::uuid[])", [ids])).rows;
+    const byId = new Map(rows.map((row: any) => [row.id, row]));
+    const results = ids.map((id: string) => {
+      const row = byId.get(id);
+      if (!row) return { id, number: null, title: null, eligible: false, reason: "pull request not found" };
+      const classification = prsPage.classifyBulkMergeEligibility(row, requireFreshPolicyBinding);
+      return { id, number: row.number, title: row.title, eligible: classification.eligible, ...(classification.eligible ? {} : { reason: classification.reason }) };
+    });
+    return json(response, 200, { results });
+  }
+  if (url.pathname === "/api/admin/pull-requests/bulk" && request.method === "POST") {
+    const body = await bodyOf(request);
+    const action = body.action;
+    if (!["ai-review", "close", "merge"].includes(action)) return json(response, 400, { error: "invalid action" });
+    const ids = Array.isArray(body.ids) && body.ids.every((id: unknown): id is string => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) ? body.ids : [];
+    if (!ids.length) return json(response, 400, { error: "no pull requests selected" });
+    if (ids.length > 100) return json(response, 400, { error: "select at most 100 pull requests at once" });
+    const batchId = typeof body.batch_id === "string" && body.batch_id.trim() ? body.batch_id.trim() : randomUUID();
+    const rows = (await pool.query(
+      `SELECT pr.*,p.github_owner,p.github_repository FROM pull_requests pr JOIN projects p ON p.id=pr.project_id WHERE pr.id = ANY($1::uuid[])`,
+      [ids],
+    )).rows;
+    const byId = new Map(rows.map((row: any) => [row.id, row]));
+    const results: Array<{ id: string; outcome: string; reason?: string; job_id?: string }> = [];
+    const { requireFreshPolicyBinding } = action === "merge" ? await getPullRequestMergeSettings(pool) : { requireFreshPolicyBinding: false };
+    // Audit logging is best-effort: the job is already enqueued by the time we get here,
+    // so a failed audit insert must never turn a queued PR into a "skipped" result entry.
+    const auditBulk = async (auditAction: string, id: string) => {
+      try {
+        await audit({
+          actorType: "admin", actorId: session.user_id, action: auditAction,
+          entityType: "pull_request", entityId: id, metadata: { batch_id: batchId }, ip: ipOf(request),
+        });
+      } catch (auditError) {
+        console.error(`bulk ${action} succeeded for pull request ${id} but audit logging failed`, auditError);
+      }
+    };
+    for (const id of ids) {
+      const row = byId.get(id);
+      if (!row) { results.push({ id, outcome: "not_found" }); continue; }
+      try {
+        if (action === "ai-review") {
+          if (row.state !== "open") { results.push({ id, outcome: "skipped", reason: `pull request is ${row.state}, not open` }); continue; }
+          const started = await startAiReview(row.id, {}, session.user_id);
+          results.push({ id, outcome: started.alreadyRunning ? "skipped" : "queued", ...(started.alreadyRunning ? { reason: "AI review already running" } : {}) });
+          await auditBulk("ai_review.bulk_start", id);
+        } else if (action === "close") {
+          if (row.state !== "open") { results.push({ id, outcome: "skipped", reason: `pull request is ${row.state}, not open` }); continue; }
+          const job = await enqueueJob({ type: "github.close_pull_request", payload: { actor_id: session.user_id, pull_request_id: row.id }, idempotencyKey: `bulk-close:${row.id}:${batchId}` });
+          results.push({ id, outcome: "queued", job_id: job.id });
+          await auditBulk("pull_request.bulk_close", id);
+        } else {
+          const classification = prsPage.classifyBulkMergeEligibility(row, requireFreshPolicyBinding);
+          if (!classification.eligible) { results.push({ id, outcome: "skipped", reason: classification.reason }); continue; }
+          const eligibility = await evaluateApproveEligibility(row);
+          if (!eligibility.eligible) { results.push({ id, outcome: "skipped", reason: eligibility.reason }); continue; }
+          const job = await enqueueJob({
+            type: "github.merge_pull_request",
+            payload: { actor_id: session.user_id, pull_request_id: row.id, expected_head_sha: eligibility.expectedHeadSha, ...(eligibility.policySnapshotId ? { policy_snapshot_id: eligibility.policySnapshotId } : {}) },
+            idempotencyKey: `g07:github.merge_pull_request:${row.id}:${eligibility.expectedHeadSha}:${Math.floor(Date.now() / 3_600_000)}`,
+          });
+          results.push({ id, outcome: "queued", job_id: job.id });
+          await auditBulk("pull_request.bulk_merge", id);
+        }
+      } catch (error) {
+        results.push({ id, outcome: "skipped", reason: "an unexpected error occurred — see server logs" });
+        console.error(`bulk ${action} failed for pull request ${id}`, error);
+      }
+    }
+    return json(response, 200, { batch_id: batchId, results });
+  }
   const pullRequestActionMatch = url.pathname.match(
     /^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/(mark-reviewed|approve|request-changes|repair-instructions|start-repair|refresh|close-ticket|ai-review|resolve-conflicts)$/i,
   );
@@ -1010,77 +1214,17 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     } else if (action === "mark-reviewed") {
       await pool.query("UPDATE pull_requests SET internal_review_state='reviewed',updated_at=now() WHERE id=$1", [pullRequest.id]);
     } else if (action === "approve") {
-      const expectedHeadSha = typeof body.expected_head_sha === "string" ? body.expected_head_sha.trim() : "";
-      const { requireFreshPolicyBinding } = await getPullRequestMergeSettings(pool);
-      if (!expectedHeadSha || expectedHeadSha !== pullRequest.head_sha) {
-        return json(response, 409, { error: "pull request policy binding is missing or stale" });
-      }
-      let policySnapshotId = pullRequest.current_policy_snapshot_id as string | null;
-      if (requireFreshPolicyBinding) {
-        const enforcementMode = getGithubPolicyEnforcementMode(pullRequest.config_json);
-        let policyStale = Boolean(pullRequest.policy_stale);
-        let policyComplete = pullRequest.policy_complete ?? null;
-        let reviewState = pullRequest.review_state ?? null;
-        let checkState = pullRequest.check_state ?? null;
-        let policyErrorCode = pullRequest.policy_error_code ?? null;
-        let policyRetryAfter = pullRequest.policy_retry_after ?? null;
-        // Closes the common "policy sync job hasn't run once yet" race: an
-        // unprotected repo with no snapshot gets a real, synchronous check
-        // right now instead of waiting for the next poll cycle. Never do this
-        // for a project that explicitly requires enforcement — a missing
-        // snapshot must stay blocking there regardless of what a fresh fetch
-        // would show.
-        // projects is outer-joined (pull_requests.project_id is nullable), so a PR
-        // with no owning project has nothing to fetch against and falls through to
-        // derivePolicyStatus, which refuses it.
-        if (!policySnapshotId && enforcementMode !== "required"
-          && pullRequest.github_owner && pullRequest.github_repository) {
-          const synced = await ensurePolicySnapshot(pool, {
-            pullRequestId: pullRequest.id, owner: pullRequest.github_owner,
-            repo: pullRequest.github_repository, number: pullRequest.number,
-          });
-          if (synced.outcome === "synced") {
-            policySnapshotId = synced.snapshotId;
-            // ensurePolicySnapshot wrote review_state/check_state/policy_complete
-            // to the row but didn't return them — re-read rather than trust the
-            // in-memory pullRequest, which was fetched before the sync ran.
-            const refreshed = (await pool.query(
-              "SELECT review_state, check_state, policy_complete FROM pull_requests WHERE id=$1",
-              [pullRequest.id],
-            )).rows[0];
-            reviewState = refreshed?.review_state ?? null;
-            checkState = refreshed?.check_state ?? null;
-            policyComplete = refreshed?.policy_complete ?? null;
-            policyStale = false;
-            policyErrorCode = null;
-            policyRetryAfter = null;
-          } else {
-            policyErrorCode = synced.errorCode;
-            policyRetryAfter = synced.retryAfter;
-          }
-        }
-        const status = derivePolicyStatus({
-          headSha: pullRequest.head_sha ?? null,
-          currentPolicySnapshotId: policySnapshotId,
-          policyStale,
-          policyComplete,
-          reviewState,
-          checkState,
-          policyErrorCode,
-          policyRetryAfter,
-          enforcementMode,
-        });
-        if (!status.allowsMerge) {
-          return json(response, 409, { error: `pull request policy binding is missing or stale: ${status.label}` });
-        }
-      }
+      const providedHeadSha = typeof body.expected_head_sha === "string" ? body.expected_head_sha.trim() : "";
+      const providedSnapshotId = typeof body.policy_snapshot_id === "string" ? body.policy_snapshot_id.trim() : "";
+      const eligibility = await evaluateApproveEligibility(pullRequest, { expectedHeadSha: providedHeadSha, policySnapshotId: providedSnapshotId });
+      if (!eligibility.eligible) return json(response, 409, { error: eligibility.reason });
       const job = await enqueueJob({
         type: "github.merge_pull_request",
         payload: {
           actor_id: session.user_id, pull_request_id: pullRequest.id,
-          expected_head_sha: expectedHeadSha, ...(requireFreshPolicyBinding ? { policy_snapshot_id: policySnapshotId } : {}),
+          expected_head_sha: eligibility.expectedHeadSha, ...(eligibility.policySnapshotId ? { policy_snapshot_id: eligibility.policySnapshotId } : {}),
         },
-        idempotencyKey: `g07:github.merge_pull_request:${pullRequest.id}:${expectedHeadSha}:${Math.floor(Date.now() / 3_600_000)}`,
+        idempotencyKey: `g07:github.merge_pull_request:${pullRequest.id}:${eligibility.expectedHeadSha}:${Math.floor(Date.now() / 3_600_000)}`,
       });
       return json(response, 202, { job });
     } else if (action === "request-changes") {
@@ -1157,53 +1301,13 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       if (body.target_branch !== undefined && (typeof body.target_branch !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(body.target_branch.trim()))) {
         return json(response, 400, { error: "invalid target_branch" });
       }
-      const mode = body.mode === "review_and_merge" ? "review_and_merge" : "review_only";
-      const targetBranch = typeof body.target_branch === "string" && body.target_branch.trim() ? body.target_branch.trim() : undefined;
-      const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
-      const selection = validateAiSelection({
-        model: typeof body.model === "string" ? body.model : settings.default_model,
-        reasoning_level: typeof body.reasoning_level === "string" ? body.reasoning_level : settings.default_reasoning_level,
-      });
-      const reviewRow = await inTransaction(async (client) => {
-        await client.query("SELECT id FROM pull_requests WHERE id=$1 FOR UPDATE", [pullRequest.id]);
-        const previous = (await client.query(
-          `SELECT r.id,j.id job_id,j.status job_status
-           FROM pr_ai_reviews r
-           LEFT JOIN LATERAL (
-             SELECT id,status FROM jobs
-             WHERE type='pr.ai_review' AND payload_json->>'pr_ai_review_id'=r.id::text
-             ORDER BY created_at DESC LIMIT 1
-           ) j ON true
-           WHERE r.pull_request_id=$1
-           ORDER BY CASE WHEN j.status IN ('queued','running') THEN 0 ELSE 1 END,r.created_at DESC LIMIT 1
-           FOR UPDATE OF r`,
-          [pullRequest.id],
-        )).rows[0];
-        if (previous && ["queued", "running"].includes(previous.job_status)) return previous;
-        const row = (
-          await client.query(
-            `INSERT INTO pr_ai_reviews (pull_request_id, mode, status, model, reasoning_level, created_by)
-             VALUES ($1,$2,'running',$3,$4,$5) RETURNING id`,
-            [pullRequest.id, mode, selection.model, selection.reasoning_level, session.user_id],
-          )
-        ).rows[0];
-        await enqueueJob({
-          type: "pr.ai_review",
-          payload: {
-            pr_ai_review_id: row.id,
-            pull_request_id: pullRequest.id,
-            mode,
-            model: selection.model,
-            reasoning_level: selection.reasoning_level,
-            target_branch: targetBranch,
-          },
-          idempotencyKey: `pr-ai-review:${row.id}`,
-          maxAttempts: 3,
-          rerunOf: previous?.job_id,
-        }, client);
-        return row;
-      });
-      return json(response, 200, { id: reviewRow.id });
+      const result = await startAiReview(pullRequest.id, {
+        mode: body.mode,
+        model: typeof body.model === "string" ? body.model : undefined,
+        reasoningLevel: typeof body.reasoning_level === "string" ? body.reasoning_level : undefined,
+        targetBranch: typeof body.target_branch === "string" && body.target_branch.trim() ? body.target_branch.trim() : undefined,
+      }, session.user_id);
+      return json(response, 200, { id: result.id });
     } else if (action === "resolve-conflicts") {
       const settings = (await pool.query("SELECT * FROM ai_review_settings WHERE id=1")).rows[0];
       const selection = validateAiSelection({
@@ -1339,7 +1443,39 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (typeof body.expected_master_sha !== "string" || !/^[0-9a-f]{40}$/.test(body.expected_master_sha)) return json(response, 400, { error: "expected_master_sha must be a 40-character hex SHA" });
     const job = await enqueueJob({ type: "deployment.promote",
       payload: { project_id: project.id, actor_id: session.user_id, commit_sha: body.commit_sha, expected_master_sha: body.expected_master_sha },
-      idempotencyKey: `g07:deployment.promote:${project.id}:${body.commit_sha}:${Math.floor(Date.now() / 3600000)}` });
+      idempotencyKey: `g07:deployment.promote:${project.id}:${body.commit_sha}:${Math.floor(Date.now() / 3600000)}`,
+      maxAttempts: 1 });
+    return json(response, 202, { job });
+  }
+
+  const deploymentPromoteForceMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/deployment\/promote-force$/i);
+  if (deploymentPromoteForceMatch && request.method === "POST") {
+    const project = (await pool.query(
+      "SELECT id, slug, github_owner, github_repository, default_branch, config_json FROM projects WHERE id=$1",
+      [deploymentPromoteForceMatch[1]],
+    )).rows[0];
+    if (!project) return json(response, 404, { error: "project not found" });
+    if (!project.config_json?.deployment?.enabled) return json(response, 404, { error: "project has no deployment configured" });
+    const allowlistEntry = findAllowlistEntry(project.slug, project);
+    if (!allowlistEntry?.allowForce) return json(response, 403, { error: "this project is not eligible for forced production promotion" });
+    // Fail fast on a projects row that no longer describes the allowlisted
+    // repository/branch pair. The worker repeats this check before it writes
+    // the ref — this one only saves enqueueing a job that can never run.
+    const mismatched = allowlistMismatches(allowlistEntry, {
+      owner: project.github_owner, repo: project.github_repository,
+      sourceBranch: project.default_branch, targetBranch: project.config_json.deployment.production_branch,
+    });
+    if (mismatched.length > 0) {
+      return json(response, 403, { error: `project no longer matches its production-promotion allowlist entry (${mismatched.join(", ")})` });
+    }
+    const body = await bodyOf(request);
+    if (body.confirm_diverged !== true) return json(response, 400, { error: "confirm_diverged:true is required to force a diverged production branch" });
+    if (typeof body.commit_sha !== "string" || !/^[0-9a-f]{40}$/.test(body.commit_sha)) return json(response, 400, { error: "commit_sha must be a 40-character hex SHA" });
+    if (typeof body.expected_master_sha !== "string" || !/^[0-9a-f]{40}$/.test(body.expected_master_sha)) return json(response, 400, { error: "expected_master_sha must be a 40-character hex SHA" });
+    const job = await enqueueJob({ type: "deployment.promote",
+      payload: { project_id: project.id, actor_id: session.user_id, commit_sha: body.commit_sha, expected_master_sha: body.expected_master_sha, force: true },
+      idempotencyKey: `g07:deployment.promote:${project.id}:${body.commit_sha}:force:${Math.floor(Date.now() / 3600000)}`,
+      maxAttempts: 1 });
     return json(response, 202, { job });
   }
 
@@ -1604,7 +1740,12 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (validateMatch && request.method === "POST") {
     const project = (await pool.query("SELECT id FROM projects WHERE id = $1", [validateMatch[1]])).rows[0];
     if (!project) return json(response, 404, { error: "project not found" });
-    return json(response, 202, { job: await enqueueJob({ type: "project.validate", payload: { project_id: project.id }, idempotencyKey: `project.validate:${project.id}` }) });
+    // Per-request key, matching the other admin-triggered refresh routes
+    // (github.sync_one, deployment.promote_check, github.import). A constant
+    // per-project key would collide with the previous run's row, and
+    // enqueueJob's ON CONFLICT is a no-op that leaves a terminal job
+    // untouched — so Recheck repository would 202 without ever re-running.
+    return json(response, 202, { job: await enqueueJob({ type: "project.validate", payload: { project_id: project.id }, idempotencyKey: `project.validate:${project.id}:${randomUUID()}` }) });
   }
   if (url.pathname === "/api/admin/forms" && request.method === "GET") {
     const forms = (await pool.query("SELECT * FROM forms ORDER BY name")).rows;
@@ -1900,6 +2041,9 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const repoCheck = await validateProject({
       repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false, agentStartPath: project.agent_start_path,
     });
+    if (!repoCheck.ok) {
+      return json(response, 409, { error: `repository could not be inspected: ${repoCheck.message}`, error_code: repoCheck.errorCode });
+    }
     const commitMessage = typeof body.commit_message === "string" ? body.commit_message.trim() : "";
     const systemAi = await getSystemAiSettings(pool);
     const selection = resolvedAiFor(ticket, project, "planning", systemAi);
@@ -1941,6 +2085,9 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       const recheck = await validateProject({
         repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false, agentStartPath: project.agent_start_path,
       });
+      if (!recheck.ok) {
+        return json(response, 409, { error: `repository could not be re-inspected after commit: ${recheck.message}`, error_code: recheck.errorCode });
+      }
       if (recheck.changedFiles.length) {
         return json(response, 409, {
           error: "repository still has uncommitted changes after committing",

@@ -11,13 +11,18 @@ export function escapeHtml(value: unknown) {
     .replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
 
+export function logoMark(letter = "N", size: "sm" | "md" = "md") {
+  const dims = size === "sm" ? "width:20px;height:20px;font-size:13px" : "width:26px;height:26px;font-size:17px";
+  return `<span class="brand-mark" style="${dims}">${letter}</span>`;
+}
+
 function document(title: string, content: string, script = "") {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><link rel="stylesheet" href="/assets/design-tokens.css"></head><body>${content}${script ? `<script>${script}</script>` : ""}</body></html>`;
 }
 
 export function loginPage() {
   return document("Sign in", `<main class="login"><section class="login-card">
-    <div class="login-intro"><div class="eyebrow">Development Control Center</div><h1>Feedback in.<br><em>Reviewed code out.</em></h1><p>One controlled workflow from public feedback to reviewed delivery.</p></div>
+    <div class="login-intro"><div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">${logoMark("N", "md")}<span class="eyebrow" style="margin:0">Nexus</span></div><h1>Feedback in.<br><em>Reviewed code out.</em></h1><p>One controlled workflow from public feedback to reviewed delivery.</p></div>
     <form class="login-form" id="login"><div class="eyebrow">Sign in</div><h2>Administrator</h2>
       <label class="field"><span>Username</span><input name="username" autocomplete="username" required></label><br>
       <label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label><br>
@@ -57,12 +62,12 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
     }
   }
 
-  const breadcrumb = section ? `<span class="eyebrow">${section}</span><span>/</span><span>${escapeHtml(title)}</span>` : `<span class="eyebrow">Development Control Center</span><span>/</span><span>${escapeHtml(title)}</span>`;
+  const breadcrumb = section ? `<span class="eyebrow">${section}</span><span>/</span><span>${escapeHtml(title)}</span>` : `<span class="eyebrow">Nexus</span><span>/</span><span>${escapeHtml(title)}</span>`;
 
-  return document(title, `<div class="shell"><aside class="sidebar" id="sidebar"><div class="brand"><span class="brand-mark">D</span><div><div class="brand-title">Development hub</div><div class="brand-sub">Internet Nederland</div></div></div>
+  return document(title, `<div class="shell"><aside class="sidebar" id="sidebar"><div class="brand">${logoMark("N", "md")}<div class="brand-title">Nexus</div></div>
     <nav class="nav" aria-label="Primary">${nav}</nav><footer class="sidebar-footer"><div class="theme"><button data-theme-choice="light">Light</button><button data-theme-choice="auto">Auto</button><button data-theme-choice="dark">Dark</button></div><p>${escapeHtml(username)} · administrator</p></footer></aside>
     <button class="scrim" type="button" data-scrim hidden aria-label="Close navigation menu"></button>
-    <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}<span class="worker">● worker-01 healthy</span>${path === "/admin/forms" || path.startsWith("/admin/forms/") ? `<a class="button" href="/f/website-feedback">Public form</a>` : ""}</header><main class="main">${body}</main></div></div>`, `
+    <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}<span class="worker"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--t-ok);box-shadow:0 0 0 4px color-mix(in srgb, var(--t-ok) 20%, transparent);margin-right:6px;vertical-align:middle"></span>worker-01 healthy</span>${path === "/admin/forms" || path.startsWith("/admin/forms/") ? `<a class="button" href="/f/website-feedback">Public form</a>` : ""}</header><main class="main">${body}</main></div></div>`, `
       const cc=document.cookie.match(/(?:^|;\\s*)dcc_csrf=([^;]*)/);if(cc)sessionStorage.setItem("dccCsrf",cc[1]);
       const choice=localStorage.getItem("dccTheme")||"auto";
       const apply=(value)=>{const dark=value==="dark"||(value==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light";document.querySelectorAll("[data-theme-choice]").forEach(b=>b.classList.toggle("selected",b.dataset.themeChoice===value))};
@@ -327,10 +332,71 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const response=await fetch("/api/admin/projects/"+projectId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
           if(response.ok){alert("Project saved")}else{const result=await response.json();alert(result.error)}
         });
-        document.querySelector("[data-validate-button]")?.addEventListener("click",async()=>{
-          const response=await fetch("/api/admin/projects/"+projectId+"/validate",{method:"POST",headers:{"x-csrf-token":csrf}});
-          if(response.ok){alert("Validation started");setTimeout(()=>location.reload(),2000)}else{const result=await response.json();alert(result.error)}
-        });
+        (function initRepositoryRecheck(){
+          const STATUS_LABELS={conflicted:"Conflicted",modified:"Modified",added:"Added",deleted:"Deleted",renamed:"Renamed",untracked:"Untracked"};
+          const STATUS_ORDER=["conflicted","modified","added","deleted","renamed","untracked"];
+          function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+          function healthSummaryLine(detail){
+            if(!detail||!detail.summary||!Object.keys(detail.summary).length)return "uncommitted changes";
+            return Object.entries(detail.summary).map(([status,count])=>count+" "+status+" file"+(count===1?"":"s")).join(", ");
+          }
+          function groupedFileList(files){
+            const byStatus={};
+            files.forEach(f=>{(byStatus[f.status]=byStatus[f.status]||[]).push(f)});
+            return STATUS_ORDER.filter(s=>byStatus[s]).map(status=>{
+              const items=byStatus[status],severe=status==="conflicted";
+              return '<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:'+(severe?"var(--t-danger)":"var(--text3)")+'">'+(STATUS_LABELS[status]||status)+' ('+items.length+')</div>'+items.map(file=>
+                '<div class="mono" style="padding:3px 0;font-size:12.5px;'+(severe?"color:var(--t-danger);font-weight:600":"")+'">'+esc(file.path)+(file.staged?' <span style="color:var(--text3);font-weight:400">· staged</span>':"")+'</div>'
+              ).join("")+'</div>';
+            }).join("");
+          }
+          function resolutionGuidance(path){
+            const p=esc(path),codeStyle="background:var(--code-bg);padding:10px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:12px;overflow-x:auto";
+            return '<pre style="'+codeStyle+'">cd '+p+'\\n\\ngit status</pre><p style="font-size:12.5px">Keep the changes:</p><pre style="'+codeStyle+'">git add &lt;files&gt;\\ngit commit -m "Describe the change"</pre><p style="font-size:12.5px">Temporarily set them aside:</p><pre style="'+codeStyle+'">git stash push -u</pre><p style="font-size:12.5px">Or remove/ignore unwanted local files.</p>';
+          }
+          function renderRepositoryDiagnostics(project){
+            const el=document.querySelector("[data-repository-diagnostics]");
+            if(!el)return;
+            const lastValidated=project.last_validated_at?("Validated "+new Date(project.last_validated_at).toLocaleString("nl-NL")):"Never validated";
+            let body="<p>"+esc(lastValidated)+"</p>";
+            if(project.health_status==="inspection_error"){
+              body+='<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px"><strong>Repository status unavailable.</strong> <em>The repository could not be inspected: '+esc(project.health_error||"unknown error")+'. This is distinct from having uncommitted changes — verify the configured repository path exists, is a Git repository, and is readable by the platform.</em></div>';
+            }else if(project.health_status==="repository_dirty"&&project.health_detail_json&&project.health_detail_json.files){
+              const detail=project.health_detail_json;
+              body+='<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px;margin-bottom:14px"><strong>Local changes are blocking planning and execution.</strong> <em>'+esc(healthSummaryLine(detail))+'</em></div>';
+              body+='<div data-diagnostics-files>'+groupedFileList(detail.files)+'</div>';
+              body+='<div style="margin-top:14px"><p style="font-size:12.5px;color:var(--text3);margin-bottom:6px">Resolve on the server — the platform never resets a checkout automatically:</p>'+resolutionGuidance(project.repository_path||el.dataset.repositoryPath||"")+'</div>';
+            }else if(project.health_status==="repository_dirty"){
+              body+='<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px"><strong>Local changes are blocking planning and execution.</strong> <em>The per-file breakdown is not available yet — recheck the repository to collect it.</em></div>';
+            }else{
+              body+='<p style="color:var(--text3);font-size:13px">No local changes blocking planning or execution.</p>';
+            }
+            el.innerHTML=body;
+            const bannerEl=document.querySelector("[data-dirty-page-banner]");
+            if(bannerEl){
+              bannerEl.innerHTML=project.health_status==="repository_dirty"
+                ?'<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px"><strong>Planning and execution are blocked.</strong> <em>The primary checkout has '+esc(healthSummaryLine(project.health_detail_json||null))+'. Resolve them on the server — the platform never resets a checkout automatically.</em></div>'
+                :"";
+            }
+          }
+          async function recheckRepository(button){
+            const original=button.textContent;
+            button.disabled=true;button.textContent="Checking…";
+            const response=await fetch("/api/admin/projects/"+projectId+"/validate",{method:"POST",headers:{"x-csrf-token":csrf}}).catch(()=>null);
+            if(!response||!response.ok){
+              const result=response?await response.json().catch(()=>({})):{};
+              alert(result.error||"Could not start validation");
+              button.disabled=false;button.textContent=original;
+              return;
+            }
+            setTimeout(async()=>{
+              const data=await fetch("/api/admin/projects/"+projectId,{headers:{"x-csrf-token":csrf}}).then(r=>r.json()).catch(()=>null);
+              if(data&&data.project)renderRepositoryDiagnostics(data.project);
+              button.disabled=false;button.textContent=original;
+            },2000);
+          }
+          document.querySelectorAll("[data-validate-button],[data-recheck-repository]").forEach(btn=>btn.addEventListener("click",()=>recheckRepository(btn)));
+        })();
         document.querySelectorAll("[data-skill-checkbox]").forEach(checkbox=>{
           checkbox.addEventListener("change",async()=>{
             const skill_ids=[...document.querySelectorAll("[data-skill-checkbox]:checked")].map(c=>c.value);
@@ -627,11 +693,33 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         const csrf=sessionStorage.getItem("dccCsrf")||"";
         const form=document.querySelector("[data-ai-review-settings-form]");
         if(form){
+          let aiReviewSaving=false;
+          const aiReviewSubmit=form.querySelector('button[type="submit"]'),aiReviewError=form.querySelector(".error");
           form.addEventListener("submit",async(event)=>{
             event.preventDefault();
+            if(aiReviewSaving)return;
+            aiReviewSaving=true;
+            if(aiReviewSubmit)aiReviewSubmit.disabled=true;
+            aiReviewError.style.color="";aiReviewError.textContent="";
             const data=new FormData(form);
-            const response=await fetch("/api/admin/settings/ai-review",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({default_model:data.get("default_model"),default_reasoning_level:data.get("default_reasoning_level"),auto_review_enabled:form.querySelector('[name=auto_review_enabled]').checked,auto_merge_on_approve:form.querySelector('[name=auto_merge_on_approve]').checked})});
-            if(response.ok)location.reload();else{const result=await response.json();form.querySelector(".error").textContent=result.error}
+            try{
+              const response=await fetch("/api/admin/settings/ai-review",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({default_model:data.get("default_model"),default_reasoning_level:data.get("default_reasoning_level"),auto_review_enabled:form.querySelector('[name=auto_review_enabled]').checked,auto_merge_on_approve:form.querySelector('[name=auto_merge_on_approve]').checked})});
+              const result=await response.json();
+              if(response.ok){
+                form.querySelector('[name=default_model]').value=result.settings.default_model;
+                form.querySelector('[name=default_reasoning_level]').value=result.settings.default_reasoning_level;
+                form.querySelector('[name=auto_review_enabled]').checked=result.settings.auto_review_enabled;
+                form.querySelector('[name=auto_merge_on_approve]').checked=result.settings.auto_merge_on_approve;
+                aiReviewError.style.color="var(--t-ok)";aiReviewError.textContent="Saved";
+              }else{
+                aiReviewError.textContent=result.error;
+              }
+            }catch(networkError){
+              aiReviewError.textContent="Could not reach the server. Please retry.";
+            }finally{
+              aiReviewSaving=false;
+              if(aiReviewSubmit)aiReviewSubmit.disabled=false;
+            }
           });
         }
         const mergeSettingsForm=document.querySelector("[data-pull-request-merge-settings-form]");
@@ -819,6 +907,121 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             setStatus("Merge failed: "+((done.error_json||{}).message||result.error||"see worker logs"),"danger");setReason("Merge did not happen.");
           }catch(error){setStatus("Merge failed: "+error.message,"danger");}
         });
+
+        (function initProductionPromotion(){
+          const statusEl=document.querySelector("[data-production-promotion-status]");
+          if(!statusEl)return;
+          const projectId=statusEl.dataset.projectId;
+          const preflightEl=document.querySelector("[data-production-promotion-preflight]");
+          const progressEl=document.querySelector("[data-production-promotion-progress]");
+          const promoteButton=document.querySelector("[data-production-promote-button]");
+          const promoteRetry=document.querySelector("[data-production-promote-retry]");
+          const promoteReason=document.querySelector("[data-production-promote-reason]");
+          const dialog=document.querySelector("[data-production-promote-dialog]");
+          const divergedWarning=document.querySelector("[data-production-diverged-warning]");
+          const forceButton=document.querySelector("[data-production-force-button]");
+          const forceDialog=document.querySelector("[data-production-force-dialog]");
+          let lastCheck=null;
+
+          async function pollProductionJob(jobId,maxMs){
+            for(let i=0;i<Math.ceil(maxMs/700);i++){
+              await new Promise(r=>setTimeout(r,i===0?300:700));
+              const payload=await fetch("/api/admin/jobs/"+jobId,{headers:{"x-csrf-token":csrf}}).then(r=>r.json()).catch(()=>null);
+              const job=payload&&payload.job;if(!job)continue;
+              if(["completed","failed","cancelled","blocked_auth","blocked_auth_configuration"].includes(job.status))return job;
+            }
+            return null;
+          }
+
+          async function loadStatus(){
+            const data=await fetch("/api/admin/projects/"+projectId+"/deployment",{headers:{"x-csrf-token":csrf}}).then(r=>r.json());
+            const snapshot=data.snapshot;
+            if(!snapshot){statusEl.innerHTML="<p>No status yet — click Refresh.</p>";return;}
+            // master_commit_sha is nullable — a partially written snapshot must
+            // still render rather than throw and leave the panel blank.
+            const masterShort=snapshot.master_commit_sha?snapshot.master_commit_sha.slice(0,8):"unknown";
+            statusEl.innerHTML='<p>Master: <code>'+masterShort+'</code></p>'
+              +'<p>Production: <code>'+(snapshot.production_commit_sha?snapshot.production_commit_sha.slice(0,8):"unknown")+'</code></p>'
+              +'<p>Status: '+({up_to_date:"Already deployed",behind_master:"Ready to deploy",diverged:"Diverged — needs recovery",unavailable:"Unavailable"}[snapshot.divergence]||snapshot.divergence)+'</p>';
+            if(snapshot.divergence==="diverged"){
+              divergedWarning.hidden=false;
+              divergedWarning.querySelector("[data-diverged-production-sha]").textContent=(snapshot.production_commit_sha||"").slice(0,8);
+              divergedWarning.querySelector("[data-diverged-master-sha]").textContent=masterShort;
+            } else divergedWarning.hidden=true;
+            renderProgress(data.releases);
+          }
+
+          function renderProgress(releases){
+            const active=releases.find(r=>r.action==="promote"&&["pending_approval","deploying"].includes(r.status));
+            if(!active){progressEl.innerHTML='<p style="color:var(--text3);font-size:13px">No deployment in progress.</p>';return;}
+            progressEl.innerHTML='<p>Deploying <code>'+active.commit_sha.slice(0,8)+'</code> — '+active.status+'</p>'
+              +(active.production_workflow_run_id?'<p><a href="https://github.com/dutchbase/va-jobs-platform/actions/runs/'+active.production_workflow_run_id+'" target="_blank" rel="noopener">View on GitHub →</a></p>':'');
+          }
+
+          async function runPreflight(){
+            promoteButton.disabled=true;promoteRetry.hidden=true;promoteReason.textContent="Checking preconditions…";
+            try{
+              const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/promote-check",{method:"POST",headers:{"x-csrf-token":csrf}});
+              const {job}=await queued.json();
+              const done=await pollProductionJob(job.id,20000);
+              if(!done||done.status!=="completed"){promoteReason.textContent="Pre-flight check timed out — try again.";promoteRetry.hidden=false;return;}
+              lastCheck=done.result_json;
+              preflightEl.innerHTML='<p>Master workflow: '+(lastCheck.reasons.includes("master_workflow_failed")?"Failed":lastCheck.reasons.includes("master_workflow_not_found")?"Not found":lastCheck.reasons.includes("master_workflow_pending")?"Pending":"Passed")+'</p>'
+                +'<p>docker-image: '+(lastCheck.reasons.includes("docker_image_job_missing")?"Missing":lastCheck.reasons.includes("docker_image_job_failed")?"Failed":lastCheck.reasons.includes("docker_image_job_pending")?"Pending":"Passed")+'</p>';
+              if(lastCheck.divergence==="up_to_date"){promoteButton.disabled=true;promoteButton.textContent="Already in production";promoteReason.textContent="Production is already on this commit.";}
+              else if(lastCheck.eligible){promoteButton.disabled=false;promoteButton.textContent="Deploy to production";promoteReason.textContent="Ready: "+lastCheck.master_sha.slice(0,8);}
+              else{promoteButton.disabled=true;promoteReason.textContent=lastCheck.reasons.join(", ");}
+            }catch(error){promoteReason.textContent="Pre-flight failed: "+error.message;promoteRetry.hidden=false;}
+          }
+
+          promoteRetry.addEventListener("click",runPreflight);
+          promoteButton.addEventListener("click",()=>{
+            if(!lastCheck||!lastCheck.eligible)return;
+            dialog.querySelector("[data-production-promote-dialog-sha]").textContent=lastCheck.master_sha.slice(0,8);
+            dialog.querySelector("[data-production-promote-dialog-message]").textContent=lastCheck.master_commit_message||"";
+            dialog.showModal();
+          });
+          dialog.querySelector("[data-production-promote-dialog-cancel]").addEventListener("click",()=>dialog.close());
+          dialog.querySelector("[data-production-promote-dialog-confirm]").addEventListener("click",async()=>{
+            dialog.close();
+            promoteButton.disabled=true;promoteReason.textContent="Deploying…";
+            const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/promote",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({commit_sha:lastCheck.master_sha,expected_master_sha:lastCheck.master_sha})});
+            const body=await queued.json().catch(()=>({}));
+            if(!queued.ok){promoteReason.textContent="Could not start deployment: "+(body.error||queued.status);return;}
+            const done=await pollProductionJob(body.job.id,20000);
+            const result=done&&done.result_json;
+            if(result&&result.refusal_code==="diverged_confirmation_required"){promoteReason.textContent="Production has diverged — use the force-recovery option below.";loadStatus();return;}
+            promoteReason.textContent=result?("Deployment "+result.outcome):"Deployment status unknown — refresh to check.";
+            loadStatus();
+          });
+
+          forceButton.addEventListener("click",()=>{
+            if(!lastCheck)return;
+            forceDialog.querySelector("[data-production-force-dialog-sha]").textContent=lastCheck.master_sha.slice(0,8);
+            const input=forceDialog.querySelector("[data-production-force-dialog-input]");
+            const confirmBtn=forceDialog.querySelector("[data-production-force-dialog-confirm]");
+            input.value="";confirmBtn.disabled=true;
+            input.oninput=()=>{confirmBtn.disabled=input.value.trim()!==lastCheck.master_sha.slice(0,8);};
+            forceDialog.showModal();
+          });
+          forceDialog.querySelector("[data-production-force-dialog-cancel]").addEventListener("click",()=>forceDialog.close());
+          forceDialog.querySelector("[data-production-force-dialog-confirm]").addEventListener("click",async()=>{
+            forceDialog.close();
+            promoteReason.textContent="Forcing production…";
+            const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/promote-force",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({commit_sha:lastCheck.master_sha,expected_master_sha:lastCheck.master_sha,confirm_diverged:true})});
+            const body=await queued.json().catch(()=>({}));
+            if(!queued.ok){promoteReason.textContent="Could not force: "+(body.error||queued.status);return;}
+            const done=await pollProductionJob(body.job.id,20000);
+            const result=done&&done.result_json;
+            promoteReason.textContent=result?("Forced deployment "+result.outcome):"Status unknown — refresh to check.";
+            loadStatus();
+          });
+
+          document.querySelectorAll("[data-refresh-production-promotion]").forEach(btn=>btn.addEventListener("click",()=>fetch("/api/admin/projects/"+projectId+"/deployment/sync",{method:"POST",headers:{"x-csrf-token":csrf}}).then(()=>setTimeout(loadStatus,1500))));
+
+          loadStatus();
+          runPreflight();
+        })();
       `:""}
       ${path==="/admin/ai-usage"?`
         const aiUsageForm=document.querySelector("[data-ai-usage-filters]");
@@ -846,6 +1049,95 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           }finally{button.disabled=false}
         });
         document.querySelector("select[name=repository]")?.addEventListener("change",function(){this.form.submit()});
+        const prChecks=()=>[...document.querySelectorAll("[data-pr-check]")];
+        const prToolbar=document.querySelector("[data-pr-bulk-toolbar]"),prSelectedCount=document.querySelector("[data-pr-selected-count]");
+        const updatePrSelection=()=>{
+          const selected=prChecks().filter(c=>c.checked);
+          if(prSelectedCount)prSelectedCount.textContent=String(selected.length);
+          if(prToolbar)prToolbar.hidden=selected.length===0;
+        };
+        prChecks().forEach(checkbox=>{
+          checkbox.addEventListener("click",event=>event.stopPropagation());
+          checkbox.addEventListener("change",updatePrSelection);
+        });
+        document.querySelector("[data-pr-check-all]")?.addEventListener("change",event=>{
+          prChecks().forEach(checkbox=>{checkbox.checked=event.target.checked});
+          updatePrSelection();
+        });
+        document.querySelector("[data-pr-clear-selection]")?.addEventListener("click",()=>{
+          prChecks().forEach(checkbox=>{checkbox.checked=false});
+          const checkAll=document.querySelector("[data-pr-check-all]");if(checkAll)checkAll.checked=false;
+          updatePrSelection();
+        });
+        const selectedPrIds=()=>prChecks().filter(c=>c.checked).map(c=>c.value);
+
+        document.querySelector('[data-pr-bulk="ai-review"]')?.addEventListener("click",async(event)=>{
+          const ids=selectedPrIds();if(!ids.length)return;
+          const button=event.currentTarget;button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/bulk",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({action:"ai-review",ids})});
+            const result=await response.json();
+            if(response.ok){
+              const queued=result.results.filter(r=>r.outcome==="queued").length,skipped=result.results.length-queued;
+              alert(\`AI review started for \${queued} pull request\${queued===1?"":"s"}\${skipped?\`, \${skipped} skipped\`:""}.\`);
+              location.reload();
+            }else alert(result.error);
+          }finally{button.disabled=false}
+        });
+        document.querySelector('[data-pr-bulk="close"]')?.addEventListener("click",async(event)=>{
+          const ids=selectedPrIds();if(!ids.length)return;
+          if(!confirm(\`Close \${ids.length} pull request\${ids.length===1?"":"s"}?\n\nThis will close the selected PRs on GitHub.\nNo branches or commits will be deleted.\`))return;
+          const button=event.currentTarget;button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/bulk",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({action:"close",ids})});
+            const result=await response.json();
+            if(response.ok){
+              const queued=result.results.filter(r=>r.outcome==="queued").length,skipped=result.results.filter(r=>r.outcome!=="queued");
+              alert(\`Closing \${queued} pull request\${queued===1?"":"s"}.\${skipped.length?\` \${skipped.length} skipped: \${skipped.map(r=>r.reason).join("; ")}\`:""}\`);
+              location.reload();
+            }else alert(result.error);
+          }finally{button.disabled=false}
+        });
+        const preflightDialog=document.querySelector("[data-pr-merge-preflight-dialog]");
+        let preflightReadyIds=[];
+        document.querySelector('[data-pr-bulk="merge"]')?.addEventListener("click",async(event)=>{
+          const ids=selectedPrIds();if(!ids.length)return;
+          const button=event.currentTarget;button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/bulk/merge-preflight",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({ids})});
+            const result=await response.json();
+            if(!response.ok){alert(result.error);return}
+            const ready=result.results.filter(r=>r.eligible),blocked=result.results.filter(r=>!r.eligible);
+            preflightReadyIds=ready.map(r=>r.id);
+            preflightDialog.querySelector("[data-pr-preflight-summary]").textContent=\`\${ready.length} ready, \${blocked.length} blocked\`;
+            preflightDialog.querySelector("[data-pr-preflight-list]").replaceChildren(
+              ...result.results.map(r=>{
+                const li=document.createElement("li");
+                li.textContent=(r.eligible?"✓ ":"✕ ")+"#"+(r.number??"?")+" "+(r.title??"")+(r.eligible?"":" — "+r.reason);
+                return li;
+              }),
+            );
+            const confirmButton=preflightDialog.querySelector("[data-pr-preflight-confirm]");
+            confirmButton.textContent=\`Merge \${ready.length} PR\${ready.length===1?"":"s"}\`;
+            confirmButton.disabled=ready.length===0;
+            preflightDialog.showModal();
+          }finally{button.disabled=false}
+        });
+        preflightDialog?.querySelector("[data-pr-preflight-confirm]")?.addEventListener("click",async()=>{
+          if(!preflightReadyIds.length)return;
+          const button=preflightDialog.querySelector("[data-pr-preflight-confirm]");button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/bulk",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({action:"merge",ids:preflightReadyIds})});
+            const result=await response.json();
+            preflightDialog.close();
+            if(response.ok){
+              const queued=result.results.filter(r=>r.outcome==="queued").length,skipped=result.results.filter(r=>r.outcome!=="queued");
+              alert(\`Merging \${queued} pull request\${queued===1?"":"s"}.\${skipped.length?\` \${skipped.length} could not be merged: \${skipped.map(r=>r.reason).join("; ")}\`:""}\`);
+              location.reload();
+            }else alert(result.error);
+          }finally{button.disabled=false}
+        });
+        preflightDialog?.querySelector("[data-close-dialog]")?.addEventListener("click",()=>preflightDialog.close());
       `:""}
       ${/^\/admin\/pull-requests\/[^/]+(\/\d+)?$/.test(path)?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";
@@ -1085,7 +1377,7 @@ export function formControls(fields: any[], projects: any[], values: Record<stri
 export function publicFormPage(form: any, fields: any[], projects: any[]) {
   const controls = formControls(fields, projects, {}, "public");
   const fieldTypes = JSON.stringify(Object.fromEntries(fields.map((field) => [field.field_key, field.field_type])));
-  return document(form.title, `<main class="public"><div class="url-strip">/f/${escapeHtml(form.slug)}</div><form class="card" id="public-form"><div class="card-body"><div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description)}</p><div class="grid one">${controls}</div><br><button class="button primary" type="submit">Melding versturen</button><p class="error" role="alert"></p></div></form></main>`, `
+  return document(form.title, `<main class="public"><div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">${logoMark("N", "sm")}<span style="font-size:13px;font-weight:700;color:var(--text2)">Nexus</span></div><div class="url-strip">/f/${escapeHtml(form.slug)}</div><form class="card" id="public-form"><div class="card-body"><div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description)}</p><div class="grid one">${controls}</div><br><button class="button primary" type="submit">Melding versturen</button><p class="error" role="alert"></p></div></form></main>`, `
     document.querySelector("#public-form").addEventListener("submit",async(event)=>{
       event.preventDefault();const data=new FormData(event.currentTarget);const payload={};const files={};
       for(const [key,value] of data){if(value instanceof File&&value.size){(files[key]=files[key]||[]).push(value)}else if(!(value instanceof File))payload[key]=key in payload?[].concat(payload[key],value):value}

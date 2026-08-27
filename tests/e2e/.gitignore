@@ -1,7 +1,7 @@
 # Runtime artifacts of run-e2e.sh — never commit.
 .results/
 .scenarios/
-.seed-patched/
+.fixtures-tmp/
 .pg-state/
 .stack.env
 .fixtures.env

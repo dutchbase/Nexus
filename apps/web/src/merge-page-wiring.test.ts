@@ -1,4 +1,4 @@
-import { describe, expect, test, vi } from "vitest";
+import { beforeEach, describe, expect, test, vi } from "vitest";
 
 // Renders the real admin shell for /admin/merge and executes its inline
 // script against a minimal DOM stub — catches broken wiring that static
@@ -6,12 +6,22 @@ import { describe, expect, test, vi } from "vitest";
 
 process.env.DATABASE_URL ??= "postgresql://test/tee";
 
-vi.mock("@dcc/database", () => ({
-  pool: { query: vi.fn(async () => ({ rows: [{ id: "p1", name: "Widgets", default_branch: "master" }] })) },
-}));
+const pool = { query: vi.fn() };
+vi.mock("@dcc/database", () => ({ pool }));
 
 const { adminPage } = await import("./ui.ts");
 const mergePage = await import("./pages/merge.ts");
+
+const defaultProjectRow = { id: "p1", name: "Widgets", default_branch: "master" };
+
+// Default: the project-picker query resolves to one connected project; the
+// va-jobs-platform lookup resolves to nothing (pre-migration-059 state) —
+// individual tests override this via pool.query.mockImplementation.
+beforeEach(() => {
+  pool.query.mockReset();
+  pool.query.mockImplementation(async (sql: string) =>
+    sql.includes("va-jobs-platform") ? { rows: [] } : { rows: [defaultProjectRow] });
+});
 
 type Stub = ReturnType<typeof makeElement>;
 
@@ -37,7 +47,15 @@ function makeElement(id: string | null) {
   };
 }
 
-function stubDocument() {
+function makeContainer(id: string | null, children: Record<string, Stub> = {}) {
+  const el = makeElement(id) as Stub & { querySelector: (selector: string) => Stub | null; showModal: () => void; close: () => void };
+  el.showModal = () => undefined;
+  el.close = () => undefined;
+  el.querySelector = (selector: string) => children[selector] ?? null;
+  return el;
+}
+
+function stubDocument(options: { production?: boolean } = {}) {
   const projectSelect = makeElement("merge-project");
   const fromSelect = makeElement("merge-from");
   const intoSelect = makeElement("merge-into");
@@ -46,6 +64,38 @@ function stubDocument() {
   const reason = makeElement(null);
   const retry = makeElement(null);
   retry.hidden = true;
+
+  const production = options.production ? (() => {
+    const status = makeElement(null);
+    status.dataset.projectId = "va-1";
+    const preflight = makeElement(null);
+    const progress = makeElement(null);
+    const promoteButton = makeElement(null);
+    const promoteRetry = makeElement(null);
+    promoteRetry.hidden = true;
+    const promoteReason = makeElement(null);
+    const dialog = makeContainer(null, {
+      "[data-production-promote-dialog-sha]": makeElement(null),
+      "[data-production-promote-dialog-message]": makeElement(null),
+      "[data-production-promote-dialog-cancel]": makeElement(null),
+      "[data-production-promote-dialog-confirm]": makeElement(null),
+    });
+    const divergedWarning = makeContainer(null, {
+      "[data-diverged-production-sha]": makeElement(null),
+      "[data-diverged-master-sha]": makeElement(null),
+    });
+    divergedWarning.hidden = true;
+    const forceButton = makeElement(null);
+    const forceDialog = makeContainer(null, {
+      "[data-production-force-dialog-sha]": makeElement(null),
+      "[data-production-force-dialog-input]": makeElement(null),
+      "[data-production-force-dialog-cancel]": makeElement(null),
+      "[data-production-force-dialog-confirm]": makeElement(null),
+    });
+    const refreshButton = makeElement(null);
+    return { status, preflight, progress, promoteButton, promoteRetry, promoteReason, dialog, divergedWarning, forceButton, forceDialog, refreshButton };
+  })() : null;
+
   const documentStub = {
     cookie: "",
     getElementById: (id: string) =>
@@ -55,13 +105,24 @@ function stubDocument() {
         : selector === "[data-merge-button]" ? button
         : selector === "[data-merge-reason]" ? reason
         : selector === "[data-merge-retry]" ? retry
+        : selector === "[data-production-promotion-status]" ? production?.status ?? null
+        : selector === "[data-production-promotion-preflight]" ? production?.preflight ?? null
+        : selector === "[data-production-promotion-progress]" ? production?.progress ?? null
+        : selector === "[data-production-promote-button]" ? production?.promoteButton ?? null
+        : selector === "[data-production-promote-retry]" ? production?.promoteRetry ?? null
+        : selector === "[data-production-promote-reason]" ? production?.promoteReason ?? null
+        : selector === "[data-production-promote-dialog]" ? production?.dialog ?? null
+        : selector === "[data-production-diverged-warning]" ? production?.divergedWarning ?? null
+        : selector === "[data-production-force-button]" ? production?.forceButton ?? null
+        : selector === "[data-production-force-dialog]" ? production?.forceDialog ?? null
         : null,
-    querySelectorAll: () => [],
+    querySelectorAll: (selector: string) =>
+      selector === "[data-refresh-production-promotion]" && production ? [production.refreshButton] : [],
     documentElement: { dataset: {} as Record<string, string> },
     addEventListener: () => undefined,
     matchMedia: () => ({ matches: false, addEventListener: () => undefined }),
   };
-  return { documentStub, projectSelect, fromSelect, intoSelect, statusBox, button, reason, retry };
+  return { documentStub, projectSelect, fromSelect, intoSelect, statusBox, button, reason, retry, production };
 }
 
 describe("merge workbench page wiring", () => {
@@ -251,5 +312,71 @@ describe("merge workbench page wiring", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test("existing merge-branches DOM elements and event listeners are still wired after the Production tab is added", async () => {
+    const page = await mergePage.render(new URL("http://x/admin/merge"), { username: "a", user_id: "u" }, {});
+    const shell = adminPage("/admin/merge", page!.title, page!.body, {}, "a");
+    const wired = [...shell.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).find((s) => s.includes("merge-project"))!;
+
+    // Case A: the production-tab markup is absent from the DOM (defensive
+    // guard — mirrors initDeploymentTab's own `if(!el)return` pattern).
+    // The merge-branches elements must still be found and wired, and
+    // initProductionPromotion() must not throw when its elements are missing.
+    const noProduction = stubDocument({ production: false });
+    globalThis.fetch = vi.fn(async () => { throw new Error("unexpected fetch"); }) as unknown as typeof fetch;
+    expect(() => new Function("document", "fetch", "sessionStorage", "localStorage", "location", "confirm", "alert", "matchMedia", "window", wired!)(
+      noProduction.documentStub, globalThis.fetch,
+      { getItem: () => "csrf" }, { getItem: () => null, setItem: () => undefined },
+      { href: "" }, () => true, () => undefined,
+      () => ({ matches: false, addEventListener: () => undefined }),
+      { location: { pathname: "/admin/merge" } },
+    )).not.toThrow();
+    expect(noProduction.documentStub.getElementById("merge-project")).toBe(noProduction.projectSelect);
+    expect(noProduction.documentStub.querySelector("[data-merge-button]")).toBe(noProduction.button);
+
+    // Case B: the production-tab markup IS present (this page's real markup)
+    // — initProductionPromotion() must run without throwing and must reach
+    // out to the deployment status/pre-flight endpoints.
+    const withProduction = stubDocument({ production: true });
+    const calls: string[] = [];
+    globalThis.fetch = vi.fn(async (url: string) => {
+      calls.push(url);
+      if (url.includes("/deployment/promote-check")) return { ok: true, json: async () => ({ job: { id: "job-check" } }) };
+      if (url.includes("/api/admin/jobs/")) return { ok: true, json: async () => ({ job: { status: "completed", result_json: { eligible: false, reasons: ["master_workflow_not_found"] } } }) };
+      if (url.endsWith("/deployment")) return { ok: true, json: async () => ({ snapshot: null, releases: [] }) };
+      throw new Error("unexpected fetch " + url);
+    }) as unknown as typeof fetch;
+    expect(() => new Function("document", "fetch", "sessionStorage", "localStorage", "location", "confirm", "alert", "matchMedia", "window", wired!)(
+      withProduction.documentStub, globalThis.fetch,
+      { getItem: () => "csrf" }, { getItem: () => null, setItem: () => undefined },
+      { href: "" }, () => true, () => undefined,
+      () => ({ matches: false, addEventListener: () => undefined }),
+      { location: { pathname: "/admin/merge" } },
+    )).not.toThrow();
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    expect(calls.some((url) => url.endsWith("/deployment"))).toBe(true);
+    expect(calls.some((url) => url.includes("/deployment/promote-check"))).toBe(true);
+  });
+
+  test("merge.ts renders both a Merge branches tab and a Production tab with VA Jobs Platform nested inside", async () => {
+    pool.query.mockImplementation(async (sql: string) =>
+      sql.includes("va-jobs-platform") ? { rows: [{ id: "va-1", config_json: { deployment: { enabled: true } } }] } : { rows: [defaultProjectRow] });
+
+    const page = await mergePage.render(new URL("http://x/admin/merge"), { username: "a", user_id: "u" }, {});
+    expect(page).toBeTruthy();
+    expect(page!.body).toContain("Merge branches");
+    expect(page!.body).toContain("Production");
+    expect(page!.body).toContain("VA Jobs Platform");
+    expect(page!.body).toContain('data-project-id="va-1"');
+  });
+
+  test("merge.ts still renders correctly when va-jobs-platform is not yet configured (pre-migration-059 state)", async () => {
+    pool.query.mockImplementation(async (sql: string) => (sql.includes("va-jobs-platform") ? { rows: [] } : { rows: [defaultProjectRow] }));
+
+    const page = await mergePage.render(new URL("http://x/admin/merge"), { username: "a", user_id: "u" }, {});
+    expect(page).toBeTruthy();
+    expect(page!.body).toContain("Merge branches");
+    expect(page!.body).toContain("VA Jobs Platform is not configured yet");
   });
 });

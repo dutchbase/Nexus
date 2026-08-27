@@ -35,6 +35,37 @@ function validationCard(validation: any): string {
   return `${failure}${files}${checks}`;
 }
 
+export type BulkMergeClassification = { eligible: true } | { eligible: false; reason: string };
+
+// Delegates to the shared derivePolicyStatus() (packages/domain/src/pull-request-policy-status.ts,
+// introduced by plan 01) so bulk merge eligibility and the PR detail page's Approve & merge
+// button always agree on policy state — the only bulk-specific additions are the
+// state/draft/conflict checks, which the single-PR button doesn't need since GitHub's own
+// merge endpoint already rejects those synchronously for a single click.
+export function classifyBulkMergeEligibility(row: {
+  state: string; head_sha: string | null; current_policy_snapshot_id: string | null;
+  policy_stale: boolean; policy_complete: boolean | null; review_state: string | null;
+  check_state: string | null; is_draft: boolean | null; merge_conflicts: boolean | null;
+  policy_error_code?: string | null; policy_retry_after?: string | Date | null;
+}, requireFreshPolicyBinding: boolean): BulkMergeClassification {
+  if (row.state !== "open") return { eligible: false, reason: `pull request is ${row.state}, not open` };
+  if (row.is_draft) return { eligible: false, reason: "pull request is a draft" };
+  if (row.merge_conflicts) return { eligible: false, reason: "pull request has merge conflicts" };
+  // requireFreshPolicyBinding is the global merge-settings kill switch (distinct from the
+  // per-project auto/required/optional enforcement mode derivePolicyStatus otherwise reads
+  // from config_json, which this row shape doesn't carry) — when it's off, no policy check
+  // runs at all, matching evaluateApproveEligibility's identical short-circuit for the
+  // single-PR route so bulk and single-PR merge never diverge on this setting.
+  if (!requireFreshPolicyBinding) return { eligible: true };
+  const status = derivePolicyStatus({
+    headSha: row.head_sha, currentPolicySnapshotId: row.current_policy_snapshot_id, policyStale: row.policy_stale,
+    policyComplete: row.policy_complete, reviewState: row.review_state, checkState: row.check_state,
+    policyErrorCode: row.policy_error_code ?? null, policyRetryAfter: row.policy_retry_after ?? null,
+    enforcementMode: "required",
+  });
+  return status.allowsMerge ? { eligible: true } : { eligible: false, reason: status.label };
+}
+
 // Shared by both the uuid route (/admin/pull-requests/{uuid}) and the slug
 // route (/admin/pull-requests/{projectSlug}/{number}) so the two never drift.
 function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[], requireFreshPolicyBinding: boolean): PageResult {
@@ -216,7 +247,10 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       // freshly synced one. Label rows whose last_synced_at has aged past
       // PR_STALE_AFTER_MS instead of presenting stale data as current.
       const freshness = prFreshness(item.last_synced_at);
-      return `<div class="ticket-row prs-row" data-pr-id="${item.id}"><a class="pr-row-link" href="${href}" aria-label="Open pull request #${escapeHtml(item.number)}"></a><span class="mono" data-label="PR">#${escapeHtml(item.number)}</span><strong>${escapeHtml(item.title)}</strong><span data-label="Project">${escapeHtml(item.project_name)}</span><span class="status ${stateBadge.cls}" data-label="Merge status">${escapeHtml(stateBadge.label)}</span><span class="status ${aiBadge.cls}" data-label="AI status">${escapeHtml(aiBadge.label)}</span><span data-label="Conflicts">${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}${freshness.stale ? `<span class="status warn">Stale · ${escapeHtml(freshness.label)}</span>` : ""}</span><time data-label="Created">${item.created_at_provider ? escapeHtml(new Date(item.created_at_provider).toLocaleDateString("nl-NL")) : "—"}</time><div class="pr-actions"><a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a></div></div>`;
+      const selectCell = item.state === "open"
+        ? `<span class="pr-select" data-label="Select"><input type="checkbox" data-pr-check="${item.id}" value="${item.id}" aria-label="Select pull request #${escapeHtml(item.number)}"></span>`
+        : `<span class="pr-select" data-label="Select"></span>`;
+      return `<div class="ticket-row prs-row" data-pr-id="${item.id}" data-pr-state="${escapeHtml(item.state)}" data-pr-draft="${item.is_draft ? "1" : "0"}"><a class="pr-row-link" href="${href}" aria-label="Open pull request #${escapeHtml(item.number)}"></a>${selectCell}<span class="mono" data-label="PR">#${escapeHtml(item.number)}</span><strong>${escapeHtml(item.title)}</strong><span data-label="Project">${escapeHtml(item.project_name)}</span><span class="status ${stateBadge.cls}" data-label="Merge status">${escapeHtml(stateBadge.label)}</span><span class="status ${aiBadge.cls}" data-label="AI status">${escapeHtml(aiBadge.label)}</span><span data-label="Conflicts">${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}${freshness.stale ? `<span class="status warn">Stale · ${escapeHtml(freshness.label)}</span>` : ""}</span><time data-label="Created">${item.created_at_provider ? escapeHtml(new Date(item.created_at_provider).toLocaleDateString("nl-NL")) : "—"}</time><div class="pr-actions"><a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer">Open on GitHub ↗</a></div></div>`;
     }).join("");
     const tabs = [["all", "All"], ["open", "Open"], ["draft", "Draft"], ["merged", "Merged"], ["closed", "Closed"]] as const;
     const withTab = (value: string) => {
@@ -242,7 +276,25 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
           <button class="button" type="submit">Filter</button><a class="button" href="/admin/pull-requests">Reset</a><span aria-live="polite">${pullRequests.rows.length} shown</span>
         </form>
       </div>
-      <section class="card prs-card"><div class="list-head prs-head"><span>PR</span><span>Title</span><span>Project</span><span>Merge Status</span><span>AI Status</span><span>Conflicts</span><span>Created</span><span>Actions</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No pull requests match these filters.</div>`}</section>`;
+      <section class="card prs-card">
+        <div data-pr-bulk-toolbar hidden style="display:flex;gap:8px;padding:12px 18px;align-items:center;border-bottom:1px solid var(--border)">
+          <span>Selected: <strong data-pr-selected-count>0</strong></span>
+          <span style="flex:1"></span>
+          <button class="button" type="button" data-pr-bulk="ai-review">AI review</button>
+          <button class="button" type="button" data-pr-bulk="close" style="border:1px solid var(--t-danger);color:var(--t-danger)">Close PR</button>
+          <button class="button primary" type="button" data-pr-bulk="merge">Approve &amp; merge</button>
+          <button class="button" type="button" data-pr-clear-selection>Clear</button>
+        </div>
+        <div class="list-head prs-head"><span class="pr-select"><input type="checkbox" data-pr-check-all aria-label="Select all pull requests"></span><span>PR</span><span>Title</span><span>Project</span><span>Merge Status</span><span>AI Status</span><span>Conflicts</span><span>Created</span><span>Actions</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No pull requests match these filters.</div>`}</section>
+      <dialog data-pr-merge-preflight-dialog>
+        <h3>Approve &amp; merge selected PRs</h3>
+        <div data-pr-preflight-summary></div>
+        <ul data-pr-preflight-list style="list-style:none;padding:0"></ul>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="button" type="button" data-close-dialog>Cancel</button>
+          <button class="button primary" type="button" data-pr-preflight-confirm>Merge</button>
+        </div>
+      </dialog>`;
     return { status: 200, title: "Pull requests", body };
   }
   const pullRequestSlugMatch = url.pathname.match(/^\/admin\/pull-requests\/([^/]+)\/(\d+)$/);

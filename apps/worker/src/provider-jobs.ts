@@ -2,10 +2,12 @@ import type pg from "pg";
 import {
   approveAndMergePullRequest, importGithubPullRequests, PullRequestMergeError, syncOpenPullRequests, syncPullRequest,
   checkProductionHealth, evaluatePromotionEligibility,
+  evaluateActionsPreflight, computeDivergence, findAllowlistEntry, allowlistMismatches,
 } from "@dcc/domain";
 import {
-  createPullRequest, findOpenPullRequestForHead, mergeBranch,
+  createPullRequest, findOpenPullRequestForHead, mergeBranch, closePullRequest,
   getBranchHeadCommit, getCommitCheckStatus, getPullRequestsForCommit, updateBranchReference, getPendingDeployments, checkImageExists,
+  findWorkflowRun, getWorkflowRunJobs, compareCommits, checkImageExistsDetailed, GitHubProviderError,
 } from "@dcc/github-provider";
 import type { DeploymentConfig } from "@dcc/project-config";
 import { assertRemoteBranchName, lsRemoteHeads, previewRemoteBranchMerge } from "../../../packages/git-runner/src/index.ts";
@@ -15,6 +17,7 @@ export const providerJobTypes = [
   "github.sync_one",
   "github.import",
   "github.merge_pull_request",
+  "github.close_pull_request",
   "github.merge_branches",
   "github.merge_preview",
   "github.open_pull_request",
@@ -69,8 +72,37 @@ async function fetchLiveDeploymentStatus(project: any, deployment: DeploymentCon
   }
   const imageTag = deployment.image.tag_template.replace("{{commit}}", master.sha);
   const image = await checkImageExists(deployment.image.registry, deployment.image.repository, imageTag);
-  const health = await checkProductionHealth(deployment.health);
+  // fetchLiveDeploymentStatus is only ever called on the "health_check" mechanism
+  // path (see the mechanism branch below) — validateDeploymentConfig requires
+  // `health` whenever mechanism is "health_check" (or absent), so it's always
+  // present here even though the type now allows it to be omitted under the
+  // "github_actions_jobs" mechanism.
+  const health = await checkProductionHealth(deployment.health!);
   return { master, ciStatus, e2eGateSatisfied, e2eGatePrNumber, imageTag, image, health };
+}
+
+// Sibling of fetchLiveDeploymentStatus for the "github_actions_jobs"
+// mechanism — used only when deployment.mechanism === "github_actions_jobs".
+// fetchLiveDeploymentStatus above is untouched and still serves every other
+// (health_check-mechanism) project.
+async function fetchActionsPreflightStatus(project: any, deployment: DeploymentConfig) {
+  const master = await getBranchHeadCommit(project.github_owner, project.github_repository, project.default_branch);
+  const masterRun = await findWorkflowRun(project.github_owner, project.github_repository, {
+    sha: master.sha, branch: project.default_branch, event: "push",
+  });
+  const masterJobs = masterRun ? await getWorkflowRunJobs(project.github_owner, project.github_repository, masterRun.id) : [];
+  const imageTag = deployment.image.tag_template.replace("{{commit}}", master.sha);
+  const ghcr = await checkImageExistsDetailed(deployment.image.registry, deployment.image.repository, imageTag);
+  const preflight = evaluateActionsPreflight({
+    masterWorkflowRun: masterRun, masterWorkflowJobs: masterJobs,
+    dockerImageJobName: deployment.actions!.docker_image_job_name, ghcr,
+  });
+  // Production SHA read live from the API — NOT lsRemoteHeads(project.repository_path) —
+  // so this mechanism has no dependency on a local git clone existing on disk,
+  // matching the task's explicit GET .../git/ref/heads/{branch} spec.
+  const production = await getBranchHeadCommit(project.github_owner, project.github_repository, deployment.production_branch).catch(() => null);
+  const comparison = production ? await compareCommits(project.github_owner, project.github_repository, deployment.production_branch, project.default_branch).catch(() => null) : null;
+  return { master, masterRun, masterJobs, imageTag, ghcr, preflight, production, divergence: computeDivergence(comparison) };
 }
 
 function loadDeploymentConfig(project: any): DeploymentConfig {
@@ -152,6 +184,27 @@ export async function runProviderJob(
       if (code) await persistJobResult(db, job.id, { outcome: "refused", refusal_code: code });
       throw error;
     }
+    return;
+  }
+
+  if (job.type === "github.close_pull_request") {
+    const pullRequestId = required(job.payload_json, "pull_request_id");
+    await assertOwned();
+    const pr = (await db.query(
+      `SELECT pr.id,pr.number,pr.state,p.github_owner,p.github_repository
+       FROM pull_requests pr JOIN projects p ON p.id=pr.project_id WHERE pr.id=$1`,
+      [pullRequestId],
+    )).rows[0];
+    if (!pr) throw new Error("pull request not found");
+    if (pr.state !== "open") {
+      await persistJobResult(db, job.id, { outcome: "skipped", reason: `pull request state is ${pr.state}, not open` });
+      return;
+    }
+    await assertOwned();
+    await closePullRequest(pr.github_owner, pr.github_repository, pr.number);
+    await db.query("UPDATE pull_requests SET state='closed',closed_at=now(),updated_at=now() WHERE id=$1", [pullRequestId]);
+    await persistJobResult(db, job.id, { outcome: "closed" });
+    await audit(db, job, actorId, "github.close_pull_request", "pull_request", pullRequestId, {});
     return;
   }
 
@@ -257,6 +310,57 @@ export async function runProviderJob(
     if (!project) throw new Error("project not found");
     const deployment = loadDeploymentConfig(project);
     await assertOwned();
+    if (deployment.mechanism === "github_actions_jobs") {
+      const actionsStatus = await fetchActionsPreflightStatus(project, deployment);
+      // 'requested' has to be in this list: a release that crashed between the
+      // INSERT and the post-PATCH status update stays at 'requested', and
+      // production_releases_project_inflight_idx covers it — leaving it
+      // invisible here would jam the single-flight slot for this project
+      // forever. 'healthy' is kept (unlike the health_check branch's list) so
+      // a just-finished release still surfaces its production workflow run in
+      // the snapshot; the status machinery below skips it explicitly.
+      const recentRelease = (await db.query(
+        `SELECT * FROM production_releases WHERE project_id=$1 AND action='promote' AND status IN ('requested','pending_approval','deploying','healthy') ORDER BY created_at DESC LIMIT 1`,
+        [projectId],
+      )).rows[0];
+      let productionRun: Awaited<ReturnType<typeof findWorkflowRun>> = null;
+      let productionJobs: Awaited<ReturnType<typeof getWorkflowRunJobs>> = [];
+      if (recentRelease) {
+        productionRun = await findWorkflowRun(project.github_owner, project.github_repository, {
+          sha: recentRelease.commit_sha, branch: deployment.production_branch, event: "push", createdAfter: recentRelease.created_at,
+        });
+        if (productionRun) productionJobs = await getWorkflowRunJobs(project.github_owner, project.github_repository, productionRun.id);
+      }
+      const migrationsJob = productionJobs.find((j) => j.name === deployment.actions!.migrations_job_name);
+      const deployJob = productionJobs.find((j) => j.name === deployment.actions!.deploy_job_name);
+      // Re-assert the lease after the GitHub round-trips, before any write —
+      // same guard the health_check path applies after its own live fetch.
+      await assertOwned();
+      await db.query(
+        `INSERT INTO deployment_status_snapshots (project_id, master_commit_sha, master_workflow_run_id, master_workflow_conclusion, docker_image_job_conclusion, ghcr_checked, ghcr_verified, image_tag, production_commit_sha, divergence, production_workflow_run_id, production_workflow_conclusion, migrations_job_conclusion, deploy_job_conclusion, fetched_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,true,$6,$7,$8,$9,$10,$11,$12,$13,now(),now())
+         ON CONFLICT (project_id) DO UPDATE SET master_commit_sha=$2, master_workflow_run_id=$3, master_workflow_conclusion=$4, docker_image_job_conclusion=$5, ghcr_checked=true, ghcr_verified=$6, image_tag=$7, production_commit_sha=$8, divergence=$9, production_workflow_run_id=$10, production_workflow_conclusion=$11, migrations_job_conclusion=$12, deploy_job_conclusion=$13, fetched_at=now(), updated_at=now()`,
+        [projectId, actionsStatus.master.sha, actionsStatus.masterRun?.id ?? null, actionsStatus.masterRun?.conclusion ?? null,
+         actionsStatus.preflight.dockerImageJobConclusion, actionsStatus.ghcr.state === "exists" ? true : actionsStatus.ghcr.state === "not_exists" ? false : null,
+         actionsStatus.imageTag, actionsStatus.production?.sha ?? null, actionsStatus.divergence,
+         productionRun?.id ?? null, productionRun?.conclusion ?? null, migrationsJob?.conclusion ?? null, deployJob?.conclusion ?? null],
+      );
+      // Reuse the existing in-flight release status machinery (above, in the
+      // health_check branch) but drive "deploying"/"healthy"/"failed" from the
+      // two named job conclusions instead of an HTTP health check.
+      if (recentRelease && recentRelease.status !== "healthy") {
+        const bothSucceeded = migrationsJob?.conclusion === "success" && deployJob?.conclusion === "success";
+        const eitherFailed = migrationsJob?.conclusion === "failure" || deployJob?.conclusion === "failure" || migrationsJob?.conclusion === "cancelled" || deployJob?.conclusion === "cancelled";
+        const stalled = !bothSucceeded && !eitherFailed && Date.now() - new Date(recentRelease.updated_at).getTime() > 15 * 60 * 1000;
+        const nextStatus = bothSucceeded ? "healthy" : eitherFailed ? "failed" : stalled ? "failed" : "deploying";
+        await db.query(
+          `UPDATE production_releases SET status=$2, production_workflow_run_id=$3, health_checked_at=now(), updated_at=now()${stalled ? ",failure_reason='stalled — production workflow jobs did not resolve within 15 minutes'" : eitherFailed ? ",failure_reason='migrations-production or deploy-production job failed'" : ""} WHERE id=$1`,
+          [recentRelease.id, nextStatus, productionRun?.id ?? null],
+        );
+      }
+      await persistJobResult(db, job.id, { outcome: "synced", mechanism: "github_actions_jobs", ...actionsStatus, production_run: productionRun, migrations_job_conclusion: migrationsJob?.conclusion ?? null, deploy_job_conclusion: deployJob?.conclusion ?? null });
+      return;
+    }
     const live = await fetchLiveDeploymentStatus(project, deployment);
     await assertOwned();
     let releaseUpdate: { status: string } | null = null;
@@ -303,6 +407,16 @@ export async function runProviderJob(
     if (!project) throw new Error("project not found");
     const deployment = loadDeploymentConfig(project);
     await assertOwned();
+    if (deployment.mechanism === "github_actions_jobs") {
+      const actionsStatus = await fetchActionsPreflightStatus(project, deployment);
+      await persistJobResult(db, job.id, {
+        eligible: actionsStatus.preflight.eligible, reasons: actionsStatus.preflight.reasons,
+        master_sha: actionsStatus.master.sha, master_commit_message: actionsStatus.master.message,
+        image_tag: actionsStatus.imageTag, production_current_sha: actionsStatus.production?.sha ?? null,
+        divergence: actionsStatus.divergence, master_workflow_run_url: actionsStatus.masterRun ? `https://github.com/${project.github_owner}/${project.github_repository}/actions/runs/${actionsStatus.masterRun.id}` : null,
+      });
+      return;
+    }
     const live = await fetchLiveDeploymentStatus(project, deployment);
     const productionHeads = await lsRemoteHeads(project.repository_path);
     const eligibility = evaluatePromotionEligibility({
@@ -326,6 +440,25 @@ export async function runProviderJob(
     if (!project) throw new Error("project not found");
     const deployment = loadDeploymentConfig(project);
     await assertOwned();
+    // Re-check the (admin-editable) projects row against the allowlist before
+    // any GitHub call is made with those values, so a tampered
+    // github_owner/github_repository/default_branch/production_branch can
+    // never redirect this job's ref write at another repository or branch.
+    // Applies to normal and forced promotion alike.
+    const promoteAllowlistEntry = deployment.mechanism === "github_actions_jobs"
+      ? findAllowlistEntry(project.slug, project)
+      : null;
+    if (promoteAllowlistEntry) {
+      const mismatched = allowlistMismatches(promoteAllowlistEntry, {
+        owner: project.github_owner, repo: project.github_repository,
+        sourceBranch: project.default_branch, targetBranch: deployment.production_branch,
+      });
+      if (mismatched.length > 0) {
+        await persistJobResult(db, job.id, { outcome: "refused", refusal_code: "allowlist_mismatch", mismatched_fields: mismatched });
+        await audit(db, job, actorId, "deployment.promote", "project", projectId, { outcome: "refused", refusal_code: "allowlist_mismatch", mismatched_fields: mismatched });
+        return;
+      }
+    }
     const freshMaster = await getBranchHeadCommit(project.github_owner, project.github_repository, project.default_branch);
     if (freshMaster.sha !== expectedMasterSha) {
       await persistJobResult(db, job.id, { outcome: "refused", refusal_code: "master_moved", current_sha: freshMaster.sha });
@@ -340,18 +473,63 @@ export async function runProviderJob(
       await audit(db, job, actorId, "deployment.promote", "project", projectId, { outcome: "refused", refusal_code: "commit_not_master" });
       return;
     }
-    const live = await fetchLiveDeploymentStatus(project, deployment);
-    const eligibility = evaluatePromotionEligibility({
-      ciState: live.ciStatus.overallState, imageExists: live.image.exists,
-      e2eGateRequired: deployment.promotion.require_e2e_gate_label, e2eGateSatisfied: live.e2eGateSatisfied,
-    });
-    if (!eligibility.eligible) {
-      await persistJobResult(db, job.id, { outcome: "refused", refusal_code: "not_eligible", reasons: eligibility.reasons });
-      await audit(db, job, actorId, "deployment.promote", "project", projectId, { outcome: "refused", reasons: eligibility.reasons });
+    const forceRequested = job.payload_json.force === true;
+    let eligibilityOk = true;
+    let eligibilityReasons: string[] = [];
+    let imageTag: string;
+    let actionsStatus: Awaited<ReturnType<typeof fetchActionsPreflightStatus>> | undefined;
+    if (deployment.mechanism === "github_actions_jobs") {
+      const allowlistEntry = promoteAllowlistEntry;
+      if (forceRequested && !allowlistEntry?.allowForce) {
+        await persistJobResult(db, job.id, { outcome: "refused", refusal_code: "force_not_allowed" });
+        await audit(db, job, actorId, "deployment.promote", "project", projectId, { outcome: "refused", refusal_code: "force_not_allowed" });
+        return;
+      }
+      actionsStatus = await fetchActionsPreflightStatus(project, deployment);
+      eligibilityOk = actionsStatus.preflight.eligible;
+      eligibilityReasons = actionsStatus.preflight.reasons;
+      imageTag = actionsStatus.imageTag;
+      if (!forceRequested && actionsStatus.production && actionsStatus.production.sha !== commitSha) {
+        // Non-fast-forward is only expected/allowed via the explicit force path;
+        // if production is diverged and force wasn't requested, refuse before
+        // ever attempting the PATCH so the UI can show the recovery flow instead
+        // of a generic ref_update_failed.
+        const comparison = await compareCommits(project.github_owner, project.github_repository, deployment.production_branch, commitSha).catch(() => null);
+        if (comparison?.status === "diverged") {
+          await persistJobResult(db, job.id, { outcome: "refused", refusal_code: "diverged_confirmation_required", production_sha: actionsStatus.production.sha });
+          await audit(db, job, actorId, "deployment.promote", "project", projectId, { outcome: "refused", refusal_code: "diverged_confirmation_required" });
+          return;
+        }
+      }
+    } else {
+      const live = await fetchLiveDeploymentStatus(project, deployment); // existing path, unchanged
+      const eligibility = evaluatePromotionEligibility({
+        ciState: live.ciStatus.overallState, imageExists: live.image.exists,
+        e2eGateRequired: deployment.promotion.require_e2e_gate_label, e2eGateSatisfied: live.e2eGateSatisfied,
+      });
+      eligibilityOk = eligibility.eligible; eligibilityReasons = eligibility.reasons; imageTag = live.imageTag;
+    }
+    if (!eligibilityOk) {
+      await persistJobResult(db, job.id, { outcome: "refused", refusal_code: "not_eligible", reasons: eligibilityReasons });
+      await audit(db, job, actorId, "deployment.promote", "project", projectId, { outcome: "refused", reasons: eligibilityReasons });
       return;
     }
-    const productionHeads = await lsRemoteHeads(project.repository_path);
-    const previousSha = productionHeads.get(deployment.production_branch) ?? null;
+    // Re-assert the lease after the eligibility round-trips, before the
+    // release row is inserted and the ref is written.
+    await assertOwned();
+
+    let previousSha: string | null;
+    if (deployment.mechanism === "github_actions_jobs") {
+      // Read live from the GitHub API (already fetched above into
+      // actionsStatus.production) rather than lsRemoteHeads(project.repository_path)
+      // — this mechanism has no dependency on a local git clone existing on
+      // disk (va-jobs-platform's repository_path is a placeholder; see
+      // migration 059's comment).
+      previousSha = actionsStatus!.production?.sha ?? null;
+    } else {
+      const productionHeads = await lsRemoteHeads(project.repository_path);
+      previousSha = productionHeads.get(deployment.production_branch) ?? null;
+    }
     if (previousSha === commitSha) {
       await persistJobResult(db, job.id, { outcome: "noop", message: "already live" });
       return;
@@ -362,7 +540,7 @@ export async function runProviderJob(
       const inserted = await db.query(
         `INSERT INTO production_releases (project_id, action, commit_sha, previous_commit_sha, image_tag, status, triggered_by, job_id)
          VALUES ($1,'promote',$2,$3,$4,'requested',$5,$6) RETURNING id`,
-        [projectId, commitSha, previousSha, live.imageTag, actorId, job.id],
+        [projectId, commitSha, previousSha, imageTag, actorId, job.id],
       );
       releaseId = inserted.rows[0].id;
     } catch (error: any) {
@@ -382,19 +560,46 @@ export async function runProviderJob(
       return;
     }
     try {
-      await updateBranchReference(project.github_owner, project.github_repository, deployment.production_branch, commitSha, false);
+      await updateBranchReference(project.github_owner, project.github_repository, deployment.production_branch, commitSha, deployment.mechanism === "github_actions_jobs" ? forceRequested : false);
     } catch (error) {
-      // If the ref write throws (422 non-fast-forward, 401/403, rate limit,
-      // network error) the release row must not stay 'requested' forever — the
-      // partial unique index would then permanently refuse every future
-      // promote/rollback for this project with promotion_in_progress.
+      if (deployment.mechanism === "github_actions_jobs") {
+        const nonFastForward = error instanceof GitHubProviderError && error.nonFastForward === true;
+        await db.query(
+          `UPDATE production_releases SET status='failed', failure_reason=$2, non_fast_forward=$3, forced=$4, updated_at=now() WHERE id=$1`,
+          [releaseId, error instanceof Error ? error.message : String(error), nonFastForward, forceRequested],
+        );
+        await persistJobResult(db, job.id, { outcome: "refused", refusal_code: nonFastForward ? "non_fast_forward" : "ref_update_failed", error: error instanceof Error ? error.message : String(error) });
+        await audit(db, job, actorId, "deployment.promote", "project", projectId, { outcome: "refused", refusal_code: nonFastForward ? "non_fast_forward" : "ref_update_failed" });
+        // IMPORTANT: do not rethrow for this mechanism. Rethrowing propagates
+        // to the worker's retry machinery (enqueueJob defaults max_attempts to
+        // 3) — the whole point of this task is that a 422/non-fast-forward
+        // must NOT auto-retry. The route in Task 9 additionally passes
+        // maxAttempts:1 at enqueue time as a second, independent safeguard.
+        return;
+      }
+      // existing health_check path: unchanged, still rethrows so the worker's
+      // normal retry/failure handling applies exactly as before this plan.
       await db.query(`UPDATE production_releases SET status='failed', failure_reason=$2, updated_at=now() WHERE id=$1`,
         [releaseId, error instanceof Error ? error.message : String(error)]);
       await persistJobResult(db, job.id, { outcome: "failed", refusal_code: "ref_update_failed", error: error instanceof Error ? error.message : String(error) });
       throw error;
     }
-    await db.query(`UPDATE production_releases SET status='pending_approval', updated_at=now() WHERE id=$1`, [releaseId]);
-    await audit(db, job, actorId, "deployment.promote", "project", projectId, { commit_sha: commitSha, previous_commit_sha: previousSha, image_tag: live.imageTag, release_id: releaseId });
+    if (deployment.mechanism === "github_actions_jobs") {
+      // Post-write ref verification — re-read the ref rather than trusting the
+      // PATCH response body. Additive: gated to the new mechanism only, so the
+      // existing health_check promotion flow's behavior (below) is unchanged.
+      const verifyRead = await getBranchHeadCommit(project.github_owner, project.github_repository, deployment.production_branch).catch(() => null);
+      if (verifyRead?.sha !== commitSha) {
+        await db.query(`UPDATE production_releases SET status='failed', failure_reason='ref_verify_failed — ref did not read back as the target SHA', updated_at=now() WHERE id=$1`, [releaseId]);
+        await persistJobResult(db, job.id, { outcome: "failed", refusal_code: "ref_verify_failed" });
+        await audit(db, job, actorId, "deployment.promote", "project", projectId, { outcome: "failed", refusal_code: "ref_verify_failed" });
+        return;
+      }
+      await db.query(`UPDATE production_releases SET status='pending_approval', forced=$2, updated_at=now() WHERE id=$1`, [releaseId, forceRequested]);
+    } else {
+      await db.query(`UPDATE production_releases SET status='pending_approval', updated_at=now() WHERE id=$1`, [releaseId]);
+    }
+    await audit(db, job, actorId, "deployment.promote", "project", projectId, { commit_sha: commitSha, previous_commit_sha: previousSha, image_tag: imageTag, release_id: releaseId });
     await persistJobResult(db, job.id, { outcome: "requested", commit_sha: commitSha, previous_commit_sha: previousSha, release_id: releaseId });
     return;
   }
@@ -407,6 +612,18 @@ export async function runProviderJob(
     if (!project) throw new Error("project not found");
     const deployment = loadDeploymentConfig(project);
     await assertOwned();
+    if (deployment.mechanism === "github_actions_jobs") {
+      // Rollback is not implemented for this mechanism: everything below reads
+      // the production ref through lsRemoteHeads(project.repository_path) and
+      // gates on the throwing checkImageExists, neither of which this
+      // mechanism's projects satisfy (they have no local clone — see migration
+      // 059's placeholder repository_path). Refuse cleanly instead of failing
+      // the job with an unhandled filesystem error. Promotion of an earlier
+      // commit is the supported recovery path.
+      await persistJobResult(db, job.id, { outcome: "refused", refusal_code: "rollback_unsupported_for_mechanism", mechanism: deployment.mechanism });
+      await audit(db, job, actorId, "deployment.rollback", "project", projectId, { outcome: "refused", refusal_code: "rollback_unsupported_for_mechanism" });
+      return;
+    }
     const productionHeads = await lsRemoteHeads(project.repository_path);
     const currentProductionSha = productionHeads.get(deployment.production_branch) ?? null;
     if (currentProductionSha !== expectedProductionSha) {

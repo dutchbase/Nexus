@@ -1,9 +1,8 @@
 #!/usr/bin/env bash
 # Boots a hermetic full stack (ephemeral Postgres + mock-github + mock-claude
 # + apps/web + apps/worker) and runs the Playwright end-user journey suite
-# against it. Reuses the eval harness's infrastructure under
-# .lfd/dcc-build/harness/ — nothing here touches the production database,
-# ports, or real GitHub/Anthropic APIs.
+# against it. Everything it needs lives under tests/e2e/ — nothing here
+# touches the production database, ports, or real GitHub/Anthropic APIs.
 #
 # Usage:
 #   tests/e2e/run-e2e.sh                 # boot, run all specs, tear down
@@ -13,7 +12,6 @@ set -uo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
-HARNESS_DIR="$REPO_ROOT/.lfd/dcc-build/harness"
 
 KEEP=false
 SPEC_ARGS=()
@@ -74,7 +72,7 @@ printf %s "$E2E_ADMIN_PASSWORD" | (cd "$REPO_ROOT" && pnpm admin:create --userna
 
 # ------------------------------------------------------------ fixtures
 log "creating git fixtures"
-FIXTURES_OUT="$(bash "$HARNESS_DIR/git-fixtures/create-fixtures.sh" --clean)"
+FIXTURES_OUT="$(bash "$SCRIPT_DIR/git-fixtures/create-fixtures.sh" --clean)"
 echo "$FIXTURES_OUT" | grep '^FIXTURE_' > "$SCRIPT_DIR/.fixtures.env" || true
 set -a; source "$SCRIPT_DIR/.fixtures.env"; set +a
 
@@ -83,14 +81,7 @@ set -a; source "$SCRIPT_DIR/.fixtures.env"; set +a
 rm -rf "$REPO_ROOT/data"
 
 log "seeding fixture data"
-# The frozen harness seed predates migration 046's notification_deliveries
-# status constraint ('delivered' -> 'sent'). Patch a throwaway copy; the
-# harness file itself must stay untouched (HARNESS_CONVENTIONS.md).
-SEED_TMP="$SCRIPT_DIR/.seed-patched"
-rm -rf "$SEED_TMP" && mkdir -p "$SEED_TMP"
-cp "$HARNESS_DIR/fixtures/seed.ts" "$SEED_TMP/seed.ts"
-sed "s/'delivered',/'sent',/g" "$HARNESS_DIR/fixtures/seed.sql" > "$SEED_TMP/seed.sql"
-(cd "$SEED_TMP" && node seed.ts) || { log "FATAL: seed failed"; exit 1; }
+(cd "$SCRIPT_DIR/fixtures" && node seed.ts) || { log "FATAL: seed failed"; exit 1; }
 
 # Same step deploy.sh runs: syncs prompts/global/*.md (incl. the code-reviewer
 # rubric the PR AI review requires) into prompt_files.
@@ -107,9 +98,8 @@ export MOCK_GITHUB_LOG="$SCRIPT_DIR/.mock-github.log"
 node "$SCRIPT_DIR/mock-github/server.js" > "$SCRIPT_DIR/.mock-github.stdout.log" 2>&1 &
 MOCK_GITHUB_PID=$!
 
-# Shim first (fixes the stale `auth status` shape), harness mock second.
 chmod +x "$SCRIPT_DIR/mock-claude/claude"
-export PATH="$SCRIPT_DIR/mock-claude:$HARNESS_DIR/mock-claude:$PATH"
+export PATH="$SCRIPT_DIR/mock-claude:$PATH"
 export MOCK_CLAUDE_LOG="$SCRIPT_DIR/.mock-claude.log"
 export MOCK_CLAUDE_SCENARIO_DIR="$SCRIPT_DIR/.scenarios"
 mkdir -p "$MOCK_CLAUDE_SCENARIO_DIR"

@@ -1,4 +1,9 @@
-export { checkImageExists, type ImageExistenceResult } from "./registry.ts";
+export { checkImageExists, type ImageExistenceResult, checkImageExistsDetailed, type ImageExistenceDetailedResult } from "./registry.ts";
+export {
+  findWorkflowRun, type WorkflowRunSummary,
+  getWorkflowRunJobs, type WorkflowJobSummary,
+  compareCommits, type CommitComparison,
+} from "./actions.ts";
 
 export type CreatePullRequestInput = {
   owner: string;
@@ -71,6 +76,7 @@ export class GitHubProviderError extends Error {
     public status?: number,
     public retryAt?: string,
     public endpoint?: string,
+    public nonFastForward?: boolean,
   ) {
     super(message);
     this.name = "GitHubProviderError";
@@ -156,7 +162,7 @@ async function responseFor(url: string, init: RequestInit = {}, allowStatuses: n
   throw lastError;
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return jsonFor<T>(await responseFor(`${apiBaseUrl()}${path}`, init));
 }
 
@@ -227,6 +233,13 @@ export async function updatePullRequestBase(owner: string, repository: string, n
   return request<ProviderPullRequest>(`${pullsPath(owner, repository)}/${number}`, {
     method: "PATCH",
     body: JSON.stringify({ base }),
+  });
+}
+
+export async function closePullRequest(owner: string, repository: string, number: number) {
+  return request<ProviderPullRequest>(`${pullsPath(owner, repository)}/${number}`, {
+    method: "PATCH",
+    body: JSON.stringify({ state: "closed" }),
   });
 }
 
@@ -422,7 +435,11 @@ export async function updateBranchReference(owner: string, repository: string, b
     { method: "PATCH", body: JSON.stringify({ sha, force }) },
     [422],
   );
-  if (response.status === 422) throw new GitHubProviderError("http_error", `branch ref update was rejected (force:${force})`, 422);
+  if (response.status === 422) {
+    const body = await response.clone().json().catch(() => ({}) as { message?: string });
+    const nonFastForward = /not a fast[- ]forward/i.test(body.message ?? "");
+    throw new GitHubProviderError("http_error", `branch ref update was rejected (force:${force})`, 422, undefined, undefined, nonFastForward);
+  }
   const body = await jsonFor<{ object: { sha: string } }>(response);
   return { sha: body.object.sha };
 }

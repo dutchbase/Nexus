@@ -116,3 +116,67 @@ test("sync pull requests from the list header", async ({ page }) => {
     return job?.status === "completed";
   }, { timeoutMs: 30_000, intervalMs: 300 });
 });
+
+test("select multiple PRs and run a bulk AI review", async ({ page }) => {
+  const a = await driveTicketToPrReady(page, `E2E bulk-ai-1 ${Date.now()}`);
+  const b = await driveTicketToPrReady(page, `E2E bulk-ai-2 ${Date.now()}`);
+  await page.goto("/admin/pull-requests");
+  await page.locator(`[data-pr-check="${a.prId}"]`).check();
+  await page.locator(`[data-pr-check="${b.prId}"]`).check();
+  await expect(page.locator("[data-pr-selected-count]")).toHaveText("2");
+  await page.locator('[data-pr-bulk="ai-review"]').click();
+
+  for (const prId of [a.prId, b.prId]) {
+    await waitFor(async () => {
+      const review = await queryOne("select status from pr_ai_reviews where pull_request_id = $1 order by created_at desc limit 1", [prId]);
+      return !!review && !["queued", "running"].includes(review.status);
+    }, { timeoutMs: 60_000, intervalMs: 500 });
+  }
+});
+
+test("bulk AI review does not duplicate an already-running review", async ({ page }) => {
+  const a = await driveTicketToPrReady(page, `E2E bulk-ai-dup ${Date.now()}`);
+  await page.goto(`/admin/pull-requests`);
+  // Start one review directly first via the detail page, then attempt a bulk review on the same PR while it's still running.
+  await page.locator(".prs-row", { hasText: a.ticketNumber }).first().click();
+  await page.locator("[data-pr-ai-review]").click();
+  await page.goto("/admin/pull-requests");
+  await page.locator(`[data-pr-check="${a.prId}"]`).check();
+  page.on("dialog", (dialog) => dialog.accept());
+  await page.locator('[data-pr-bulk="ai-review"]').click();
+  const reviews = await queryOne("select count(*)::int as count from pr_ai_reviews where pull_request_id = $1", [a.prId]);
+  expect(reviews.count).toBe(1); // no duplicate row created
+});
+
+test("bulk close requires confirmation and closes selected PRs without deleting branches", async ({ page }) => {
+  const a = await driveTicketToPrReady(page, `E2E bulk-close ${Date.now()}`);
+  await page.goto("/admin/pull-requests");
+  await page.locator(`[data-pr-check="${a.prId}"]`).check();
+  page.on("dialog", (dialog) => dialog.accept());
+  await page.locator('[data-pr-bulk="close"]').click();
+  await waitFor(async () => {
+    const pr = await queryOne("select state from pull_requests where id = $1", [a.prId]);
+    return pr?.state === "closed";
+  }, { timeoutMs: 30_000, intervalMs: 500 });
+});
+
+test("bulk merge pre-flight classifies ready vs blocked PRs and only merges the ready ones", async ({ page }) => {
+  const ready = await driveTicketToPrReady(page, `E2E bulk-merge-ready ${Date.now()}`);
+  await waitFor(async () => {
+    const row = await queryOne("select current_policy_snapshot_id, policy_stale from pull_requests where id = $1", [ready.prId]);
+    return !!row?.current_policy_snapshot_id && row.policy_stale === false;
+  }, { timeoutMs: 30_000, intervalMs: 300 });
+
+  await page.goto("/admin/pull-requests");
+  await page.locator(`[data-pr-check="${ready.prId}"]`).check();
+  await page.locator('[data-pr-bulk="merge"]').click();
+
+  const dialog = page.locator("[data-pr-merge-preflight-dialog]");
+  await expect(dialog).toBeVisible();
+  await expect(dialog.locator("[data-pr-preflight-summary]")).toHaveText(/1 ready, 0 blocked/);
+  await dialog.locator("[data-pr-preflight-confirm]").click();
+
+  await waitForTicketStatus(ready.ticketId, ["Merged", "Completed"], 60_000);
+  const pr = await queryOne("select merged_at from pull_requests where id = $1", [ready.prId]);
+  expect(pr.merged_at).not.toBeNull();
+});

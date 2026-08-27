@@ -1,7 +1,6 @@
 // Extended mock GitHub server for the e2e journey suite.
 //
-// Forked from .lfd/dcc-build/harness/mock-github/server.js (frozen) because
-// the app outgrew it:
+// Beyond plain PR CRUD, the app needs the following from it:
 // - PR objects need immutable head.sha / base.sha (worker.ts:1133 refuses to
 //   review without them), resolved from the REAL fixture bare remotes so the
 //   AI-review worktree's `git rev-parse` cross-check passes.

@@ -16,19 +16,58 @@ test("change the default AI review model in settings", async ({ page }) => {
   await form.locator('select[name="default_reasoning_level"]').selectOption("low");
   await form.locator('button[type="submit"]').click();
 
-  // Submit reloads the page; the selection must survive it.
-  await page.waitForLoadState("load");
-  await page.getByRole("tab", { name: "AI" }).click();
+  // No reload required — the save must resolve in place.
+  await expect(form.locator(".error")).toHaveText("Saved");
   await expect(form.locator('select[name="default_model"]')).toHaveValue("haiku");
   const row = await queryOne("select default_model, default_reasoning_level from ai_review_settings where id = 1");
   expect(row).toMatchObject({ default_model: "haiku", default_reasoning_level: "low" });
 
   // Restore the seeded default so other journeys are unaffected.
-  await page.getByRole("tab", { name: "AI" }).click();
   await form.locator('select[name="default_model"]').selectOption("sonnet");
   await form.locator('select[name="default_reasoning_level"]').selectOption("high");
   await form.locator('button[type="submit"]').click();
-  await page.waitForLoadState("load");
+  await expect(form.locator(".error")).toHaveText("Saved");
+});
+
+test("toggling auto-review and auto-merge on the AI PR review defaults form saves without a reload", async ({ page }) => {
+  await page.goto("/admin/settings");
+  await page.getByRole("tab", { name: "AI" }).click();
+  const form = page.locator("[data-ai-review-settings-form]");
+  const autoReview = form.locator('input[name="auto_review_enabled"]');
+  const autoMerge = form.locator('input[name="auto_merge_on_approve"]');
+  const initialReview = await autoReview.isChecked();
+  const initialMerge = await autoMerge.isChecked();
+
+  await autoReview.setChecked(!initialReview);
+  await autoMerge.setChecked(!initialMerge);
+  await form.locator('button[type="submit"]').click();
+
+  await expect(form.locator(".error")).toHaveText("Saved");
+  const row = await queryOne("select auto_review_enabled, auto_merge_on_approve from ai_review_settings where id = 1");
+  expect(row).toMatchObject({ auto_review_enabled: !initialReview, auto_merge_on_approve: !initialMerge });
+
+  // Restore.
+  await autoReview.setChecked(initialReview);
+  await autoMerge.setChecked(initialMerge);
+  await form.locator('button[type="submit"]').click();
+  await expect(form.locator(".error")).toHaveText("Saved");
+});
+
+test("clicking Save twice in quick succession only submits once", async ({ page }) => {
+  await page.goto("/admin/settings");
+  await page.getByRole("tab", { name: "AI" }).click();
+  const form = page.locator("[data-ai-review-settings-form]");
+
+  let requestCount = 0;
+  await page.route("**/api/admin/settings/ai-review", async (route) => {
+    requestCount++;
+    await route.continue();
+  });
+
+  const submit = form.locator('button[type="submit"]');
+  await Promise.all([submit.click(), submit.click()]);
+  await expect(form.locator(".error")).toHaveText("Saved");
+  expect(requestCount).toBe(1);
 });
 
 test("save a per-phase system AI default and have it survive a refresh", async ({ page }) => {

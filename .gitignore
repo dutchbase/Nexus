@@ -6,6 +6,7 @@ worktrees/
 .worktrees/
 .env
 .env.*
+!.env.example
 secrets/
 dist/
 .next/
@@ -15,4 +16,5 @@ test-results/
 .deploy-current
 .deploy-current.next
 .gstack/
+.lfd/
 packages/database/native/build/
