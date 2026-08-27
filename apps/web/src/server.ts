@@ -1546,7 +1546,12 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (validateMatch && request.method === "POST") {
     const project = (await pool.query("SELECT id FROM projects WHERE id = $1", [validateMatch[1]])).rows[0];
     if (!project) return json(response, 404, { error: "project not found" });
-    return json(response, 202, { job: await enqueueJob({ type: "project.validate", payload: { project_id: project.id }, idempotencyKey: `project.validate:${project.id}` }) });
+    // Per-request key, matching the other admin-triggered refresh routes
+    // (github.sync_one, deployment.promote_check, github.import). A constant
+    // per-project key would collide with the previous run's row, and
+    // enqueueJob's ON CONFLICT is a no-op that leaves a terminal job
+    // untouched — so Recheck repository would 202 without ever re-running.
+    return json(response, 202, { job: await enqueueJob({ type: "project.validate", payload: { project_id: project.id }, idempotencyKey: `project.validate:${project.id}:${randomUUID()}` }) });
   }
   if (url.pathname === "/api/admin/forms" && request.method === "GET") {
     const forms = (await pool.query("SELECT * FROM forms ORDER BY name")).rows;
@@ -1842,6 +1847,9 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const repoCheck = await validateProject({
       repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false, agentStartPath: project.agent_start_path,
     });
+    if (!repoCheck.ok) {
+      return json(response, 409, { error: `repository could not be inspected: ${repoCheck.message}`, error_code: repoCheck.errorCode });
+    }
     const commitMessage = typeof body.commit_message === "string" ? body.commit_message.trim() : "";
     const systemAi = await getSystemAiSettings(pool);
     const selection = resolvedAiFor(ticket, project, "planning", systemAi);
@@ -1883,6 +1891,9 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       const recheck = await validateProject({
         repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false, agentStartPath: project.agent_start_path,
       });
+      if (!recheck.ok) {
+        return json(response, 409, { error: `repository could not be re-inspected after commit: ${recheck.message}`, error_code: recheck.errorCode });
+      }
       if (recheck.changedFiles.length) {
         return json(response, 409, {
           error: "repository still has uncommitted changes after committing",

@@ -327,10 +327,71 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const response=await fetch("/api/admin/projects/"+projectId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});
           if(response.ok){alert("Project saved")}else{const result=await response.json();alert(result.error)}
         });
-        document.querySelector("[data-validate-button]")?.addEventListener("click",async()=>{
-          const response=await fetch("/api/admin/projects/"+projectId+"/validate",{method:"POST",headers:{"x-csrf-token":csrf}});
-          if(response.ok){alert("Validation started");setTimeout(()=>location.reload(),2000)}else{const result=await response.json();alert(result.error)}
-        });
+        (function initRepositoryRecheck(){
+          const STATUS_LABELS={conflicted:"Conflicted",modified:"Modified",added:"Added",deleted:"Deleted",renamed:"Renamed",untracked:"Untracked"};
+          const STATUS_ORDER=["conflicted","modified","added","deleted","renamed","untracked"];
+          function esc(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));}
+          function healthSummaryLine(detail){
+            if(!detail||!detail.summary||!Object.keys(detail.summary).length)return "uncommitted changes";
+            return Object.entries(detail.summary).map(([status,count])=>count+" "+status+" file"+(count===1?"":"s")).join(", ");
+          }
+          function groupedFileList(files){
+            const byStatus={};
+            files.forEach(f=>{(byStatus[f.status]=byStatus[f.status]||[]).push(f)});
+            return STATUS_ORDER.filter(s=>byStatus[s]).map(status=>{
+              const items=byStatus[status],severe=status==="conflicted";
+              return '<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:'+(severe?"var(--t-danger)":"var(--text3)")+'">'+(STATUS_LABELS[status]||status)+' ('+items.length+')</div>'+items.map(file=>
+                '<div class="mono" style="padding:3px 0;font-size:12.5px;'+(severe?"color:var(--t-danger);font-weight:600":"")+'">'+esc(file.path)+(file.staged?' <span style="color:var(--text3);font-weight:400">· staged</span>':"")+'</div>'
+              ).join("")+'</div>';
+            }).join("");
+          }
+          function resolutionGuidance(path){
+            const p=esc(path),codeStyle="background:var(--code-bg);padding:10px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:12px;overflow-x:auto";
+            return '<pre style="'+codeStyle+'">cd '+p+'\\n\\ngit status</pre><p style="font-size:12.5px">Keep the changes:</p><pre style="'+codeStyle+'">git add &lt;files&gt;\\ngit commit -m "Describe the change"</pre><p style="font-size:12.5px">Temporarily set them aside:</p><pre style="'+codeStyle+'">git stash push -u</pre><p style="font-size:12.5px">Or remove/ignore unwanted local files.</p>';
+          }
+          function renderRepositoryDiagnostics(project){
+            const el=document.querySelector("[data-repository-diagnostics]");
+            if(!el)return;
+            const lastValidated=project.last_validated_at?("Validated "+new Date(project.last_validated_at).toLocaleString("nl-NL")):"Never validated";
+            let body="<p>"+esc(lastValidated)+"</p>";
+            if(project.health_status==="inspection_error"){
+              body+='<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px"><strong>Repository status unavailable.</strong> <em>The repository could not be inspected: '+esc(project.health_error||"unknown error")+'. This is distinct from having uncommitted changes — verify the configured repository path exists, is a Git repository, and is readable by the platform.</em></div>';
+            }else if(project.health_status==="repository_dirty"&&project.health_detail_json&&project.health_detail_json.files){
+              const detail=project.health_detail_json;
+              body+='<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px;margin-bottom:14px"><strong>Local changes are blocking planning and execution.</strong> <em>'+esc(healthSummaryLine(detail))+'</em></div>';
+              body+='<div data-diagnostics-files>'+groupedFileList(detail.files)+'</div>';
+              body+='<div style="margin-top:14px"><p style="font-size:12.5px;color:var(--text3);margin-bottom:6px">Resolve on the server — the platform never resets a checkout automatically:</p>'+resolutionGuidance(project.repository_path||el.dataset.repositoryPath||"")+'</div>';
+            }else if(project.health_status==="repository_dirty"){
+              body+='<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px"><strong>Local changes are blocking planning and execution.</strong> <em>The per-file breakdown is not available yet — recheck the repository to collect it.</em></div>';
+            }else{
+              body+='<p style="color:var(--text3);font-size:13px">No local changes blocking planning or execution.</p>';
+            }
+            el.innerHTML=body;
+            const bannerEl=document.querySelector("[data-dirty-page-banner]");
+            if(bannerEl){
+              bannerEl.innerHTML=project.health_status==="repository_dirty"
+                ?'<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px"><strong>Planning and execution are blocked.</strong> <em>The primary checkout has '+esc(healthSummaryLine(project.health_detail_json||null))+'. Resolve them on the server — the platform never resets a checkout automatically.</em></div>'
+                :"";
+            }
+          }
+          async function recheckRepository(button){
+            const original=button.textContent;
+            button.disabled=true;button.textContent="Checking…";
+            const response=await fetch("/api/admin/projects/"+projectId+"/validate",{method:"POST",headers:{"x-csrf-token":csrf}}).catch(()=>null);
+            if(!response||!response.ok){
+              const result=response?await response.json().catch(()=>({})):{};
+              alert(result.error||"Could not start validation");
+              button.disabled=false;button.textContent=original;
+              return;
+            }
+            setTimeout(async()=>{
+              const data=await fetch("/api/admin/projects/"+projectId,{headers:{"x-csrf-token":csrf}}).then(r=>r.json()).catch(()=>null);
+              if(data&&data.project)renderRepositoryDiagnostics(data.project);
+              button.disabled=false;button.textContent=original;
+            },2000);
+          }
+          document.querySelectorAll("[data-validate-button],[data-recheck-repository]").forEach(btn=>btn.addEventListener("click",()=>recheckRepository(btn)));
+        })();
         document.querySelectorAll("[data-skill-checkbox]").forEach(checkbox=>{
           checkbox.addEventListener("change",async()=>{
             const skill_ids=[...document.querySelectorAll("[data-skill-checkbox]:checked")].map(c=>c.value);
