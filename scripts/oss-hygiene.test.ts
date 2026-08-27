@@ -35,4 +35,17 @@ describe("open-source release hygiene", () => {
     expect(existsSync(new URL(".github/ISSUE_TEMPLATE/bug_report.md", root))).toBe(true);
     expect(existsSync(new URL(".github/ISSUE_TEMPLATE/feature_request.md", root))).toBe(true);
   });
+
+  it("does not hardcode a private deploy path as the default in shipped deploy tooling", () => {
+    for (const file of ["deploy.sh", "webhook-server.js", "webhook-runner.sh"]) {
+      const content = readFileSync(new URL(file, root), "utf8");
+      expect(content, `${file} should not default to /home/deploy/...`).not.toContain("/home/deploy/");
+    }
+  });
+
+  it("does not expose a real SSH host alias in the deployment runbook", () => {
+    const runbook = readFileSync(new URL("docs/DEPLOYMENT-RUNBOOK.md", root), "utf8");
+    expect(runbook).not.toContain("vps-nederland");
+    expect(runbook).not.toContain("/home/deploy/");
+  });
 });

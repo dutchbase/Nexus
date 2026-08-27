@@ -8,17 +8,19 @@ finalization to the fresh webhook. If everything works you do nothing.
 
 **This runbook is for when that automation fails.**
 
-Server: `ssh vps-nederland` (user `deploy`). Repo root:
-`/home/deploy/projects/dev-control` (a checkout whose `origin/master` tracks
-GitHub). Live releases: `/home/deploy/projects/dev-control/.deploy-releases/<sha>`,
-selected by the `.deploy-current` symlink. pm2 manages the three processes;
-**pm2 lives in the nvm PATH**: prefix commands with
-`export PATH=/home/deploy/.nvm/versions/node/v24.16.0/bin:$PATH`.
+Server: `ssh <your-deploy-host>` (whatever user your deploy process runs
+as). Repo root: `$DCC_ROOT` (defaults to `/opt/nexus` — see `deploy.sh`; a
+checkout whose `origin/master` tracks GitHub). Live releases:
+`$DCC_ROOT/.deploy-releases/<sha>`, selected by the `.deploy-current`
+symlink. pm2 manages the three processes (`dcc-web`, `dcc-worker`,
+`dcc-webhook`); if you installed Node via nvm, pm2 may only be on `PATH`
+under nvm's shim — prefix commands with
+`export PATH=$(dirname "$(nvm which node)"):$PATH` if `pm2` isn't found.
 
 ## 1. Diagnose: what state is the deployment in?
 
 ```bash
-cd /home/deploy/projects/dev-control
+cd "$DCC_ROOT"
 set -a; source .env; set +a
 psql "$DATABASE_URL" -tAc "SELECT state,target_sha,created_at FROM deployment_attempts ORDER BY created_at DESC LIMIT 5"
 ls -la .deploy-state/completions/ | tail -3      # completion markers (.done)
@@ -54,8 +56,8 @@ jump to §3-A (do NOT just `pm2 restart` — restart keeps the stale cwd).
 ### A. Attempt stuck `running` / processes on an old release (webhook died mid-swap)
 
 ```bash
-export PATH=/home/deploy/.nvm/versions/node/v24.16.0/bin:$PATH
-cd /home/deploy/projects/dev-control
+export PATH=$(dirname "$(nvm which node)"):$PATH   # only if pm2 isn't already on PATH
+cd "$DCC_ROOT"
 pm2 delete dcc-webhook >/dev/null 2>&1
 pm2 start .deploy-current/ecosystem.config.cjs --only dcc-webhook
 sleep 5
@@ -90,7 +92,7 @@ git commit --allow-empty -m "chore: retrigger deployment" && git push
 Only after confirming no attempt is `running` (§1):
 
 ```bash
-cd /home/deploy/projects/dev-control
+cd "$DCC_ROOT"
 git pull --ff-only
 set -a; source .env; source .env.worker; set +a   # releases have no .env!
 SHA=$(git rev-parse origin/master)
@@ -103,7 +105,7 @@ pnpm verify
 pnpm --filter database migrate
 # switch over (release sits at <root>/.deploy-releases/<sha>)
 ln -sfn "$(pwd)" ../.deploy-current.tmp && mv -Tf ../.deploy-current.tmp ../.deploy-current
-cd /home/deploy/projects/dev-control
+cd "$DCC_ROOT"
 pm2 delete dcc-web dcc-worker dcc-webhook
 pm2 start .deploy-current/ecosystem.config.cjs
 curl --fail http://127.0.0.1:3000/api/health
