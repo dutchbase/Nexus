@@ -82,3 +82,23 @@ test("run detail escapes and retains captured prompts and accounting", async () 
   expect(sql).toContain("ps.metadata_json->'promptVersionIds' prompt_versions");
   expect(sql).not.toContain("prompt_version'");
 });
+
+test("shows a pulsing status dot only while the run is active", async () => {
+  const dotShadow = "box-shadow:0 0 0 4px color-mix(in srgb, var(--t-run) 20%, transparent)";
+
+  query.mockImplementation(async (sql: string) => {
+    if (String(sql).includes("FROM agent_runs ar")) return { rows: [{ ...run, status: "running" }] };
+    if (String(sql).includes("FROM artifacts a JOIN execution_attempts ea")) return { rows: [] };
+    return { rows: [] };
+  });
+  const runningPage = await runs.render(new URL("http://test/admin/runs/aaaaaaaa-0000-4000-8000-000000000002"), session, {});
+  expect(runningPage?.body).toContain(dotShadow);
+
+  query.mockImplementation(async (sql: string) => {
+    if (String(sql).includes("FROM agent_runs ar")) return { rows: [{ ...run, status: "completed" }] };
+    if (String(sql).includes("FROM artifacts a JOIN execution_attempts ea")) return { rows: [] };
+    return { rows: [] };
+  });
+  const completedPage = await runs.render(new URL("http://test/admin/runs/aaaaaaaa-0000-4000-8000-000000000002"), session, {});
+  expect(completedPage?.body).not.toContain(dotShadow);
+});

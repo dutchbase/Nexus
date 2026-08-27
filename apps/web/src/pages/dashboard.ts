@@ -39,7 +39,7 @@ function runRow(runId: string, type: string, ticketNum: string, model: string, e
     : `<div style="font-size:11.5px;color:${progress.stale ? "var(--t-danger)" : "var(--text3)"}">${escapeHtml(progress.label)}</div>`;
   return `<div style="display:grid;grid-template-rows:auto auto;gap:10px;padding:13px 18px;border-bottom:1px solid var(--border)">
     <div style="display:flex;align-items:center;gap:10px">
-      <span style="width:6px;height:6px;border-radius:50%;background:var(--t-run);animation:dccPulse 1.4s ease-in-out infinite;flex-shrink:0"></span>
+      <span style="width:6px;height:6px;border-radius:50%;background:var(--t-run);animation:dccPulse 1.4s ease-in-out infinite;box-shadow:0 0 0 4px color-mix(in srgb, var(--t-run) 20%, transparent);flex-shrink:0"></span>
       <span style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600">${escapeHtml(runId)}</span>
       <span style="font-size:12px;color:var(--text3)">${escapeHtml(type)}</span>
       <span style="font-size:12px;color:var(--text3)">${escapeHtml(ticketNum)}</span>
