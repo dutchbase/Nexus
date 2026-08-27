@@ -290,15 +290,43 @@ export async function runProviderJob(
     await assertOwned();
     if (deployment.mechanism === "github_actions_jobs") {
       const actionsStatus = await fetchActionsPreflightStatus(project, deployment);
+      const recentRelease = (await db.query(
+        `SELECT * FROM production_releases WHERE project_id=$1 AND action='promote' AND status IN ('pending_approval','deploying','healthy') ORDER BY created_at DESC LIMIT 1`,
+        [projectId],
+      )).rows[0];
+      let productionRun: Awaited<ReturnType<typeof findWorkflowRun>> = null;
+      let productionJobs: Awaited<ReturnType<typeof getWorkflowRunJobs>> = [];
+      if (recentRelease) {
+        productionRun = await findWorkflowRun(project.github_owner, project.github_repository, {
+          sha: recentRelease.commit_sha, branch: deployment.production_branch, event: "push", createdAfter: recentRelease.created_at,
+        });
+        if (productionRun) productionJobs = await getWorkflowRunJobs(project.github_owner, project.github_repository, productionRun.id);
+      }
+      const migrationsJob = productionJobs.find((j) => j.name === deployment.actions!.migrations_job_name);
+      const deployJob = productionJobs.find((j) => j.name === deployment.actions!.deploy_job_name);
       await db.query(
-        `INSERT INTO deployment_status_snapshots (project_id, master_commit_sha, master_workflow_run_id, master_workflow_conclusion, docker_image_job_conclusion, ghcr_checked, ghcr_verified, image_tag, production_commit_sha, divergence, fetched_at, updated_at)
-         VALUES ($1,$2,$3,$4,$5,true,$6,$7,$8,$9,now(),now())
-         ON CONFLICT (project_id) DO UPDATE SET master_commit_sha=$2, master_workflow_run_id=$3, master_workflow_conclusion=$4, docker_image_job_conclusion=$5, ghcr_checked=true, ghcr_verified=$6, image_tag=$7, production_commit_sha=$8, divergence=$9, fetched_at=now(), updated_at=now()`,
+        `INSERT INTO deployment_status_snapshots (project_id, master_commit_sha, master_workflow_run_id, master_workflow_conclusion, docker_image_job_conclusion, ghcr_checked, ghcr_verified, image_tag, production_commit_sha, divergence, production_workflow_run_id, production_workflow_conclusion, migrations_job_conclusion, deploy_job_conclusion, fetched_at, updated_at)
+         VALUES ($1,$2,$3,$4,$5,true,$6,$7,$8,$9,$10,$11,$12,$13,now(),now())
+         ON CONFLICT (project_id) DO UPDATE SET master_commit_sha=$2, master_workflow_run_id=$3, master_workflow_conclusion=$4, docker_image_job_conclusion=$5, ghcr_checked=true, ghcr_verified=$6, image_tag=$7, production_commit_sha=$8, divergence=$9, production_workflow_run_id=$10, production_workflow_conclusion=$11, migrations_job_conclusion=$12, deploy_job_conclusion=$13, fetched_at=now(), updated_at=now()`,
         [projectId, actionsStatus.master.sha, actionsStatus.masterRun?.id ?? null, actionsStatus.masterRun?.conclusion ?? null,
          actionsStatus.preflight.dockerImageJobConclusion, actionsStatus.ghcr.state === "exists" ? true : actionsStatus.ghcr.state === "not_exists" ? false : null,
-         actionsStatus.imageTag, actionsStatus.production?.sha ?? null, actionsStatus.divergence],
+         actionsStatus.imageTag, actionsStatus.production?.sha ?? null, actionsStatus.divergence,
+         productionRun?.id ?? null, productionRun?.conclusion ?? null, migrationsJob?.conclusion ?? null, deployJob?.conclusion ?? null],
       );
-      await persistJobResult(db, job.id, { outcome: "synced", mechanism: "github_actions_jobs", ...actionsStatus });
+      // Reuse the existing in-flight release status machinery (above, in the
+      // health_check branch) but drive "deploying"/"healthy"/"failed" from the
+      // two named job conclusions instead of an HTTP health check.
+      if (recentRelease && recentRelease.status !== "healthy") {
+        const bothSucceeded = migrationsJob?.conclusion === "success" && deployJob?.conclusion === "success";
+        const eitherFailed = migrationsJob?.conclusion === "failure" || deployJob?.conclusion === "failure" || migrationsJob?.conclusion === "cancelled" || deployJob?.conclusion === "cancelled";
+        const stalled = !bothSucceeded && !eitherFailed && Date.now() - new Date(recentRelease.updated_at).getTime() > 15 * 60 * 1000;
+        const nextStatus = bothSucceeded ? "healthy" : eitherFailed ? "failed" : stalled ? "failed" : "deploying";
+        await db.query(
+          `UPDATE production_releases SET status=$2, production_workflow_run_id=$3, health_checked_at=now(), updated_at=now()${stalled ? ",failure_reason='stalled — production workflow jobs did not resolve within 15 minutes'" : eitherFailed ? ",failure_reason='migrations-production or deploy-production job failed'" : ""} WHERE id=$1`,
+          [recentRelease.id, nextStatus, productionRun?.id ?? null],
+        );
+      }
+      await persistJobResult(db, job.id, { outcome: "synced", mechanism: "github_actions_jobs", ...actionsStatus, production_run: productionRun, migrations_job_conclusion: migrationsJob?.conclusion ?? null, deploy_job_conclusion: deployJob?.conclusion ?? null });
       return;
     }
     const live = await fetchLiveDeploymentStatus(project, deployment);

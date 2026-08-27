@@ -113,6 +113,10 @@ test("sync_status (github_actions_jobs mechanism) persists master workflow run i
   const database = db([project]);
   database.query.mockImplementation(async (text: string, values?: unknown[]) => {
     database.queries.push({ text, values });
+    // No release is in flight — route the production_releases lookup to an
+    // empty result so this test only exercises the base snapshot-write path
+    // (Task 8b's production-run-tracking columns stay null).
+    if (text.includes("FROM production_releases")) return { rows: [], rowCount: 0 };
     return { rows: [project], rowCount: 1 };
   });
   setUpHappyActionsStatus();
@@ -127,9 +131,55 @@ test("sync_status (github_actions_jobs mechanism) persists master workflow run i
   expect(snapshotUpsert).toBeDefined();
   expect(snapshotUpsert!.values).toEqual([
     "project-va", "a".repeat(40), 111, "success", "success", true, "sha-" + "a".repeat(40), "b".repeat(40), "behind_master",
+    null, null, null, null,
   ]);
+  expect(findWorkflowRun).toHaveBeenCalledTimes(1); // only the master-branch lookup — no release to anchor a production-branch lookup
   const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
   expect(resultUpdate!.values![1]).toMatchObject({ outcome: "synced", mechanism: "github_actions_jobs" });
+});
+
+test("sync_status (github_actions_jobs mechanism) tracks the production-branch run's migrations/deploy jobs distinctly from the master run at the same SHA", async () => {
+  const database = db([project]);
+  const masterSha = "a".repeat(40);
+  const release = { id: "release-inflight", commit_sha: masterSha, status: "pending_approval", created_at: "2026-01-02T00:00:00Z", updated_at: new Date(Date.now() - 60_000).toISOString() };
+  database.query.mockImplementation(async (text: string, values?: unknown[]) => {
+    database.queries.push({ text, values });
+    if (text.includes("FROM production_releases")) return { rows: [release], rowCount: 1 };
+    return { rows: [project], rowCount: 1 };
+  });
+  setUpHappyActionsStatus();
+  const productionRun = { id: 222, name: "CD", headBranch: "production", headSha: masterSha, event: "push", status: "in_progress", conclusion: null, createdAt: "2026-01-02T00:01:00Z", htmlUrl: "https://x/222" };
+  findWorkflowRun.mockImplementation(async (_owner: string, _repo: string, filter: { branch: string; createdAfter?: string }) => {
+    if (filter.branch === "master") return masterRun;
+    if (filter.branch === "production") {
+      expect(filter.createdAfter).toBe(release.created_at);
+      return productionRun;
+    }
+    throw new Error(`unexpected branch ${filter.branch}`);
+  });
+  getWorkflowRunJobs.mockImplementation(async (_owner: string, _repo: string, runId: number) => {
+    if (runId === masterRun.id) return [{ name: "docker-image", status: "completed", conclusion: "success", htmlUrl: "https://x/job" }];
+    if (runId === productionRun.id) return [
+      { name: "migrations-production", status: "completed", conclusion: "success", htmlUrl: "https://x/mj" },
+      { name: "deploy-production", status: "in_progress", conclusion: null, htmlUrl: "https://x/dj" },
+    ];
+    throw new Error(`unexpected run ${runId}`);
+  });
+
+  await runProviderJob({
+    id: "job-sync-2", type: "deployment.sync_status",
+    idempotency_key: "g07:deployment.sync_status:project-va:once2",
+    payload_json: { actor_id: "admin-1", project_id: "project-va" },
+  } as any, database as any);
+
+  const snapshotUpsert = database.queries.find((q) => q.text.includes("deployment_status_snapshots"));
+  expect(snapshotUpsert!.values).toEqual([
+    "project-va", masterSha, masterRun.id, "success", "success", true, "sha-" + masterSha, "b".repeat(40), "behind_master",
+    productionRun.id, null, "success", null,
+  ]);
+  const releaseUpdate = database.queries.find((q) => q.text.includes("UPDATE production_releases") && q.text.includes("health_checked_at"));
+  expect(releaseUpdate).toBeDefined();
+  expect(releaseUpdate!.values).toEqual(["release-inflight", "deploying", productionRun.id]);
 });
 
 test("promote_check (github_actions_jobs mechanism) reports ineligible with docker_image_job_missing when the job isn't in the run", async () => {
