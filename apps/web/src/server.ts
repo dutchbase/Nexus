@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
 import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
-  buildExecutionPrompt, checkPlanApprovalGate, enqueueJob, getPullRequestMergeSettings, getSystemAiSettings,
+  buildExecutionPrompt, checkPlanApprovalGate, derivePolicyStatus, ensurePolicySnapshot, enqueueJob, getPullRequestMergeSettings, getSystemAiSettings,
   globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
   unionSkills, validateAiSelection, providerForModel, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
@@ -22,7 +22,7 @@ import {
   resolveSkills, snapshotSkillSet, snapshotSkills, SkillResolutionError, validateFilesystemPath,
 } from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
-import { cronWebhookSecretReferencePattern, normalizeAgentStartPath, validateAgentStartPath, validateDeploymentConfig, validateProject } from "@dcc/project-config";
+import { cronWebhookSecretReferencePattern, getGithubPolicyEnforcementMode, normalizeAgentStartPath, validateAgentStartPath, validateDeploymentConfig, validateProject } from "@dcc/project-config";
 import { adminPage, escapeHtml, loginPage, publicFormPage, styles, submittedPage } from "./ui.ts";
 import { allowedTemplateVariables, fieldsFor, lineDiff, validStatuses } from "./pages/shared.ts";
 import * as dashboardPage from "./pages/dashboard.ts";
@@ -996,8 +996,9 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const [, pullRequestId, action] = pullRequestActionMatch;
     const body = await bodyOf(request);
     const pullRequest = (await pool.query(
-      `SELECT pr.*,ea.agent_run_id,ar.metadata_json
+      `SELECT pr.*,ea.agent_run_id,ar.metadata_json,p.config_json,p.github_owner,p.github_repository
        FROM pull_requests pr
+       JOIN projects p ON p.id=pr.project_id
        LEFT JOIN execution_attempts ea ON ea.id=pr.execution_attempt_id
        LEFT JOIN agent_runs ar ON ar.id=ea.agent_run_id WHERE pr.id=$1`,
       [pullRequestId],
@@ -1010,11 +1011,64 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       await pool.query("UPDATE pull_requests SET internal_review_state='reviewed',updated_at=now() WHERE id=$1", [pullRequest.id]);
     } else if (action === "approve") {
       const expectedHeadSha = typeof body.expected_head_sha === "string" ? body.expected_head_sha.trim() : "";
-      const policySnapshotId = typeof body.policy_snapshot_id === "string" ? body.policy_snapshot_id.trim() : "";
       const { requireFreshPolicyBinding } = await getPullRequestMergeSettings(pool);
-      if (!expectedHeadSha || expectedHeadSha !== pullRequest.head_sha || (requireFreshPolicyBinding && (!policySnapshotId || pullRequest.policy_stale
-        || policySnapshotId !== pullRequest.current_policy_snapshot_id))) {
+      if (!expectedHeadSha || expectedHeadSha !== pullRequest.head_sha) {
         return json(response, 409, { error: "pull request policy binding is missing or stale" });
+      }
+      let policySnapshotId = pullRequest.current_policy_snapshot_id as string | null;
+      if (requireFreshPolicyBinding) {
+        const enforcementMode = getGithubPolicyEnforcementMode(pullRequest.config_json);
+        let policyStale = Boolean(pullRequest.policy_stale);
+        let policyComplete = pullRequest.policy_complete ?? null;
+        let reviewState = pullRequest.review_state ?? null;
+        let checkState = pullRequest.check_state ?? null;
+        let policyErrorCode = pullRequest.policy_error_code ?? null;
+        let policyRetryAfter = pullRequest.policy_retry_after ?? null;
+        // Closes the common "policy sync job hasn't run once yet" race: an
+        // unprotected repo with no snapshot gets a real, synchronous check
+        // right now instead of waiting for the next poll cycle. Never do this
+        // for a project that explicitly requires enforcement — a missing
+        // snapshot must stay blocking there regardless of what a fresh fetch
+        // would show.
+        if (!policySnapshotId && enforcementMode !== "required") {
+          const synced = await ensurePolicySnapshot(pool, {
+            pullRequestId: pullRequest.id, owner: pullRequest.github_owner,
+            repo: pullRequest.github_repository, number: pullRequest.number,
+          });
+          if (synced.outcome === "synced") {
+            policySnapshotId = synced.snapshotId;
+            // ensurePolicySnapshot wrote review_state/check_state/policy_complete
+            // to the row but didn't return them — re-read rather than trust the
+            // in-memory pullRequest, which was fetched before the sync ran.
+            const refreshed = (await pool.query(
+              "SELECT review_state, check_state, policy_complete FROM pull_requests WHERE id=$1",
+              [pullRequest.id],
+            )).rows[0];
+            reviewState = refreshed?.review_state ?? null;
+            checkState = refreshed?.check_state ?? null;
+            policyComplete = refreshed?.policy_complete ?? null;
+            policyStale = false;
+            policyErrorCode = null;
+            policyRetryAfter = null;
+          } else {
+            policyErrorCode = synced.errorCode;
+            policyRetryAfter = synced.retryAfter;
+          }
+        }
+        const status = derivePolicyStatus({
+          headSha: pullRequest.head_sha ?? null,
+          currentPolicySnapshotId: policySnapshotId,
+          policyStale,
+          policyComplete,
+          reviewState,
+          checkState,
+          policyErrorCode,
+          policyRetryAfter,
+          enforcementMode,
+        });
+        if (!status.allowsMerge) {
+          return json(response, 409, { error: `pull request policy binding is missing or stale: ${status.label}` });
+        }
       }
       const job = await enqueueJob({
         type: "github.merge_pull_request",
