@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
@@ -47,5 +48,12 @@ describe("open-source release hygiene", () => {
     const runbook = readFileSync(new URL("docs/DEPLOYMENT-RUNBOOK.md", root), "utf8");
     expect(runbook).not.toContain("vps-nederland");
     expect(runbook).not.toContain("/home/deploy/");
+  });
+
+  it("does not track internal AI-build scaffolding referencing the operator's private home directory", () => {
+    const tracked = execFileSync("git", ["ls-files"], { cwd: new URL(".", root), encoding: "utf8" });
+    const lfdFiles = tracked.split("\n").filter((line) => line.startsWith(".lfd/"));
+    expect(lfdFiles).toEqual([]);
+    expect(tracked).not.toContain("prompts/lfd-dev-control-center.md");
   });
 });
