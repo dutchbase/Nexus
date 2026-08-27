@@ -1,4 +1,4 @@
-export { checkImageExists, type ImageExistenceResult } from "./registry.ts";
+export { checkImageExists, type ImageExistenceResult, checkImageExistsDetailed, type ImageExistenceDetailedResult } from "./registry.ts";
 
 export type CreatePullRequestInput = {
   owner: string;

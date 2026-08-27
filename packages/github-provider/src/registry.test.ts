@@ -1,5 +1,5 @@
 import { expect, test, vi, beforeEach } from "vitest";
-import { checkImageExists } from "./registry.ts";
+import { checkImageExists, checkImageExistsDetailed } from "./registry.ts";
 
 beforeEach(() => { vi.restoreAllMocks(); });
 
@@ -53,6 +53,46 @@ test("still throws on a genuinely unexpected anonymous status with no GHCR_READ_
     .mockResolvedValueOnce(new Response(JSON.stringify({ token: "anon-token" }), { status: 200 }))
     .mockResolvedValueOnce(new Response(null, { status: 418 }));
   await expect(checkImageExists("ghcr.io", "acme/jobs-platform", "sha-deadbeef")).rejects.toThrow(/status 418/);
+});
+
+test("checkImageExistsDetailed returns state:exists with digest on 200", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(new Response(JSON.stringify({ token: "anon-token" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(null, { status: 200, headers: { "docker-content-digest": "sha256:abc" } }));
+  const result = await checkImageExistsDetailed("ghcr.io", "dutchbase/va-jobs-platform", "sha-" + "a".repeat(40));
+  expect(result).toEqual({ state: "exists", digest: "sha256:abc" });
+});
+
+test("checkImageExistsDetailed returns state:not_exists on 404", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(new Response(JSON.stringify({ token: "anon-token" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(null, { status: 404 }));
+  const result = await checkImageExistsDetailed("ghcr.io", "dutchbase/va-jobs-platform", "sha-" + "a".repeat(40));
+  expect(result.state).toBe("not_exists");
+});
+
+test("checkImageExistsDetailed returns state:unknown (not not_exists) on a 429", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(new Response(JSON.stringify({ token: "anon-token" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(null, { status: 429 }));
+  const result = await checkImageExistsDetailed("ghcr.io", "dutchbase/va-jobs-platform", "sha-" + "a".repeat(40));
+  expect(result.state).toBe("unknown");
+  expect(result.reason).toBeTruthy();
+});
+
+test("checkImageExistsDetailed returns state:unknown on a 5xx", async () => {
+  vi.spyOn(globalThis, "fetch")
+    .mockResolvedValueOnce(new Response(JSON.stringify({ token: "anon-token" }), { status: 200 }))
+    .mockResolvedValueOnce(new Response(null, { status: 503 }));
+  const result = await checkImageExistsDetailed("ghcr.io", "dutchbase/va-jobs-platform", "sha-" + "a".repeat(40));
+  expect(result.state).toBe("unknown");
+});
+
+test("checkImageExistsDetailed never throws — a fetch rejection is reported as state:unknown", async () => {
+  vi.spyOn(globalThis, "fetch").mockRejectedValueOnce(new Error("network down"));
+  const result = await checkImageExistsDetailed("ghcr.io", "dutchbase/va-jobs-platform", "sha-" + "a".repeat(40));
+  expect(result.state).toBe("unknown");
+  expect(result.reason).toBe("network down");
 });
 
 test("sends the multi-media-type accept header covering OCI and Docker manifest/index formats", async () => {
