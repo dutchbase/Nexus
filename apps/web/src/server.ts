@@ -22,7 +22,7 @@ import {
   resolveSkills, snapshotSkillSet, snapshotSkills, SkillResolutionError, validateFilesystemPath,
 } from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
-import { normalizeAgentStartPath, validateAgentStartPath, validateProject } from "@dcc/project-config";
+import { normalizeAgentStartPath, validateAgentStartPath, validateDeploymentConfig, validateProject } from "@dcc/project-config";
 import { adminPage, escapeHtml, loginPage, publicFormPage, styles, submittedPage } from "./ui.ts";
 import { allowedTemplateVariables, fieldsFor, lineDiff, validStatuses } from "./pages/shared.ts";
 import * as dashboardPage from "./pages/dashboard.ts";
@@ -1466,6 +1466,10 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (Object.hasOwn(body, "agent_start_path")) {
       const agentStartPathErrors = await validateAgentStartPath(body.agent_start_path);
       if (agentStartPathErrors.length) return json(response, 400, { error: agentStartPathErrors.join("; ") });
+    }
+    if (body.config_json && typeof body.config_json === "object" && "deployment" in body.config_json) {
+      const deploymentErrors = validateDeploymentConfig(body.config_json.deployment);
+      if (deploymentErrors.length) return json(response, 400, { error: deploymentErrors.join("; ") });
     }
     const allowed = ["name", "description", "enabled", "repository_path", "agent_start_path", "github_owner", "github_repository", "default_branch", "config_json"];
     const entries = Object.entries(body).filter(([key]) => allowed.includes(key)).map(([key, value]) => [key, key === "agent_start_path" ? agentStartPath : value]);
