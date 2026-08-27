@@ -66,6 +66,15 @@ describe("repository dirty diagnostics", () => {
     expect(html).toMatch(/repository status unavailable|inspection.*failed/i);
   });
 
+  test("dirty project with no stored detail never claims there are no local changes", () => {
+    const project = { ...baseProject, health_status: "repository_dirty", health_detail_json: null };
+    const html = repositoryDiagnosticsPanel(project);
+    expect(html).not.toContain("No local changes");
+    expect(html).toMatch(/not available yet/i);
+    // The page banner still says blocked, so the panel must agree with it.
+    expect(dirtyBanner(project)).toContain("blocked");
+  });
+
   test("clean project shows no diagnostics section", () => {
     const project = { ...baseProject, health_status: "healthy", health_detail_json: null };
     expect(dirtyBanner(project)).toBe("");

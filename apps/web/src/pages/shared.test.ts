@@ -15,6 +15,11 @@ describe("status tone scale", () => {
     expect(statusTone("Needs Information")).toBe("warn");
   });
 
+  it("colors both project health failures alarmingly, never muted", () => {
+    expect(statusTone("repository_dirty")).toBe("danger");
+    expect(statusTone("inspection_error")).toBe("danger");
+  });
+
   it("keeps organizational states quiet", () => {
     expect(statusTone("Archived")).toBe("muted");
     expect(statusTone("Cancelled")).toBe("muted");

@@ -106,6 +106,17 @@ export function repositoryDiagnosticsPanel(project: any): string {
     </div></section>`;
   }
 
+  // Dirty but with no stored detail: every row last validated before
+  // health_detail_json existed. Saying "no local changes" here would flatly
+  // contradict the blocking banner above it.
+  if (project.health_status === "repository_dirty") {
+    return `${open}
+      <div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px">
+        <strong>Local changes are blocking planning and execution.</strong> <em>The per-file breakdown is not available yet — recheck the repository to collect it.</em>
+      </div>
+    </div></section>`;
+  }
+
   return `${open}
     <p style="color:var(--text3);font-size:13px">No local changes blocking planning or execution.</p>
   </div></section>`;

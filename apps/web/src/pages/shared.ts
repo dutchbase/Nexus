@@ -30,7 +30,7 @@ const stateTones: Record<string, string> = {
   passed: "ok", skipped: "muted",
   enabled: "ok", disabled: "muted", active: "ok", inactive: "muted", historic: "muted",
   captured: "ok", legacy: "muted", unpriced: "warn", unavailable: "warn",
-  healthy: "ok", repository_dirty: "danger", stale: "warn", unknown: "muted",
+  healthy: "ok", repository_dirty: "danger", inspection_error: "danger", stale: "warn", unknown: "muted",
   published: "ok", draft: "muted", placeholder: "muted",
   approved: "ok", rejected: "danger", error: "danger", resolved: "ok", open: "info", closed: "muted",
   unhealthy: "danger", unreachable: "warn", "pending_approval": "warn", deploying: "run",

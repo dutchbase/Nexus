@@ -361,6 +361,8 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
               body+='<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px;margin-bottom:14px"><strong>Local changes are blocking planning and execution.</strong> <em>'+esc(healthSummaryLine(detail))+'</em></div>';
               body+='<div data-diagnostics-files>'+groupedFileList(detail.files)+'</div>';
               body+='<div style="margin-top:14px"><p style="font-size:12.5px;color:var(--text3);margin-bottom:6px">Resolve on the server — the platform never resets a checkout automatically:</p>'+resolutionGuidance(project.repository_path||el.dataset.repositoryPath||"")+'</div>';
+            }else if(project.health_status==="repository_dirty"){
+              body+='<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px"><strong>Local changes are blocking planning and execution.</strong> <em>The per-file breakdown is not available yet — recheck the repository to collect it.</em></div>';
             }else{
               body+='<p style="color:var(--text3);font-size:13px">No local changes blocking planning or execution.</p>';
             }
