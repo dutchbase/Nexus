@@ -29,12 +29,20 @@ async function renderPr(item: any, reviews: any[] = [], requireFreshPolicyBindin
   return (await prs.render(new URL("http://test/admin/pull-requests/project/7"), session, {}))!.body;
 }
 
+// Matches the Approve & merge element itself, so "is it disabled?" is answered by the
+// button's own attributes rather than by a substring that may not exist either way.
+function approveButton(body: string) {
+  const match = body.match(/<button[^>]*\sdata-pr-approve(?:\s[^>]*)?>/);
+  if (!match) throw new Error("no Approve & merge button rendered");
+  return match[0];
+}
+
 beforeEach(() => query.mockReset());
 
 test("renders a fresh GitHub binding and sends exactly its visible values", async () => {
   const body = await renderPr({ ...pr, policy_synced_at: "2026-08-04T10:05:00Z", requested_reviewers: [{ type: "team", name: "release" }] });
 
-  expect(body).toContain("GitHub: Current");
+  expect(body).toContain("GitHub: Policies satisfied");
   expect(body).toContain("GitHub: reviews");
   expect(body).toContain("GitHub: checks");
   expect(body).toContain("Requested reviewers");
@@ -42,25 +50,62 @@ test("renders a fresh GitHub binding and sends exactly its visible values", asyn
   expect(body).toContain("Policy snapshot");
   expect(body).toContain("snapshot-1");
   expect(body).toContain('data-pr-head-sha="head-sha" data-pr-policy-snapshot-id="snapshot-1"');
-  expect(body).not.toContain('data-pr-approve disabled');
+  expect(approveButton(body)).not.toContain(" disabled");
 });
 
 test("labels stale rate-limited evidence and disables merge with its exact reason", async () => {
   const body = await renderPr({ ...pr, policy_stale: true, policy_error_code: "rate_limited", policy_retry_after: "2026-08-04T10:10:00Z" });
 
   expect(body).toContain("GitHub: Stale: rate_limited; retry after");
-  expect(body).toContain('data-pr-approve data-pr-head-sha="head-sha" data-pr-policy-snapshot-id="snapshot-1" disabled title="GitHub policy is stale"');
+  expect(body).toContain('data-pr-approve data-pr-head-sha="head-sha" data-pr-policy-snapshot-id="snapshot-1" disabled title="GitHub: Stale: rate_limited; retry after');
 });
 
-test("labels missing snapshot and head bindings as unavailable", async () => {
-  const noSnapshot = await renderPr({ ...pr, current_policy_snapshot_id: null });
-  const noHead = await renderPr({ ...pr, head_sha: null });
+test("labels a missing snapshot as unavailable when enforcement mode is required", async () => {
+  const body = await renderPr({
+    ...pr, current_policy_snapshot_id: null, config_json: { github_policy: { enforcement: "required" } },
+  });
 
-  expect(noSnapshot).toContain("GitHub: Unavailable: policy snapshot missing");
-  expect(noSnapshot).toContain("Policy snapshot</dt><dd class=\"mono\">Unavailable");
-  expect(noSnapshot).toContain('disabled title="GitHub policy snapshot is unavailable"');
-  expect(noHead).toContain("GitHub: Unavailable: head SHA missing");
-  expect(noHead).toContain('disabled title="GitHub head SHA is unavailable"');
+  expect(body).toContain("GitHub: Unavailable: policy snapshot missing");
+  expect(body).toContain("Policy snapshot</dt><dd class=\"mono\">Unavailable");
+  expect(body).toContain('disabled title="GitHub: Unavailable: policy snapshot missing"');
+});
+
+test.each(["auto", "optional"] as const)("keeps Approve & merge clickable for a never-synced PR under %s enforcement", async (enforcement) => {
+  const body = await renderPr({
+    ...pr, current_policy_snapshot_id: null, policy_error_code: null,
+    config_json: enforcement === "auto" ? {} : { github_policy: { enforcement } },
+  });
+
+  // /approve runs the live GitHub check itself, so blocking here would strand the PR
+  // until the next poll cycle — the whole point of the on-demand sync.
+  expect(approveButton(body)).not.toContain(" disabled");
+  expect(body).toContain("GitHub: Not verified yet; checked on approve");
+});
+
+test("still blocks a never-synced PR whose last policy fetch failed", async () => {
+  const body = await renderPr({
+    ...pr, current_policy_snapshot_id: null, policy_error_code: "rate_limited", config_json: {},
+  });
+
+  expect(approveButton(body)).toContain(" disabled");
+  expect(body).toContain("GitHub: Unavailable: rate_limited");
+});
+
+test("labels a missing snapshot as no applicable policies when enforcement mode is auto and review/check states are not_required", async () => {
+  const body = await renderPr({
+    ...pr, current_policy_snapshot_id: "snap-1", policy_complete: true, policy_stale: false,
+    review_state: "not_required", check_state: "not_required", config_json: {},
+  });
+
+  expect(body).toContain("GitHub: No applicable policies");
+  expect(approveButton(body)).not.toContain(" disabled");
+});
+
+test("labels missing head SHA as unavailable regardless of enforcement mode", async () => {
+  const body = await renderPr({ ...pr, head_sha: null });
+
+  expect(body).toContain("GitHub: Unavailable: head SHA missing");
+  expect(body).toContain('disabled title="GitHub: Unavailable: head SHA missing"');
 });
 
 test("omits the policy snapshot and allows a matching head when enforcement is disabled", async () => {
@@ -71,14 +116,34 @@ test("omits the policy snapshot and allows a matching head when enforcement is d
 });
 
 test.each([
-  [{ policy_complete: false }, "GitHub: Incomplete", "GitHub policy is incomplete"],
-  [{ review_state: "pending" }, "GitHub: Current", "GitHub reviews are pending"],
-  [{ check_state: "failure" }, "GitHub: Current", "GitHub checks are failure"],
-])("disables merge for %o with the exact policy reason", async (changes, status, reason) => {
+  [{ policy_complete: false }, "GitHub: Incomplete"],
+  [{ review_state: "pending" }, "GitHub: Required: reviews pending"],
+  [{ check_state: "failure" }, "GitHub: Required: checks failed"],
+])("disables merge for %o with the exact policy reason", async (changes, status) => {
   const body = await renderPr({ ...pr, ...changes });
 
   expect(body).toContain(status);
-  expect(body).toContain(`disabled title="${reason}"`);
+  expect(body).toContain(`disabled title="${status}"`);
+});
+
+test("a protected repo with pending required checks still shows Approve & merge disabled", async () => {
+  const body = await renderPr({
+    ...pr, current_policy_snapshot_id: "snap-1", policy_complete: true, policy_stale: false,
+    review_state: "approved", check_state: "pending", config_json: {},
+  });
+
+  expect(body).toContain("GitHub: Required: checks pending");
+  expect(body).toContain('disabled title="GitHub: Required: checks pending"');
+});
+
+test("a protected repo with changes requested still shows Approve & merge disabled", async () => {
+  const body = await renderPr({
+    ...pr, current_policy_snapshot_id: "snap-1", policy_complete: true, policy_stale: false,
+    review_state: "changes_requested", check_state: "success", config_json: {},
+  });
+
+  expect(body).toContain("GitHub: Required: changes requested");
+  expect(body).toContain('disabled title="GitHub: Required: changes requested"');
 });
 
 test("escapes persisted review output and errors", async () => {

@@ -37,6 +37,18 @@ export function normalizeAgentStartPath(value: unknown) {
   return typeof value === "string" && value.trim() ? value.trim() : null;
 }
 
+const GITHUB_POLICY_ENFORCEMENT_MODES = new Set(["auto", "required", "optional"]);
+
+export function getGithubPolicyEnforcementMode(configJson: unknown): "auto" | "required" | "optional" {
+  if (!configJson || typeof configJson !== "object") return "auto";
+  const githubPolicy = (configJson as Record<string, unknown>).github_policy;
+  if (!githubPolicy || typeof githubPolicy !== "object") return "auto";
+  const enforcement = (githubPolicy as Record<string, unknown>).enforcement;
+  return typeof enforcement === "string" && GITHUB_POLICY_ENFORCEMENT_MODES.has(enforcement)
+    ? (enforcement as "auto" | "required" | "optional")
+    : "auto";
+}
+
 export async function validateAgentStartPath(path: unknown) {
   if (path === null || path === undefined || path === "") return [];
   if (typeof path !== "string") return ["planning agent start path must be a string"];

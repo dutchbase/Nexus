@@ -1,8 +1,9 @@
 import { escapeHtml, fmtDateTime, pool, prFreshness, renderMarkdown, shortRef, statusBadge } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
-import { aiModels, reasoningLevels } from "@dcc/domain";
+import { aiModels, derivePolicyStatus, reasoningLevels } from "@dcc/domain";
+import { getGithubPolicyEnforcementMode } from "@dcc/project-config";
 
-const detailQuery = `SELECT pr.*,p.name project_name,p.slug project_slug,t.ticket_number,t.title ticket_title,t.status ticket_status,t.approved_plan_hash,
+const detailQuery = `SELECT pr.*,p.name project_name,p.slug project_slug,p.config_json,t.ticket_number,t.title ticket_title,t.status ticket_status,t.approved_plan_hash,
               pv.content_markdown approved_plan,ar.id run_id,ar.model run_model,ar.reasoning_level run_reasoning_level,
               ar.metadata_json,ea.result_commit,jsonb_array_length(ss.skills_json) skills_applied
        FROM pull_requests pr JOIN projects p ON p.id=pr.project_id
@@ -36,25 +37,33 @@ function validationCard(validation: any): string {
 
 export type BulkMergeClassification = { eligible: true } | { eligible: false; reason: string };
 
-// TODO(plan 01 dependency): once packages/domain/src/pull-request-policy-status.ts
-// (derivePolicyStatus) lands, replace this function's policy-check block with a call
-// to it instead of re-deriving the same logic — see plans/09-pull-requests-bulk-actions.md
-// Task 3 Global Constraints for why this duplication is temporary and intentional.
+// Delegates to the shared derivePolicyStatus() (packages/domain/src/pull-request-policy-status.ts,
+// introduced by plan 01) so bulk merge eligibility and the PR detail page's Approve & merge
+// button always agree on policy state — the only bulk-specific additions are the
+// state/draft/conflict checks, which the single-PR button doesn't need since GitHub's own
+// merge endpoint already rejects those synchronously for a single click.
 export function classifyBulkMergeEligibility(row: {
   state: string; head_sha: string | null; current_policy_snapshot_id: string | null;
   policy_stale: boolean; policy_complete: boolean | null; review_state: string | null;
   check_state: string | null; is_draft: boolean | null; merge_conflicts: boolean | null;
+  policy_error_code?: string | null; policy_retry_after?: string | Date | null;
 }, requireFreshPolicyBinding: boolean): BulkMergeClassification {
   if (row.state !== "open") return { eligible: false, reason: `pull request is ${row.state}, not open` };
   if (row.is_draft) return { eligible: false, reason: "pull request is a draft" };
   if (row.merge_conflicts) return { eligible: false, reason: "pull request has merge conflicts" };
-  if (!row.head_sha) return { eligible: false, reason: "GitHub head SHA is unavailable" };
-  if (requireFreshPolicyBinding && !row.current_policy_snapshot_id) return { eligible: false, reason: "GitHub policy snapshot is unavailable" };
-  if (requireFreshPolicyBinding && row.policy_stale) return { eligible: false, reason: "GitHub policy is stale" };
-  if (requireFreshPolicyBinding && !row.policy_complete) return { eligible: false, reason: "GitHub policy is incomplete" };
-  if (requireFreshPolicyBinding && !["approved", "not_required"].includes(row.review_state ?? "")) return { eligible: false, reason: `GitHub reviews are ${row.review_state ?? "unknown"}` };
-  if (requireFreshPolicyBinding && !["success", "not_required"].includes(row.check_state ?? "")) return { eligible: false, reason: `GitHub checks are ${row.check_state ?? "unknown"}` };
-  return { eligible: true };
+  // requireFreshPolicyBinding is the global merge-settings kill switch (distinct from the
+  // per-project auto/required/optional enforcement mode derivePolicyStatus otherwise reads
+  // from config_json, which this row shape doesn't carry) — when it's off, no policy check
+  // runs at all, matching evaluateApproveEligibility's identical short-circuit for the
+  // single-PR route so bulk and single-PR merge never diverge on this setting.
+  if (!requireFreshPolicyBinding) return { eligible: true };
+  const status = derivePolicyStatus({
+    headSha: row.head_sha, currentPolicySnapshotId: row.current_policy_snapshot_id, policyStale: row.policy_stale,
+    policyComplete: row.policy_complete, reviewState: row.review_state, checkState: row.check_state,
+    policyErrorCode: row.policy_error_code ?? null, policyRetryAfter: row.policy_retry_after ?? null,
+    enforcementMode: "required",
+  });
+  return status.allowsMerge ? { eligible: true } : { eligible: false, reason: status.label };
 }
 
 // Shared by both the uuid route (/admin/pull-requests/{uuid}) and the slug
@@ -70,29 +79,29 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[], r
   const canStartRepair = Boolean(item.run_id);
   const button = (attr: string, label: string, allowed: boolean, deniedReason: string, extraClass = "") =>
     `<button class="button${extraClass}" type="button" ${attr}${allowed ? "" : " disabled"} title="${allowed ? "" : escapeHtml(deniedReason)}">${label}</button>`;
-  const policyIssue = !item.current_policy_snapshot_id
-    ? "Unavailable: policy snapshot missing"
-    : !item.head_sha
-    ? "Unavailable: head SHA missing"
-    : item.policy_stale
-    ? `Stale${item.policy_error_code ? `: ${item.policy_error_code}` : ""}${item.policy_retry_after ? `; retry after ${new Date(item.policy_retry_after).toLocaleString("nl-NL")}` : ""}`
-    : !item.policy_complete
-    ? `Incomplete${item.policy_error_code ? `: ${item.policy_error_code}` : ""}`
-    : "Current";
-  const mergeBlocker = !item.head_sha
-    ? "GitHub head SHA is unavailable"
-    : requireFreshPolicyBinding && !item.current_policy_snapshot_id
-    ? "GitHub policy snapshot is unavailable"
-    : requireFreshPolicyBinding && item.policy_stale
-    ? "GitHub policy is stale"
-    : requireFreshPolicyBinding && !item.policy_complete
-    ? "GitHub policy is incomplete"
-    : requireFreshPolicyBinding && !["approved", "not_required"].includes(item.review_state)
-    ? `GitHub reviews are ${item.review_state ?? "unknown"}`
-    : requireFreshPolicyBinding && !["success", "not_required"].includes(item.check_state)
-    ? `GitHub checks are ${item.check_state ?? "unknown"}`
-    : "";
-  const policyAllowsMerge = !mergeBlocker;
+  const policyStatus = derivePolicyStatus({
+    headSha: item.head_sha ?? null,
+    currentPolicySnapshotId: item.current_policy_snapshot_id ?? null,
+    policyStale: Boolean(item.policy_stale),
+    policyComplete: item.policy_complete ?? null,
+    reviewState: item.review_state ?? null,
+    checkState: item.check_state ?? null,
+    policyErrorCode: item.policy_error_code ?? null,
+    policyRetryAfter: item.policy_retry_after ?? null,
+    enforcementMode: getGithubPolicyEnforcementMode(item.config_json),
+  });
+  const policyIssue = policyStatus.label;
+  // requireFreshPolicyBinding is a global kill-switch (independent of the
+  // per-project enforcement mode above): when off, only a missing head SHA
+  // blocks the merge button, exactly as before this shared derivation existed.
+  // resolvableOnApprove keeps a never-synced PR clickable: /approve runs the live
+  // GitHub check itself and answers with the real reason, so disabling here would
+  // strand the PR until the next poll cycle.
+  const policyAllowsMerge = requireFreshPolicyBinding
+    ? policyStatus.allowsMerge || policyStatus.resolvableOnApprove
+    : Boolean(item.head_sha);
+  const policyTone = !policyAllowsMerge ? "warn" : policyStatus.resolvableOnApprove ? "info" : "ok";
+  const mergeBlocker = policyAllowsMerge ? "" : `GitHub: ${policyStatus.label}`;
   const requestedReviewers = Array.isArray(item.requested_reviewers)
     ? item.requested_reviewers.map((reviewer: any) => `${reviewer.type === "team" ? "team " : ""}${reviewer.name ?? "unknown"}`).join(", ") || "None"
     : "Unknown";
@@ -133,7 +142,7 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[], r
       <span class="status ${stateBadge.cls}">${escapeHtml(stateBadge.label)}</span>
       <span class="status ${reviewBadge.cls}">${escapeHtml(reviewBadge.label)}</span>
       <span class="status ${aiBadge.cls}" data-ai-review-status="${escapeHtml(latestAiReview?.status ?? "")}">${escapeHtml(aiBadge.label)}</span>
-      <span class="status ${policyAllowsMerge ? "ok" : "warn"}">GitHub: ${escapeHtml(policyIssue)}</span>
+      <span class="status ${policyTone}">GitHub: ${escapeHtml(policyIssue)}</span>
       ${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}
       ${conflictResolutionBadge ? `<span class="status ${conflictResolutionBadge.cls}" data-conflict-resolution-status="${escapeHtml(latestConflictResolution.status)}">${escapeHtml(conflictResolutionBadge.label)}</span>` : ""}
       ${item.merge_conflicts ? button("data-pr-resolve-conflicts", "Resolve conflicts (AI)", true, "") : ""}
@@ -206,7 +215,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     else if (tab === "closed") conditions.push("pr.state='closed' AND pr.merged_at IS NULL");
     const [pullRequests, repositories, lastSynced] = await Promise.all([
       pool.query(
-        `SELECT pr.*,p.name project_name,p.slug project_slug,t.ticket_number,t.status ticket_status,
+        `SELECT pr.*,p.name project_name,p.slug project_slug,p.config_json,t.ticket_number,t.status ticket_status,
                 (SELECT status FROM pr_ai_reviews WHERE pull_request_id=pr.id ORDER BY created_at DESC LIMIT 1) AS latest_ai_review_status
          FROM pull_requests pr JOIN projects p ON p.id=pr.project_id
          LEFT JOIN tickets t ON t.id=pr.ticket_id

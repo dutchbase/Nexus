@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
 import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
-  allowlistMismatches, buildExecutionPrompt, checkPlanApprovalGate, enqueueJob, findAllowlistEntry, getPullRequestMergeSettings, getSystemAiSettings,
+  allowlistMismatches, buildExecutionPrompt, checkPlanApprovalGate, derivePolicyStatus, ensurePolicySnapshot, enqueueJob, findAllowlistEntry, getPullRequestMergeSettings, getSystemAiSettings,
   globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
   unionSkills, validateAiSelection, providerForModel, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
@@ -22,7 +22,7 @@ import {
   resolveSkills, snapshotSkillSet, snapshotSkills, SkillResolutionError, validateFilesystemPath,
 } from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
-import { cronWebhookSecretReferencePattern, normalizeAgentStartPath, validateAgentStartPath, validateDeploymentConfig, validateProject } from "@dcc/project-config";
+import { cronWebhookSecretReferencePattern, getGithubPolicyEnforcementMode, normalizeAgentStartPath, validateAgentStartPath, validateDeploymentConfig, validateProject } from "@dcc/project-config";
 import { adminPage, escapeHtml, loginPage, publicFormPage, styles, submittedPage } from "./ui.ts";
 import { allowedTemplateVariables, fieldsFor, lineDiff, validStatuses } from "./pages/shared.ts";
 import * as dashboardPage from "./pages/dashboard.ts";
@@ -273,12 +273,70 @@ async function evaluateApproveEligibility(
   // Bulk path: derive "expected" values from the freshly-fetched row itself — there is
   // no browser-rendered snapshot to compare-and-swap against for a list-page bulk action.
   const expectedHeadSha = provided?.expectedHeadSha ?? pullRequest.head_sha ?? "";
-  const policySnapshotId = provided?.policySnapshotId ?? pullRequest.current_policy_snapshot_id ?? "";
-  if (!expectedHeadSha || expectedHeadSha !== pullRequest.head_sha || (requireFreshPolicyBinding && (!policySnapshotId || pullRequest.policy_stale
-    || policySnapshotId !== pullRequest.current_policy_snapshot_id))) {
+  if (!expectedHeadSha || expectedHeadSha !== pullRequest.head_sha) {
     return { eligible: false, reason: "pull request policy binding is missing or stale" };
   }
-  return { eligible: true, expectedHeadSha, policySnapshotId: requireFreshPolicyBinding ? policySnapshotId : undefined };
+  if (!requireFreshPolicyBinding) {
+    return { eligible: true, expectedHeadSha, policySnapshotId: undefined };
+  }
+  const enforcementMode = getGithubPolicyEnforcementMode(pullRequest.config_json);
+  let policySnapshotId = pullRequest.current_policy_snapshot_id as string | null;
+  let policyStale = Boolean(pullRequest.policy_stale);
+  let policyComplete = pullRequest.policy_complete ?? null;
+  let reviewState = pullRequest.review_state ?? null;
+  let checkState = pullRequest.check_state ?? null;
+  let policyErrorCode = pullRequest.policy_error_code ?? null;
+  let policyRetryAfter = pullRequest.policy_retry_after ?? null;
+  // Closes the common "policy sync job hasn't run once yet" race: an
+  // unprotected repo with no snapshot gets a real, synchronous check
+  // right now instead of waiting for the next poll cycle. Never do this
+  // for a project that explicitly requires enforcement — a missing
+  // snapshot must stay blocking there regardless of what a fresh fetch
+  // would show.
+  // projects is outer-joined (pull_requests.project_id is nullable), so a PR
+  // with no owning project has nothing to fetch against and falls through to
+  // derivePolicyStatus, which refuses it.
+  if (!policySnapshotId && enforcementMode !== "required"
+    && pullRequest.github_owner && pullRequest.github_repository) {
+    const synced = await ensurePolicySnapshot(pool, {
+      pullRequestId: pullRequest.id, owner: pullRequest.github_owner,
+      repo: pullRequest.github_repository, number: pullRequest.number,
+    });
+    if (synced.outcome === "synced") {
+      policySnapshotId = synced.snapshotId;
+      // ensurePolicySnapshot wrote review_state/check_state/policy_complete
+      // to the row but didn't return them — re-read rather than trust the
+      // in-memory pullRequest, which was fetched before the sync ran.
+      const refreshed = (await pool.query(
+        "SELECT review_state, check_state, policy_complete FROM pull_requests WHERE id=$1",
+        [pullRequest.id],
+      )).rows[0];
+      reviewState = refreshed?.review_state ?? null;
+      checkState = refreshed?.check_state ?? null;
+      policyComplete = refreshed?.policy_complete ?? null;
+      policyStale = false;
+      policyErrorCode = null;
+      policyRetryAfter = null;
+    } else {
+      policyErrorCode = synced.errorCode;
+      policyRetryAfter = synced.retryAfter;
+    }
+  }
+  const status = derivePolicyStatus({
+    headSha: pullRequest.head_sha ?? null,
+    currentPolicySnapshotId: policySnapshotId,
+    policyStale,
+    policyComplete,
+    reviewState,
+    checkState,
+    policyErrorCode,
+    policyRetryAfter,
+    enforcementMode,
+  });
+  if (!status.allowsMerge) {
+    return { eligible: false, reason: `pull request policy binding is missing or stale: ${status.label}` };
+  }
+  return { eligible: true, expectedHeadSha, policySnapshotId: policySnapshotId ?? undefined };
 }
 
 async function startAiReview(
@@ -1142,8 +1200,9 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const [, pullRequestId, action] = pullRequestActionMatch;
     const body = await bodyOf(request);
     const pullRequest = (await pool.query(
-      `SELECT pr.*,ea.agent_run_id,ar.metadata_json
+      `SELECT pr.*,ea.agent_run_id,ar.metadata_json,p.config_json,p.github_owner,p.github_repository
        FROM pull_requests pr
+       LEFT JOIN projects p ON p.id=pr.project_id
        LEFT JOIN execution_attempts ea ON ea.id=pr.execution_attempt_id
        LEFT JOIN agent_runs ar ON ar.id=ea.agent_run_id WHERE pr.id=$1`,
       [pullRequestId],

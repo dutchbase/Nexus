@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, test } from "vitest";
-import { normalizeAgentStartPath, validateAgentStartPath, validateProject } from "./index.ts";
+import { getGithubPolicyEnforcementMode, normalizeAgentStartPath, validateAgentStartPath, validateProject } from "./index.ts";
 
 const execGit = promisify(execFile);
 const tempDirs: string[] = [];
@@ -53,6 +53,22 @@ describe("planning agent start path", () => {
 
     await expect(validateAgentStartPath(directory)).resolves.toEqual(["planning agent start path is not a readable and searchable directory"]);
   });
+});
+
+test("defaults to auto when config_json has no github_policy key", () => {
+  expect(getGithubPolicyEnforcementMode({})).toBe("auto");
+  expect(getGithubPolicyEnforcementMode(null)).toBe("auto");
+  expect(getGithubPolicyEnforcementMode(undefined)).toBe("auto");
+});
+
+test("reads a valid enforcement value", () => {
+  expect(getGithubPolicyEnforcementMode({ github_policy: { enforcement: "required" } })).toBe("required");
+  expect(getGithubPolicyEnforcementMode({ github_policy: { enforcement: "optional" } })).toBe("optional");
+});
+
+test("falls back to auto on an invalid/unexpected value", () => {
+  expect(getGithubPolicyEnforcementMode({ github_policy: { enforcement: "bogus" } })).toBe("auto");
+  expect(getGithubPolicyEnforcementMode({ github_policy: "not-an-object" })).toBe("auto");
 });
 
 afterEach(async () => {
