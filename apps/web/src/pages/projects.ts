@@ -28,7 +28,7 @@ function generateYaml(project: any) {
 function deploymentPanel(project: any, deployment: DeploymentConfig): string {
   return `<div class="grid two">
     <section class="card">
-      <div class="card-head">Pipeline status</div>
+      <div class="card-head">Pipeline status <button class="button" type="button" data-refresh-deployment>Refresh</button></div>
       <div class="card-body" data-deployment-pipeline data-project-id="${project.id}">
         <p style="color:var(--text3);font-size:13px">Loading…</p>
       </div>
@@ -55,10 +55,11 @@ function deploymentPanel(project: any, deployment: DeploymentConfig): string {
         <p style="color:var(--text3);font-size:13px">Loading…</p>
       </div>
     </section>
-    ${deployment.cron_jobs?.length ? `<section class="card" style="grid-column:1 / -1">
-      <div class="card-head">Background jobs</div>
-      <div class="card-body" data-deployment-cron></div>
-    </section>` : ""}
+    <!-- Cron/background-job monitoring: config support exists (deployment.cron_jobs,
+         cron_check_ins rows written by the webhook), but there is no read path yet —
+         no API route reads cron_check_ins and nothing renders it. Real spec gap,
+         intentionally left unbuilt rather than half-wired; someone should pick this
+         up later (add a GET route + render logic here). -->
     <section class="card" style="grid-column:1 / -1">
       <div class="card-head">Release history</div>
       <div data-deployment-releases></div>

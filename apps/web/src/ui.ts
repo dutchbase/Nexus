@@ -408,7 +408,6 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const productionEl=document.querySelector("[data-deployment-production]");
           const rollbackEl=document.querySelector("[data-deployment-rollback]");
           const releasesEl=document.querySelector("[data-deployment-releases]");
-          const cronEl=document.querySelector("[data-deployment-cron]");
           const promoteButton=document.querySelector("[data-promote-button]");
           const promoteRetry=document.querySelector("[data-promote-retry]");
           const promoteReason=document.querySelector("[data-promote-reason]");
@@ -428,7 +427,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           async function loadStatus(){
             const data=await fetch("/api/admin/projects/"+projectId+"/deployment",{headers:{"x-csrf-token":csrf}}).then(r=>r.json());
             renderSnapshot(data.snapshot);
-            renderReleases(data.releases);
+            renderReleases(data.releases,data.snapshot);
           }
 
           function renderSnapshot(snapshot){
@@ -439,11 +438,17 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
 
           function badge(label){return '<span class="status">'+label+'</span>';} // real tone class comes from server-rendered statusBadge on initial load; client refresh reuses plain text + tone lookup table mirroring shared.ts's stateTones if richer styling is wanted later.
 
-          function renderReleases(releases){
+          function renderReleases(releases,snapshot){
             releasesEl.innerHTML=releases.length?releases.map(r=>'<div style="padding:10px 18px;border-top:1px solid var(--border)"><b>'+r.action+'</b> '+r.commit_sha.slice(0,8)+' — '+r.status+' — '+new Date(r.created_at).toLocaleString()+'</div>').join(""):'<div style="padding:16px 18px;color:var(--text3)">No releases yet.</div>';
-            const lastHealthy=releases.find(r=>r.status==="healthy");
-            rollbackEl.innerHTML=lastHealthy
-              ?'<button class="button" type="button" data-rollback-button data-target-sha="'+lastHealthy.commit_sha+'" data-expected-production-sha="'+releases[0].commit_sha+'">Roll back to '+lastHealthy.commit_sha.slice(0,8)+'</button>'
+            const liveSha=snapshot&&snapshot.production_commit_sha;
+            // Exclude the currently-live commit — rolling "back" to what's already
+            // live is a no-op the server refuses, and offering it as a target is
+            // misleading. Target the snapshot's actual live production commit
+            // (not releases[0].commit_sha, which may be a refused/failed promote
+            // that never went live) as the compare-and-swap guard.
+            const lastHealthy=releases.find(r=>r.status==="healthy"&&r.commit_sha!==liveSha);
+            rollbackEl.innerHTML=lastHealthy&&liveSha
+              ?'<button class="button" type="button" data-rollback-button data-target-sha="'+lastHealthy.commit_sha+'" data-expected-production-sha="'+liveSha+'">Roll back to '+lastHealthy.commit_sha.slice(0,8)+'</button>'
               :'<button class="button" type="button" disabled title="No previous known-good release recorded">No previous release to roll back to</button>';
           }
 
