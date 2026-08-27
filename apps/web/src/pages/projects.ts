@@ -25,6 +25,92 @@ function generateYaml(project: any) {
   return lines.join("\n");
 }
 
+type HealthDetail = { summary: Record<string, number>; files: Array<{ path: string; status: string; staged: boolean }> } | null;
+
+function healthSummaryLine(detail: HealthDetail): string {
+  if (!detail || !detail.summary || !Object.keys(detail.summary).length) return "uncommitted changes";
+  return Object.entries(detail.summary).map(([status, count]) => `${count} ${status} file${count === 1 ? "" : "s"}`).join(", ");
+}
+
+// The dirty banner shown at the top of the project page — fixed to read the
+// real categorized count instead of the never-populated config.uncommitted_count.
+export function dirtyBanner(project: any): string {
+  if (project.health_status !== "repository_dirty") return "";
+  const summary = healthSummaryLine(project.health_detail_json ?? null);
+  return `<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px"><strong>Planning and execution are blocked.</strong> <em>The primary checkout has ${summary}. Resolve them on the server — the platform never resets a checkout automatically.</em></div>`;
+}
+
+const STATUS_LABELS: Record<string, string> = {
+  conflicted: "Conflicted", modified: "Modified", added: "Added", deleted: "Deleted", renamed: "Renamed", untracked: "Untracked",
+};
+const STATUS_ORDER = ["conflicted", "modified", "added", "deleted", "renamed", "untracked"];
+const CODE_BLOCK_STYLE = "background:var(--code-bg);padding:10px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:12px;overflow-x:auto";
+
+function groupedFileList(files: Array<{ path: string; status: string; staged: boolean }>): string {
+  const byStatus = new Map<string, Array<{ path: string; status: string; staged: boolean }>>();
+  for (const file of files) {
+    if (!byStatus.has(file.status)) byStatus.set(file.status, []);
+    byStatus.get(file.status)!.push(file);
+  }
+  return STATUS_ORDER.filter((status) => byStatus.has(status)).map((status) => {
+    const items = byStatus.get(status)!;
+    const severe = status === "conflicted";
+    return `<div style="margin-bottom:10px"><div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:${severe ? "var(--t-danger)" : "var(--text3)"}">${STATUS_LABELS[status] ?? status} (${items.length})</div>${items.map((file) =>
+      `<div class="mono" style="padding:3px 0;font-size:12.5px;${severe ? "color:var(--t-danger);font-weight:600" : ""}">${escapeHtml(file.path)}${file.staged ? ` <span style="color:var(--text3);font-weight:400">· staged</span>` : ""}</div>`,
+    ).join("")}</div>`;
+  }).join("");
+}
+
+function resolutionGuidance(repositoryPath: string): string {
+  const path = escapeHtml(repositoryPath);
+  return `<pre style="${CODE_BLOCK_STYLE}">cd ${path}
+
+git status</pre>
+<p style="font-size:12.5px">Keep the changes:</p>
+<pre style="${CODE_BLOCK_STYLE}">git add &lt;files&gt;
+git commit -m "Describe the change"</pre>
+<p style="font-size:12.5px">Temporarily set them aside:</p>
+<pre style="${CODE_BLOCK_STYLE}">git stash push -u</pre>
+<p style="font-size:12.5px">Or remove/ignore unwanted local files.</p>`;
+}
+
+// Replaces the previously-static "Last validation" checklist with real
+// diagnostics driven by health_detail_json/health_error, plus a live-wired
+// Recheck repository button (see ui.ts data-recheck-repository).
+export function repositoryDiagnosticsPanel(project: any): string {
+  const lastValidated = project.last_validated_at ? `Validated ${new Date(project.last_validated_at).toLocaleString("nl-NL")}` : "Never validated";
+  const head = `<div class="card-head">Last validation <button class="button" type="button" data-recheck-repository>Recheck repository</button></div>`;
+
+  if (project.health_status === "inspection_error") {
+    return `<section class="card">${head}<div class="card-body" data-repository-diagnostics data-project-id="${project.id}">
+      <p>${escapeHtml(lastValidated)}</p>
+      <div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px">
+        <strong>Repository status unavailable.</strong> <em>The repository could not be inspected: ${escapeHtml(project.health_error ?? "unknown error")}. This is distinct from having uncommitted changes — verify the configured repository path exists, is a Git repository, and is readable by the platform.</em>
+      </div>
+    </div></section>`;
+  }
+
+  const detail: HealthDetail = project.health_detail_json ?? null;
+  if (project.health_status === "repository_dirty" && detail && detail.files) {
+    return `<section class="card">${head}<div class="card-body" data-repository-diagnostics data-project-id="${project.id}">
+      <p>${escapeHtml(lastValidated)}</p>
+      <div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px;margin-bottom:14px">
+        <strong>Local changes are blocking planning and execution.</strong> <em>${escapeHtml(healthSummaryLine(detail))}</em>
+      </div>
+      <div data-diagnostics-files>${groupedFileList(detail.files)}</div>
+      <div style="margin-top:14px">
+        <p style="font-size:12.5px;color:var(--text3);margin-bottom:6px">Resolve on the server — the platform never resets a checkout automatically:</p>
+        ${resolutionGuidance(project.repository_path)}
+      </div>
+    </div></section>`;
+  }
+
+  return `<section class="card">${head}<div class="card-body" data-repository-diagnostics data-project-id="${project.id}">
+    <p>${escapeHtml(lastValidated)}</p>
+    <p style="color:var(--text3);font-size:13px">No local changes blocking planning or execution.</p>
+  </div></section>`;
+}
+
 function deploymentPanel(project: any, deployment: DeploymentConfig): string {
   return `<div class="grid two">
     <section class="card">
@@ -109,7 +195,6 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         [project.id],
       ),
     ]);
-    const dirty = project.health_status === "repository_dirty";
     const config = project.config_json || {};
     const validationCommands = config.validation_commands || {};
     const branchPrefix = config.branch_prefix || "";
@@ -138,10 +223,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const skillsPanel = `<section class="card"><div class="card-head">Automatically attached to every ticket</div><div class="card-body">${allSkillsResult.rows.length > 0 ? allSkillsResult.rows.map((skill) =>
       `<label style="padding:8px;display:flex;justify-content:space-between;align-items:center;border-bottom:1px solid var(--border)"><div><strong>${escapeHtml(skill.name)}</strong> <span class="mono" style="font-size:11px;color:var(--text3)">${escapeHtml(skill.slug)}</span> <span style="font-size:11px;font-weight:600;color:var(--text3)">${escapeHtml(skill.category)}</span> <span style="font-size:11px;color:var(--text3)">v${escapeHtml(skill.version)}</span></div><input type="checkbox" data-skill-checkbox value="${skill.id}" ${skill.attached ? "checked" : ""}></label>`,
     ).join("") : "<p>No skills available.</p>"}</div></section>`;
-    const validationPanel = `<section class="card"><div class="card-head">Last validation</div><div class="card-body"><p>${project.last_validated_at ? `Validated ${new Date(project.last_validated_at).toLocaleString("nl-NL")}` : "Never validated"}</p>
-      <div style="display:flex;flex-direction:column;gap:8px">${["Repository path exists and is a Git repository", "Remote reachable · default branch exists · fetch succeeded", "Worktree root writable", "Primary checkout clean", "Prompt files present · automatic skills resolve", "Claude subscription auth · GitHub auth valid"].map((msg) =>
-        `<p style="display:flex;gap:8px;align-items:center"><span style="width:8px;height:8px;border-radius:50%;background:var(--border2);flex-shrink:0"></span>${msg}</p>`,
-      ).join("")}</div></div></section>`;
+    const validationPanel = repositoryDiagnosticsPanel(project);
     const overriddenTypes = new Set(promptsResult.rows.map((prompt) => prompt.prompt_type));
     const availableTypes = globalPromptTypes.filter((type) => !overriddenTypes.has(type));
     const promptsPanel = `<section class="card"><div class="card-head">Project prompt overrides</div><div class="card-body">
@@ -156,7 +238,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const panelContents = [overviewPanel + mergeBranchesPanel, yamlPanel, skillsPanel, validationPanel, promptsPanel, ...(deployment?.enabled ? [deploymentPanel(project, deployment)] : [])];
     const body = `<div class="eyebrow">Configure / Projects</div><h1>${escapeHtml(project.name)}</h1>
       <div class="toolbar"><button class="button" data-validate-button>Run validation</button><button class="button primary" data-save-button>Save configuration</button></div>
-      ${dirty ? `<div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px"><strong>Planning and execution are blocked.</strong> <em>The primary checkout has ${escapeHtml(String(config.uncommitted_count || 3))} uncommitted files. Resolve them on the server — the platform never resets a checkout automatically.</em></div>` : ""}
+      ${dirtyBanner(project)}
       <div class="tabs" role="tablist">${tabLabels.map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
       ${panelContents.map((content, index) => panel(index, content)).join("")}`;
     return { status: 200, title: project.name, body };
