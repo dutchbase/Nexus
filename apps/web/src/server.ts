@@ -803,6 +803,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       params.push(`%${search}%`);
       where.push(`(pr.title ILIKE $${params.length} OR t.ticket_number ILIKE $${params.length})`);
     }
+    const ids = url.searchParams.getAll("id").filter((id) => /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id));
+    if (ids.length) { params.push(ids); where.push(`pr.id = ANY($${params.length}::uuid[])`); }
     const pullRequests = (await pool.query(
       `SELECT pr.*,p.name project_name,p.slug project_slug,
               t.ticket_number,t.title ticket_title,t.status ticket_status,
@@ -1051,6 +1053,70 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       ...(typeof generatedDescription === "string" ? { generated_description: generatedDescription } : {}),
       ...(typeof error === "string" ? { error } : {}),
     });
+  }
+  if (url.pathname === "/api/admin/pull-requests/bulk/merge-preflight" && request.method === "POST") {
+    const body = await bodyOf(request);
+    const ids = Array.isArray(body.ids) && body.ids.every((id: unknown): id is string => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) ? body.ids : [];
+    if (!ids.length) return json(response, 400, { error: "no pull requests selected" });
+    const { requireFreshPolicyBinding } = await getPullRequestMergeSettings(pool);
+    const rows = (await pool.query("SELECT * FROM pull_requests WHERE id = ANY($1::uuid[])", [ids])).rows;
+    const byId = new Map(rows.map((row: any) => [row.id, row]));
+    const results = ids.map((id: string) => {
+      const row = byId.get(id);
+      if (!row) return { id, number: null, title: null, eligible: false, reason: "pull request not found" };
+      const classification = prsPage.classifyBulkMergeEligibility(row, requireFreshPolicyBinding);
+      return { id, number: row.number, title: row.title, eligible: classification.eligible, ...(classification.eligible ? {} : { reason: classification.reason }) };
+    });
+    return json(response, 200, { results });
+  }
+  if (url.pathname === "/api/admin/pull-requests/bulk" && request.method === "POST") {
+    const body = await bodyOf(request);
+    const action = body.action;
+    if (!["ai-review", "close", "merge"].includes(action)) return json(response, 400, { error: "invalid action" });
+    const ids = Array.isArray(body.ids) && body.ids.every((id: unknown): id is string => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) ? body.ids : [];
+    if (!ids.length) return json(response, 400, { error: "no pull requests selected" });
+    if (ids.length > 100) return json(response, 400, { error: "select at most 100 pull requests at once" });
+    const batchId = typeof body.batch_id === "string" && body.batch_id.trim() ? body.batch_id.trim() : randomUUID();
+    const rows = (await pool.query(
+      `SELECT pr.*,p.github_owner,p.github_repository FROM pull_requests pr JOIN projects p ON p.id=pr.project_id WHERE pr.id = ANY($1::uuid[])`,
+      [ids],
+    )).rows;
+    const byId = new Map(rows.map((row: any) => [row.id, row]));
+    const results: Array<{ id: string; outcome: string; reason?: string; job_id?: string }> = [];
+    const { requireFreshPolicyBinding } = action === "merge" ? await getPullRequestMergeSettings(pool) : { requireFreshPolicyBinding: false };
+    for (const id of ids) {
+      const row = byId.get(id);
+      if (!row) { results.push({ id, outcome: "not_found" }); continue; }
+      try {
+        if (action === "ai-review") {
+          if (row.state !== "open") { results.push({ id, outcome: "skipped", reason: `pull request is ${row.state}, not open` }); continue; }
+          const started = await startAiReview(row.id, {}, session.user_id);
+          results.push({ id, outcome: started.alreadyRunning ? "skipped" : "queued", ...(started.alreadyRunning ? { reason: "AI review already running" } : {}) });
+          await audit({ actorType: "admin", actorId: session.user_id, action: "ai_review.bulk_start", entityType: "pull_request", entityId: id, metadata: { batch_id: batchId }, ip: ipOf(request) });
+        } else if (action === "close") {
+          if (row.state !== "open") { results.push({ id, outcome: "skipped", reason: `pull request is ${row.state}, not open` }); continue; }
+          const job = await enqueueJob({ type: "github.close_pull_request", payload: { actor_id: session.user_id, pull_request_id: row.id }, idempotencyKey: `bulk-close:${row.id}:${batchId}` });
+          results.push({ id, outcome: "queued", job_id: job.id });
+          await audit({ actorType: "admin", actorId: session.user_id, action: "pull_request.bulk_close", entityType: "pull_request", entityId: id, metadata: { batch_id: batchId }, ip: ipOf(request) });
+        } else {
+          const classification = prsPage.classifyBulkMergeEligibility(row, requireFreshPolicyBinding);
+          if (!classification.eligible) { results.push({ id, outcome: "skipped", reason: classification.reason }); continue; }
+          const eligibility = await evaluateApproveEligibility(row);
+          if (!eligibility.eligible) { results.push({ id, outcome: "skipped", reason: eligibility.reason }); continue; }
+          const job = await enqueueJob({
+            type: "github.merge_pull_request",
+            payload: { actor_id: session.user_id, pull_request_id: row.id, expected_head_sha: eligibility.expectedHeadSha, ...(eligibility.policySnapshotId ? { policy_snapshot_id: eligibility.policySnapshotId } : {}) },
+            idempotencyKey: `g07:github.merge_pull_request:${row.id}:${eligibility.expectedHeadSha}:${Math.floor(Date.now() / 3_600_000)}`,
+          });
+          results.push({ id, outcome: "queued", job_id: job.id });
+          await audit({ actorType: "admin", actorId: session.user_id, action: "pull_request.bulk_merge", entityType: "pull_request", entityId: id, metadata: { batch_id: batchId }, ip: ipOf(request) });
+        }
+      } catch (error) {
+        results.push({ id, outcome: "skipped", reason: "an unexpected error occurred — see server logs" });
+        console.error(`bulk ${action} failed for pull request ${id}`, error);
+      }
+    }
+    return json(response, 200, { batch_id: batchId, results });
   }
   const pullRequestActionMatch = url.pathname.match(
     /^\/api\/admin\/pull-requests\/([0-9a-f-]+)\/(mark-reviewed|approve|request-changes|repair-instructions|start-repair|refresh|close-ticket|ai-review|resolve-conflicts)$/i,
