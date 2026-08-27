@@ -25,4 +25,8 @@ describe("design tokens: elevation, focus, interaction", () => {
   it("sidebar has the ambient radial-gradient depth layer", () => {
     expect(styles).toContain("radial-gradient(130% 160% at 12% -12%,rgba(255,255,255,.07),transparent 55%)");
   });
+  it("primary CTA buttons have resting elevation and a hover lift that excludes disabled buttons", () => {
+    expect(styles).toContain("box-shadow:0 1px 2px color-mix(in srgb, var(--primary) 30%, transparent)");
+    expect(styles).toContain(".button.primary:hover:not([disabled]) { transform:translateY(-1px);box-shadow:0 6px 16px color-mix(in srgb, var(--primary) 35%, transparent) }");
+  });
 });

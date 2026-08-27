@@ -90,7 +90,8 @@ textarea { resize:vertical }
    line length — wrap instead of clipping inside .card{overflow:hidden}. */
 pre { white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word }
 .button { display:inline-flex;align-items:center;justify-content:center;min-height:38px;padding:8px 14px;border:1px solid var(--border2);border-radius:4px;background:var(--surface);cursor:pointer;color:var(--text2) }
-.button.primary { border-color:var(--primary);background:var(--primary);color:var(--primary-fg);font-weight:700 }
+.button.primary { border-color:var(--primary);background:var(--primary);color:var(--primary-fg);font-weight:700;box-shadow:0 1px 2px color-mix(in srgb, var(--primary) 30%, transparent) }
+.button.primary:hover:not([disabled]) { transform:translateY(-1px);box-shadow:0 6px 16px color-mix(in srgb, var(--primary) 35%, transparent) }
 .toolbar { display:flex;gap:10px;align-items:center;flex-wrap:wrap }
 .toolbar .search { flex:1 1 240px }
 .menu { position:relative;display:inline-flex }
