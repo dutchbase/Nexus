@@ -230,4 +230,37 @@ integration("webhook deployment store", () => {
     await expect(pool.query("SELECT state FROM deployment_attempts WHERE id=$1", [second.attempt.id])).resolves.toMatchObject({ rows: [{ state: "queued" }] });
     await expect(pool.query("UPDATE deployment_attempts SET recovery_count=2 WHERE id=$1", [first.attempt.id])).rejects.toThrow();
   });
+
+  it("finds no stale attempt when the latest for the branch already succeeded", async () => {
+    const first = await deployments.enqueueDeploymentAttempt(pool, attempt("a"));
+    await deployments.claimDeploymentAttempt(pool, { owner: "webhook-a", leaseMs: 60_000 });
+    await deployments.completeDeploymentAttempt(pool, { attemptId: first.attempt.id, owner: "webhook-a", state: "succeeded" });
+    await pool.query("UPDATE deployment_attempts SET created_at=now()-interval '1 hour' WHERE id=$1", [first.attempt.id]);
+
+    await expect(deployments.findStaleDeploymentAttempt(pool, { protectedBranch: "master", staleAfterMs: 60_000 })).resolves.toBeNull();
+  });
+
+  it("finds no stale attempt younger than the threshold", async () => {
+    await deployments.enqueueDeploymentAttempt(pool, attempt("a"));
+
+    await expect(deployments.findStaleDeploymentAttempt(pool, { protectedBranch: "master", staleAfterMs: 3_600_000 })).resolves.toBeNull();
+  });
+
+  it("finds the newest attempt when it is queued past the threshold", async () => {
+    const created = await deployments.enqueueDeploymentAttempt(pool, attempt("a"));
+    await pool.query("UPDATE deployment_attempts SET created_at=now()-interval '1 hour' WHERE id=$1", [created.attempt.id]);
+
+    await expect(deployments.findStaleDeploymentAttempt(pool, { protectedBranch: "master", staleAfterMs: 60_000 }))
+      .resolves.toMatchObject({ id: created.attempt.id, state: "queued" });
+  });
+
+  it("ignores rejected and superseded latest attempts", async () => {
+    const rejected = await deployments.enqueueDeploymentAttempt(pool, { ...attempt("a"), state: "rejected" });
+    await pool.query("UPDATE deployment_attempts SET created_at=now()-interval '1 hour' WHERE id=$1", [rejected.attempt.id]);
+    await expect(deployments.findStaleDeploymentAttempt(pool, { protectedBranch: "master", staleAfterMs: 60_000 })).resolves.toBeNull();
+
+    const superseded = await deployments.enqueueDeploymentAttempt(pool, attempt("b"));
+    await pool.query("UPDATE deployment_attempts SET state='superseded',completed_at=now(),created_at=now()-interval '1 hour' WHERE id=$1", [superseded.attempt.id]);
+    await expect(deployments.findStaleDeploymentAttempt(pool, { protectedBranch: "master", staleAfterMs: 60_000 })).resolves.toBeNull();
+  });
 });
