@@ -97,6 +97,26 @@ test.each([
   expect(body).toContain(`disabled title="${status}"`);
 });
 
+test("a protected repo with pending required checks still shows Approve & merge disabled", async () => {
+  const body = await renderPr({
+    ...pr, current_policy_snapshot_id: "snap-1", policy_complete: true, policy_stale: false,
+    review_state: "approved", check_state: "pending", config_json: {},
+  });
+
+  expect(body).toContain("GitHub: Required: checks pending");
+  expect(body).toContain('disabled title="GitHub: Required: checks pending"');
+});
+
+test("a protected repo with changes requested still shows Approve & merge disabled", async () => {
+  const body = await renderPr({
+    ...pr, current_policy_snapshot_id: "snap-1", policy_complete: true, policy_stale: false,
+    review_state: "changes_requested", check_state: "success", config_json: {},
+  });
+
+  expect(body).toContain("GitHub: Required: changes requested");
+  expect(body).toContain('disabled title="GitHub: Required: changes requested"');
+});
+
 test("escapes persisted review output and errors", async () => {
   const body = await renderPr(pr, [{ status: "error", mode: "review_only", model: "sonnet", reasoning_level: "high", created_at: "2026-08-04T10:00:00Z", publication_id: "publication", github_comment_id: 4, error_message: "<script>bad()</script>", raw_output: "<img src=x>" }]);
 
