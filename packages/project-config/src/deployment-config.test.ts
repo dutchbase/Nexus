@@ -77,3 +77,43 @@ test("rejects a malformed cron_jobs entry", () => {
   });
   expect(errors).toContain("deployment.cron_jobs[0].expected_interval_minutes must be a positive number");
 });
+
+test("mechanism absent defaults to health_check semantics — health still required", () => {
+  const errors = validateDeploymentConfig({
+    enabled: true, production_branch: "production",
+    image: { registry: "ghcr.io", repository: "x/y", tag_template: "sha-{{commit}}" },
+    promotion: { require_e2e_gate_label: false },
+    // health omitted
+  });
+  expect(errors).toContain("deployment.health is required");
+});
+
+test("mechanism github_actions_jobs makes health optional but requires actions block", () => {
+  const errors = validateDeploymentConfig({
+    enabled: true, production_branch: "production", mechanism: "github_actions_jobs",
+    image: { registry: "ghcr.io", repository: "dutchbase/va-jobs-platform", tag_template: "sha-{{commit}}" },
+    promotion: { require_e2e_gate_label: false },
+    // health omitted deliberately
+  });
+  expect(errors).toContain("deployment.actions is required when mechanism is github_actions_jobs");
+});
+
+test("a complete github_actions_jobs config with no health block is valid", () => {
+  const errors = validateDeploymentConfig({
+    enabled: true, production_branch: "production", mechanism: "github_actions_jobs",
+    image: { registry: "ghcr.io", repository: "dutchbase/va-jobs-platform", tag_template: "sha-{{commit}}" },
+    promotion: { require_e2e_gate_label: false },
+    actions: { docker_image_job_name: "docker-image", migrations_job_name: "migrations-production", deploy_job_name: "deploy-production" },
+  });
+  expect(errors).toEqual([]);
+});
+
+test("an unknown mechanism value is rejected", () => {
+  const errors = validateDeploymentConfig({
+    enabled: true, production_branch: "production", mechanism: "something_else",
+    image: { registry: "ghcr.io", repository: "x/y", tag_template: "sha-{{commit}}" },
+    health: { host: "https://x", health_path: "/health", version_path: "/version" },
+    promotion: { require_e2e_gate_label: false },
+  });
+  expect(errors).toContain('deployment.mechanism must be "health_check" or "github_actions_jobs"');
+});

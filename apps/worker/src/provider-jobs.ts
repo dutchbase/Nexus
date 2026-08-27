@@ -69,7 +69,12 @@ async function fetchLiveDeploymentStatus(project: any, deployment: DeploymentCon
   }
   const imageTag = deployment.image.tag_template.replace("{{commit}}", master.sha);
   const image = await checkImageExists(deployment.image.registry, deployment.image.repository, imageTag);
-  const health = await checkProductionHealth(deployment.health);
+  // fetchLiveDeploymentStatus is only ever called on the "health_check" mechanism
+  // path (see the mechanism branch below) — validateDeploymentConfig requires
+  // `health` whenever mechanism is "health_check" (or absent), so it's always
+  // present here even though the type now allows it to be omitted under the
+  // "github_actions_jobs" mechanism.
+  const health = await checkProductionHealth(deployment.health!);
   return { master, ciStatus, e2eGateSatisfied, e2eGatePrNumber, imageTag, image, health };
 }
 
