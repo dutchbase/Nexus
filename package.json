@@ -1,6 +1,11 @@
 {
-  "name": "development-control-center",
+  "name": "nexus",
+  "description": "Nexus — an open-source control center for software projects, AI-assisted development workflows, pull requests, jobs, and deployments.",
   "private": true,
+  "license": "MIT",
+  "repository": { "type": "git", "url": "https://github.com/dutchbase/dev-control.git" },
+  "homepage": "https://github.com/dutchbase/dev-control#readme",
+  "bugs": { "url": "https://github.com/dutchbase/dev-control/issues" },
   "packageManager": "pnpm@11.17.0",
   "engines": { "node": ">=22" },
   "scripts": {
