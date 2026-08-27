@@ -58,14 +58,14 @@ export type ChangedFileDetail = {
   staged: boolean;
 };
 
-// Git porcelain v1: each line is `XY PATH` (or `XY PATH -> NEWPATH` for
-// renames), X = index/staged status, Y = worktree/unstaged status.
-function categorizePorcelainLine(line: string): ChangedFileDetail | null {
-  if (line.length < 4) return null;
-  const indexStatus = line[0];
-  const worktreeStatus = line[1];
-  const rest = line.slice(3);
-  const path = rest.includes(" -> ") ? rest.split(" -> ")[1] : rest;
+// Git porcelain v1 `-z` record: `XY PATH`, X = index/staged status,
+// Y = worktree/unstaged status. Renames and copies carry their original path
+// in a second record, consumed by parsePorcelainStatus.
+function categorizePorcelainLine(record: string): ChangedFileDetail | null {
+  if (record.length < 4) return null;
+  const indexStatus = record[0];
+  const worktreeStatus = record[1];
+  const path = record.slice(3);
   const conflictCodes = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
   const code = `${indexStatus}${worktreeStatus}`;
   if (conflictCodes.has(code)) return { path, status: "conflicted", staged: false };
@@ -77,6 +77,26 @@ function categorizePorcelainLine(line: string): ChangedFileDetail | null {
   if (worktreeStatus === "D") return { path, status: "deleted", staged: false };
   if (worktreeStatus === "M") return { path, status: "modified", staged: false };
   return { path, status: "modified", staged: false };
+}
+
+// `-z` is what makes the reported paths the real ones: without it git
+// C-quotes any path containing a space, a quote or a non-ASCII byte
+// (`"caf\303\251.txt"`), which the diagnostics list would show verbatim.
+// Records are NUL-terminated, and a rename/copy is two records — the new
+// path, then the original — so those consume an extra field.
+export function parsePorcelainStatus(stdout: string): { paths: string[]; detail: ChangedFileDetail[] } {
+  const records = stdout.split("\0").filter(Boolean);
+  const paths: string[] = [];
+  const detail: ChangedFileDetail[] = [];
+  for (let index = 0; index < records.length; index += 1) {
+    const record = records[index];
+    if (["R", "C"].includes(record[0])) index += 1; // skip the original path
+    const entry = categorizePorcelainLine(record);
+    if (!entry) continue;
+    paths.push(entry.path);
+    detail.push(entry);
+  }
+  return { paths, detail };
 }
 
 export type InspectionErrorCode = "path_missing" | "not_a_repo" | "permission_denied" | "git_unavailable" | "timeout" | "unknown";
@@ -122,10 +142,8 @@ export async function validateProject(input: ProjectValidationInput): Promise<Va
   let changedFileDetail: ChangedFileDetail[] = [];
   try {
     await exec("git", ["-C", input.repositoryPath, "show-ref", "--verify", `refs/heads/${input.defaultBranch}`], { timeout: GIT_INSPECTION_TIMEOUT_MS });
-    const status = (await exec("git", ["-C", input.repositoryPath, "status", "--porcelain"], { timeout: GIT_INSPECTION_TIMEOUT_MS })).stdout;
-    const lines = status.split("\n").filter(Boolean);
-    changedFiles = lines.map((line) => line.slice(3));
-    changedFileDetail = lines.map(categorizePorcelainLine).filter((entry): entry is ChangedFileDetail => entry !== null);
+    const status = (await exec("git", ["-C", input.repositoryPath, "status", "--porcelain", "-z"], { timeout: GIT_INSPECTION_TIMEOUT_MS })).stdout;
+    ({ paths: changedFiles, detail: changedFileDetail } = parsePorcelainStatus(status));
     if (changedFiles.length) errors.push("repository has uncommitted changes");
     if (input.requireRemote !== false) {
       const remotes = (await exec("git", ["-C", input.repositoryPath, "remote"], { timeout: GIT_INSPECTION_TIMEOUT_MS })).stdout.trim();

@@ -141,6 +141,31 @@ describe("git status categorization", () => {
     expect(statuses).toEqual(["added", "modified", "untracked"].sort());
   });
 
+  // Without `-z`, git C-quotes these: `"a b.txt"` and `"caf\303\251.txt"`,
+  // which the diagnostics list would render verbatim instead of the names the
+  // user would have to type to resolve them.
+  test("paths with spaces and non-ASCII characters keep their real names", async () => {
+    const dir = await initRepo();
+    await commitFile(dir, "seed.txt", "hi\n");
+    await writeFile(join(dir, "a b.txt"), "x\n");
+    await writeFile(join(dir, "café.txt"), "x\n");
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
+    expect(result.changedFileDetail.map((entry) => entry.path).sort()).toEqual(["a b.txt", "café.txt"]);
+    expect(result.changedFiles.sort()).toEqual(["a b.txt", "café.txt"]);
+  });
+
+  test("a rename reports only the new path, not the consumed original record", async () => {
+    const dir = await initRepo();
+    await commitFile(dir, "old name.txt", "hello\n");
+    await execGit("git", ["-C", dir, "mv", "old name.txt", "new name.txt"]);
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
+    expect(result.changedFileDetail).toEqual([{ path: "new name.txt", status: "renamed", staged: true }]);
+  });
+
   test("clean repository returns an empty changedFileDetail and valid:true", async () => {
     const dir = await initRepo();
     await commitFile(dir, "file.txt", "hello\n");
