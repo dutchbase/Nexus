@@ -76,14 +76,16 @@ git commit -m "Describe the change"</pre>
 
 // Replaces the previously-static "Last validation" checklist with real
 // diagnostics driven by health_detail_json/health_error, plus a live-wired
-// Recheck repository button (see ui.ts data-recheck-repository).
+// Recheck repository button (see ui.ts data-recheck-repository, which
+// mirrors this function's grouping/summary logic client-side to re-render
+// data-repository-diagnostics in place from the refreshed project JSON).
 export function repositoryDiagnosticsPanel(project: any): string {
   const lastValidated = project.last_validated_at ? `Validated ${new Date(project.last_validated_at).toLocaleString("nl-NL")}` : "Never validated";
   const head = `<div class="card-head">Last validation <button class="button" type="button" data-recheck-repository>Recheck repository</button></div>`;
+  const open = `<section class="card">${head}<div class="card-body" data-repository-diagnostics data-project-id="${project.id}" data-repository-path="${escapeHtml(project.repository_path ?? "")}"><p>${escapeHtml(lastValidated)}</p>`;
 
   if (project.health_status === "inspection_error") {
-    return `<section class="card">${head}<div class="card-body" data-repository-diagnostics data-project-id="${project.id}">
-      <p>${escapeHtml(lastValidated)}</p>
+    return `${open}
       <div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px">
         <strong>Repository status unavailable.</strong> <em>The repository could not be inspected: ${escapeHtml(project.health_error ?? "unknown error")}. This is distinct from having uncommitted changes — verify the configured repository path exists, is a Git repository, and is readable by the platform.</em>
       </div>
@@ -92,8 +94,7 @@ export function repositoryDiagnosticsPanel(project: any): string {
 
   const detail: HealthDetail = project.health_detail_json ?? null;
   if (project.health_status === "repository_dirty" && detail && detail.files) {
-    return `<section class="card">${head}<div class="card-body" data-repository-diagnostics data-project-id="${project.id}">
-      <p>${escapeHtml(lastValidated)}</p>
+    return `${open}
       <div style="border:1px solid var(--t-danger);border-left:3px;background:var(--s-danger);border-radius:5px;padding:13px 16px;margin-bottom:14px">
         <strong>Local changes are blocking planning and execution.</strong> <em>${escapeHtml(healthSummaryLine(detail))}</em>
       </div>
@@ -105,8 +106,7 @@ export function repositoryDiagnosticsPanel(project: any): string {
     </div></section>`;
   }
 
-  return `<section class="card">${head}<div class="card-body" data-repository-diagnostics data-project-id="${project.id}">
-    <p>${escapeHtml(lastValidated)}</p>
+  return `${open}
     <p style="color:var(--text3);font-size:13px">No local changes blocking planning or execution.</p>
   </div></section>`;
 }
@@ -238,7 +238,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const panelContents = [overviewPanel + mergeBranchesPanel, yamlPanel, skillsPanel, validationPanel, promptsPanel, ...(deployment?.enabled ? [deploymentPanel(project, deployment)] : [])];
     const body = `<div class="eyebrow">Configure / Projects</div><h1>${escapeHtml(project.name)}</h1>
       <div class="toolbar"><button class="button" data-validate-button>Run validation</button><button class="button primary" data-save-button>Save configuration</button></div>
-      ${dirtyBanner(project)}
+      <div data-dirty-page-banner>${dirtyBanner(project)}</div>
       <div class="tabs" role="tablist">${tabLabels.map((label, index) => `<button type="button" role="tab" id="tab-${index}" aria-controls="panel-${index}" aria-selected="${index === 0}">${label}</button>`).join("")}</div>
       ${panelContents.map((content, index) => panel(index, content)).join("")}`;
     return { status: 200, title: project.name, body };
