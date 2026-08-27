@@ -34,7 +34,7 @@ beforeEach(() => query.mockReset());
 test("renders a fresh GitHub binding and sends exactly its visible values", async () => {
   const body = await renderPr({ ...pr, policy_synced_at: "2026-08-04T10:05:00Z", requested_reviewers: [{ type: "team", name: "release" }] });
 
-  expect(body).toContain("GitHub: Current");
+  expect(body).toContain("GitHub: Policies satisfied");
   expect(body).toContain("GitHub: reviews");
   expect(body).toContain("GitHub: checks");
   expect(body).toContain("Requested reviewers");
@@ -49,18 +49,34 @@ test("labels stale rate-limited evidence and disables merge with its exact reaso
   const body = await renderPr({ ...pr, policy_stale: true, policy_error_code: "rate_limited", policy_retry_after: "2026-08-04T10:10:00Z" });
 
   expect(body).toContain("GitHub: Stale: rate_limited; retry after");
-  expect(body).toContain('data-pr-approve data-pr-head-sha="head-sha" data-pr-policy-snapshot-id="snapshot-1" disabled title="GitHub policy is stale"');
+  expect(body).toContain('data-pr-approve data-pr-head-sha="head-sha" data-pr-policy-snapshot-id="snapshot-1" disabled title="GitHub: Stale: rate_limited; retry after');
 });
 
-test("labels missing snapshot and head bindings as unavailable", async () => {
-  const noSnapshot = await renderPr({ ...pr, current_policy_snapshot_id: null });
-  const noHead = await renderPr({ ...pr, head_sha: null });
+test("labels a missing snapshot as unavailable when enforcement mode is required", async () => {
+  const body = await renderPr({
+    ...pr, current_policy_snapshot_id: null, config_json: { github_policy: { enforcement: "required" } },
+  });
 
-  expect(noSnapshot).toContain("GitHub: Unavailable: policy snapshot missing");
-  expect(noSnapshot).toContain("Policy snapshot</dt><dd class=\"mono\">Unavailable");
-  expect(noSnapshot).toContain('disabled title="GitHub policy snapshot is unavailable"');
-  expect(noHead).toContain("GitHub: Unavailable: head SHA missing");
-  expect(noHead).toContain('disabled title="GitHub head SHA is unavailable"');
+  expect(body).toContain("GitHub: Unavailable: policy snapshot missing");
+  expect(body).toContain("Policy snapshot</dt><dd class=\"mono\">Unavailable");
+  expect(body).toContain('disabled title="GitHub: Unavailable: policy snapshot missing"');
+});
+
+test("labels a missing snapshot as no applicable policies when enforcement mode is auto and review/check states are not_required", async () => {
+  const body = await renderPr({
+    ...pr, current_policy_snapshot_id: "snap-1", policy_complete: true, policy_stale: false,
+    review_state: "not_required", check_state: "not_required", config_json: {},
+  });
+
+  expect(body).toContain("GitHub: No applicable policies");
+  expect(body).not.toContain('data-pr-approve disabled');
+});
+
+test("labels missing head SHA as unavailable regardless of enforcement mode", async () => {
+  const body = await renderPr({ ...pr, head_sha: null });
+
+  expect(body).toContain("GitHub: Unavailable: head SHA missing");
+  expect(body).toContain('disabled title="GitHub: Unavailable: head SHA missing"');
 });
 
 test("omits the policy snapshot and allows a matching head when enforcement is disabled", async () => {
@@ -71,14 +87,14 @@ test("omits the policy snapshot and allows a matching head when enforcement is d
 });
 
 test.each([
-  [{ policy_complete: false }, "GitHub: Incomplete", "GitHub policy is incomplete"],
-  [{ review_state: "pending" }, "GitHub: Current", "GitHub reviews are pending"],
-  [{ check_state: "failure" }, "GitHub: Current", "GitHub checks are failure"],
-])("disables merge for %o with the exact policy reason", async (changes, status, reason) => {
+  [{ policy_complete: false }, "GitHub: Incomplete"],
+  [{ review_state: "pending" }, "GitHub: Required: reviews pending"],
+  [{ check_state: "failure" }, "GitHub: Required: checks failed"],
+])("disables merge for %o with the exact policy reason", async (changes, status) => {
   const body = await renderPr({ ...pr, ...changes });
 
   expect(body).toContain(status);
-  expect(body).toContain(`disabled title="${reason}"`);
+  expect(body).toContain(`disabled title="${status}"`);
 });
 
 test("escapes persisted review output and errors", async () => {

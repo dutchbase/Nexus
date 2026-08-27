@@ -1,8 +1,9 @@
 import { escapeHtml, fmtDateTime, pool, prFreshness, renderMarkdown, shortRef, statusBadge } from "./shared.ts";
 import type { PageResult, Session } from "./shared.ts";
-import { aiModels, reasoningLevels } from "@dcc/domain";
+import { aiModels, derivePolicyStatus, reasoningLevels } from "@dcc/domain";
+import { getGithubPolicyEnforcementMode } from "@dcc/project-config";
 
-const detailQuery = `SELECT pr.*,p.name project_name,p.slug project_slug,t.ticket_number,t.title ticket_title,t.status ticket_status,t.approved_plan_hash,
+const detailQuery = `SELECT pr.*,p.name project_name,p.slug project_slug,p.config_json,t.ticket_number,t.title ticket_title,t.status ticket_status,t.approved_plan_hash,
               pv.content_markdown approved_plan,ar.id run_id,ar.model run_model,ar.reasoning_level run_reasoning_level,
               ar.metadata_json,ea.result_commit,jsonb_array_length(ss.skills_json) skills_applied
        FROM pull_requests pr JOIN projects p ON p.id=pr.project_id
@@ -47,29 +48,23 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[], r
   const canStartRepair = Boolean(item.run_id);
   const button = (attr: string, label: string, allowed: boolean, deniedReason: string, extraClass = "") =>
     `<button class="button${extraClass}" type="button" ${attr}${allowed ? "" : " disabled"} title="${allowed ? "" : escapeHtml(deniedReason)}">${label}</button>`;
-  const policyIssue = !item.current_policy_snapshot_id
-    ? "Unavailable: policy snapshot missing"
-    : !item.head_sha
-    ? "Unavailable: head SHA missing"
-    : item.policy_stale
-    ? `Stale${item.policy_error_code ? `: ${item.policy_error_code}` : ""}${item.policy_retry_after ? `; retry after ${new Date(item.policy_retry_after).toLocaleString("nl-NL")}` : ""}`
-    : !item.policy_complete
-    ? `Incomplete${item.policy_error_code ? `: ${item.policy_error_code}` : ""}`
-    : "Current";
-  const mergeBlocker = !item.head_sha
-    ? "GitHub head SHA is unavailable"
-    : requireFreshPolicyBinding && !item.current_policy_snapshot_id
-    ? "GitHub policy snapshot is unavailable"
-    : requireFreshPolicyBinding && item.policy_stale
-    ? "GitHub policy is stale"
-    : requireFreshPolicyBinding && !item.policy_complete
-    ? "GitHub policy is incomplete"
-    : requireFreshPolicyBinding && !["approved", "not_required"].includes(item.review_state)
-    ? `GitHub reviews are ${item.review_state ?? "unknown"}`
-    : requireFreshPolicyBinding && !["success", "not_required"].includes(item.check_state)
-    ? `GitHub checks are ${item.check_state ?? "unknown"}`
-    : "";
-  const policyAllowsMerge = !mergeBlocker;
+  const policyStatus = derivePolicyStatus({
+    headSha: item.head_sha ?? null,
+    currentPolicySnapshotId: item.current_policy_snapshot_id ?? null,
+    policyStale: Boolean(item.policy_stale),
+    policyComplete: item.policy_complete ?? null,
+    reviewState: item.review_state ?? null,
+    checkState: item.check_state ?? null,
+    policyErrorCode: item.policy_error_code ?? null,
+    policyRetryAfter: item.policy_retry_after ?? null,
+    enforcementMode: getGithubPolicyEnforcementMode(item.config_json),
+  });
+  const policyIssue = policyStatus.label;
+  // requireFreshPolicyBinding is a global kill-switch (independent of the
+  // per-project enforcement mode above): when off, only a missing head SHA
+  // blocks the merge button, exactly as before this shared derivation existed.
+  const policyAllowsMerge = requireFreshPolicyBinding ? policyStatus.allowsMerge : Boolean(item.head_sha);
+  const mergeBlocker = policyAllowsMerge ? "" : `GitHub: ${policyStatus.label}`;
   const requestedReviewers = Array.isArray(item.requested_reviewers)
     ? item.requested_reviewers.map((reviewer: any) => `${reviewer.type === "team" ? "team " : ""}${reviewer.name ?? "unknown"}`).join(", ") || "None"
     : "Unknown";
@@ -183,7 +178,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     else if (tab === "closed") conditions.push("pr.state='closed' AND pr.merged_at IS NULL");
     const [pullRequests, repositories, lastSynced] = await Promise.all([
       pool.query(
-        `SELECT pr.*,p.name project_name,p.slug project_slug,t.ticket_number,t.status ticket_status,
+        `SELECT pr.*,p.name project_name,p.slug project_slug,p.config_json,t.ticket_number,t.status ticket_status,
                 (SELECT status FROM pr_ai_reviews WHERE pull_request_id=pr.id ORDER BY created_at DESC LIMIT 1) AS latest_ai_review_status
          FROM pull_requests pr JOIN projects p ON p.id=pr.project_id
          LEFT JOIN tickets t ON t.id=pr.ticket_id
