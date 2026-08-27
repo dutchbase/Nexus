@@ -276,7 +276,16 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
           <button class="button primary" type="button" data-pr-bulk="merge">Approve &amp; merge</button>
           <button class="button" type="button" data-pr-clear-selection>Clear</button>
         </div>
-        <div class="list-head prs-head"><span class="pr-select"><input type="checkbox" data-pr-check-all aria-label="Select all pull requests"></span><span>PR</span><span>Title</span><span>Project</span><span>Merge Status</span><span>AI Status</span><span>Conflicts</span><span>Created</span><span>Actions</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No pull requests match these filters.</div>`}</section>`;
+        <div class="list-head prs-head"><span class="pr-select"><input type="checkbox" data-pr-check-all aria-label="Select all pull requests"></span><span>PR</span><span>Title</span><span>Project</span><span>Merge Status</span><span>AI Status</span><span>Conflicts</span><span>Created</span><span>Actions</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No pull requests match these filters.</div>`}</section>
+      <dialog data-pr-merge-preflight-dialog>
+        <h3>Approve &amp; merge selected PRs</h3>
+        <div data-pr-preflight-summary></div>
+        <ul data-pr-preflight-list style="list-style:none;padding:0"></ul>
+        <div style="display:flex;gap:8px;margin-top:12px">
+          <button class="button" type="button" data-close-dialog>Cancel</button>
+          <button class="button primary" type="button" data-pr-preflight-confirm>Merge</button>
+        </div>
+      </dialog>`;
     return { status: 200, title: "Pull requests", body };
   }
   const pullRequestSlugMatch = url.pathname.match(/^\/admin\/pull-requests\/([^/]+)\/(\d+)$/);

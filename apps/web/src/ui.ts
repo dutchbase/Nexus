@@ -895,6 +895,46 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             }else alert(result.error);
           }finally{button.disabled=false}
         });
+        const preflightDialog=document.querySelector("[data-pr-merge-preflight-dialog]");
+        let preflightReadyIds=[];
+        document.querySelector('[data-pr-bulk="merge"]')?.addEventListener("click",async(event)=>{
+          const ids=selectedPrIds();if(!ids.length)return;
+          const button=event.currentTarget;button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/bulk/merge-preflight",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({ids})});
+            const result=await response.json();
+            if(!response.ok){alert(result.error);return}
+            const ready=result.results.filter(r=>r.eligible),blocked=result.results.filter(r=>!r.eligible);
+            preflightReadyIds=ready.map(r=>r.id);
+            preflightDialog.querySelector("[data-pr-preflight-summary]").textContent=\`\${ready.length} ready, \${blocked.length} blocked\`;
+            preflightDialog.querySelector("[data-pr-preflight-list]").replaceChildren(
+              ...result.results.map(r=>{
+                const li=document.createElement("li");
+                li.textContent=(r.eligible?"✓ ":"✕ ")+"#"+(r.number??"?")+" "+(r.title??"")+(r.eligible?"":" — "+r.reason);
+                return li;
+              }),
+            );
+            const confirmButton=preflightDialog.querySelector("[data-pr-preflight-confirm]");
+            confirmButton.textContent=\`Merge \${ready.length} PR\${ready.length===1?"":"s"}\`;
+            confirmButton.disabled=ready.length===0;
+            preflightDialog.showModal();
+          }finally{button.disabled=false}
+        });
+        preflightDialog?.querySelector("[data-pr-preflight-confirm]")?.addEventListener("click",async()=>{
+          if(!preflightReadyIds.length)return;
+          const button=preflightDialog.querySelector("[data-pr-preflight-confirm]");button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/bulk",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({action:"merge",ids:preflightReadyIds})});
+            const result=await response.json();
+            preflightDialog.close();
+            if(response.ok){
+              const queued=result.results.filter(r=>r.outcome==="queued").length,skipped=result.results.filter(r=>r.outcome!=="queued");
+              alert(\`Merging \${queued} pull request\${queued===1?"":"s"}.\${skipped.length?\` \${skipped.length} could not be merged: \${skipped.map(r=>r.reason).join("; ")}\`:""}\`);
+              location.reload();
+            }else alert(result.error);
+          }finally{button.disabled=false}
+        });
+        preflightDialog?.querySelector("[data-close-dialog]")?.addEventListener("click",()=>preflightDialog.close());
       `:""}
       ${/^\/admin\/pull-requests\/[^/]+(\/\d+)?$/.test(path)?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";
