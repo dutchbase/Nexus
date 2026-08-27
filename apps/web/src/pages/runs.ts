@@ -55,6 +55,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const body = `<div class="eyebrow">${escapeHtml(run.ticket_number ?? "")} · ${escapeHtml(run.project_name ?? "")}</div>
       <h1>${shortRef("RUN", run.id)} · ${escapeHtml(run.run_type)}</h1>
       <div style="display:flex;gap:12px;align-items:center;margin-bottom:20px">
+        ${isActive ? `<span style="width:6px;height:6px;border-radius:50%;background:var(--t-run);animation:dccPulse 1.4s ease-in-out infinite;box-shadow:0 0 0 4px color-mix(in srgb, var(--t-run) 20%, transparent);flex-shrink:0"></span>` : ""}
         ${statusBadge(run.status)}
         <span>${statusLine}</span>
         <a href="/api/admin/runs/${run.id}/log" class="button secondary" download>Download logs</a>

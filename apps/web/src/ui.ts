@@ -11,13 +11,18 @@ export function escapeHtml(value: unknown) {
     .replaceAll('"', "&quot;").replaceAll("'", "&apos;");
 }
 
+export function logoMark(letter = "N", size: "sm" | "md" = "md") {
+  const dims = size === "sm" ? "width:20px;height:20px;font-size:13px" : "width:26px;height:26px;font-size:17px";
+  return `<span class="brand-mark" style="${dims}">${letter}</span>`;
+}
+
 function document(title: string, content: string, script = "") {
   return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><link rel="stylesheet" href="/assets/design-tokens.css"></head><body>${content}${script ? `<script>${script}</script>` : ""}</body></html>`;
 }
 
 export function loginPage() {
   return document("Sign in", `<main class="login"><section class="login-card">
-    <div class="login-intro"><div class="eyebrow">Development Control Center</div><h1>Feedback in.<br><em>Reviewed code out.</em></h1><p>One controlled workflow from public feedback to reviewed delivery.</p></div>
+    <div class="login-intro"><div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">${logoMark("N", "md")}<span class="eyebrow" style="margin:0">Nexus</span></div><h1>Feedback in.<br><em>Reviewed code out.</em></h1><p>One controlled workflow from public feedback to reviewed delivery.</p></div>
     <form class="login-form" id="login"><div class="eyebrow">Sign in</div><h2>Administrator</h2>
       <label class="field"><span>Username</span><input name="username" autocomplete="username" required></label><br>
       <label class="field"><span>Password</span><input name="password" type="password" autocomplete="current-password" required></label><br>
@@ -57,12 +62,12 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
     }
   }
 
-  const breadcrumb = section ? `<span class="eyebrow">${section}</span><span>/</span><span>${escapeHtml(title)}</span>` : `<span class="eyebrow">Development Control Center</span><span>/</span><span>${escapeHtml(title)}</span>`;
+  const breadcrumb = section ? `<span class="eyebrow">${section}</span><span>/</span><span>${escapeHtml(title)}</span>` : `<span class="eyebrow">Nexus</span><span>/</span><span>${escapeHtml(title)}</span>`;
 
-  return document(title, `<div class="shell"><aside class="sidebar" id="sidebar"><div class="brand"><span class="brand-mark">D</span><div><div class="brand-title">Development hub</div><div class="brand-sub">Internet Nederland</div></div></div>
+  return document(title, `<div class="shell"><aside class="sidebar" id="sidebar"><div class="brand">${logoMark("N", "md")}<div class="brand-title">Nexus</div></div>
     <nav class="nav" aria-label="Primary">${nav}</nav><footer class="sidebar-footer"><div class="theme"><button data-theme-choice="light">Light</button><button data-theme-choice="auto">Auto</button><button data-theme-choice="dark">Dark</button></div><p>${escapeHtml(username)} · administrator</p></footer></aside>
     <button class="scrim" type="button" data-scrim hidden aria-label="Close navigation menu"></button>
-    <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}<span class="worker">● worker-01 healthy</span>${path === "/admin/forms" || path.startsWith("/admin/forms/") ? `<a class="button" href="/f/website-feedback">Public form</a>` : ""}</header><main class="main">${body}</main></div></div>`, `
+    <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}<span class="worker"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--t-ok);box-shadow:0 0 0 4px color-mix(in srgb, var(--t-ok) 20%, transparent);margin-right:6px;vertical-align:middle"></span>worker-01 healthy</span>${path === "/admin/forms" || path.startsWith("/admin/forms/") ? `<a class="button" href="/f/website-feedback">Public form</a>` : ""}</header><main class="main">${body}</main></div></div>`, `
       const cc=document.cookie.match(/(?:^|;\\s*)dcc_csrf=([^;]*)/);if(cc)sessionStorage.setItem("dccCsrf",cc[1]);
       const choice=localStorage.getItem("dccTheme")||"auto";
       const apply=(value)=>{const dark=value==="dark"||(value==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light";document.querySelectorAll("[data-theme-choice]").forEach(b=>b.classList.toggle("selected",b.dataset.themeChoice===value))};
@@ -1168,7 +1173,7 @@ export function formControls(fields: any[], projects: any[], values: Record<stri
 export function publicFormPage(form: any, fields: any[], projects: any[]) {
   const controls = formControls(fields, projects, {}, "public");
   const fieldTypes = JSON.stringify(Object.fromEntries(fields.map((field) => [field.field_key, field.field_type])));
-  return document(form.title, `<main class="public"><div class="url-strip">/f/${escapeHtml(form.slug)}</div><form class="card" id="public-form"><div class="card-body"><div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description)}</p><div class="grid one">${controls}</div><br><button class="button primary" type="submit">Melding versturen</button><p class="error" role="alert"></p></div></form></main>`, `
+  return document(form.title, `<main class="public"><div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">${logoMark("N", "sm")}<span style="font-size:13px;font-weight:700;color:var(--text2)">Nexus</span></div><div class="url-strip">/f/${escapeHtml(form.slug)}</div><form class="card" id="public-form"><div class="card-body"><div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description)}</p><div class="grid one">${controls}</div><br><button class="button primary" type="submit">Melding versturen</button><p class="error" role="alert"></p></div></form></main>`, `
     document.querySelector("#public-form").addEventListener("submit",async(event)=>{
       event.preventDefault();const data=new FormData(event.currentTarget);const payload={};const files={};
       for(const [key,value] of data){if(value instanceof File&&value.size){(files[key]=files[key]||[]).push(value)}else if(!(value instanceof File))payload[key]=key in payload?[].concat(payload[key],value):value}
