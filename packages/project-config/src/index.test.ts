@@ -1,8 +1,28 @@
-import { chmod, mkdtemp, mkdir } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
-import { normalizeAgentStartPath, validateAgentStartPath } from "./index.ts";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
+import { afterEach, describe, expect, it, test } from "vitest";
+import { normalizeAgentStartPath, validateAgentStartPath, validateProject } from "./index.ts";
+
+const execGit = promisify(execFile);
+const tempDirs: string[] = [];
+
+async function initRepo() {
+  const dir = await mkdtemp(join(tmpdir(), "dcc-git-status-"));
+  tempDirs.push(dir);
+  await execGit("git", ["init", "-b", "main", dir]);
+  await execGit("git", ["-C", dir, "config", "user.email", "test@example.com"]);
+  await execGit("git", ["-C", dir, "config", "user.name", "Test"]);
+  return dir;
+}
+
+async function commitFile(dir: string, name: string, content: string) {
+  await writeFile(join(dir, name), content);
+  await execGit("git", ["-C", dir, "add", name]);
+  await execGit("git", ["-C", dir, "commit", "-m", `add ${name}`]);
+}
 
 describe("planning agent start path", () => {
   it("normalizes blank input to no configured path", async () => {
@@ -32,5 +52,121 @@ describe("planning agent start path", () => {
     await chmod(directory, 0o600);
 
     await expect(validateAgentStartPath(directory)).resolves.toEqual(["planning agent start path is not a readable and searchable directory"]);
+  });
+});
+
+afterEach(async () => {
+  await Promise.all(tempDirs.splice(0).map((dir) => rm(dir, { recursive: true, force: true })));
+});
+
+describe("git status categorization", () => {
+  test("modified tracked file is categorized as modified, unstaged", async () => {
+    const dir = await initRepo();
+    await commitFile(dir, "file.txt", "hello\n");
+    await writeFile(join(dir, "file.txt"), "changed\n");
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
+    expect(result.changedFileDetail).toContainEqual({ path: "file.txt", status: "modified", staged: false });
+  });
+
+  test("staged modification is categorized as modified, staged", async () => {
+    const dir = await initRepo();
+    await commitFile(dir, "file.txt", "hello\n");
+    await writeFile(join(dir, "file.txt"), "changed\n");
+    await execGit("git", ["-C", dir, "add", "file.txt"]);
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
+    expect(result.changedFileDetail).toContainEqual({ path: "file.txt", status: "modified", staged: true });
+  });
+
+  test("untracked file is categorized as untracked", async () => {
+    const dir = await initRepo();
+    await commitFile(dir, "committed.txt", "hi\n");
+    await writeFile(join(dir, "new-file.txt"), "new\n");
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
+    expect(result.changedFileDetail).toContainEqual({ path: "new-file.txt", status: "untracked", staged: false });
+  });
+
+  test("deleted tracked file is categorized as deleted", async () => {
+    const dir = await initRepo();
+    await commitFile(dir, "gone.txt", "bye\n");
+    await rm(join(dir, "gone.txt"));
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
+    expect(result.changedFileDetail).toContainEqual({ path: "gone.txt", status: "deleted", staged: false });
+  });
+
+  test("renamed staged file is categorized as renamed", async () => {
+    const dir = await initRepo();
+    await commitFile(dir, "renamed-from.txt", "content preserved across the rename\n");
+    await execGit("git", ["-C", dir, "mv", "renamed-from.txt", "renamed-to.txt"]);
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
+    expect(result.changedFileDetail).toContainEqual({ path: "renamed-to.txt", status: "renamed", staged: true });
+  });
+
+  test("unresolved merge conflict is categorized as conflicted, distinct from ordinary modifications", async () => {
+    const dir = await initRepo();
+    await commitFile(dir, "conflict.txt", "base\n");
+    await execGit("git", ["-C", dir, "checkout", "-b", "feature"]);
+    await writeFile(join(dir, "conflict.txt"), "feature change\n");
+    await execGit("git", ["-C", dir, "commit", "-am", "feature change"]);
+    await execGit("git", ["-C", dir, "checkout", "main"]);
+    await writeFile(join(dir, "conflict.txt"), "main change\n");
+    await execGit("git", ["-C", dir, "commit", "-am", "main change"]);
+    await execGit("git", ["-C", dir, "merge", "feature"]).catch(() => {});
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
+    expect(result.changedFileDetail).toContainEqual({ path: "conflict.txt", status: "conflicted", staged: false });
+  });
+
+  test("multiple dirty-state types in one repo are all grouped correctly", async () => {
+    const dir = await initRepo();
+    await commitFile(dir, "modified.txt", "original\n");
+    await writeFile(join(dir, "modified.txt"), "changed\n");
+    await writeFile(join(dir, "untracked.txt"), "new\n");
+    await writeFile(join(dir, "added.txt"), "added\n");
+    await execGit("git", ["-C", dir, "add", "added.txt"]);
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
+    const statuses = result.changedFileDetail.map((entry) => entry.status).sort();
+    expect(statuses).toEqual(["added", "modified", "untracked"].sort());
+  });
+
+  test("clean repository returns an empty changedFileDetail and valid:true", async () => {
+    const dir = await initRepo();
+    await commitFile(dir, "file.txt", "hello\n");
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
+    expect(result.changedFileDetail).toEqual([]);
+    expect(result.valid).toBe(true);
+  });
+});
+
+describe("inspection failure handling", () => {
+  test("nonexistent repository path returns ok:false, errorCode:'path_missing', not repository_dirty", async () => {
+    const result = await validateProject({ repositoryPath: "/nonexistent/path/dcc-test-" + Date.now(), defaultBranch: "main" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errorCode).toBe("path_missing");
+  });
+
+  test("a directory that exists but is not a git repository returns errorCode:'not_a_repo'", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "dcc-not-a-repo-"));
+    tempDirs.push(dir);
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main" });
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.errorCode).toBe("not_a_repo");
   });
 });

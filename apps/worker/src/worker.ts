@@ -328,6 +328,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
   const repository = await validateProject({
     repositoryPath: input.project.repository_path, defaultBranch: input.project.default_branch, requireRemote: false, agentStartPath: input.project.agent_start_path,
   });
+  if (!repository.ok) throw new Error(`repository is not available for planning: ${repository.message}`);
   if (!repository.valid) throw new Error(`repository is not available for planning: ${repository.errors.join("; ")}`);
 
   const planningStartPath = input.project.agent_start_path ?? input.project.repository_path;
@@ -575,6 +576,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
         defaultBranch: approvedProject.defaultBranch,
         requireRemote: true,
       });
+      if (!repository.ok) throw new Error(`repository is not available for execution: ${repository.message}`);
       if (!repository.valid) throw new Error(`repository is not available for execution: ${repository.errors.join("; ")}`);
       worktree = await createExecutionWorktree({
         repositoryPath: approvedProject.repositoryPath,

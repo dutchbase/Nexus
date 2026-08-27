@@ -52,20 +52,83 @@ export async function validateAgentStartPath(path: unknown) {
 }
 
 
-export async function validateProject(input: ProjectValidationInput) {
+export type ChangedFileDetail = {
+  path: string;
+  status: "modified" | "added" | "deleted" | "renamed" | "untracked" | "conflicted";
+  staged: boolean;
+};
+
+// Git porcelain v1: each line is `XY PATH` (or `XY PATH -> NEWPATH` for
+// renames), X = index/staged status, Y = worktree/unstaged status.
+function categorizePorcelainLine(line: string): ChangedFileDetail | null {
+  if (line.length < 4) return null;
+  const indexStatus = line[0];
+  const worktreeStatus = line[1];
+  const rest = line.slice(3);
+  const path = rest.includes(" -> ") ? rest.split(" -> ")[1] : rest;
+  const conflictCodes = new Set(["DD", "AU", "UD", "UA", "DU", "AA", "UU"]);
+  const code = `${indexStatus}${worktreeStatus}`;
+  if (conflictCodes.has(code)) return { path, status: "conflicted", staged: false };
+  if (indexStatus === "?" && worktreeStatus === "?") return { path, status: "untracked", staged: false };
+  if (indexStatus === "R") return { path, status: "renamed", staged: true };
+  if (indexStatus === "A") return { path, status: "added", staged: true };
+  if (indexStatus === "D") return { path, status: "deleted", staged: true };
+  if (indexStatus === "M") return { path, status: "modified", staged: true };
+  if (worktreeStatus === "D") return { path, status: "deleted", staged: false };
+  if (worktreeStatus === "M") return { path, status: "modified", staged: false };
+  return { path, status: "modified", staged: false };
+}
+
+export type InspectionErrorCode = "path_missing" | "not_a_repo" | "permission_denied" | "git_unavailable" | "timeout" | "unknown";
+
+export type ValidateProjectResult =
+  | { ok: true; valid: boolean; errors: string[]; changedFiles: string[]; changedFileDetail: ChangedFileDetail[] }
+  | { ok: false; errorCode: InspectionErrorCode; message: string };
+
+// execFile options accept a timeout; kept generous since repository
+// inspection can run against network filesystems.
+const GIT_INSPECTION_TIMEOUT_MS = 10_000;
+
+function classifyInspectionError(error: unknown): { errorCode: InspectionErrorCode; message: string } {
+  const err = error as NodeJS.ErrnoException & { stderr?: string; killed?: boolean; signal?: NodeJS.Signals | null };
+  const message = (err?.stderr && err.stderr.trim()) || (error instanceof Error ? error.message : String(error));
+  if (err?.killed || err?.signal === "SIGTERM") return { errorCode: "timeout", message };
+  // execFile ENOENT for a missing `git` binary carries the command path/syscall,
+  // distinguishing it from our own stat()/access() ENOENT on repositoryPath.
+  if (err?.code === "ENOENT" && (err.path === "git" || (err.syscall ?? "").includes("spawn"))) {
+    return { errorCode: "git_unavailable", message };
+  }
+  if (err?.code === "ENOENT" || err?.code === "ENOTDIR") return { errorCode: "path_missing", message };
+  if (err?.code === "EACCES") return { errorCode: "permission_denied", message };
+  if (/not a git repository/i.test(message)) return { errorCode: "not_a_repo", message };
+  return { errorCode: "unknown", message };
+}
+
+export async function validateProject(input: ProjectValidationInput): Promise<ValidateProjectResult> {
   const errors: string[] = [];
-  const changedFiles: string[] = [];
   errors.push(...await validateAgentStartPath(input.agentStartPath));
+
   try {
-    if (!(await stat(input.repositoryPath)).isDirectory()) errors.push("repository path is not a directory");
+    if (!(await stat(input.repositoryPath)).isDirectory()) {
+      return { ok: false, errorCode: "not_a_repo", message: "repository path is not a directory" };
+    }
     await access(input.repositoryPath, constants.R_OK);
-    await exec("git", ["-C", input.repositoryPath, "rev-parse", "--git-dir"]);
-    await exec("git", ["-C", input.repositoryPath, "show-ref", "--verify", `refs/heads/${input.defaultBranch}`]);
-    const status = (await exec("git", ["-C", input.repositoryPath, "status", "--porcelain"])).stdout;
-    changedFiles.push(...status.split("\n").filter(Boolean).map((line) => line.slice(3)));
+    await exec("git", ["-C", input.repositoryPath, "rev-parse", "--git-dir"], { timeout: GIT_INSPECTION_TIMEOUT_MS });
+  } catch (error) {
+    return { ok: false, ...classifyInspectionError(error) };
+  }
+
+  let changedFiles: string[] = [];
+  let changedFileDetail: ChangedFileDetail[] = [];
+  try {
+    await exec("git", ["-C", input.repositoryPath, "show-ref", "--verify", `refs/heads/${input.defaultBranch}`], { timeout: GIT_INSPECTION_TIMEOUT_MS });
+    const status = (await exec("git", ["-C", input.repositoryPath, "status", "--porcelain"], { timeout: GIT_INSPECTION_TIMEOUT_MS })).stdout;
+    const lines = status.split("\n").filter(Boolean);
+    changedFiles = lines.map((line) => line.slice(3));
+    changedFileDetail = lines.map(categorizePorcelainLine).filter((entry): entry is ChangedFileDetail => entry !== null);
     if (changedFiles.length) errors.push("repository has uncommitted changes");
     if (input.requireRemote !== false) {
-      const remotes = (await exec("git", ["-C", input.repositoryPath, "remote"])).stdout.trim();
+      const remotes = (await exec("git", ["-C", input.repositoryPath, "remote"], { timeout: GIT_INSPECTION_TIMEOUT_MS })).stdout.trim();
       if (!remotes) errors.push("configured remote does not exist");
     }
   } catch (error) {
@@ -80,7 +143,7 @@ export async function validateProject(input: ProjectValidationInput) {
   for (const command of input.validationCommands ?? []) {
     if (!command.trim()) errors.push("validation command is empty");
   }
-  return { valid: errors.length === 0, errors, changedFiles };
+  return { ok: true, valid: errors.length === 0, errors, changedFiles, changedFileDetail };
 }
 
 export type DeploymentConfig = {

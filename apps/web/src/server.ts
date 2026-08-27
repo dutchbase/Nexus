@@ -1842,6 +1842,9 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const repoCheck = await validateProject({
       repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false, agentStartPath: project.agent_start_path,
     });
+    if (!repoCheck.ok) {
+      return json(response, 409, { error: `repository could not be inspected: ${repoCheck.message}`, error_code: repoCheck.errorCode });
+    }
     const commitMessage = typeof body.commit_message === "string" ? body.commit_message.trim() : "";
     const systemAi = await getSystemAiSettings(pool);
     const selection = resolvedAiFor(ticket, project, "planning", systemAi);
@@ -1883,6 +1886,9 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       const recheck = await validateProject({
         repositoryPath: project.repository_path, defaultBranch: project.default_branch, requireRemote: false, agentStartPath: project.agent_start_path,
       });
+      if (!recheck.ok) {
+        return json(response, 409, { error: `repository could not be re-inspected after commit: ${recheck.message}`, error_code: recheck.errorCode });
+      }
       if (recheck.changedFiles.length) {
         return json(response, 409, {
           error: "repository still has uncommitted changes after committing",
