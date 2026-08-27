@@ -66,6 +66,22 @@ test("no route overflows the viewport at common widths", async ({ page }) => {
         });
         const label = `${theme}-${width}-${route.replaceAll("/", "_")}`;
         expect(overflow, `${label}: horizontal overflow`).toBeNull();
+
+        if (route === "/admin" && width >= 1024) {
+          const scrollHeight = await page.evaluate(() => document.documentElement.scrollHeight);
+          const viewportHeight = await page.evaluate(() => window.innerHeight);
+          expect(scrollHeight, `${label}: page-level vertical scroll`).toBeLessThanOrEqual(viewportHeight);
+
+          const cardBoxes = await page.locator(".dashboard-rows .card").evaluateAll(
+            (cards) => cards.map((c) => c.getBoundingClientRect().bottom),
+          );
+          // Every card's bottom edge should land within a few pixels of the viewport bottom
+          // (allowing for border-box rounding), confirming they all stretch to fill it.
+          for (const bottom of cardBoxes) {
+            expect(Math.abs(bottom - viewportHeight), `${label}: card bottom vs viewport bottom`).toBeLessThan(4);
+          }
+        }
+
         await page.screenshot({ path: `tests/e2e/.results/visual-sweep/${label}.png`, fullPage: false });
       }
     }
