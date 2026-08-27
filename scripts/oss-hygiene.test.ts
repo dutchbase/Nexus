@@ -1,4 +1,4 @@
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const root = new URL("../", import.meta.url);
@@ -27,5 +27,12 @@ describe("open-source release hygiene", () => {
     expect(envStarLine, ".gitignore must still ignore .env.* (real secrets)").toBeTruthy();
     const negation = gitignore.split("\n").find((line) => line.trim() === "!.env.example");
     expect(negation, ".gitignore must explicitly un-ignore .env.example").toBeTruthy();
+  });
+
+  it("has contribution docs and GitHub templates", () => {
+    expect(existsSync(new URL("CONTRIBUTING.md", root))).toBe(true);
+    expect(existsSync(new URL(".github/PULL_REQUEST_TEMPLATE.md", root))).toBe(true);
+    expect(existsSync(new URL(".github/ISSUE_TEMPLATE/bug_report.md", root))).toBe(true);
+    expect(existsSync(new URL(".github/ISSUE_TEMPLATE/feature_request.md", root))).toBe(true);
   });
 });
