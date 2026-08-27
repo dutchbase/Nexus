@@ -372,13 +372,22 @@ or `scripts/restore-drill.sh` itself for the full flag/marker contract.
 
 ## Updating
 
-A signed push to your protected branch queues a deployment if you're using
-the included webhook flow (GitHub Actions are not a deployment
-prerequisite). See
-[`docs/DEPLOYMENT-RUNBOOK.md`](docs/DEPLOYMENT-RUNBOOK.md) for full
-operator/incident-recovery detail. If you're managing deployment yourself
-(no webhook), updating is just: `git pull`, `pnpm install`,
-`pnpm --filter database migrate`, restart both processes.
+If you manage deployment yourself (no webhook), updating is just: `git pull`,
+`pnpm install`, `pnpm --filter database migrate`, then restart both
+processes.
+
+If you use the included webhook flow, a signed protected-branch push queues a
+deployment; GitHub Actions are not a deployment prerequisite. Before staging
+or migrating, `deploy.sh` fetches the protected branch and requires its SHA to
+equal the queued SHA. After installing locked dependencies in the detached
+release worktree, it runs pnpm verify locally before migrations. Each release
+is a detached worktree under `$DCC_ROOT/.deploy-releases`; the script keeps
+`.env`, `.env.worker`, and `data` in `$DCC_ROOT`, then atomically repoints the
+`$DCC_ROOT/.deploy-current` symlink once the new release is healthy.
+A fetched SHA mismatch fails before staging, writes a nonzero marker, and the webhook finalizes the attempt as failed.
+
+See [`docs/DEPLOYMENT-RUNBOOK.md`](docs/DEPLOYMENT-RUNBOOK.md) for the full
+operator and incident-recovery runbook.
 
 ### Superpowers updates
 
