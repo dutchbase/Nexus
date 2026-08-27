@@ -401,6 +401,102 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const result=await response.json();
           if(response.ok)location.reload();else{button.disabled=false;alert(result.error)}
         }));
+        (function initDeploymentTab(){
+          const pipelineEl=document.querySelector("[data-deployment-pipeline]");
+          if(!pipelineEl)return; // no Deployment tab on this project
+          const projectId=pipelineEl.dataset.projectId;
+          const productionEl=document.querySelector("[data-deployment-production]");
+          const rollbackEl=document.querySelector("[data-deployment-rollback]");
+          const releasesEl=document.querySelector("[data-deployment-releases]");
+          const cronEl=document.querySelector("[data-deployment-cron]");
+          const promoteButton=document.querySelector("[data-promote-button]");
+          const promoteRetry=document.querySelector("[data-promote-retry]");
+          const promoteReason=document.querySelector("[data-promote-reason]");
+          const dialog=document.querySelector("[data-promote-dialog]");
+          let lastCheck=null;
+
+          async function pollJob(jobId,maxMs){
+            for(let i=0;i<Math.ceil(maxMs/700);i++){
+              await new Promise(r=>setTimeout(r,i===0?300:700));
+              const payload=await fetch("/api/admin/jobs/"+jobId,{headers:{"x-csrf-token":csrf}}).then(r=>r.json()).catch(()=>null);
+              const job=payload&&payload.job;if(!job)continue;
+              if(["completed","failed","cancelled","blocked_auth","blocked_auth_configuration"].includes(job.status))return job;
+            }
+            return null;
+          }
+
+          async function loadStatus(){
+            const data=await fetch("/api/admin/projects/"+projectId+"/deployment",{headers:{"x-csrf-token":csrf}}).then(r=>r.json());
+            renderSnapshot(data.snapshot);
+            renderReleases(data.releases);
+          }
+
+          function renderSnapshot(snapshot){
+            if(!snapshot){pipelineEl.innerHTML="<p>No status yet — click Refresh.</p>";return;}
+            pipelineEl.innerHTML='<p>Master: <code>'+snapshot.master_commit_sha.slice(0,8)+'</code> '+badge(snapshot.master_ci_state)+'</p><p>Image: <code>'+snapshot.image_tag+'</code> '+badge(snapshot.image_exists?"Built":"Not built")+'</p>';
+            productionEl.innerHTML='<p>Live: <code>'+(snapshot.production_commit_sha?snapshot.production_commit_sha.slice(0,8):"unknown")+'</code> '+badge(snapshot.production_health)+'</p><p>Checked '+new Date(snapshot.production_checked_at).toLocaleString()+'</p>';
+          }
+
+          function badge(label){return '<span class="status">'+label+'</span>';} // real tone class comes from server-rendered statusBadge on initial load; client refresh reuses plain text + tone lookup table mirroring shared.ts's stateTones if richer styling is wanted later.
+
+          function renderReleases(releases){
+            releasesEl.innerHTML=releases.length?releases.map(r=>'<div style="padding:10px 18px;border-top:1px solid var(--border)"><b>'+r.action+'</b> '+r.commit_sha.slice(0,8)+' — '+r.status+' — '+new Date(r.created_at).toLocaleString()+'</div>').join(""):'<div style="padding:16px 18px;color:var(--text3)">No releases yet.</div>';
+            const lastHealthy=releases.find(r=>r.status==="healthy");
+            rollbackEl.innerHTML=lastHealthy
+              ?'<button class="button" type="button" data-rollback-button data-target-sha="'+lastHealthy.commit_sha+'" data-expected-production-sha="'+releases[0].commit_sha+'">Roll back to '+lastHealthy.commit_sha.slice(0,8)+'</button>'
+              :'<button class="button" type="button" disabled title="No previous known-good release recorded">No previous release to roll back to</button>';
+          }
+
+          async function runPromoteCheck(){
+            promoteButton.disabled=true;promoteRetry.hidden=true;promoteReason.textContent="Checking preconditions…";
+            try{
+              const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/promote-check",{method:"POST",headers:{"x-csrf-token":csrf}});
+              const {job}=await queued.json();
+              const done=await pollJob(job.id,20000);
+              if(!done||done.status!=="completed"){promoteReason.textContent="Pre-flight check timed out — try again.";promoteRetry.hidden=false;return;}
+              lastCheck=done.result_json;
+              if(lastCheck.eligible){promoteButton.disabled=false;promoteReason.textContent="Ready: "+lastCheck.master_sha.slice(0,8);}
+              else{promoteButton.disabled=true;promoteReason.textContent=lastCheck.reasons.join(", ");}
+            }catch(error){promoteReason.textContent="Pre-flight failed: "+error.message;promoteRetry.hidden=false;}
+          }
+
+          promoteRetry.addEventListener("click",runPromoteCheck);
+          promoteButton.addEventListener("click",()=>{
+            if(!lastCheck||!lastCheck.eligible)return;
+            dialog.querySelector("[data-promote-dialog-sha]").textContent=lastCheck.master_sha.slice(0,8);
+            dialog.querySelector("[data-promote-dialog-message]").textContent=lastCheck.master_commit_message||"";
+            dialog.querySelector("[data-promote-dialog-tag]").textContent=lastCheck.image_tag;
+            dialog.showModal();
+          });
+          dialog.querySelector("[data-promote-dialog-cancel]").addEventListener("click",()=>dialog.close());
+          dialog.querySelector("[data-promote-dialog-confirm]").addEventListener("click",async()=>{
+            dialog.close();
+            promoteButton.disabled=true;promoteReason.textContent="Promoting…";
+            const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/promote",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({commit_sha:lastCheck.master_sha,expected_master_sha:lastCheck.master_sha})});
+            const body=await queued.json().catch(()=>({}));
+            if(!queued.ok){promoteReason.textContent="Could not start promotion: "+(body.error||queued.status);return;}
+            const done=await pollJob(body.job.id,20000);
+            const result=done&&done.result_json;
+            promoteReason.textContent=result?("Promotion "+result.outcome):"Promotion status unknown — refresh to check.";
+            loadStatus();
+          });
+
+          rollbackEl.addEventListener("click",async(event)=>{
+            const button=event.target.closest("[data-rollback-button]");if(!button)return;
+            if(!confirm("Roll back to "+button.dataset.targetSha.slice(0,8)+"?"))return;
+            button.disabled=true;button.textContent="Rolling back…";
+            const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/rollback",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({target_commit_sha:button.dataset.targetSha,expected_production_sha:button.dataset.expectedProductionSha})});
+            const body=await queued.json().catch(()=>({}));
+            if(!queued.ok){alert("Could not start rollback: "+(body.error||queued.status));button.disabled=false;return;}
+            await pollJob(body.job.id,20000);
+            loadStatus();
+          });
+
+          document.querySelector("[data-deployment-pipeline]").closest("section").parentElement.querySelectorAll("[data-refresh-deployment]").forEach(btn=>btn.addEventListener("click",()=>fetch("/api/admin/projects/"+projectId+"/deployment/sync",{method:"POST",headers:{"x-csrf-token":csrf}}).then(()=>setTimeout(loadStatus,1500))));
+
+          loadStatus();
+          runPromoteCheck();
+        })();
       `:""}
       ${path==="/admin/forms/new"?`
         const csrf=sessionStorage.getItem("dccCsrf")||"",form=document.querySelector("[data-new-form-form]");
