@@ -52,3 +52,48 @@ export async function checkImageExists(registry: string, repository: string, tag
   }
   throw new Error(`GHCR manifest check failed with status ${anonymousResponse.status}`);
 }
+
+// A separate return shape from ImageExistenceResult (state:"exists"|"not_exists"|"unknown"
+// instead of exists:boolean) because checkImageExists's boolean already collapses a real
+// 404 and a transient 429/5xx into the same `exists:false` — this function needs to tell
+// those apart so callers can treat GHCR as advisory-only (never blocking) without losing
+// the distinction between "confirmed missing" and "couldn't check".
+export type ImageExistenceDetailedResult = { state: "exists" | "not_exists" | "unknown"; digest?: string; reason?: string };
+
+// checkImageExistsDetailed must never throw — callers treat it as advisory-only.
+export async function checkImageExistsDetailed(registry: string, repository: string, tag: string): Promise<ImageExistenceDetailedResult> {
+  try {
+    if (registry !== "ghcr.io") return { state: "unknown", reason: `unsupported registry "${registry}"` };
+    const anonymousToken = await ghcrToken(repository);
+    const manifestUrl = `https://ghcr.io/v2/${repository}/manifests/${encodeURIComponent(tag)}`;
+    const anonymousResponse = await fetch(manifestUrl, {
+      headers: { authorization: `Bearer ${anonymousToken}`, accept: manifestAcceptHeader },
+    });
+    if (anonymousResponse.status === 200) {
+      return { state: "exists", digest: anonymousResponse.headers.get("docker-content-digest") ?? undefined };
+    }
+    if (anonymousResponse.status === 404) return { state: "not_exists" };
+    if (anonymousResponse.status === 429 || anonymousResponse.status >= 500) {
+      return { state: "unknown", reason: `GHCR returned ${anonymousResponse.status}` };
+    }
+    if ((anonymousResponse.status === 401 || anonymousResponse.status === 403) && process.env.GHCR_READ_TOKEN) {
+      const authedResponse = await fetch(manifestUrl, {
+        headers: { authorization: `Bearer ${process.env.GHCR_READ_TOKEN}`, accept: manifestAcceptHeader },
+      });
+      if (authedResponse.status === 200) {
+        return { state: "exists", digest: authedResponse.headers.get("docker-content-digest") ?? undefined };
+      }
+      if (authedResponse.status === 404) return { state: "not_exists" };
+      if (authedResponse.status === 429 || authedResponse.status >= 500) {
+        return { state: "unknown", reason: `GHCR returned ${authedResponse.status}` };
+      }
+      return { state: "unknown", reason: `unexpected status ${authedResponse.status}` };
+    }
+    if (anonymousResponse.status === 401 || anonymousResponse.status === 403) {
+      return { state: "unknown", reason: "authRequired" };
+    }
+    return { state: "unknown", reason: `unexpected status ${anonymousResponse.status}` };
+  } catch (error) {
+    return { state: "unknown", reason: error instanceof Error ? error.message : String(error) };
+  }
+}

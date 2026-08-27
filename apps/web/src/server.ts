@@ -9,7 +9,7 @@ import { promisify } from "node:util";
 import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
 import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
-  buildExecutionPrompt, checkPlanApprovalGate, enqueueJob, getPullRequestMergeSettings, getSystemAiSettings,
+  allowlistMismatches, buildExecutionPrompt, checkPlanApprovalGate, enqueueJob, findAllowlistEntry, getPullRequestMergeSettings, getSystemAiSettings,
   globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
   unionSkills, validateAiSelection, providerForModel, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
@@ -1384,7 +1384,39 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (typeof body.expected_master_sha !== "string" || !/^[0-9a-f]{40}$/.test(body.expected_master_sha)) return json(response, 400, { error: "expected_master_sha must be a 40-character hex SHA" });
     const job = await enqueueJob({ type: "deployment.promote",
       payload: { project_id: project.id, actor_id: session.user_id, commit_sha: body.commit_sha, expected_master_sha: body.expected_master_sha },
-      idempotencyKey: `g07:deployment.promote:${project.id}:${body.commit_sha}:${Math.floor(Date.now() / 3600000)}` });
+      idempotencyKey: `g07:deployment.promote:${project.id}:${body.commit_sha}:${Math.floor(Date.now() / 3600000)}`,
+      maxAttempts: 1 });
+    return json(response, 202, { job });
+  }
+
+  const deploymentPromoteForceMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/deployment\/promote-force$/i);
+  if (deploymentPromoteForceMatch && request.method === "POST") {
+    const project = (await pool.query(
+      "SELECT id, slug, github_owner, github_repository, default_branch, config_json FROM projects WHERE id=$1",
+      [deploymentPromoteForceMatch[1]],
+    )).rows[0];
+    if (!project) return json(response, 404, { error: "project not found" });
+    if (!project.config_json?.deployment?.enabled) return json(response, 404, { error: "project has no deployment configured" });
+    const allowlistEntry = findAllowlistEntry(project.slug, project);
+    if (!allowlistEntry?.allowForce) return json(response, 403, { error: "this project is not eligible for forced production promotion" });
+    // Fail fast on a projects row that no longer describes the allowlisted
+    // repository/branch pair. The worker repeats this check before it writes
+    // the ref — this one only saves enqueueing a job that can never run.
+    const mismatched = allowlistMismatches(allowlistEntry, {
+      owner: project.github_owner, repo: project.github_repository,
+      sourceBranch: project.default_branch, targetBranch: project.config_json.deployment.production_branch,
+    });
+    if (mismatched.length > 0) {
+      return json(response, 403, { error: `project no longer matches its production-promotion allowlist entry (${mismatched.join(", ")})` });
+    }
+    const body = await bodyOf(request);
+    if (body.confirm_diverged !== true) return json(response, 400, { error: "confirm_diverged:true is required to force a diverged production branch" });
+    if (typeof body.commit_sha !== "string" || !/^[0-9a-f]{40}$/.test(body.commit_sha)) return json(response, 400, { error: "commit_sha must be a 40-character hex SHA" });
+    if (typeof body.expected_master_sha !== "string" || !/^[0-9a-f]{40}$/.test(body.expected_master_sha)) return json(response, 400, { error: "expected_master_sha must be a 40-character hex SHA" });
+    const job = await enqueueJob({ type: "deployment.promote",
+      payload: { project_id: project.id, actor_id: session.user_id, commit_sha: body.commit_sha, expected_master_sha: body.expected_master_sha, force: true },
+      idempotencyKey: `g07:deployment.promote:${project.id}:${body.commit_sha}:force:${Math.floor(Date.now() / 3600000)}`,
+      maxAttempts: 1 });
     return json(response, 202, { job });
   }
 

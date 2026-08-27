@@ -168,11 +168,13 @@ export type DeploymentConfig = {
   enabled: boolean;
   production_branch: string;
   image: { registry: string; repository: string; tag_template: string };
-  health: { host: string; health_path: string; version_path: string; version_field?: string };
+  health?: { host: string; health_path: string; version_path: string; version_field?: string };
   promotion: { require_e2e_gate_label: boolean; e2e_gate_label?: string };
   auto_rollback_on_failed_health_check?: boolean;
   cron_jobs?: Array<{ key: string; description?: string; expected_interval_minutes: number; grace_minutes?: number }>;
   cron_webhook_secret_reference?: string;
+  mechanism?: "health_check" | "github_actions_jobs"; // defaults to "health_check" when absent
+  actions?: { docker_image_job_name: string; migrations_job_name: string; deploy_job_name: string }; // required iff mechanism === "github_actions_jobs"
 };
 
 // Mirrors notification-provider's secretReferencePattern: only env vars with this
@@ -200,12 +202,35 @@ export function validateDeploymentConfig(value: unknown): string[] {
     if (typeof image.repository !== "string" || !image.repository.trim()) errors.push("deployment.image.repository is required");
     if (typeof image.tag_template !== "string" || !image.tag_template.includes("{{commit}}")) errors.push("deployment.image.tag_template must contain {{commit}}");
   }
+  const mechanism = v.mechanism === undefined ? "health_check" : v.mechanism;
+  if (mechanism !== "health_check" && mechanism !== "github_actions_jobs") {
+    errors.push('deployment.mechanism must be "health_check" or "github_actions_jobs"');
+  }
   const health = v.health as Record<string, unknown> | undefined;
-  if (!health || typeof health !== "object") errors.push("deployment.health is required");
-  else {
-    if (typeof health.host !== "string" || !/^https?:\/\//.test(health.host)) errors.push("deployment.health.host must be an http(s) URL");
-    if (typeof health.health_path !== "string" || !health.health_path.startsWith("/")) errors.push("deployment.health.health_path must start with /");
-    if (typeof health.version_path !== "string" || !health.version_path.startsWith("/")) errors.push("deployment.health.version_path must start with /");
+  if (mechanism === "health_check") {
+    if (!health || typeof health !== "object") errors.push("deployment.health is required");
+    else {
+      if (typeof health.host !== "string" || !/^https?:\/\//.test(health.host)) errors.push("deployment.health.host must be an http(s) URL");
+      if (typeof health.health_path !== "string" || !health.health_path.startsWith("/")) errors.push("deployment.health.health_path must start with /");
+      if (typeof health.version_path !== "string" || !health.version_path.startsWith("/")) errors.push("deployment.health.version_path must start with /");
+    }
+  } else if (health !== undefined) {
+    // health is optional under github_actions_jobs, but if provided it must still be well-formed
+    if (typeof health !== "object") errors.push("deployment.health must be an object when provided");
+    else {
+      if (typeof health.host !== "string" || !/^https?:\/\//.test(health.host)) errors.push("deployment.health.host must be an http(s) URL");
+      if (typeof health.health_path !== "string" || !health.health_path.startsWith("/")) errors.push("deployment.health.health_path must start with /");
+      if (typeof health.version_path !== "string" || !health.version_path.startsWith("/")) errors.push("deployment.health.version_path must start with /");
+    }
+  }
+  if (mechanism === "github_actions_jobs") {
+    const actions = v.actions as Record<string, unknown> | undefined;
+    if (!actions || typeof actions !== "object") errors.push("deployment.actions is required when mechanism is github_actions_jobs");
+    else {
+      if (typeof actions.docker_image_job_name !== "string" || !actions.docker_image_job_name.trim()) errors.push("deployment.actions.docker_image_job_name is required");
+      if (typeof actions.migrations_job_name !== "string" || !actions.migrations_job_name.trim()) errors.push("deployment.actions.migrations_job_name is required");
+      if (typeof actions.deploy_job_name !== "string" || !actions.deploy_job_name.trim()) errors.push("deployment.actions.deploy_job_name is required");
+    }
   }
   const promotion = v.promotion as Record<string, unknown> | undefined;
   if (!promotion || typeof promotion !== "object") errors.push("deployment.promotion is required");

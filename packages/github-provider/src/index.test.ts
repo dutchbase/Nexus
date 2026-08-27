@@ -582,6 +582,26 @@ test("updateBranchReference sends force:false by default and surfaces a 422 as a
   });
 });
 
+test("updateBranchReference marks a non-fast-forward 422 distinctly from other 422s", async () => {
+  await withServer((incoming, outgoing) => {
+    outgoing.statusCode = 422;
+    outgoing.end(JSON.stringify({ message: "Update is not a fast forward" }));
+  }, async () => {
+    await expect(updateBranchReference("dutchbase", "va-jobs-platform", "production", "a".repeat(40), false))
+      .rejects.toMatchObject({ status: 422, nonFastForward: true });
+  });
+});
+
+test("updateBranchReference does not mark an unrelated 422 as non-fast-forward", async () => {
+  await withServer((incoming, outgoing) => {
+    outgoing.statusCode = 422;
+    outgoing.end(JSON.stringify({ message: "Reference does not exist" }));
+  }, async () => {
+    await expect(updateBranchReference("dutchbase", "va-jobs-platform", "production", "a".repeat(40), false))
+      .rejects.toMatchObject({ status: 422, nonFastForward: false });
+  });
+});
+
 test("rejects a merge when GitHub reports the reviewed head changed", async () => {
   let body: Record<string, unknown> | undefined;
   const server = createServer(async (incoming, outgoing) => {
