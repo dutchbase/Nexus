@@ -1,5 +1,7 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
+import { loadProjectConfig } from "@dcc/project-config";
+import { parse } from "yaml";
 import { describe, expect, it } from "vitest";
 
 const root = new URL("../", import.meta.url);
@@ -55,5 +57,48 @@ describe("open-source release hygiene", () => {
     const lfdFiles = tracked.split("\n").filter((line) => line.startsWith(".lfd/"));
     expect(lfdFiles).toEqual([]);
     expect(tracked).not.toContain("prompts/lfd-dev-control-center.md");
+  });
+
+  it("README leads with what Nexus is, and covers every required open-source section", () => {
+    const readme = readFileSync(new URL("README.md", root), "utf8");
+    expect(readme.startsWith("# Nexus")).toBe(true);
+    expect(readme).not.toContain("/home/deploy/");
+    for (const heading of [
+      "## What is Nexus?",
+      "## Features",
+      "## Project status",
+      "## Prerequisites",
+      "## Installation",
+      "## Configuration",
+      "### Environment variables",
+      "## Running locally",
+      "## Production / self-hosted deployment",
+      "### Configuring projects",
+      "### GitHub integration",
+      "### Authentication",
+      "## Troubleshooting",
+      "## Security",
+      "## Contributing",
+      "## License",
+      "## Contact",
+    ]) {
+      expect(readme, `README missing section: ${heading}`).toContain(heading);
+    }
+  });
+
+  it("the tracked config/projects.yaml (empty, no private data) loads successfully", async () => {
+    // loadProjectConfig returns { path, content, config } — not the parsed
+    // config directly (packages/project-config/src/index.ts:16-23).
+    const { config } = await loadProjectConfig(new URL("config/projects.yaml", root).pathname);
+    expect(config.version).toBe(1);
+    expect(config.projects).toEqual({});
+  });
+
+  it("the README's example project config block is structurally valid YAML with the required fields", () => {
+    const readme = readFileSync(new URL("README.md", root), "utf8");
+    const match = readme.match(/```yaml\n(version: 1[\s\S]*?example-app:[\s\S]*?)```/);
+    expect(match, "README should contain a fenced yaml example with an example-app project").toBeTruthy();
+    const parsed = parse(match![1]);
+    expect(parsed.projects["example-app"].paths.repository).toBeTruthy();
   });
 });

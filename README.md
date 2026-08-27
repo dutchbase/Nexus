@@ -1,30 +1,68 @@
-# Development Control Center
+# Nexus
 
-A ticket-in, reviewed-PR-out workflow: public feedback forms feed tickets,
-an admin reviews and approves plans, a worker drives Claude Code executions
-against real project repositories, and results land as pull requests.
+An open-source control center for software projects, AI-assisted development
+workflows, pull requests, jobs, and deployments.
 
-Two long-running Node processes (`apps/web`, `apps/worker`) share one
-PostgreSQL database and a job queue table. No build step — both run
-directly via `tsx`.
+## What is Nexus?
 
-## Prerequisites (VPS)
+Nexus turns a ticket-in, reviewed-PR-out workflow into one controlled
+pipeline: public feedback forms feed tickets, an administrator reviews and
+approves execution plans, a worker drives AI coding-agent executions against
+real project repositories, and results land as pull requests ready for
+human review. It also manages the promotion of reviewed changes to
+production and keeps an audit trail of the whole path.
+
+Nexus is not tied to one company, one deployment target, or one
+infrastructure setup — it's a self-hosted app you run against your own
+GitHub repositories and your own Postgres database.
+
+## Features
+
+- **Ticket intake** — public feedback/intake forms that funnel into a
+  reviewable ticket queue
+- **Planning & execution jobs** — an AI worker drives coding-agent runs
+  against your repositories, from an approved plan to a pushed branch
+- **Pull request review** — track PR status, policy checks, and merge
+  eligibility from one dashboard
+- **Production promotion workflows** — controlled, auditable promotion of
+  reviewed changes to production, including automated deployment for
+  projects that opt in
+- **Notifications** — pluggable delivery (webhook/Slack/etc.) for workflow
+  events
+- **Repository & system health** — visibility into project repository
+  status, worker health, and job queue state
+
+## Project status
+
+Nexus is under active development. The core ticket → plan → execute → PR
+workflow is in daily production use; some features (e.g. the production
+promotion workflow) are opt-in per project and still maturing. Expect
+breaking config/schema changes to be called out clearly in release notes —
+this is not yet a stable 1.0.
+
+## Prerequisites
 
 - **Node.js 22+** (built and tested on Node 26)
-- **pnpm 11** (declared in `packageManager`; install validates versions via `engine-strict`)
-- **PostgreSQL 15+**, reachable from the VPS
+- **pnpm 11** (declared in `packageManager`; `pnpm install` validates
+  versions via `engine-strict`)
+- **PostgreSQL 15+**, reachable from wherever you run Nexus
 - **gcc** and the **libargon2 runtime** (`libargon2-1` on Debian/Ubuntu) —
-  `pnpm install` compiles the Argon2 helper via `postinstall`
-  (`scripts/build-argon2.ts`)
-- **git**, and network access to whatever repos you'll point projects at
+  `pnpm install` compiles the Argon2 password-hashing helper via
+  `postinstall` (`scripts/build-argon2.ts`)
+- **git**, and network access to whatever repositories you'll point
+  projects at
 - **Claude Code CLI** (`claude`) installed and on `$PATH` — the worker
-  shells out to it (`spawn("claude", ...)`) to run executions. Install and
-  authenticate it under the same user the worker runs as.
-- **Claude Code 2.1.219+**, `bubblewrap`, and `socat` for execution. The
-  worker uses Claude Code's native strict Linux sandbox; it fails closed when
-  that sandbox is unavailable. Docker is not required.
-- A **GitHub token/App** with push + PR access to the repos you'll manage,
-  if you want the worker to open pull requests automatically
+  shells out to it to run executions. Install and authenticate it under the
+  same user the worker runs as.
+- **Claude Code 2.1.219+**, `bubblewrap`, and `socat` for execution — the
+  worker uses Claude Code's native strict Linux sandbox and fails closed
+  when that sandbox is unavailable. **Docker is not required.**
+- A **GitHub token or GitHub App** with push + pull-request access to the
+  repositories you'll manage, if you want the worker to open pull requests
+  automatically. See [GitHub integration](#github-integration) below.
+
+Tested on Ubuntu 24.04+; other modern Linux distributions should work but
+aren't specifically verified.
 
 ### Ubuntu 24.04+ execution sandbox
 
@@ -34,8 +72,8 @@ Install the native sandbox dependencies:
 sudo apt-get install bubblewrap socat
 ```
 
-Ubuntu 24.04+ AppArmor blocks Bubblewrap from creating the user namespaces
-needed for isolation. Install the exact Claude Code-recommended profile and
+Ubuntu 24.04+'s AppArmor policy blocks Bubblewrap from creating the user
+namespaces isolation needs. Install the Claude Code-recommended profile and
 reload AppArmor:
 
 ```bash
@@ -51,159 +89,198 @@ EOF
 sudo systemctl reload apparmor
 ```
 
-The profile applies to `bwrap`, not commands inside its sandbox. Do not start
-execution until Claude Code confirms its sandbox support is available: the
-worker refuses unsandboxed execution rather than falling back. Claude runs in
-a temporary private clone with egress restricted to Claude service domains;
-it cannot reach GitHub or receive worker credentials.
-The worker verifies the result in worker-owned staging before touching its
-publishable worktree. Validation commands receive a scrubbed environment and
-no network namespace; the worker re-enumerates and secret-scans their final
-output before creating the squashed final commit, pushing, and opening the
-draft PR.
+Do not start execution work until Claude Code confirms its sandbox support
+is available — the worker refuses unsandboxed execution rather than falling
+back. Claude runs in a temporary private clone with egress restricted to
+Claude's own service domains; it cannot reach GitHub or receive worker
+credentials directly. The worker verifies results in worker-owned staging
+before touching its publishable worktree, re-scans final output for
+secrets, then creates a squashed commit, pushes, and opens a draft PR.
 
-## 1. Clone and install
+## Installation
 
 ```bash
-git clone https://github.com/<you>/dev-control.git
+git clone https://github.com/dutchbase/dev-control.git
 cd dev-control
 corepack enable
 pnpm install
 ```
 
-## 1a. Verify setup
+Verify the install:
 
 ```bash
 pnpm verify
 ```
 
-This runs the root verification command, which combines TypeScript type-checking and the unit test suite. It must pass before deploying. Database-backed tests additionally require `DCC_TEST_DATABASE_URL` to be set.
+This runs TypeScript type-checking plus the full unit test suite — it must
+pass before you deploy. Database-backed tests additionally require
+`DCC_TEST_DATABASE_URL` to be set (see [Environment variables](#environment-variables)).
 
-## 2. Provision PostgreSQL
+## Configuration
+
+### Environment variables
+
+Copy the example file and fill in real values:
+
+```bash
+cp .env.example .env
+```
+
+Nothing in this repo auto-loads `.env` — wire it up via systemd's
+`EnvironmentFile=`, pm2's `env` config, or (for one-off commands)
+`set -a; source .env; set +a`. See `.env.example` for every variable this
+app reads, with comments. The two most important, always required:
+
+| Variable | Purpose |
+|---|---|
+| `DATABASE_URL` | Postgres connection string |
+| `PORT` | Port `apps/web` listens on |
+
+In production, keep worker-only credentials (`GITHUB_TOKEN`,
+`CLAUDE_CODE_OAUTH_TOKEN`, etc.) in a **separate** `.env.worker` file — the
+web process is deliberately never given these (see
+`apps/web/src/security.ts`'s `workerOnlyCredentials` list, enforced at
+process-start via `env -u ...` stripping in `ecosystem.config.cjs`).
+
+### Provisioning PostgreSQL
 
 ```bash
 sudo -u postgres psql <<'SQL'
-CREATE USER dcc WITH PASSWORD 'change-me';
-CREATE DATABASE dcc OWNER dcc;
+CREATE USER nexus WITH PASSWORD 'change-me';
+CREATE DATABASE nexus OWNER nexus;
 SQL
 ```
 
-## 3. Configure environment
-
-Create a `.env` file at the repo root (or export these in your process
-manager's environment — nothing in this repo auto-loads `.env`, so wire it
-up via systemd `EnvironmentFile=`, pm2's `env`, or similar):
-
-```bash
-# Required
-DATABASE_URL=postgresql://dcc:change-me@127.0.0.1:5432/dcc
-
-# Web process only — never put worker credentials in this file
-PORT=3000                                # apps/web listens here
-APP_BASE_URL=https://control.example.com # used to build links in notifications
-DCC_TRUST_PROXY_HOPS=1                   # Caddy/nginx hop count; use 0 without a proxy
-
-# Optional overrides (sane defaults if unset)
-DB_POOL_SIZE=10
-DCC_DATA_DIR=./data              # managed artifact root for web, worker, and reconciliation
-DCC_DATA_ROOT=.                  # compatibility fallback: artifacts live in $DCC_DATA_ROOT/data when DCC_DATA_DIR is unset
-DCC_SKILLS_ROOT=.                # worker: where skill definitions are read from
-PROJECTS_CONFIG_PATH=./config/projects.yaml
-```
-
-Create a separate, mode-600 `.env.worker` for worker-only credentials:
-
-```bash
-# Worker process only — never expose these to dcc-web
-CLAUDE_CODE_OAUTH_TOKEN=...
-GITHUB_TOKEN=...
-GITHUB_API_BASE_URL=https://api.github.com
-DCC_NOTIFICATION_SECRET_<NAME>=...
-
-# DeepSeek API key — enables the "deepseek-v4-flash" and "deepseek-v4-pro"
-# models (both run via the OpenCode CLI) for PR reviews, planning, execution,
-# repair, and conflict resolution.
-# Jobs resolved to model=deepseek-v4-flash or model=deepseek-v4-pro fail fast
-# with a clear error if unset.
-DEEPSEEK_API_KEY=
-
-# Absolute path to the OpenCode CLI binary (defaults to "opencode" on PATH).
-OPENCODE_BIN=/home/deploy/.opencode/bin/opencode
-```
-
-Production always runs with `NODE_ENV=production`. The web process requires
-`DCC_PROCESS_ROLE=web`, an HTTPS `APP_BASE_URL`, and no worker credentials;
-the worker requires `DCC_PROCESS_ROLE=worker`. `pnpm dev` assigns those roles
-automatically for local development.
-
-Then source it in your shell for the one-off setup commands below:
-
-```bash
-set -a; source .env; set +a
-```
-
-## 4. Run database migrations
+Then run migrations:
 
 ```bash
 pnpm --filter database migrate
 ```
 
-Re-run this after every `git pull` that touches `packages/database/migrations/`.
+Re-run this after every `git pull` that touches
+`packages/database/migrations/`.
 
-## 5. Configure projects, skills, and notification providers
+### Configuring projects
 
-Three YAML files under `config/` drive the app; all start empty:
+Three YAML files under `config/` drive the app; **all start empty** — Nexus
+boots and runs with no projects configured, so there's no private
+configuration required just to get it running:
 
 - **`config/projects.yaml`** — the repositories the worker can execute
-  against (repo path/URL, default branch, install/lint/test/build
-  commands, protected paths). Add one entry per project before creating
-  tickets against it.
-- **`config/notification-providers.yaml`** — webhook/Slack/etc. targets
-  for workflow notifications. Optional; delivery failures never block the
+  against. Add one entry per project before creating tickets against it.
+- **`config/notification-providers.yaml`** — webhook/Slack/etc. targets for
+  workflow notifications. Optional; delivery failures never block the
   ticket workflow.
 - **`config/system.yaml`** — system-level settings.
 
-Edit these directly on the VPS (they're config, not secrets — but don't
-commit real webhook URLs/tokens into a public fork).
+Minimal working example — add this under `projects:` in
+`config/projects.yaml` to register your first project:
 
-## 6. Create the first admin user
+```yaml
+version: 1
+defaults:
+  ai:
+    model: sonnet
+    reasoning_level: high
+projects:
+  example-app:
+    name: Example App
+    description: A sample project Nexus can plan and execute against.
+    paths:
+      repository: /srv/repos/example-app   # required: local clone path, must be a valid git repo
+    github:
+      owner: your-org
+      repository: example-app
+    default_branch: main                    # optional, defaults to "main"
+```
+
+Required per-project fields: `paths.repository` (entries missing it are
+skipped with a warning at import time). Everything else — `github.owner`,
+`github.repository`, `default_branch`, and an optional `deployment:` block
+for automated production promotion — is optional and validated by
+`packages/project-config/src/index.ts` (`validateProject` /
+`validateDeploymentConfig`). The `deployment.image.registry` field, if you
+use it, must currently be exactly `"ghcr.io"` — that's the only registry
+Nexus's deployment flow supports today.
+
+Import/sync the file into the database:
+
+```bash
+pnpm projects:import
+```
+
+This is idempotent — safe to re-run any time you edit
+`config/projects.yaml`.
+
+Edit these files directly wherever you run Nexus — they're config, not
+secrets, but don't commit real webhook URLs or tokens into a public fork.
+
+### GitHub integration
+
+Nexus talks to GitHub via a personal access token or GitHub App
+installation token (not OAuth) — set `GITHUB_TOKEN` and
+`GITHUB_API_BASE_URL` (see `.env.example`). Nexus degrades gracefully with
+GitHub features disabled if these are unset; nothing else breaks.
+
+**Minimum permissions needed** for the worker's token, scoped to the
+repositories you register in `config/projects.yaml`:
+
+- **Contents: Read and write** — to push branches and commits
+- **Pull requests: Read and write** — to open and update PRs
+- **Actions: Read** — to check workflow run/job status for merge-eligibility checks
+- **Packages: Read** (optional) — only needed if you use the GHCR-based
+  deployment/promotion feature; it degrades gracefully without this scope
+
+If you use the included deployment webhook (`webhook-server.js`/
+`deploy.sh`), you'll also need a webhook configured on your protected
+branch with a shared `WEBHOOK_SECRET` (see `.env.example`).
+
+### Authentication
+
+Nexus's admin UI uses session-cookie auth with a local `users` table
+(Argon2-hashed passwords, no external identity provider today). Create the
+first admin user after migrating:
 
 ```bash
 printf %s 'a-strong-password' | pnpm admin:create -- --username admin --password-stdin --non-interactive
 ```
 
 Passwords are UTF-8 input of 1–4096 bytes; NUL, CR, and LF are rejected.
-Use `printf %s`, not `echo`: the input is read from stdin incrementally and
-never accepted as a command-line argument.
+Use `printf %s`, not `echo` — the password is read from stdin, never
+accepted as a command-line argument (which would leak it into shell
+history / process listings). Failed logins are rate-limited per account.
 
-## 7. Run it
-
-**Quick check (foreground, both processes, restarts on file change):**
+## Running locally
 
 ```bash
 pnpm dev
 ```
 
-This starts `apps/web` (the admin UI + public form + API, port `$PORT`)
-and `apps/worker` (the job queue consumer that drives Claude Code
-executions) together and logs both to your terminal. Fine for a first
-smoke test; not what you want for a VPS you'll walk away from.
+Starts `apps/web` (admin UI + public form + API, on `$PORT`) and
+`apps/worker` (the job-queue consumer that drives executions) together,
+both logging to your terminal, restarting on file change. Good for a first
+smoke test; not what you want for a server you'll walk away from.
 
-**Production — run each process under a supervisor** so it survives
-crashes and reboots. Example with `systemd` (two unit files):
+**Verify it worked:** open `http://localhost:3000` — it redirects to
+`/login`. Sign in with the admin user you created above.
 
-`/etc/systemd/system/dcc-web.service`:
+## Production / self-hosted deployment
+
+Run each process under a supervisor so it survives crashes and reboots.
+Example with `systemd` (two unit files):
+
+`/etc/systemd/system/nexus-web.service`:
 
 ```ini
 [Unit]
-Description=Development Control Center — web
+Description=Nexus — web
 After=network.target postgresql.service
 
 [Service]
 Type=simple
-User=dcc
-WorkingDirectory=/opt/dev-control
-EnvironmentFile=/opt/dev-control/.env
+User=nexus
+WorkingDirectory=/opt/nexus
+EnvironmentFile=/opt/nexus/.env
 Environment=DCC_PROCESS_ROLE=web
 Environment=NODE_ENV=production
 ExecStart=/usr/bin/env pnpm --filter web dev
@@ -214,19 +291,19 @@ RestartSec=3
 WantedBy=multi-user.target
 ```
 
-`/etc/systemd/system/dcc-worker.service`:
+`/etc/systemd/system/nexus-worker.service`:
 
 ```ini
 [Unit]
-Description=Development Control Center — worker
+Description=Nexus — worker
 After=network.target postgresql.service
 
 [Service]
 Type=simple
-User=dcc
-WorkingDirectory=/opt/dev-control
-EnvironmentFile=/opt/dev-control/.env
-EnvironmentFile=/opt/dev-control/.env.worker
+User=nexus
+WorkingDirectory=/opt/nexus
+EnvironmentFile=/opt/nexus/.env
+EnvironmentFile=/opt/nexus/.env.worker
 Environment=DCC_PROCESS_ROLE=worker
 Environment=NODE_ENV=production
 ExecStart=/usr/bin/env pnpm --filter worker start
@@ -239,169 +316,131 @@ WantedBy=multi-user.target
 
 ```bash
 sudo systemctl daemon-reload
-sudo systemctl enable --now dcc-web dcc-worker
-sudo systemctl status dcc-web dcc-worker
+sudo systemctl enable --now nexus-web nexus-worker
+sudo systemctl status nexus-web nexus-worker
 ```
 
-(`apps/web` only has a `dev` script — `tsx watch`, which is fine to run
-under systemd too; it just also restarts on source-file changes, which is
-harmless in production since you deploy via `git pull` + restart anyway.)
+(`apps/web` only has a `dev` script — `tsx watch` — which is fine under
+systemd too; it just also restarts on source-file changes, harmless in
+production since you deploy via `git pull` + restart anyway.)
 
-## 8. Put it behind a reverse proxy + TLS
+This repository also includes an optional zero-downtime deploy pipeline
+(`deploy.sh` + `webhook-server.js`, driven by `pm2` — see
+`ecosystem.config.cjs`) that stages each release as a detached git
+worktree, runs `pnpm verify` and migrations, then atomically cuts over. It
+is entirely optional infrastructure specific to a PM2-based deployment
+style; you can ignore it and manage systemd units directly as shown above.
+If you do use it, see
+[`docs/DEPLOYMENT-RUNBOOK.md`](docs/DEPLOYMENT-RUNBOOK.md) for the
+operator runbook, and set `DCC_ROOT` to wherever you check the repo out
+(defaults to `/opt/nexus`).
 
-Point nginx/Caddy at `127.0.0.1:$PORT` and terminate TLS there. Example
-Caddyfile:
+Put it behind a reverse proxy + TLS (nginx/Caddy) — example Caddyfile:
 
 ```
-control.example.com {
+your-domain.example.com {
     reverse_proxy 127.0.0.1:3000
 }
 ```
 
-Make sure `APP_BASE_URL` in `.env` matches the public HTTPS URL — it's
-used to build links in outgoing notifications. Set `DCC_TRUST_PROXY_HOPS` to
-the exact number of trusted proxies: the web server selects that raw
-`X-Forwarded-For` position and falls back to the socket address for malformed
-or missing values.
+Make sure `APP_BASE_URL` matches the public HTTPS URL — it's used to build
+links in outgoing notifications. Set `DCC_TRUST_PROXY_HOPS` to the exact
+number of trusted proxies in front of Nexus.
 
-The worker deletes only sessions whose `expires_at <= now()` once per minute.
-Each successful pass is recorded in the audit log; System health shows its
-latest timestamp and deleted count. A failed pass is logged and does not stop
-the worker.
-
-## Updating
-
-> Operator/agent runbook for diagnosing and manually recovering failed
-> deployments: [`docs/DEPLOYMENT-RUNBOOK.md`](docs/DEPLOYMENT-RUNBOOK.md).
-
-A signed protected-branch push queues a deployment; GitHub Actions are not a deployment prerequisite. Before staging or migrating, `deploy.sh` fetches the protected branch and requires its SHA to equal the queued SHA. After installing locked dependencies in the detached release worktree, it runs pnpm verify locally before migrations. The webhook invokes `deploy.sh <40-char-sha> <absolute-marker-path>
-<attempt-uuid> <protected-branch>`. Its environment must provide
-`DATABASE_URL` and `DCC_DEPLOY_HEALTH_URL`; the latter is a URL that returns a
-successful response only when the new web and worker release is healthy. The
-webhook also supplies a private inherited launch pipe; `deploy.sh` cannot begin
-deployment stages until the child PID is durable under the active lease.
-
-Each release is a detached worktree in `$DCC_ROOT/.deploy-releases` (override
-with `DCC_DEPLOY_RELEASES_DIR`). The script keeps `.env`, `.env.worker`, and
-`data` in `$DCC_ROOT`, then atomically changes the
-`$DCC_ROOT/.deploy-current` symlink (override with `DCC_DEPLOY_CURRENT_LINK`).
-It installs locked dependencies, migrates, synchronizes content, reloads web
-and worker, health-checks them, writes its atomic JSON completion marker, and
-only then reloads the webhook. Stage evidence is appended to
-`deployment_events` for the supplied attempt. A fetched SHA mismatch fails before staging, writes a nonzero marker, and the webhook finalizes the attempt as failed. Request bodies and credentials are never deployment history.
-
-A successful marker carries `reloadPending: true`. The old webhook must leave
-that marker alone; only a webhook whose working directory is the atomically
-selected release for that SHA may finalize it during boot recovery. If webhook
-reload fails, deployment replaces it with a nonzero final marker before
-restoring the previous release, so any running webhook records failure rather
-than success.
-
-On a migration failure, the old release remains live. On a failed process
-reload or health check after cutover, the old symlink and its web/worker
-processes are restored and recovery is health-checked. A first deployment has
-no prior release: a failed health gate removes `current` and stops its web and
-worker processes, so bootstrap remains fail-closed. The webhook must not
-promote queued attempts after any failure.
-
-Migrations must remain compatible with the immediately previous release:
-automatic code rollback does not roll back the database. Use an additive,
-expand/contract migration or ship a forward fix; do not reset production data.
-
-For an incident, inspect the attempt and its ordered stage events, then repair
-the failed dependency or release and enqueue a new protected-head deployment:
-
-```sql
-SELECT id, state, target_sha, prior_release_path, recovery_reason,
-       notification_status, notification_error_code, completed_at
-FROM deployment_attempts ORDER BY created_at DESC LIMIT 10;
-SELECT event_key, event_type, metadata, created_at
-FROM deployment_events WHERE attempt_id = '<attempt-uuid>' ORDER BY id;
-```
-
-Before cutover, `prior_release_path` is stored on the attempt and a
-`cutover_prepared` event records the prior and target release paths. The
-`rollback` event's safe metadata records `prior_release_path`,
-`rollback_outcome`, `recovery_health`, and a non-secret reason. Terminal
-completion preserves the rollback target and durably records notification
-outcome/error code; recovery health remains in the append-only event.
-
-After confirming no deployment is running and `.deploy-current` points to the
-known-good worktree, remove obsolete directories manually; releases are kept
-for recovery and are never pruned automatically:
+### Backups and recovery drills
 
 ```bash
-rm -rf /opt/dev-control/.deploy-releases/<old-sha>
-```
-
-### Superpowers updates
-
-The **Superpowers Update** workflow runs daily at 04:17 UTC. It imports the
-latest tagged `obra/superpowers` release into an
-`automation/superpowers-<tag>` PR; review and merge that PR to activate it.
-Use **Run workflow** with an exact `vX.Y.Z` tag to override the resolved
-latest release. Leaving the tag empty uses the latest release again.
-
-## Data layout
-
-Everything under `$DCC_DATA_DIR` (or `$DCC_DATA_ROOT/data` when `DCC_DATA_DIR` is unset) is managed artifact state: uploaded attachments, execution logs, and worktrees. Plans are immutable database rows; skill bundles are temporary and reconstructed for each run. Back this directory up with the database — losing it does not corrupt the DB, but it loses execution history and in-flight artifacts.
-
-## Backups and recovery drills
-
-Backups are external scheduled work. Configure the process environment with:
-
-```bash
-DCC_BACKUP_DIRECTORY=/var/backups/dcc
+DCC_BACKUP_DIRECTORY=/var/backups/nexus
 DCC_BACKUP_RETENTION_DAYS=30
-DCC_DATA_DIR=/opt/dev-control/data
-DCC_CONFIG_DIR=/opt/dev-control/config
+DCC_DATA_DIR=/opt/nexus/data
+DCC_CONFIG_DIR=/opt/nexus/config
 
-# Required only for restore drills — this must be a separate, disposable database.
-DCC_RESTORE_DATABASE_URL=postgresql://dcc:change-me@127.0.0.1:5432/dcc_restore
-DCC_RESTORE_ROOT=/var/lib/dcc/recovery-drill
+# Required only for restore drills — must be a separate, disposable database.
+DCC_RESTORE_DATABASE_URL=postgresql://nexus:change-me@127.0.0.1:5432/nexus_restore
+DCC_RESTORE_ROOT=/var/lib/nexus/recovery-drill
 DCC_RESTORE_HEALTH_URL=http://127.0.0.1:3100/api/health
 ```
 
-Install an external cron entry for **03:15 Europe/Amsterdam**. Cron does not inherit your service environment, so source the same environment file explicitly:
+Install an external cron entry to run `scripts/backup.sh` on your own
+schedule (cron doesn't inherit your service environment, so source it
+explicitly in the crontab line). Each backup is atomically published as one
+directory containing a database dump, managed data/config, and a manifest;
+`.env` files and any `secrets/`, `.key`, `.pem`, `.secret` paths are always
+excluded. Run `scripts/restore-drill.sh <backup-dir>` after a successful
+backup to verify it's actually restorable — see `README`'s prior revision
+or `scripts/restore-drill.sh` itself for the full flag/marker contract.
 
-```cron
-CRON_TZ=Europe/Amsterdam
-15 3 * * * cd /opt/dev-control && set -a && . ./.env && set +a && /usr/bin/env bash scripts/backup.sh >> /var/log/dcc-backup.log 2>&1
-```
+## Updating
 
-Each backup is atomically published as one directory containing database.dump, managed data/ (and legacy-data/ when DCC_DATA_DIR differs from DCC_DATA_ROOT/data), managed config/, and manifest-v1.sha256. .env files and secrets/, .key, .pem, and .secret paths are excluded; backup directories are also excluded from the managed-data copy. Successful runs apply DCC_BACKUP_RETENTION_DAYS.
+A signed push to your protected branch queues a deployment if you're using
+the included webhook flow (GitHub Actions are not a deployment
+prerequisite). See
+[`docs/DEPLOYMENT-RUNBOOK.md`](docs/DEPLOYMENT-RUNBOOK.md) for full
+operator/incident-recovery detail. If you're managing deployment yourself
+(no webhook), updating is just: `git pull`, `pnpm install`,
+`pnpm --filter database migrate`, restart both processes.
 
-Run the recovery drill after a successful backup:
+### Superpowers updates
 
-```bash
-set -a; source .env; set +a
-scripts/restore-drill.sh /var/backups/dcc/dcc-YYYYMMDDTHHMMSSZ-PID
-```
+The **Superpowers Update** GitHub Actions workflow runs daily and imports
+the latest tagged `obra/superpowers` release into an
+`automation/superpowers-<tag>` PR; review and merge that PR to activate it.
 
-The drill requires a fresh absolute `DCC_RESTORE_ROOT` whose parent already exists and which is outside the repository, live data/config, and backup trees. It verifies the exact manifest file set, restores only to the explicit `DCC_RESTORE_DATABASE_URL`, and atomically publishes recovered files only after database and health verification. It writes a passed or failed result to `backup_recovery_verifications` through the primary `DATABASE_URL`. It rejects the primary database and requires a durable database-scoped marker set with PostgreSQL configuration; session and role options do not qualify: `psql -d postgres --command "ALTER DATABASE dcc_restore SET dcc.restore_disposable = true"`. Never set that marker on production. The System health page reports configured retention and recorded verification, but cannot inspect an external host crontab.
+## Data layout
 
-Start a separate health process against the restore target before the drill (in another terminal):
-
-~~~bash
-DATABASE_URL="$DCC_RESTORE_DATABASE_URL" DCC_DATA_DIR="$DCC_RESTORE_ROOT/data" HOST=127.0.0.1 PORT=3100 pnpm exec tsx apps/web/src/server.ts
-~~~
-
-```bash
-export DCC_RESTORE_HEALTH_URL=http://127.0.0.1:3100/api/health
-```
-
-## Recovery integration test
-
-`scripts/backup.integration.test.ts` is intentionally skipped unless **both** `DCC_TEST_DATABASE_URL` and `DCC_TEST_RESTORE_DATABASE_URL` are set. A CI job that runs it must provide distinct, disposable databases; the primary and restore databases must already be marked `dcc.restore_disposable=true`; the test refuses unmarked targets before any reset. These variables never default to `DATABASE_URL` or a production target.
+Everything under `$DCC_DATA_DIR` (or `$DCC_DATA_ROOT/data` when
+`DCC_DATA_DIR` is unset) is managed artifact state: uploaded attachments,
+execution logs, and worktrees. Plans are immutable database rows; skill
+bundles are temporary and reconstructed per run. Back this directory up
+alongside the database — losing it doesn't corrupt the DB, but loses
+execution history and in-flight artifacts.
 
 ## Troubleshooting
 
 - **Worker can't find `claude`:** confirm `which claude` resolves for the
-  `dcc-worker` systemd user specifically (`sudo -u dcc which claude`), not
-  just your login shell.
+  exact user/service the worker runs as, not just your login shell.
 - **Migrations fail on a fresh DB:** confirm `DATABASE_URL` is set in the
   shell you're running `pnpm --filter database migrate` from — it isn't
   read from `.env` automatically.
-- **Admin login locked out:** the app rate-limits failed logins per
-  account; wait out the lockout window or create a second admin via
+- **Admin login locked out:** Nexus rate-limits failed logins per account;
+  wait out the lockout window or create a second admin via
   `pnpm admin:create`.
+- **`pnpm install` fails to build the Argon2 helper:** confirm `gcc` and
+  `libargon2-1` (or your distro's equivalent) are installed — see
+  [Prerequisites](#prerequisites).
+
+## Security
+
+- No secrets, tokens, or credentials are committed in this repository — see
+  `.gitignore` for what's excluded (`.env`, `.env.*`, `secrets/`, etc.).
+- Worker-only credentials (`GITHUB_TOKEN`, `CLAUDE_CODE_OAUTH_TOKEN`, and
+  similar) are deliberately never exposed to the web process — see
+  `apps/web/src/security.ts`.
+- AI-agent execution runs inside Claude Code's native Linux sandbox
+  (bubblewrap-based); the worker fails closed if that sandbox is
+  unavailable rather than running unsandboxed.
+- If you believe you've found a security vulnerability, please open a
+  private report via GitHub's "Report a vulnerability" flow on this
+  repository (Security tab) rather than a public issue.
+
+## Contributing
+
+Nexus is actively developed and contributions are welcome — see
+[CONTRIBUTING.md](CONTRIBUTING.md) for how to get set up, what makes a good
+PR, and where help is most useful right now.
+
+Want to contribute or discuss an idea?
+
+Open an [issue](https://github.com/dutchbase/dev-control/issues), send a
+pull request, or reach out via X/Twitter DM:
+[@dutchbase](https://x.com/dutchbase).
+
+## License
+
+[MIT](LICENSE)
+
+## Contact
+
+- **Bugs and feature requests:** [GitHub Issues](https://github.com/dutchbase/dev-control/issues)
+- **Code contributions:** GitHub pull requests
+- **Anything else:** [@dutchbase on X/Twitter](https://x.com/dutchbase)

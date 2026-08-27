@@ -12,6 +12,9 @@ importers:
         specifier: 8.22.0
         version: 8.22.0
     devDependencies:
+      '@dcc/project-config':
+        specifier: workspace:*
+        version: link:packages/project-config
       '@playwright/test':
         specifier: 1.62.0
         version: 1.62.0
@@ -30,6 +33,9 @@ importers:
       vitest:
         specifier: 2.1.9
         version: 2.1.9(@types/node@22.20.1)
+      yaml:
+        specifier: ^2.8.0
+        version: 2.9.0
 
   apps/web:
     dependencies:
