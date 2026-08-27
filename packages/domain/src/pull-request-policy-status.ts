@@ -18,10 +18,18 @@ export type PolicyStatus = {
   label: string;
   /** True when this status should NOT block Approve & merge (all other Dev Control checks aside). */
   allowsMerge: boolean;
+  /**
+   * True only when nothing is known to be wrong and the /approve route resolves this
+   * status itself by running a live GitHub check (see pull-request-on-demand-sync.ts)
+   * before re-deriving it. A UI may keep Approve & merge clickable here even though
+   * allowsMerge is false — the route still answers with the real reason if the live
+   * check blocks the merge. Never true for a recorded API failure or stale evidence.
+   */
+  resolvableOnApprove: boolean;
 };
 
-function unavailable(label: string): PolicyStatus {
-  return { code: "unavailable", label, allowsMerge: false };
+function unavailable(label: string, resolvableOnApprove = false): PolicyStatus {
+  return { code: "unavailable", label, allowsMerge: false, resolvableOnApprove };
 }
 
 export function derivePolicyStatus(input: PolicyStatusInput): PolicyStatus {
@@ -35,11 +43,11 @@ export function derivePolicyStatus(input: PolicyStatusInput): PolicyStatus {
       const retry = input.policyRetryAfter ? `; retry after ${new Date(input.policyRetryAfter).toLocaleString("nl-NL")}` : "";
       return unavailable(`Unavailable: ${input.policyErrorCode}${retry}`);
     }
-    // auto/optional, never synced, no recorded failure: still unavailable on its
-    // own — callers with the on-demand sync helper (see pull-request-on-demand-sync.ts)
-    // should run that BEFORE calling derivePolicyStatus so this branch is rarely hit
-    // by end users. It intentionally does not "pass" from absence alone.
-    return unavailable("Unavailable: policy snapshot missing");
+    // auto/optional, never synced, no recorded failure: absence alone never merges,
+    // so allowsMerge stays false. But /approve resolves this state itself by running
+    // the on-demand sync (pull-request-on-demand-sync.ts) and re-deriving, so it is
+    // flagged resolvable rather than left as a dead end the UI blocks forever.
+    return unavailable("Not verified yet; checked on approve", true);
   }
 
   if (input.policyStale) {
@@ -53,10 +61,10 @@ export function derivePolicyStatus(input: PolicyStatusInput): PolicyStatus {
   const reviewOk = input.reviewState === "approved" || input.reviewState === "not_required";
   const checkOk = input.checkState === "success" || input.checkState === "not_required";
   if (input.reviewState === "not_required" && input.checkState === "not_required") {
-    return { code: "not_applicable", label: "No applicable policies", allowsMerge: true };
+    return { code: "not_applicable", label: "No applicable policies", allowsMerge: true, resolvableOnApprove: false };
   }
   if (reviewOk && checkOk) {
-    return { code: "satisfied", label: "Policies satisfied", allowsMerge: true };
+    return { code: "satisfied", label: "Policies satisfied", allowsMerge: true, resolvableOnApprove: false };
   }
   const reasons: string[] = [];
   if (!reviewOk) {
@@ -65,5 +73,5 @@ export function derivePolicyStatus(input: PolicyStatusInput): PolicyStatus {
   if (!checkOk) {
     reasons.push(input.checkState === "failure" ? "checks failed" : `checks ${input.checkState ?? "unknown"}`);
   }
-  return { code: "failed", label: `Required: ${reasons.join(", ")}`, allowsMerge: false };
+  return { code: "failed", label: `Required: ${reasons.join(", ")}`, allowsMerge: false, resolvableOnApprove: false };
 }

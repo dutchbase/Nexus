@@ -998,7 +998,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const pullRequest = (await pool.query(
       `SELECT pr.*,ea.agent_run_id,ar.metadata_json,p.config_json,p.github_owner,p.github_repository
        FROM pull_requests pr
-       JOIN projects p ON p.id=pr.project_id
+       LEFT JOIN projects p ON p.id=pr.project_id
        LEFT JOIN execution_attempts ea ON ea.id=pr.execution_attempt_id
        LEFT JOIN agent_runs ar ON ar.id=ea.agent_run_id WHERE pr.id=$1`,
       [pullRequestId],
@@ -1030,7 +1030,11 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         // for a project that explicitly requires enforcement — a missing
         // snapshot must stay blocking there regardless of what a fresh fetch
         // would show.
-        if (!policySnapshotId && enforcementMode !== "required") {
+        // projects is outer-joined (pull_requests.project_id is nullable), so a PR
+        // with no owning project has nothing to fetch against and falls through to
+        // derivePolicyStatus, which refuses it.
+        if (!policySnapshotId && enforcementMode !== "required"
+          && pullRequest.github_owner && pullRequest.github_repository) {
           const synced = await ensurePolicySnapshot(pool, {
             pullRequestId: pullRequest.id, owner: pullRequest.github_owner,
             repo: pullRequest.github_repository, number: pullRequest.number,

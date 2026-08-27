@@ -29,6 +29,14 @@ async function renderPr(item: any, reviews: any[] = [], requireFreshPolicyBindin
   return (await prs.render(new URL("http://test/admin/pull-requests/project/7"), session, {}))!.body;
 }
 
+// Matches the Approve & merge element itself, so "is it disabled?" is answered by the
+// button's own attributes rather than by a substring that may not exist either way.
+function approveButton(body: string) {
+  const match = body.match(/<button[^>]*\sdata-pr-approve(?:\s[^>]*)?>/);
+  if (!match) throw new Error("no Approve & merge button rendered");
+  return match[0];
+}
+
 beforeEach(() => query.mockReset());
 
 test("renders a fresh GitHub binding and sends exactly its visible values", async () => {
@@ -42,7 +50,7 @@ test("renders a fresh GitHub binding and sends exactly its visible values", asyn
   expect(body).toContain("Policy snapshot");
   expect(body).toContain("snapshot-1");
   expect(body).toContain('data-pr-head-sha="head-sha" data-pr-policy-snapshot-id="snapshot-1"');
-  expect(body).not.toContain('data-pr-approve disabled');
+  expect(approveButton(body)).not.toContain(" disabled");
 });
 
 test("labels stale rate-limited evidence and disables merge with its exact reason", async () => {
@@ -62,6 +70,27 @@ test("labels a missing snapshot as unavailable when enforcement mode is required
   expect(body).toContain('disabled title="GitHub: Unavailable: policy snapshot missing"');
 });
 
+test.each(["auto", "optional"] as const)("keeps Approve & merge clickable for a never-synced PR under %s enforcement", async (enforcement) => {
+  const body = await renderPr({
+    ...pr, current_policy_snapshot_id: null, policy_error_code: null,
+    config_json: enforcement === "auto" ? {} : { github_policy: { enforcement } },
+  });
+
+  // /approve runs the live GitHub check itself, so blocking here would strand the PR
+  // until the next poll cycle — the whole point of the on-demand sync.
+  expect(approveButton(body)).not.toContain(" disabled");
+  expect(body).toContain("GitHub: Not verified yet; checked on approve");
+});
+
+test("still blocks a never-synced PR whose last policy fetch failed", async () => {
+  const body = await renderPr({
+    ...pr, current_policy_snapshot_id: null, policy_error_code: "rate_limited", config_json: {},
+  });
+
+  expect(approveButton(body)).toContain(" disabled");
+  expect(body).toContain("GitHub: Unavailable: rate_limited");
+});
+
 test("labels a missing snapshot as no applicable policies when enforcement mode is auto and review/check states are not_required", async () => {
   const body = await renderPr({
     ...pr, current_policy_snapshot_id: "snap-1", policy_complete: true, policy_stale: false,
@@ -69,7 +98,7 @@ test("labels a missing snapshot as no applicable policies when enforcement mode 
   });
 
   expect(body).toContain("GitHub: No applicable policies");
-  expect(body).not.toContain('data-pr-approve disabled');
+  expect(approveButton(body)).not.toContain(" disabled");
 });
 
 test("labels missing head SHA as unavailable regardless of enforcement mode", async () => {

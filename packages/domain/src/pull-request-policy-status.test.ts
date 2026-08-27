@@ -15,20 +15,48 @@ const base: PolicyStatusInput = {
 
 test("missing head SHA is always unavailable regardless of enforcement mode", () => {
   const result = derivePolicyStatus({ ...base, headSha: null });
-  expect(result).toEqual({ code: "unavailable", label: "Unavailable: head SHA missing", allowsMerge: false });
+  expect(result).toEqual({ code: "unavailable", label: "Unavailable: head SHA missing", allowsMerge: false, resolvableOnApprove: false });
 });
 
 test("no snapshot yet, auto mode, no recorded error -> not_applicable (never synced, treat as no known policy)", () => {
   const result = derivePolicyStatus({ ...base, currentPolicySnapshotId: null, enforcementMode: "auto" });
   expect(result.code).toBe("unavailable");
   expect(result.allowsMerge).toBe(false);
-  // On its own (no on-demand sync applied) this stays unavailable — Task 3 covers
-  // the on-demand sync that eliminates this state before the user ever sees it.
+  // Absence alone never merges, but /approve resolves it with a live check, so the
+  // UI is told it may keep the button clickable instead of blocking forever.
+  expect(result.resolvableOnApprove).toBe(true);
+});
+
+test.each(["auto", "optional"] as const)("never-synced %s enforcement is resolvable on approve without allowing a merge", (mode) => {
+  const result = derivePolicyStatus({ ...base, currentPolicySnapshotId: null, enforcementMode: mode });
+  expect(result).toEqual({
+    code: "unavailable", label: "Not verified yet; checked on approve",
+    allowsMerge: false, resolvableOnApprove: true,
+  });
+});
+
+test.each([
+  ["enforcement is required", { enforcementMode: "required" as const }],
+  ["an API failure is recorded", { policyErrorCode: "rate_limited" }],
+])("a missing snapshot is not resolvable on approve when %s", (_name, overrides) => {
+  const result = derivePolicyStatus({ ...base, currentPolicySnapshotId: null, ...overrides });
+  expect(result.allowsMerge).toBe(false);
+  expect(result.resolvableOnApprove).toBe(false);
+});
+
+test.each([
+  ["stale evidence", { currentPolicySnapshotId: "snap-1", policyStale: true, policyComplete: true }],
+  ["incomplete evidence", { currentPolicySnapshotId: "snap-1", policyComplete: false }],
+  ["failing checks", { currentPolicySnapshotId: "snap-1", policyComplete: true, reviewState: "approved", checkState: "failure" }],
+])("%s is never resolvable on approve", (_name, overrides) => {
+  const result = derivePolicyStatus({ ...base, ...overrides });
+  expect(result.allowsMerge).toBe(false);
+  expect(result.resolvableOnApprove).toBe(false);
 });
 
 test("no snapshot yet, enforcement required -> unavailable and blocks", () => {
   const result = derivePolicyStatus({ ...base, currentPolicySnapshotId: null, enforcementMode: "required" });
-  expect(result).toEqual({ code: "unavailable", label: "Unavailable: policy snapshot missing", allowsMerge: false });
+  expect(result).toEqual({ code: "unavailable", label: "Unavailable: policy snapshot missing", allowsMerge: false, resolvableOnApprove: false });
 });
 
 test("snapshot exists, no recorded error, real API failure recorded -> unavailable, distinct message", () => {
@@ -45,7 +73,7 @@ test("snapshot exists, both states not_required -> not_applicable, allows merge"
     ...base, currentPolicySnapshotId: "snap-1", policyComplete: true,
     reviewState: "not_required", checkState: "not_required",
   });
-  expect(result).toEqual({ code: "not_applicable", label: "No applicable policies", allowsMerge: true });
+  expect(result).toEqual({ code: "not_applicable", label: "No applicable policies", allowsMerge: true, resolvableOnApprove: false });
 });
 
 test("snapshot exists, approved + success -> satisfied, allows merge", () => {
@@ -53,7 +81,7 @@ test("snapshot exists, approved + success -> satisfied, allows merge", () => {
     ...base, currentPolicySnapshotId: "snap-1", policyComplete: true,
     reviewState: "approved", checkState: "success",
   });
-  expect(result).toEqual({ code: "satisfied", label: "Policies satisfied", allowsMerge: true });
+  expect(result).toEqual({ code: "satisfied", label: "Policies satisfied", allowsMerge: true, resolvableOnApprove: false });
 });
 
 test("snapshot exists, checks pending -> failed, does not allow merge, mentions checks", () => {

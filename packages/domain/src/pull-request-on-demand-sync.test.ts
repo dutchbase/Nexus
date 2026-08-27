@@ -40,7 +40,8 @@ function database() {
     }
     return { rows: [], rowCount: 1 };
   });
-  return { query, queries } as any;
+  const client = { query, release: vi.fn() };
+  return { query, connect: vi.fn(async () => client), queries } as any;
 }
 
 beforeEach(() => {
@@ -58,6 +59,18 @@ test("persists a snapshot and returns synced outcome when GitHub call succeeds",
   expect(db.queries.some(({ sql }: { sql: string }) => sql.includes("INSERT INTO pull_request_policy_snapshots"))).toBe(true);
   expect(db.queries.some(({ sql, values }: any) => sql.includes("UPDATE pull_requests") && sql.includes("current_policy_snapshot_id")
     && values?.includes("snapshot-1"))).toBe(true);
+});
+
+test("writes the snapshot and its pull_requests binding in one transaction", async () => {
+  const db = database();
+  github.getPullRequestPolicyInputs.mockResolvedValue(policy());
+
+  await ensurePolicySnapshot(db, { pullRequestId: "pr-1", owner: "o", repo: "r", number: 1 });
+
+  const statements = db.queries.map(({ sql }: { sql: string }) => sql.trim().split(/\s+/).slice(0, 3).join(" "));
+  expect(statements[0]).toBe("BEGIN");
+  expect(statements.at(-1)).toBe("COMMIT");
+  expect(statements.filter((sql: string) => sql.startsWith("INSERT INTO pull_request_policy_snapshots"))).toHaveLength(1);
 });
 
 test("returns error outcome without writing a snapshot when GitHub call throws GitHubProviderError", async () => {

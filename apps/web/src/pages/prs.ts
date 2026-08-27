@@ -63,7 +63,13 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[], r
   // requireFreshPolicyBinding is a global kill-switch (independent of the
   // per-project enforcement mode above): when off, only a missing head SHA
   // blocks the merge button, exactly as before this shared derivation existed.
-  const policyAllowsMerge = requireFreshPolicyBinding ? policyStatus.allowsMerge : Boolean(item.head_sha);
+  // resolvableOnApprove keeps a never-synced PR clickable: /approve runs the live
+  // GitHub check itself and answers with the real reason, so disabling here would
+  // strand the PR until the next poll cycle.
+  const policyAllowsMerge = requireFreshPolicyBinding
+    ? policyStatus.allowsMerge || policyStatus.resolvableOnApprove
+    : Boolean(item.head_sha);
+  const policyTone = !policyAllowsMerge ? "warn" : policyStatus.resolvableOnApprove ? "info" : "ok";
   const mergeBlocker = policyAllowsMerge ? "" : `GitHub: ${policyStatus.label}`;
   const requestedReviewers = Array.isArray(item.requested_reviewers)
     ? item.requested_reviewers.map((reviewer: any) => `${reviewer.type === "team" ? "team " : ""}${reviewer.name ?? "unknown"}`).join(", ") || "None"
@@ -105,7 +111,7 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[], r
       <span class="status ${stateBadge.cls}">${escapeHtml(stateBadge.label)}</span>
       <span class="status ${reviewBadge.cls}">${escapeHtml(reviewBadge.label)}</span>
       <span class="status ${aiBadge.cls}" data-ai-review-status="${escapeHtml(latestAiReview?.status ?? "")}">${escapeHtml(aiBadge.label)}</span>
-      <span class="status ${policyAllowsMerge ? "ok" : "warn"}">GitHub: ${escapeHtml(policyIssue)}</span>
+      <span class="status ${policyTone}">GitHub: ${escapeHtml(policyIssue)}</span>
       ${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}
       ${conflictResolutionBadge ? `<span class="status ${conflictResolutionBadge.cls}" data-conflict-resolution-status="${escapeHtml(latestConflictResolution.status)}">${escapeHtml(conflictResolutionBadge.label)}</span>` : ""}
       ${item.merge_conflicts ? button("data-pr-resolve-conflicts", "Resolve conflicts (AI)", true, "") : ""}

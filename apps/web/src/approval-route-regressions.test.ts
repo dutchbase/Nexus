@@ -172,6 +172,30 @@ test("keeps blocking a PR with no policy snapshot when the project requires enfo
   expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(false);
 });
 
+test.each([
+  ["failing required checks", { review_state: "approved", check_state: "failure" }, "checks failed"],
+  ["pending required checks", { review_state: "approved", check_state: "pending" }, "checks pending"],
+  ["a changes-requested review", { review_state: "changes_requested", check_state: "success" }, "changes requested"],
+])("refuses a protected repo with %s before queueing a merge job", async (_name, policy, reason) => {
+  pool.query.mockImplementation(async (sql: string) => {
+    if (sql.includes("FROM pull_request_merge_settings")) return { rows: [{ require_fresh_policy_binding: true }] };
+    if (sql.includes("FROM pull_requests pr")) return { rows: [{
+      id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", head_sha: "head-sha", number: 7,
+      github_owner: "acme", github_repository: "widgets", config_json: {},
+      current_policy_snapshot_id: "snapshot-1", policy_stale: false, policy_complete: true, ...policy,
+    }] };
+    return { rows: [], rowCount: 1 };
+  });
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+
+  await adminApi(request({ expected_head_sha: "head-sha" }, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin" });
+
+  expect(ensurePolicySnapshot).not.toHaveBeenCalled();
+  expect(response.writeHead).toHaveBeenCalledWith(409, expect.any(Object));
+  expect(response.end).toHaveBeenCalledWith(expect.stringContaining(reason));
+  expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(false);
+});
+
 test("keeps blocking and surfaces the real error when GitHub is unreachable during on-demand sync", async () => {
   pool.query.mockImplementation(async (sql: string) => {
     if (sql.includes("FROM pull_request_merge_settings")) return { rows: [{ require_fresh_policy_binding: true }] };
