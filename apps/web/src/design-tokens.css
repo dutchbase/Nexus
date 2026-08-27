@@ -96,6 +96,9 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word }
 .list-head > *,.ticket-row > * { min-width:0 }
 .list-head { background:var(--surface2);font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3) }
 .ticket-row { border-top:1px solid var(--border);color:inherit }
+.event-row { display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 18px;border-top:1px solid var(--border) }
+.event-row .mono { min-width:0;overflow-wrap:anywhere;flex:1 1 auto }
+.event-row .status { flex-shrink:0 }
 .tickets7.list-head,.tickets7.ticket-row { grid-template-columns:110px minmax(220px,3fr) 1.2fr 1fr 1.1fr 1.3fr .8fr }
 .runs-head,.runs-row { grid-template-columns:90px 1.4fr 1fr .9fr 1fr 110px }
 .projects-head,.projects-row { grid-template-columns:minmax(170px,1.4fr) 150px minmax(0,1fr) minmax(0,1.5fr) }
