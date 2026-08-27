@@ -34,6 +34,29 @@ function validationCard(validation: any): string {
   return `${failure}${files}${checks}`;
 }
 
+export type BulkMergeClassification = { eligible: true } | { eligible: false; reason: string };
+
+// TODO(plan 01 dependency): once packages/domain/src/pull-request-policy-status.ts
+// (derivePolicyStatus) lands, replace this function's policy-check block with a call
+// to it instead of re-deriving the same logic — see plans/09-pull-requests-bulk-actions.md
+// Task 3 Global Constraints for why this duplication is temporary and intentional.
+export function classifyBulkMergeEligibility(row: {
+  state: string; head_sha: string | null; current_policy_snapshot_id: string | null;
+  policy_stale: boolean; policy_complete: boolean | null; review_state: string | null;
+  check_state: string | null; is_draft: boolean | null; merge_conflicts: boolean | null;
+}, requireFreshPolicyBinding: boolean): BulkMergeClassification {
+  if (row.state !== "open") return { eligible: false, reason: `pull request is ${row.state}, not open` };
+  if (row.is_draft) return { eligible: false, reason: "pull request is a draft" };
+  if (row.merge_conflicts) return { eligible: false, reason: "pull request has merge conflicts" };
+  if (!row.head_sha) return { eligible: false, reason: "GitHub head SHA is unavailable" };
+  if (requireFreshPolicyBinding && !row.current_policy_snapshot_id) return { eligible: false, reason: "GitHub policy snapshot is unavailable" };
+  if (requireFreshPolicyBinding && row.policy_stale) return { eligible: false, reason: "GitHub policy is stale" };
+  if (requireFreshPolicyBinding && !row.policy_complete) return { eligible: false, reason: "GitHub policy is incomplete" };
+  if (requireFreshPolicyBinding && !["approved", "not_required"].includes(row.review_state ?? "")) return { eligible: false, reason: `GitHub reviews are ${row.review_state ?? "unknown"}` };
+  if (requireFreshPolicyBinding && !["success", "not_required"].includes(row.check_state ?? "")) return { eligible: false, reason: `GitHub checks are ${row.check_state ?? "unknown"}` };
+  return { eligible: true };
+}
+
 // Shared by both the uuid route (/admin/pull-requests/{uuid}) and the slug
 // route (/admin/pull-requests/{projectSlug}/{number}) so the two never drift.
 function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[], requireFreshPolicyBinding: boolean): PageResult {
