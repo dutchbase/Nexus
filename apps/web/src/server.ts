@@ -876,17 +876,22 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       model: typeof body.default_model === "string" ? body.default_model : "",
       reasoning_level: typeof body.default_reasoning_level === "string" ? body.default_reasoning_level : "",
     });
-    await pool.query(
+    const { rows: [saved] } = await pool.query(
       `UPDATE ai_review_settings
        SET default_model=$1,default_reasoning_level=$2,
          auto_review_enabled=COALESCE($4,auto_review_enabled),
          auto_merge_on_approve=COALESCE($5,auto_merge_on_approve),
-         updated_at=now(),updated_by=$3 WHERE id=1`,
+         updated_at=now(),updated_by=$3 WHERE id=1
+       RETURNING default_model, default_reasoning_level, auto_review_enabled, auto_merge_on_approve`,
       [selection.model, selection.reasoning_level, session.user_id,
        body.auto_review_enabled ?? null, body.auto_merge_on_approve ?? null],
     );
-    await audit({ actorType: "admin", actorId: session.user_id, action: "ai_review_settings.update", entityType: "ai_review_settings", entityId: "1", after: { ...selection, auto_review_enabled: body.auto_review_enabled ?? null, auto_merge_on_approve: body.auto_merge_on_approve ?? null }, ip: ipOf(request) });
-    return json(response, 200, { ok: true });
+    try {
+      await audit({ actorType: "admin", actorId: session.user_id, action: "ai_review_settings.update", entityType: "ai_review_settings", entityId: "1", after: saved, ip: ipOf(request) });
+    } catch (auditError) {
+      console.error("ai_review_settings.update: settings saved but audit logging failed", auditError);
+    }
+    return json(response, 200, { ok: true, settings: saved });
   }
   if (url.pathname === "/api/admin/settings/system-ai" && request.method === "POST") {
     const body = await bodyOf(request);
