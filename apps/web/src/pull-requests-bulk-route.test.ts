@@ -293,3 +293,31 @@ test("every successful action writes an audit_events row tagged with the same ba
   expect(auditRows).toHaveLength(1);
   expect(auditRows[0][7]).toMatchObject({ batch_id: "batch-42" });
 });
+
+test("a failing audit insert does not duplicate or downgrade the result entry for a PR that was queued", async () => {
+  const openPr = { ...basePr, id: uuid(14), number: 14, title: "Open" };
+  const other = { ...basePr, id: uuid(15), number: 15, title: "Also open" };
+  const jobInserts: any[] = [];
+  pool.query.mockImplementation(async (sql: string, values?: any[]) => {
+    if (sql.includes("SELECT pr.*,p.github_owner,p.github_repository")) {
+      const ids: string[] = values![0];
+      return { rows: [openPr, other].filter((row) => ids.includes(row.id)) };
+    }
+    if (sql.includes("INSERT INTO jobs")) { jobInserts.push(values); return { rows: [{ id: `job-${jobInserts.length}` }], rowCount: 1 }; }
+    if (sql.includes("INSERT INTO audit_events")) throw new Error("simulated audit insert failure (e.g. FK violation, transient connection error)");
+    throw new Error(`unexpected query: ${sql}`);
+  });
+  const res = response();
+
+  await adminApi(request({ action: "close", ids: [openPr.id, other.id] }), res, new URL(bulkUrl), { user_id: "admin" });
+
+  // Both close jobs were really enqueued, so both must be reported exactly once as queued —
+  // the audit failure must not push a second, contradictory "skipped" entry for the same id.
+  expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object));
+  expect(jobInserts).toHaveLength(2);
+  const body = jsonOf(res);
+  expect(body.results).toEqual([
+    { id: openPr.id, outcome: "queued", job_id: "job-1" },
+    { id: other.id, outcome: "queued", job_id: "job-2" },
+  ]);
+});

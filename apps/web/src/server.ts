@@ -1084,6 +1084,18 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const byId = new Map(rows.map((row: any) => [row.id, row]));
     const results: Array<{ id: string; outcome: string; reason?: string; job_id?: string }> = [];
     const { requireFreshPolicyBinding } = action === "merge" ? await getPullRequestMergeSettings(pool) : { requireFreshPolicyBinding: false };
+    // Audit logging is best-effort: the job is already enqueued by the time we get here,
+    // so a failed audit insert must never turn a queued PR into a "skipped" result entry.
+    const auditBulk = async (auditAction: string, id: string) => {
+      try {
+        await audit({
+          actorType: "admin", actorId: session.user_id, action: auditAction,
+          entityType: "pull_request", entityId: id, metadata: { batch_id: batchId }, ip: ipOf(request),
+        });
+      } catch (auditError) {
+        console.error(`bulk ${action} succeeded for pull request ${id} but audit logging failed`, auditError);
+      }
+    };
     for (const id of ids) {
       const row = byId.get(id);
       if (!row) { results.push({ id, outcome: "not_found" }); continue; }
@@ -1092,12 +1104,12 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
           if (row.state !== "open") { results.push({ id, outcome: "skipped", reason: `pull request is ${row.state}, not open` }); continue; }
           const started = await startAiReview(row.id, {}, session.user_id);
           results.push({ id, outcome: started.alreadyRunning ? "skipped" : "queued", ...(started.alreadyRunning ? { reason: "AI review already running" } : {}) });
-          await audit({ actorType: "admin", actorId: session.user_id, action: "ai_review.bulk_start", entityType: "pull_request", entityId: id, metadata: { batch_id: batchId }, ip: ipOf(request) });
+          await auditBulk("ai_review.bulk_start", id);
         } else if (action === "close") {
           if (row.state !== "open") { results.push({ id, outcome: "skipped", reason: `pull request is ${row.state}, not open` }); continue; }
           const job = await enqueueJob({ type: "github.close_pull_request", payload: { actor_id: session.user_id, pull_request_id: row.id }, idempotencyKey: `bulk-close:${row.id}:${batchId}` });
           results.push({ id, outcome: "queued", job_id: job.id });
-          await audit({ actorType: "admin", actorId: session.user_id, action: "pull_request.bulk_close", entityType: "pull_request", entityId: id, metadata: { batch_id: batchId }, ip: ipOf(request) });
+          await auditBulk("pull_request.bulk_close", id);
         } else {
           const classification = prsPage.classifyBulkMergeEligibility(row, requireFreshPolicyBinding);
           if (!classification.eligible) { results.push({ id, outcome: "skipped", reason: classification.reason }); continue; }
@@ -1109,7 +1121,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
             idempotencyKey: `g07:github.merge_pull_request:${row.id}:${eligibility.expectedHeadSha}:${Math.floor(Date.now() / 3_600_000)}`,
           });
           results.push({ id, outcome: "queued", job_id: job.id });
-          await audit({ actorType: "admin", actorId: session.user_id, action: "pull_request.bulk_merge", entityType: "pull_request", entityId: id, metadata: { batch_id: batchId }, ip: ipOf(request) });
+          await auditBulk("pull_request.bulk_merge", id);
         }
       } catch (error) {
         results.push({ id, outcome: "skipped", reason: "an unexpected error occurred — see server logs" });
