@@ -4,6 +4,8 @@ import {
   createPullRequest,
   createPullRequestComment,
   findOpenPullRequestForHead,
+  getCommitCheckStatus,
+  GitHubProviderError,
   getPullRequest,
   getPullRequestPolicyInputs,
   listPullRequestComments,
@@ -11,6 +13,7 @@ import {
   markReadyForReview,
   mergeBranch,
   mergePullRequest,
+  updateBranchReference,
 } from "./index.ts";
 
 const originalApiBaseUrl = process.env.GITHUB_API_BASE_URL;
@@ -515,6 +518,68 @@ test("creates system pull requests ready for review", async () => {
   } finally {
     await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
   }
+});
+
+test("getCommitCheckStatus reports overallState=failure when any check failed, even if others succeeded", async () => {
+  await withServer((incoming, outgoing) => {
+    const url = incoming.url ?? "";
+    outgoing.setHeader("content-type", "application/json");
+    if (url.includes("/check-runs")) {
+      outgoing.end(JSON.stringify({
+        check_runs: [
+          { name: "build", app: { id: 7 }, status: "completed", conclusion: "success", completed_at: "2026-08-04T11:00:00Z" },
+          { name: "lint", app: { id: 7 }, status: "completed", conclusion: "failure", completed_at: "2026-08-04T11:05:00Z" },
+        ],
+      }));
+      return;
+    }
+    if (url.includes("/status")) {
+      outgoing.end(JSON.stringify({ statuses: [] }));
+      return;
+    }
+    outgoing.statusCode = 404;
+    outgoing.end("{}");
+  }, async () => {
+    const result = await getCommitCheckStatus("acme", "widgets", "a".repeat(40));
+    expect(result.overallState).toBe("failure");
+    expect(result.checks).toHaveLength(2);
+  });
+});
+
+test("getCommitCheckStatus reports overallState=none when there are no checks at all", async () => {
+  await withServer((incoming, outgoing) => {
+    const url = incoming.url ?? "";
+    outgoing.setHeader("content-type", "application/json");
+    if (url.includes("/check-runs")) {
+      outgoing.end(JSON.stringify({ check_runs: [] }));
+      return;
+    }
+    if (url.includes("/status")) {
+      outgoing.end(JSON.stringify({ statuses: [] }));
+      return;
+    }
+    outgoing.statusCode = 404;
+    outgoing.end("{}");
+  }, async () => {
+    const result = await getCommitCheckStatus("acme", "widgets", "a".repeat(40));
+    expect(result.overallState).toBe("none");
+  });
+});
+
+test("updateBranchReference sends force:false by default and surfaces a 422 as a GitHubProviderError", async () => {
+  await withServer((incoming, outgoing) => {
+    const url = incoming.url ?? "";
+    if (url.includes("/git/refs/heads/")) {
+      outgoing.statusCode = 422;
+      outgoing.end(JSON.stringify({ message: "not a fast-forward" }));
+      return;
+    }
+    outgoing.statusCode = 404;
+    outgoing.end("{}");
+  }, async () => {
+    await expect(updateBranchReference("acme", "widgets", "production", "a".repeat(40)))
+      .rejects.toThrow(GitHubProviderError);
+  });
 });
 
 test("rejects a merge when GitHub reports the reviewed head changed", async () => {
