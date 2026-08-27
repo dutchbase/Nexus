@@ -102,14 +102,14 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word }
 .tickets7.list-head,.tickets7.ticket-row { grid-template-columns:110px minmax(220px,3fr) 1.2fr 1fr 1.1fr 1.3fr .8fr }
 .runs-head,.runs-row { grid-template-columns:90px 1.4fr 1fr .9fr 1fr 110px }
 .projects-head,.projects-row { grid-template-columns:minmax(170px,1.4fr) 150px minmax(0,1fr) minmax(0,1.5fr) }
-.prs-head,.prs-row { grid-template-columns:70px minmax(200px,3fr) 1.1fr .9fr 1.1fr 1fr .8fr 52px }
+.prs-head,.prs-row { grid-template-columns:28px 70px minmax(200px,3fr) 1.1fr .9fr 1.1fr 1fr .8fr 52px }
 .prs-card { overflow:visible }
 .prs-row { position:relative }
 .prs-row:has(.menu[open]) { z-index:2 }
 .pr-row-link { position:absolute;inset:0;z-index:0 }
 .prs-row > :not(.pr-row-link) { position:relative;z-index:1;pointer-events:none }
 .pr-actions { display:flex;justify-content:flex-end }
-.pr-actions,.pr-actions * { pointer-events:auto }
+.pr-actions,.pr-actions *,.pr-select,.pr-select * { pointer-events:auto }
 .deliveries-head,.deliveries-row { grid-template-columns:90px 1.4fr .8fr 1.1fr .7fr .8fr .9fr }
 .aiusage-head,.aiusage-row { grid-template-columns:150px .9fr 1.1fr 1.1fr .7fr 1.1fr 1.2fr 100px }
 .mono { font-family:'JetBrains Mono',ui-monospace,SFMono-Regular,monospace }
