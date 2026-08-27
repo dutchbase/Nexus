@@ -849,13 +849,16 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             const data=await fetch("/api/admin/projects/"+projectId+"/deployment",{headers:{"x-csrf-token":csrf}}).then(r=>r.json());
             const snapshot=data.snapshot;
             if(!snapshot){statusEl.innerHTML="<p>No status yet — click Refresh.</p>";return;}
-            statusEl.innerHTML='<p>Master: <code>'+snapshot.master_commit_sha.slice(0,8)+'</code></p>'
+            // master_commit_sha is nullable — a partially written snapshot must
+            // still render rather than throw and leave the panel blank.
+            const masterShort=snapshot.master_commit_sha?snapshot.master_commit_sha.slice(0,8):"unknown";
+            statusEl.innerHTML='<p>Master: <code>'+masterShort+'</code></p>'
               +'<p>Production: <code>'+(snapshot.production_commit_sha?snapshot.production_commit_sha.slice(0,8):"unknown")+'</code></p>'
               +'<p>Status: '+({up_to_date:"Already deployed",behind_master:"Ready to deploy",diverged:"Diverged — needs recovery",unavailable:"Unavailable"}[snapshot.divergence]||snapshot.divergence)+'</p>';
             if(snapshot.divergence==="diverged"){
               divergedWarning.hidden=false;
               divergedWarning.querySelector("[data-diverged-production-sha]").textContent=(snapshot.production_commit_sha||"").slice(0,8);
-              divergedWarning.querySelector("[data-diverged-master-sha]").textContent=snapshot.master_commit_sha.slice(0,8);
+              divergedWarning.querySelector("[data-diverged-master-sha]").textContent=masterShort;
             } else divergedWarning.hidden=true;
             renderProgress(data.releases);
           }

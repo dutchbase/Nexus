@@ -361,3 +361,144 @@ test("promote with force:true still requires commit_sha === fresh master sha", a
   const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
   expect(resultUpdate!.values![1]).toMatchObject({ outcome: "refused", refusal_code: "commit_not_master" });
 });
+
+// The projects row is admin-editable (PATCH /api/admin/projects/:id allows
+// github_owner, github_repository, default_branch and config_json), so these
+// cover the allowlist entry — not the row — being the source of truth for
+// which repository and branches a promotion may ever move a ref on.
+test("promote refuses with allowlist_mismatch when the project row's github_repository was tampered with", async () => {
+  const database = db([project]);
+  const masterSha = "a".repeat(40);
+  const tampered = { ...project, github_repository: "some-other-repo" };
+  database.query.mockImplementation(async (text: string, values?: unknown[]) => {
+    database.queries.push({ text, values });
+    return { rows: [tampered], rowCount: 1 };
+  });
+  setUpHappyActionsStatus();
+
+  await runProviderJob({
+    id: "job-promote-7", type: "deployment.promote",
+    idempotency_key: "g07:deployment.promote:project-va:once7",
+    payload_json: { actor_id: "admin-1", project_id: "project-va", commit_sha: masterSha, expected_master_sha: masterSha },
+  } as any, database as any);
+
+  const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
+  expect(resultUpdate!.values![1]).toMatchObject({ outcome: "refused", refusal_code: "allowlist_mismatch", mismatched_fields: ["github_repository"] });
+  // Refused before any GitHub call is made against the tampered values.
+  expect(getBranchHeadCommit).not.toHaveBeenCalled();
+  expect(updateBranchReference).not.toHaveBeenCalled();
+});
+
+test("force promote refuses with allowlist_mismatch when production_branch was repointed away from the allowlisted target", async () => {
+  const database = db([project]);
+  const masterSha = "a".repeat(40);
+  const tampered = {
+    ...project,
+    config_json: { deployment: { ...actionsDeploymentConfig, production_branch: "master" } },
+  };
+  database.query.mockImplementation(async (text: string, values?: unknown[]) => {
+    database.queries.push({ text, values });
+    return { rows: [tampered], rowCount: 1 };
+  });
+  setUpHappyActionsStatus();
+
+  await runProviderJob({
+    id: "job-promote-8", type: "deployment.promote",
+    idempotency_key: "g07:deployment.promote:project-va:once8",
+    payload_json: { actor_id: "admin-1", project_id: "project-va", commit_sha: masterSha, expected_master_sha: masterSha, force: true },
+  } as any, database as any);
+
+  const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
+  expect(resultUpdate!.values![1]).toMatchObject({ outcome: "refused", refusal_code: "allowlist_mismatch", mismatched_fields: ["production_branch"] });
+  expect(updateBranchReference).not.toHaveBeenCalled();
+});
+
+test("promote still proceeds when the project row matches its allowlist entry exactly", async () => {
+  const database = db([project]);
+  const masterSha = "a".repeat(40);
+  database.query.mockImplementation(async (text: string, values?: unknown[]) => {
+    database.queries.push({ text, values });
+    if (text.includes("INSERT INTO production_releases")) return { rows: [{ id: "release-ok" }], rowCount: 1 };
+    return { rows: [project], rowCount: 1 };
+  });
+  setUpHappyActionsStatus();
+  updateBranchReference.mockResolvedValue({ sha: masterSha });
+  let productionReads = 0;
+  getBranchHeadCommit.mockImplementation(async (_o: string, _r: string, branch: string) => {
+    if (branch === "master") return { sha: masterSha, committedAt: "2026-01-01T00:00:00Z", message: "ready" };
+    if (branch === "production") {
+      productionReads += 1;
+      // pre-flight read: behind master; post-write verification read: the target.
+      return { sha: productionReads === 1 ? "b".repeat(40) : masterSha, committedAt: "2025-12-01T00:00:00Z", message: "old" };
+    }
+    throw new Error("unexpected");
+  });
+
+  await runProviderJob({
+    id: "job-promote-9", type: "deployment.promote",
+    idempotency_key: "g07:deployment.promote:project-va:once9",
+    payload_json: { actor_id: "admin-1", project_id: "project-va", commit_sha: masterSha, expected_master_sha: masterSha },
+  } as any, database as any);
+
+  expect(updateBranchReference).toHaveBeenCalledWith("dutchbase", "va-jobs-platform", "production", masterSha, false);
+  const resultUpdates = database.queries.filter((q) => q.text.includes("result_json"));
+  expect(resultUpdates[resultUpdates.length - 1]!.values![1]).toMatchObject({ outcome: "requested" });
+});
+
+test("sync_status reaps a release stuck at 'requested' instead of leaving it invisible in the single-flight slot", async () => {
+  const database = db([project]);
+  // A release that crashed between the INSERT and the post-PATCH status
+  // update: still 'requested', still occupying
+  // production_releases_project_inflight_idx, last touched 16 minutes ago.
+  const stuck = {
+    id: "release-stuck", commit_sha: "a".repeat(40), status: "requested",
+    created_at: "2026-01-02T00:00:00Z", updated_at: new Date(Date.now() - 16 * 60 * 1000).toISOString(),
+  };
+  database.query.mockImplementation(async (text: string, values?: unknown[]) => {
+    database.queries.push({ text, values });
+    // Faithful to Postgres: the row only comes back if the handler's status
+    // filter actually includes 'requested'.
+    if (text.includes("FROM production_releases")) {
+      return text.includes("'requested'") ? { rows: [stuck], rowCount: 1 } : { rows: [], rowCount: 0 };
+    }
+    return { rows: [project], rowCount: 1 };
+  });
+  setUpHappyActionsStatus();
+  findWorkflowRun.mockImplementation(async (_owner: string, _repo: string, filter: { branch: string }) =>
+    (filter.branch === "master" ? masterRun : null));
+
+  await runProviderJob({
+    id: "job-sync-3", type: "deployment.sync_status",
+    idempotency_key: "g07:deployment.sync_status:project-va:once3",
+    payload_json: { actor_id: "admin-1", project_id: "project-va" },
+  } as any, database as any);
+
+  const releaseUpdate = database.queries.find((q) => q.text.includes("UPDATE production_releases") && q.text.includes("health_checked_at"));
+  expect(releaseUpdate).toBeDefined();
+  expect(releaseUpdate!.text).toContain("stalled");
+  // 'failed' is outside the partial unique index, so the slot is freed.
+  expect(releaseUpdate!.values).toEqual(["release-stuck", "failed", null]);
+});
+
+test("rollback refuses cleanly for the github_actions_jobs mechanism instead of reading a nonexistent local clone", async () => {
+  const database = db([project]);
+  database.query.mockImplementation(async (text: string, values?: unknown[]) => {
+    database.queries.push({ text, values });
+    return { rows: [project], rowCount: 1 };
+  });
+
+  await runProviderJob({
+    id: "job-rollback-1", type: "deployment.rollback",
+    idempotency_key: "g07:deployment.rollback:project-va:once",
+    payload_json: {
+      actor_id: "admin-1", project_id: "project-va",
+      target_commit_sha: "b".repeat(40), expected_production_sha: "a".repeat(40),
+    },
+  } as any, database as any);
+
+  const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
+  expect(resultUpdate!.values![1]).toMatchObject({ outcome: "refused", refusal_code: "rollback_unsupported_for_mechanism" });
+  expect(lsRemoteHeads).not.toHaveBeenCalled();
+  expect(checkImageExists).not.toHaveBeenCalled();
+  expect(updateBranchReference).not.toHaveBeenCalled();
+});

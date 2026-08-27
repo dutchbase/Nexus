@@ -27,7 +27,10 @@ function newResponse() {
 
 const vaJobsPlatformId = "dddddddd-dddd-4ddd-8ddd-dddddddddddd";
 const otherProjectId = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee";
+const tamperedProjectId = "ffffffff-ffff-4fff-8fff-ffffffffffff";
 const masterSha = "a".repeat(40);
+
+const allowlistedRepoFields = { github_owner: "dutchbase", github_repository: "va-jobs-platform", default_branch: "master" };
 
 const actionsDeploymentConfig = {
   enabled: true,
@@ -44,10 +47,15 @@ beforeEach(() => {
     if (sql.includes("FROM projects")) {
       const id = params?.[0];
       if (id === vaJobsPlatformId) {
-        return { rows: [{ id: vaJobsPlatformId, slug: "va-jobs-platform", config_json: { deployment: actionsDeploymentConfig } }] };
+        return { rows: [{ id: vaJobsPlatformId, slug: "va-jobs-platform", ...allowlistedRepoFields, config_json: { deployment: actionsDeploymentConfig } }] };
+      }
+      if (id === tamperedProjectId) {
+        // Same allowlisted slug, but github_repository was edited through
+        // PATCH /api/admin/projects/:id after the row was seeded.
+        return { rows: [{ id: tamperedProjectId, slug: "va-jobs-platform", ...allowlistedRepoFields, github_repository: "some-other-repo", config_json: { deployment: actionsDeploymentConfig } }] };
       }
       if (id === otherProjectId) {
-        return { rows: [{ id: otherProjectId, slug: "some-other-project", config_json: { deployment: { ...actionsDeploymentConfig, image: { ...actionsDeploymentConfig.image, repository: "acme/other" } } } }] };
+        return { rows: [{ id: otherProjectId, slug: "some-other-project", ...allowlistedRepoFields, config_json: { deployment: { ...actionsDeploymentConfig, image: { ...actionsDeploymentConfig.image, repository: "acme/other" } } } }] };
       }
       return { rows: [] };
     }
@@ -114,4 +122,17 @@ test("normal promote route (unchanged) still uses maxAttempts:1 too — 422 must
   expect(enqueue).toBeDefined();
   const values = enqueue![1] as unknown[];
   expect(values[4]).toBe(1); // max_attempts
+});
+
+test("promote-force route refuses an allowlisted slug whose github_repository was edited away from the allowlist entry", async () => {
+  const response = newResponse();
+  await adminApi(
+    request({ commit_sha: masterSha, expected_master_sha: masterSha, confirm_diverged: true }),
+    response,
+    new URL(`http://test/api/admin/projects/${tamperedProjectId}/deployment/promote-force`),
+    { user_id: "admin" },
+  );
+
+  expect(response.writeHead).toHaveBeenCalledWith(403, expect.any(Object));
+  expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(false);
 });

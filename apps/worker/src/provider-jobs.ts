@@ -2,7 +2,7 @@ import type pg from "pg";
 import {
   approveAndMergePullRequest, importGithubPullRequests, PullRequestMergeError, syncOpenPullRequests, syncPullRequest,
   checkProductionHealth, evaluatePromotionEligibility,
-  evaluateActionsPreflight, computeDivergence, findAllowlistEntry,
+  evaluateActionsPreflight, computeDivergence, findAllowlistEntry, allowlistMismatches,
 } from "@dcc/domain";
 import {
   createPullRequest, findOpenPullRequestForHead, mergeBranch,
@@ -290,8 +290,15 @@ export async function runProviderJob(
     await assertOwned();
     if (deployment.mechanism === "github_actions_jobs") {
       const actionsStatus = await fetchActionsPreflightStatus(project, deployment);
+      // 'requested' has to be in this list: a release that crashed between the
+      // INSERT and the post-PATCH status update stays at 'requested', and
+      // production_releases_project_inflight_idx covers it — leaving it
+      // invisible here would jam the single-flight slot for this project
+      // forever. 'healthy' is kept (unlike the health_check branch's list) so
+      // a just-finished release still surfaces its production workflow run in
+      // the snapshot; the status machinery below skips it explicitly.
       const recentRelease = (await db.query(
-        `SELECT * FROM production_releases WHERE project_id=$1 AND action='promote' AND status IN ('pending_approval','deploying','healthy') ORDER BY created_at DESC LIMIT 1`,
+        `SELECT * FROM production_releases WHERE project_id=$1 AND action='promote' AND status IN ('requested','pending_approval','deploying','healthy') ORDER BY created_at DESC LIMIT 1`,
         [projectId],
       )).rows[0];
       let productionRun: Awaited<ReturnType<typeof findWorkflowRun>> = null;
@@ -304,6 +311,9 @@ export async function runProviderJob(
       }
       const migrationsJob = productionJobs.find((j) => j.name === deployment.actions!.migrations_job_name);
       const deployJob = productionJobs.find((j) => j.name === deployment.actions!.deploy_job_name);
+      // Re-assert the lease after the GitHub round-trips, before any write —
+      // same guard the health_check path applies after its own live fetch.
+      await assertOwned();
       await db.query(
         `INSERT INTO deployment_status_snapshots (project_id, master_commit_sha, master_workflow_run_id, master_workflow_conclusion, docker_image_job_conclusion, ghcr_checked, ghcr_verified, image_tag, production_commit_sha, divergence, production_workflow_run_id, production_workflow_conclusion, migrations_job_conclusion, deploy_job_conclusion, fetched_at, updated_at)
          VALUES ($1,$2,$3,$4,$5,true,$6,$7,$8,$9,$10,$11,$12,$13,now(),now())
@@ -408,6 +418,25 @@ export async function runProviderJob(
     if (!project) throw new Error("project not found");
     const deployment = loadDeploymentConfig(project);
     await assertOwned();
+    // Re-check the (admin-editable) projects row against the allowlist before
+    // any GitHub call is made with those values, so a tampered
+    // github_owner/github_repository/default_branch/production_branch can
+    // never redirect this job's ref write at another repository or branch.
+    // Applies to normal and forced promotion alike.
+    const promoteAllowlistEntry = deployment.mechanism === "github_actions_jobs"
+      ? findAllowlistEntry(project.slug, project)
+      : null;
+    if (promoteAllowlistEntry) {
+      const mismatched = allowlistMismatches(promoteAllowlistEntry, {
+        owner: project.github_owner, repo: project.github_repository,
+        sourceBranch: project.default_branch, targetBranch: deployment.production_branch,
+      });
+      if (mismatched.length > 0) {
+        await persistJobResult(db, job.id, { outcome: "refused", refusal_code: "allowlist_mismatch", mismatched_fields: mismatched });
+        await audit(db, job, actorId, "deployment.promote", "project", projectId, { outcome: "refused", refusal_code: "allowlist_mismatch", mismatched_fields: mismatched });
+        return;
+      }
+    }
     const freshMaster = await getBranchHeadCommit(project.github_owner, project.github_repository, project.default_branch);
     if (freshMaster.sha !== expectedMasterSha) {
       await persistJobResult(db, job.id, { outcome: "refused", refusal_code: "master_moved", current_sha: freshMaster.sha });
@@ -428,7 +457,7 @@ export async function runProviderJob(
     let imageTag: string;
     let actionsStatus: Awaited<ReturnType<typeof fetchActionsPreflightStatus>> | undefined;
     if (deployment.mechanism === "github_actions_jobs") {
-      const allowlistEntry = findAllowlistEntry(project.slug, project);
+      const allowlistEntry = promoteAllowlistEntry;
       if (forceRequested && !allowlistEntry?.allowForce) {
         await persistJobResult(db, job.id, { outcome: "refused", refusal_code: "force_not_allowed" });
         await audit(db, job, actorId, "deployment.promote", "project", projectId, { outcome: "refused", refusal_code: "force_not_allowed" });
@@ -463,6 +492,9 @@ export async function runProviderJob(
       await audit(db, job, actorId, "deployment.promote", "project", projectId, { outcome: "refused", reasons: eligibilityReasons });
       return;
     }
+    // Re-assert the lease after the eligibility round-trips, before the
+    // release row is inserted and the ref is written.
+    await assertOwned();
 
     let previousSha: string | null;
     if (deployment.mechanism === "github_actions_jobs") {
@@ -558,6 +590,18 @@ export async function runProviderJob(
     if (!project) throw new Error("project not found");
     const deployment = loadDeploymentConfig(project);
     await assertOwned();
+    if (deployment.mechanism === "github_actions_jobs") {
+      // Rollback is not implemented for this mechanism: everything below reads
+      // the production ref through lsRemoteHeads(project.repository_path) and
+      // gates on the throwing checkImageExists, neither of which this
+      // mechanism's projects satisfy (they have no local clone — see migration
+      // 059's placeholder repository_path). Refuse cleanly instead of failing
+      // the job with an unhandled filesystem error. Promotion of an earlier
+      // commit is the supported recovery path.
+      await persistJobResult(db, job.id, { outcome: "refused", refusal_code: "rollback_unsupported_for_mechanism", mechanism: deployment.mechanism });
+      await audit(db, job, actorId, "deployment.rollback", "project", projectId, { outcome: "refused", refusal_code: "rollback_unsupported_for_mechanism" });
+      return;
+    }
     const productionHeads = await lsRemoteHeads(project.repository_path);
     const currentProductionSha = productionHeads.get(deployment.production_branch) ?? null;
     if (currentProductionSha !== expectedProductionSha) {
