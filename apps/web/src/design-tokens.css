@@ -49,7 +49,7 @@ a:hover { color:var(--text) }
 ::-webkit-scrollbar-thumb { background:var(--border2);border-radius:99px;border:3px solid transparent;background-clip:content-box }
 ::-webkit-scrollbar-thumb:hover { background:var(--text3) }
 .shell { min-height:100vh;display:flex }
-.sidebar { width:246px;flex:0 0 246px;background:var(--side-bg);border-right:1px solid var(--side-border);display:flex;flex-direction:column;position:fixed;inset:0 auto 0 0;z-index:60;overflow:hidden }
+.sidebar { width:246px;flex:0 0 246px;background:radial-gradient(130% 160% at 12% -12%,rgba(255,255,255,.07),transparent 55%),var(--side-bg);border-right:1px solid var(--side-border);display:flex;flex-direction:column;position:fixed;inset:0 auto 0 0;z-index:60;overflow:hidden }
 .brand { height:64px;flex:0 0 64px;display:flex;align-items:center;gap:11px;padding:0 20px;border-bottom:1px solid var(--side-border);color:var(--side-active) }
 .brand-mark { display:grid;place-items:center;background:linear-gradient(145deg,var(--primary),color-mix(in srgb, var(--primary) 65%, #000));box-shadow:0 2px 8px color-mix(in srgb, var(--primary) 45%, transparent);color:var(--primary-fg);border-radius:3px;font-family:"Cormorant Garamond",Georgia,serif;font-weight:700 }
 .brand-title { font-family:"Cormorant Garamond",Georgia,serif;font-size:18px;font-weight:700;line-height:1.1 }

@@ -22,4 +22,7 @@ describe("design tokens: elevation, focus, interaction", () => {
     expect(styles).toContain(":focus-visible { outline:2px solid var(--primary);outline-offset:1px }");
     expect(styles).toContain("input:focus-visible,select:focus-visible,textarea:focus-visible,button:focus-visible { box-shadow:var(--ring) }");
   });
+  it("sidebar has the ambient radial-gradient depth layer", () => {
+    expect(styles).toContain("radial-gradient(130% 160% at 12% -12%,rgba(255,255,255,.07),transparent 55%)");
+  });
 });
