@@ -819,6 +819,118 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             setStatus("Merge failed: "+((done.error_json||{}).message||result.error||"see worker logs"),"danger");setReason("Merge did not happen.");
           }catch(error){setStatus("Merge failed: "+error.message,"danger");}
         });
+
+        (function initProductionPromotion(){
+          const statusEl=document.querySelector("[data-production-promotion-status]");
+          if(!statusEl)return;
+          const projectId=statusEl.dataset.projectId;
+          const preflightEl=document.querySelector("[data-production-promotion-preflight]");
+          const progressEl=document.querySelector("[data-production-promotion-progress]");
+          const promoteButton=document.querySelector("[data-production-promote-button]");
+          const promoteRetry=document.querySelector("[data-production-promote-retry]");
+          const promoteReason=document.querySelector("[data-production-promote-reason]");
+          const dialog=document.querySelector("[data-production-promote-dialog]");
+          const divergedWarning=document.querySelector("[data-production-diverged-warning]");
+          const forceButton=document.querySelector("[data-production-force-button]");
+          const forceDialog=document.querySelector("[data-production-force-dialog]");
+          let lastCheck=null;
+
+          async function pollProductionJob(jobId,maxMs){
+            for(let i=0;i<Math.ceil(maxMs/700);i++){
+              await new Promise(r=>setTimeout(r,i===0?300:700));
+              const payload=await fetch("/api/admin/jobs/"+jobId,{headers:{"x-csrf-token":csrf}}).then(r=>r.json()).catch(()=>null);
+              const job=payload&&payload.job;if(!job)continue;
+              if(["completed","failed","cancelled","blocked_auth","blocked_auth_configuration"].includes(job.status))return job;
+            }
+            return null;
+          }
+
+          async function loadStatus(){
+            const data=await fetch("/api/admin/projects/"+projectId+"/deployment",{headers:{"x-csrf-token":csrf}}).then(r=>r.json());
+            const snapshot=data.snapshot;
+            if(!snapshot){statusEl.innerHTML="<p>No status yet — click Refresh.</p>";return;}
+            statusEl.innerHTML='<p>Master: <code>'+snapshot.master_commit_sha.slice(0,8)+'</code></p>'
+              +'<p>Production: <code>'+(snapshot.production_commit_sha?snapshot.production_commit_sha.slice(0,8):"unknown")+'</code></p>'
+              +'<p>Status: '+({up_to_date:"Already deployed",behind_master:"Ready to deploy",diverged:"Diverged — needs recovery",unavailable:"Unavailable"}[snapshot.divergence]||snapshot.divergence)+'</p>';
+            if(snapshot.divergence==="diverged"){
+              divergedWarning.hidden=false;
+              divergedWarning.querySelector("[data-diverged-production-sha]").textContent=(snapshot.production_commit_sha||"").slice(0,8);
+              divergedWarning.querySelector("[data-diverged-master-sha]").textContent=snapshot.master_commit_sha.slice(0,8);
+            } else divergedWarning.hidden=true;
+            renderProgress(data.releases);
+          }
+
+          function renderProgress(releases){
+            const active=releases.find(r=>r.action==="promote"&&["pending_approval","deploying"].includes(r.status));
+            if(!active){progressEl.innerHTML='<p style="color:var(--text3);font-size:13px">No deployment in progress.</p>';return;}
+            progressEl.innerHTML='<p>Deploying <code>'+active.commit_sha.slice(0,8)+'</code> — '+active.status+'</p>'
+              +(active.production_workflow_run_id?'<p><a href="https://github.com/dutchbase/va-jobs-platform/actions/runs/'+active.production_workflow_run_id+'" target="_blank" rel="noopener">View on GitHub →</a></p>':'');
+          }
+
+          async function runPreflight(){
+            promoteButton.disabled=true;promoteRetry.hidden=true;promoteReason.textContent="Checking preconditions…";
+            try{
+              const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/promote-check",{method:"POST",headers:{"x-csrf-token":csrf}});
+              const {job}=await queued.json();
+              const done=await pollProductionJob(job.id,20000);
+              if(!done||done.status!=="completed"){promoteReason.textContent="Pre-flight check timed out — try again.";promoteRetry.hidden=false;return;}
+              lastCheck=done.result_json;
+              preflightEl.innerHTML='<p>Master workflow: '+(lastCheck.reasons.includes("master_workflow_failed")?"Failed":lastCheck.reasons.includes("master_workflow_not_found")?"Not found":lastCheck.reasons.includes("master_workflow_pending")?"Pending":"Passed")+'</p>'
+                +'<p>docker-image: '+(lastCheck.reasons.includes("docker_image_job_missing")?"Missing":lastCheck.reasons.includes("docker_image_job_failed")?"Failed":lastCheck.reasons.includes("docker_image_job_pending")?"Pending":"Passed")+'</p>';
+              if(lastCheck.divergence==="up_to_date"){promoteButton.disabled=true;promoteButton.textContent="Already in production";promoteReason.textContent="Production is already on this commit.";}
+              else if(lastCheck.eligible){promoteButton.disabled=false;promoteButton.textContent="Deploy to production";promoteReason.textContent="Ready: "+lastCheck.master_sha.slice(0,8);}
+              else{promoteButton.disabled=true;promoteReason.textContent=lastCheck.reasons.join(", ");}
+            }catch(error){promoteReason.textContent="Pre-flight failed: "+error.message;promoteRetry.hidden=false;}
+          }
+
+          promoteRetry.addEventListener("click",runPreflight);
+          promoteButton.addEventListener("click",()=>{
+            if(!lastCheck||!lastCheck.eligible)return;
+            dialog.querySelector("[data-production-promote-dialog-sha]").textContent=lastCheck.master_sha.slice(0,8);
+            dialog.querySelector("[data-production-promote-dialog-message]").textContent=lastCheck.master_commit_message||"";
+            dialog.showModal();
+          });
+          dialog.querySelector("[data-production-promote-dialog-cancel]").addEventListener("click",()=>dialog.close());
+          dialog.querySelector("[data-production-promote-dialog-confirm]").addEventListener("click",async()=>{
+            dialog.close();
+            promoteButton.disabled=true;promoteReason.textContent="Deploying…";
+            const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/promote",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({commit_sha:lastCheck.master_sha,expected_master_sha:lastCheck.master_sha})});
+            const body=await queued.json().catch(()=>({}));
+            if(!queued.ok){promoteReason.textContent="Could not start deployment: "+(body.error||queued.status);return;}
+            const done=await pollProductionJob(body.job.id,20000);
+            const result=done&&done.result_json;
+            if(result&&result.refusal_code==="diverged_confirmation_required"){promoteReason.textContent="Production has diverged — use the force-recovery option below.";loadStatus();return;}
+            promoteReason.textContent=result?("Deployment "+result.outcome):"Deployment status unknown — refresh to check.";
+            loadStatus();
+          });
+
+          forceButton.addEventListener("click",()=>{
+            if(!lastCheck)return;
+            forceDialog.querySelector("[data-production-force-dialog-sha]").textContent=lastCheck.master_sha.slice(0,8);
+            const input=forceDialog.querySelector("[data-production-force-dialog-input]");
+            const confirmBtn=forceDialog.querySelector("[data-production-force-dialog-confirm]");
+            input.value="";confirmBtn.disabled=true;
+            input.oninput=()=>{confirmBtn.disabled=input.value.trim()!==lastCheck.master_sha.slice(0,8);};
+            forceDialog.showModal();
+          });
+          forceDialog.querySelector("[data-production-force-dialog-cancel]").addEventListener("click",()=>forceDialog.close());
+          forceDialog.querySelector("[data-production-force-dialog-confirm]").addEventListener("click",async()=>{
+            forceDialog.close();
+            promoteReason.textContent="Forcing production…";
+            const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/promote-force",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({commit_sha:lastCheck.master_sha,expected_master_sha:lastCheck.master_sha,confirm_diverged:true})});
+            const body=await queued.json().catch(()=>({}));
+            if(!queued.ok){promoteReason.textContent="Could not force: "+(body.error||queued.status);return;}
+            const done=await pollProductionJob(body.job.id,20000);
+            const result=done&&done.result_json;
+            promoteReason.textContent=result?("Forced deployment "+result.outcome):"Status unknown — refresh to check.";
+            loadStatus();
+          });
+
+          document.querySelectorAll("[data-refresh-production-promotion]").forEach(btn=>btn.addEventListener("click",()=>fetch("/api/admin/projects/"+projectId+"/deployment/sync",{method:"POST",headers:{"x-csrf-token":csrf}}).then(()=>setTimeout(loadStatus,1500))));
+
+          loadStatus();
+          runPreflight();
+        })();
       `:""}
       ${path==="/admin/ai-usage"?`
         const aiUsageForm=document.querySelector("[data-ai-usage-filters]");
