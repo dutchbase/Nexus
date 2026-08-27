@@ -199,7 +199,9 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         ${runRows ? `<div style="max-height:400px;overflow-y:auto">${runRows}</div>` : `<div style="padding:20px 18px;color:var(--text3);font-size:13px">No active runs.</div>`}
         <a href="/admin/queue" style="display:block;padding:10px 18px;border-top:1px solid var(--border);font-size:12px;color:var(--text3);text-decoration:none">Queued behind: ${queuedCount} jobs · Inspect queue</a>
       </section>
+    </div>
 
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(330px,1fr));gap:22px;margin-top:22px;align-items:start">
       <section class="card" style="margin-top:0">
         <div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between">
           <div style="font-size:11.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text2)">System health</div>
