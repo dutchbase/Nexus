@@ -846,6 +846,41 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           }finally{button.disabled=false}
         });
         document.querySelector("select[name=repository]")?.addEventListener("change",function(){this.form.submit()});
+        const prChecks=()=>[...document.querySelectorAll("[data-pr-check]")];
+        const prToolbar=document.querySelector("[data-pr-bulk-toolbar]"),prSelectedCount=document.querySelector("[data-pr-selected-count]");
+        const updatePrSelection=()=>{
+          const selected=prChecks().filter(c=>c.checked);
+          if(prSelectedCount)prSelectedCount.textContent=String(selected.length);
+          if(prToolbar)prToolbar.hidden=selected.length===0;
+        };
+        prChecks().forEach(checkbox=>{
+          checkbox.addEventListener("click",event=>event.stopPropagation());
+          checkbox.addEventListener("change",updatePrSelection);
+        });
+        document.querySelector("[data-pr-check-all]")?.addEventListener("change",event=>{
+          prChecks().forEach(checkbox=>{checkbox.checked=event.target.checked});
+          updatePrSelection();
+        });
+        document.querySelector("[data-pr-clear-selection]")?.addEventListener("click",()=>{
+          prChecks().forEach(checkbox=>{checkbox.checked=false});
+          const checkAll=document.querySelector("[data-pr-check-all]");if(checkAll)checkAll.checked=false;
+          updatePrSelection();
+        });
+        const selectedPrIds=()=>prChecks().filter(c=>c.checked).map(c=>c.value);
+
+        document.querySelector('[data-pr-bulk="ai-review"]')?.addEventListener("click",async(event)=>{
+          const ids=selectedPrIds();if(!ids.length)return;
+          const button=event.currentTarget;button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/bulk",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({action:"ai-review",ids})});
+            const result=await response.json();
+            if(response.ok){
+              const queued=result.results.filter(r=>r.outcome==="queued").length,skipped=result.results.length-queued;
+              alert(\`AI review started for \${queued} pull request\${queued===1?"":"s"}\${skipped?\`, \${skipped} skipped\`:""}.\`);
+              location.reload();
+            }else alert(result.error);
+          }finally{button.disabled=false}
+        });
       `:""}
       ${/^\/admin\/pull-requests\/[^/]+(\/\d+)?$/.test(path)?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";
