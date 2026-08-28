@@ -78,3 +78,31 @@ test("jobs status endpoint rejects malformed ids without touching the database",
   expect(response.writeHead).toHaveBeenCalledWith(404, expect.any(Object));
   expect(pool.query).not.toHaveBeenCalled();
 });
+
+test("merge-preview returns 400 with a clear message for a placeholder repository_path, without enqueuing a job", async () => {
+  pool.query.mockImplementation(async (sql: string) =>
+    sql.includes("FROM projects")
+      ? { rows: [{ id: projectId, name: "VA Jobs Platform", github_owner: "dutchbase", github_repository: "va-jobs-platform", default_branch: "master", repository_path: "/PLACEHOLDER/set-a-real-local-clone-path-for-va-jobs-platform" }] }
+      : { rows: [] });
+  const response = newResponse();
+
+  await adminApi(request({}), response, new URL(`http://test/api/admin/projects/${projectId}/merge-preview`), { user_id: "admin" });
+
+  expect(response.writeHead).toHaveBeenCalledWith(400, expect.any(Object));
+  const body = JSON.parse(String(response.end.mock.calls[0][0]));
+  expect(body.error).toMatch(/local repository path is not configured correctly/i);
+  expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(false);
+});
+
+test("merge-preview still enqueues a job for a project with a real repository_path (no regression)", async () => {
+  pool.query.mockImplementation(async (sql: string) =>
+    sql.includes("FROM projects")
+      ? { rows: [{ id: projectId, name: "Widgets", github_owner: "acme", github_repository: "widgets", default_branch: "main", repository_path: "/home/deploy/projects/widgets" }] }
+      : { rows: [] });
+  const response = newResponse();
+
+  await adminApi(request({}), response, new URL(`http://test/api/admin/projects/${projectId}/merge-preview`), { user_id: "admin" });
+
+  expect(response.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
+  expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(true);
+});
