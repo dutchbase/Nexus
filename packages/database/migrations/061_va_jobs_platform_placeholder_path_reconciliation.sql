@@ -42,7 +42,7 @@ BEGIN
       AND id != target_id
       AND repository_path IS NOT NULL
       AND btrim(repository_path) != ''
-      AND repository_path NOT LIKE '/PLACEHOLDER/%';
+      AND btrim(repository_path) NOT ILIKE '/PLACEHOLDER/%';
 
   IF candidate_count = 1 THEN
     SELECT id, repository_path, agent_start_path INTO source_id, source_repository_path, source_agent_start_path
@@ -51,7 +51,7 @@ BEGIN
         AND id != target_id
         AND repository_path IS NOT NULL
         AND btrim(repository_path) != ''
-        AND repository_path NOT LIKE '/PLACEHOLDER/%';
+        AND btrim(repository_path) NOT ILIKE '/PLACEHOLDER/%';
 
     UPDATE projects
       SET repository_path = source_repository_path,
