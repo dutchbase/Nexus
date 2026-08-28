@@ -16,7 +16,7 @@ afterEach(async () => {
 async function initRepo() {
   const dir = await mkdtemp(join(tmpdir(), "dcc-project-validate-"));
   tempDirs.push(dir);
-  await execGit("git", ["init", "-b", "main", dir]);
+  await execGit("git", ["init", "-b", "trunk", dir]);
   await execGit("git", ["-C", dir, "config", "user.email", "test@example.com"]);
   await execGit("git", ["-C", dir, "config", "user.name", "Test"]);
   await execGit("git", ["-C", dir, "remote", "add", "origin", "https://example.invalid/repo.git"]);
@@ -47,7 +47,7 @@ test("a dirty repo persists categorized file detail, not just the health_status 
   await commitFile(dir, "modified.txt", "original\n");
   await writeFile(join(dir, "modified.txt"), "changed\n");
   await writeFile(join(dir, "untracked.txt"), "new\n");
-  const project = { id: "project-1", repository_path: dir, default_branch: "main", agent_start_path: null };
+  const project = { id: "project-1", repository_path: dir, default_branch: "trunk", agent_start_path: null };
   const database = db(project);
 
   await runProjectValidateJob({ id: "job-1", payload_json: { project_id: "project-1" } }, database as any).catch(() => {});
@@ -62,7 +62,7 @@ test("a dirty repo persists categorized file detail, not just the health_status 
 });
 
 test("an inspection failure (missing path) sets a distinct status, not repository_dirty", async () => {
-  const project = { id: "project-2", repository_path: "/nonexistent/dcc-test-" + Date.now(), default_branch: "main", agent_start_path: null };
+  const project = { id: "project-2", repository_path: "/nonexistent/dcc-test-" + Date.now(), default_branch: "trunk", agent_start_path: null };
   const database = db(project);
 
   await expect(runProjectValidateJob({ id: "job-2", payload_json: { project_id: "project-2" } }, database as any))
@@ -79,7 +79,7 @@ test("an inspection failure (missing path) sets a distinct status, not repositor
 test("a repository that becomes clean after being dirty clears health_detail_json", async () => {
   const dir = await initRepo();
   await commitFile(dir, "file.txt", "hello\n");
-  const project = { id: "project-3", repository_path: dir, default_branch: "main", agent_start_path: null };
+  const project = { id: "project-3", repository_path: dir, default_branch: "trunk", agent_start_path: null };
   const database = db(project);
 
   await runProjectValidateJob({ id: "job-3", payload_json: { project_id: "project-3" } }, database as any);
