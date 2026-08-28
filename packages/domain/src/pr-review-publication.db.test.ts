@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -50,7 +50,8 @@ integration("AI PR review publication (Sonnet / review_only / medium)", () => {
     await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
     client = new pg.Client({ connectionString: testDatabaseUrl });
     await client.connect();
-  });
+  }, 20_000);
+  afterEach(async () => { await client?.end(); }, 20_000);
   afterAll(async () => { if (migrationDirectory) await rm(migrationDirectory, { recursive: true, force: true }); });
 
   it("completes end to end for sonnet/review_only/medium without a parameter type error", async () => {
