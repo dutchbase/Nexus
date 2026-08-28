@@ -22,7 +22,7 @@ import {
   resolveSkills, snapshotSkillSet, snapshotSkills, SkillResolutionError, validateFilesystemPath,
 } from "../../../packages/skill-registry/src/index.ts";
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
-import { cronWebhookSecretReferencePattern, getGithubPolicyEnforcementMode, normalizeAgentStartPath, validateAgentStartPath, validateDeploymentConfig, validateProject } from "@dcc/project-config";
+import { cronWebhookSecretReferencePattern, getGithubPolicyEnforcementMode, isPlaceholderRepositoryPath, normalizeAgentStartPath, validateAgentStartPath, validateDeploymentConfig, validateProject } from "@dcc/project-config";
 import { adminPage, escapeHtml, loginPage, publicFormPage, styles, submittedPage } from "./ui.ts";
 import { allowedTemplateVariables, fieldsFor, lineDiff, validStatuses } from "./pages/shared.ts";
 import * as dashboardPage from "./pages/dashboard.ts";
@@ -1361,6 +1361,9 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const project = (await pool.query("SELECT * FROM projects WHERE id=$1", [mergePreviewMatch[1]])).rows[0];
     if (!project) return json(response, 404, { error: "project not found" });
     if (!project.repository_path) return json(response, 400, { error: "project has no local repository configured" });
+    if (isPlaceholderRepositoryPath(project.repository_path)) {
+      return json(response, 400, { error: `${project.name} local repository path is not configured correctly: set a real local clone path on the Projects page before running merge pre-flight.` });
+    }
     const body = await bodyOf(request);
     const refPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/;
     const head = typeof body.head === "string" && body.head.trim() ? body.head.trim() : undefined;

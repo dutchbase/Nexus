@@ -218,6 +218,20 @@ test("merge_preview persists a read-only preview into result_json", async () => 
   expect(resultUpdate!.values![1]).toMatchObject({ outcome: "branches_only" });
 });
 
+test("merge_preview propagates a placeholder-path configuration error unchanged", async () => {
+  const database = db([{ id: "proj-1", repository_path: "/PLACEHOLDER/set-a-real-local-clone-path-for-va-jobs-platform", github_owner: "dutchbase", github_repository: "va-jobs-platform" }]);
+  previewRemoteBranchMerge.mockRejectedValueOnce(new Error("Project local repository path is not configured correctly. Set a real local clone path for this project on the Projects page before running merge pre-flight."));
+
+  await expect(runProviderJob({
+    id: "job-10", type: "github.merge_preview",
+    idempotency_key: "g07:github.merge_preview:two", payload_json: { actor_id: "admin-1", project_id: "proj-1" },
+  }, database as any)).rejects.toThrow(/local repository path is not configured correctly/i);
+
+  expect(previewRemoteBranchMerge).toHaveBeenCalledWith({ repositoryPath: "/PLACEHOLDER/set-a-real-local-clone-path-for-va-jobs-platform", head: undefined, base: undefined });
+  const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
+  expect(resultUpdate).toBeUndefined();
+});
+
 test("merge_branches refuses without merging when a ref moved since the preview", async () => {
   lsRemoteHeads.mockResolvedValueOnce(new Map([["staging", "b".repeat(40)]]));
   const database = db([{ id: "proj-1", repository_path: "/repos/widgets", github_owner: "acme", github_repository: "widgets" }]);

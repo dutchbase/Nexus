@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, test } from "vitest";
-import { getGithubPolicyEnforcementMode, normalizeAgentStartPath, validateAgentStartPath, validateProject } from "./index.ts";
+import { getGithubPolicyEnforcementMode, isPlaceholderRepositoryPath, normalizeAgentStartPath, validateAgentStartPath, validateProject } from "./index.ts";
 
 const execGit = promisify(execFile);
 const tempDirs: string[] = [];
@@ -193,6 +193,36 @@ describe("git status categorization", () => {
   });
 });
 
+describe("isPlaceholderRepositoryPath", () => {
+  it("flags the known va-jobs-platform seed placeholder", () => {
+    expect(isPlaceholderRepositoryPath("/PLACEHOLDER/set-a-real-local-clone-path-for-va-jobs-platform")).toBe(true);
+  });
+  it("flags any /PLACEHOLDER/ prefixed path, case-insensitively", () => {
+    expect(isPlaceholderRepositoryPath("/placeholder/anything-else")).toBe(true);
+    expect(isPlaceholderRepositoryPath("/PLACEHOLDER/anything-else")).toBe(true);
+  });
+  it("flags empty, whitespace-only, and nullish paths", () => {
+    expect(isPlaceholderRepositoryPath("")).toBe(true);
+    expect(isPlaceholderRepositoryPath("   ")).toBe(true);
+    expect(isPlaceholderRepositoryPath(null)).toBe(true);
+    expect(isPlaceholderRepositoryPath(undefined)).toBe(true);
+  });
+  it("does not flag a real absolute path", () => {
+    expect(isPlaceholderRepositoryPath("/home/deploy/projects/va-jobs-platform")).toBe(false);
+  });
+});
+
+describe("validateProject placeholder rejection", () => {
+  it("returns errorCode placeholder_path without ever calling stat/realpath on a placeholder path", async () => {
+    const result = await validateProject({ repositoryPath: "/PLACEHOLDER/set-a-real-local-clone-path-for-va-jobs-platform", defaultBranch: "master" });
+    expect(result).toEqual({ ok: false, errorCode: "placeholder_path", message: "repository path is a placeholder and has not been configured" });
+  });
+  it("returns errorCode path_not_configured for an empty repositoryPath", async () => {
+    const result = await validateProject({ repositoryPath: "", defaultBranch: "master" });
+    expect(result).toEqual({ ok: false, errorCode: "path_not_configured", message: "repository path is not configured" });
+  });
+});
+
 describe("inspection failure handling", () => {
   test("nonexistent repository path returns ok:false, errorCode:'path_missing', not repository_dirty", async () => {
     const result = await validateProject({ repositoryPath: "/nonexistent/path/dcc-test-" + Date.now(), defaultBranch: "main" });
@@ -209,5 +239,33 @@ describe("inspection failure handling", () => {
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.errorCode).toBe("not_a_repo");
+  });
+});
+
+describe("validateProject real-path regression (no false positives)", () => {
+  it("does not flag a real, existing directory as a placeholder", async () => {
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const exec = promisify(execFile);
+    const dir = await mkdtemp(join(tmpdir(), "dcc-real-repo-"));
+    try {
+      await exec("git", ["-C", dir, "init", "-q"]);
+      await exec("git", ["-C", dir, "commit", "--allow-empty", "-q", "-m", "init"]);
+      await exec("git", ["-C", dir, "branch", "-m", "master"]);
+      const result = await validateProject({ repositoryPath: dir, defaultBranch: "master", requireRemote: false });
+      expect(result.ok).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("path changes are picked up on the next call -- no caching inside validateProject", async () => {
+    const first = await validateProject({ repositoryPath: "/PLACEHOLDER/anything", defaultBranch: "master" });
+    expect(first).toMatchObject({ ok: false, errorCode: "placeholder_path" });
+    const second = await validateProject({ repositoryPath: "/definitely/does/not/exist/on/this/machine", defaultBranch: "master" });
+    expect(second).toMatchObject({ ok: false, errorCode: "path_missing" });
   });
 });

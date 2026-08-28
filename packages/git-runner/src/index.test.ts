@@ -845,4 +845,9 @@ describe("previewRemoteBranchMerge", () => {
       await rm(tmp, { recursive: true, force: true });
     }
   });
+
+  it("rejects a placeholder repositoryPath with a clear configuration error, before calling realpath", async () => {
+    await expect(previewRemoteBranchMerge({ repositoryPath: "/PLACEHOLDER/set-a-real-local-clone-path-for-va-jobs-platform" }))
+      .rejects.toThrow(/project local repository path is not configured correctly/i);
+  });
 });
