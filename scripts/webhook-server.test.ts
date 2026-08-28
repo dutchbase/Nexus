@@ -133,6 +133,21 @@ describe("deployment webhook", () => {
     expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ state: "blocked", attemptId: "attempt-1" }));
   });
 
+  it("claims the next queued attempt after a failed completion, not only after a succeeded one", async () => {
+    const next = { id: "attempt-next", target_sha: protectedSha, protected_branch: "master", owner: "webhook" };
+    const claimDeploymentAttempt = vi.fn()
+      .mockResolvedValueOnce({ kind: "claimed", attempt: next })
+      .mockResolvedValue({ kind: "idle", attempt: null });
+    const ctx = await webhook({ store: { claimDeploymentAttempt } }); dirs.push(ctx.dir);
+    const marker = join(ctx.dir, "bad.done");
+    await writeFile(marker, "not json");
+
+    await ctx.app.finalizeAttempt({ id: "attempt-1", target_sha: protectedSha, owner: "webhook" }, marker);
+
+    expect(claimDeploymentAttempt).toHaveBeenCalledTimes(1);
+    expect(ctx.spawnFn).toHaveBeenCalledTimes(1);
+  });
+
   it("leaves a reload-pending success marker for an old release without finalizing it", async () => {
     const ctx = await webhook({ isCurrentReleaseFn: () => false }); dirs.push(ctx.dir);
     const marker = join(ctx.dir, "pending.done");
@@ -168,7 +183,9 @@ describe("deployment webhook", () => {
 
   it("finalizes a recovered marker before considering another launch", async () => {
     const recovered = { id: "attempt-recovered", target_sha: protectedSha, protected_branch: "master", owner: "webhook" };
-    const ctx = await webhook({ isCurrentReleaseFn: () => true, store: { claimDeploymentAttempt: vi.fn(async () => ({ kind: "recovered", attempt: recovered })) } }); dirs.push(ctx.dir);
+    const ctx = await webhook({ isCurrentReleaseFn: () => true, store: { claimDeploymentAttempt: vi.fn()
+      .mockResolvedValueOnce({ kind: "recovered", attempt: recovered })
+      .mockResolvedValue({ kind: "idle", attempt: null }) } }); dirs.push(ctx.dir);
     const marker = join(ctx.dir, "completions", "attempt-recovered.done");
     await writeFile(marker, JSON.stringify({ attemptId: "attempt-recovered", sha: protectedSha, exitCode: 0, reloadPending: true }));
 
@@ -191,15 +208,17 @@ describe("deployment webhook", () => {
     expect(ctx.store.completeDeploymentAttempt).not.toHaveBeenCalled();
   });
 
-  it("blocks a recovered launch intent without a marker or live PID and never promotes the queue", async () => {
+  it("blocks a recovered launch intent without a marker or live PID and then drains the queue", async () => {
     const recovered = { id: "attempt-intent", target_sha: protectedSha, protected_branch: "master", owner: "webhook", marker_path: join(tmpdir(), "missing.done"), child_pid: null };
-    const claimDeploymentAttempt = vi.fn(async () => ({ kind: "recovered", attempt: recovered }));
+    const claimDeploymentAttempt = vi.fn()
+      .mockResolvedValueOnce({ kind: "recovered", attempt: recovered })
+      .mockResolvedValue({ kind: "idle", attempt: null });
     const ctx = await webhook({ store: { claimDeploymentAttempt } }); dirs.push(ctx.dir);
 
     await expect(ctx.app.recoverOnBoot()).resolves.toBe(false);
 
     expect(ctx.spawnFn).not.toHaveBeenCalled();
-    expect(claimDeploymentAttempt).toHaveBeenCalledTimes(1);
+    expect(claimDeploymentAttempt).toHaveBeenCalledTimes(2);
     expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({ state: "blocked", recoveryReason: "recovery_launch_intent_without_live_child" }));
   });
 
@@ -244,7 +263,9 @@ describe("deployment webhook", () => {
 
   it("blocks a claimed attempt when process spawn fails", async () => {
     const attempt = { id: "attempt-spawn", target_sha: protectedSha, protected_branch: "master", owner: "webhook" };
-    const ctx = await webhook({ spawnFn: vi.fn(() => { throw Object.assign(new Error("missing deploy script"), { code: "ENOENT" }); }), store: { claimDeploymentAttempt: vi.fn(async () => ({ kind: "claimed", attempt })) } }); dirs.push(ctx.dir);
+    const ctx = await webhook({ spawnFn: vi.fn(() => { throw Object.assign(new Error("missing deploy script"), { code: "ENOENT" }); }), store: { claimDeploymentAttempt: vi.fn()
+      .mockResolvedValueOnce({ kind: "claimed", attempt })
+      .mockResolvedValue({ kind: "idle", attempt: null }) } }); dirs.push(ctx.dir);
 
     await expect(ctx.app.processNext()).resolves.toBe(false);
 
@@ -256,7 +277,9 @@ describe("deployment webhook", () => {
     const attempt = { id: "attempt-native-error", target_sha: protectedSha, protected_branch: "master", owner: "webhook" };
     const ctx = await webhook({
       spawnFn: vi.fn(() => { queueMicrotask(() => child.emit("error", Object.assign(new Error("not executable"), { code: "EACCES" }))); return child; }),
-      store: { claimDeploymentAttempt: vi.fn(async () => ({ kind: "claimed", attempt })) },
+      store: { claimDeploymentAttempt: vi.fn()
+        .mockResolvedValueOnce({ kind: "claimed", attempt })
+        .mockResolvedValue({ kind: "idle", attempt: null }) },
     }); dirs.push(ctx.dir);
 
     await expect(ctx.app.processNext()).resolves.toBe(false);
@@ -275,7 +298,9 @@ describe("deployment webhook", () => {
         kill: () => calls.push("kill"),
         unref() {},
       }; }),
-      store: { claimDeploymentAttempt: vi.fn(async () => ({ kind: "claimed", attempt })), recordDeploymentLaunchIntent, recordDeploymentLaunch },
+      store: { claimDeploymentAttempt: vi.fn()
+        .mockResolvedValueOnce({ kind: "claimed", attempt })
+        .mockResolvedValue({ kind: "idle", attempt: null }), recordDeploymentLaunchIntent, recordDeploymentLaunch },
     }); dirs.push(ctx.dir);
 
     await expect(ctx.app.processNext()).resolves.toBe(false);
@@ -306,7 +331,7 @@ describe("deployment webhook", () => {
     expect(calls).toEqual(["intent", "spawn", "persist", "release"]);
   });
 
-  it("blocks a dead launched child without a marker and does not promote the queue", async () => {
+  it("blocks a dead launched child without a marker and then drains the queue", async () => {
     vi.useFakeTimers();
     try {
       const attempt = { id: "attempt-dead", target_sha: protectedSha, protected_branch: "master", owner: "webhook" };
@@ -315,7 +340,9 @@ describe("deployment webhook", () => {
         stdio: [null, null, null, { end() {}, destroy() {}, unref() {} }],
         unref() {},
       });
-      const claimDeploymentAttempt = vi.fn(async () => ({ kind: "claimed", attempt }));
+      const claimDeploymentAttempt = vi.fn()
+        .mockResolvedValueOnce({ kind: "claimed", attempt })
+        .mockResolvedValue({ kind: "idle", attempt: null });
       const ctx = await webhook({ spawnFn: vi.fn(() => child), isAliveFn: vi.fn(() => false), store: { claimDeploymentAttempt } }); dirs.push(ctx.dir);
 
       await ctx.app.processNext();
@@ -324,7 +351,7 @@ describe("deployment webhook", () => {
       expect(ctx.store.completeDeploymentAttempt).toHaveBeenCalledWith(null, expect.objectContaining({
         attemptId: "attempt-dead", state: "blocked", recoveryReason: "child_exited_without_marker",
       }));
-      expect(claimDeploymentAttempt).toHaveBeenCalledTimes(1);
+      expect(claimDeploymentAttempt).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }
@@ -339,7 +366,9 @@ describe("deployment webhook", () => {
         stdio: [null, null, null, { end() {}, destroy() {}, unref() {} }],
         unref() {},
       });
-      const claimDeploymentAttempt = vi.fn(async () => ({ kind: "claimed", attempt }));
+      const claimDeploymentAttempt = vi.fn()
+        .mockResolvedValueOnce({ kind: "claimed", attempt })
+        .mockResolvedValue({ kind: "idle", attempt: null });
       let persistTerminal!: (value: object) => void;
       const terminalPersisted = new Promise<object>((resolve) => { persistTerminal = resolve; });
       const completeDeploymentAttempt = vi.fn()
@@ -365,7 +394,7 @@ describe("deployment webhook", () => {
       await vi.advanceTimersByTimeAsync(2_000);
       expect(completeDeploymentAttempt).toHaveBeenCalledTimes(2);
       expect(ctx.store.renewDeploymentLease).toHaveBeenCalledTimes(1);
-      expect(claimDeploymentAttempt).toHaveBeenCalledTimes(1);
+      expect(claimDeploymentAttempt).toHaveBeenCalledTimes(2);
     } finally {
       vi.useRealTimers();
     }

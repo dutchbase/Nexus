@@ -105,7 +105,7 @@ function createWebhook({ config = readConfig(), store = deployments, pool = null
       try { fsModule.unlinkSync(markerPath); } catch (error) { if (error.code !== 'ENOENT') throw error; }
     }
     logger.info(`[webhook] deployment ${state} for ${attempt.target_sha.slice(0, 8)}`);
-    if (state === 'succeeded') await processNext();
+    await processNext();
   }
 
   async function finalizeAttempt(attempt, markerPath) {
