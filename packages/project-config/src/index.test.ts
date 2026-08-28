@@ -12,7 +12,7 @@ const tempDirs: string[] = [];
 async function initRepo() {
   const dir = await mkdtemp(join(tmpdir(), "dcc-git-status-"));
   tempDirs.push(dir);
-  await execGit("git", ["init", "-b", "main", dir]);
+  await execGit("git", ["init", "-b", "trunk", dir]);
   await execGit("git", ["-C", dir, "config", "user.email", "test@example.com"]);
   await execGit("git", ["-C", dir, "config", "user.name", "Test"]);
   return dir;
@@ -81,7 +81,7 @@ describe("git status categorization", () => {
     await commitFile(dir, "file.txt", "hello\n");
     await writeFile(join(dir, "file.txt"), "changed\n");
 
-    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
     if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
     expect(result.changedFileDetail).toContainEqual({ path: "file.txt", status: "modified", staged: false });
   });
@@ -92,7 +92,7 @@ describe("git status categorization", () => {
     await writeFile(join(dir, "file.txt"), "changed\n");
     await execGit("git", ["-C", dir, "add", "file.txt"]);
 
-    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
     if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
     expect(result.changedFileDetail).toContainEqual({ path: "file.txt", status: "modified", staged: true });
   });
@@ -102,7 +102,7 @@ describe("git status categorization", () => {
     await commitFile(dir, "committed.txt", "hi\n");
     await writeFile(join(dir, "new-file.txt"), "new\n");
 
-    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
     if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
     expect(result.changedFileDetail).toContainEqual({ path: "new-file.txt", status: "untracked", staged: false });
   });
@@ -112,7 +112,7 @@ describe("git status categorization", () => {
     await commitFile(dir, "gone.txt", "bye\n");
     await rm(join(dir, "gone.txt"));
 
-    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
     if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
     expect(result.changedFileDetail).toContainEqual({ path: "gone.txt", status: "deleted", staged: false });
   });
@@ -122,7 +122,7 @@ describe("git status categorization", () => {
     await commitFile(dir, "renamed-from.txt", "content preserved across the rename\n");
     await execGit("git", ["-C", dir, "mv", "renamed-from.txt", "renamed-to.txt"]);
 
-    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
     if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
     expect(result.changedFileDetail).toContainEqual({ path: "renamed-to.txt", status: "renamed", staged: true });
   });
@@ -133,12 +133,12 @@ describe("git status categorization", () => {
     await execGit("git", ["-C", dir, "checkout", "-b", "feature"]);
     await writeFile(join(dir, "conflict.txt"), "feature change\n");
     await execGit("git", ["-C", dir, "commit", "-am", "feature change"]);
-    await execGit("git", ["-C", dir, "checkout", "main"]);
-    await writeFile(join(dir, "conflict.txt"), "main change\n");
-    await execGit("git", ["-C", dir, "commit", "-am", "main change"]);
+    await execGit("git", ["-C", dir, "checkout", "trunk"]);
+    await writeFile(join(dir, "conflict.txt"), "trunk change\n");
+    await execGit("git", ["-C", dir, "commit", "-am", "trunk change"]);
     await execGit("git", ["-C", dir, "merge", "feature"]).catch(() => {});
 
-    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
     if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
     expect(result.changedFileDetail).toContainEqual({ path: "conflict.txt", status: "conflicted", staged: false });
   });
@@ -151,7 +151,7 @@ describe("git status categorization", () => {
     await writeFile(join(dir, "added.txt"), "added\n");
     await execGit("git", ["-C", dir, "add", "added.txt"]);
 
-    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
     if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
     const statuses = result.changedFileDetail.map((entry) => entry.status).sort();
     expect(statuses).toEqual(["added", "modified", "untracked"].sort());
@@ -166,7 +166,7 @@ describe("git status categorization", () => {
     await writeFile(join(dir, "a b.txt"), "x\n");
     await writeFile(join(dir, "café.txt"), "x\n");
 
-    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
     if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
     expect(result.changedFileDetail.map((entry) => entry.path).sort()).toEqual(["a b.txt", "café.txt"]);
     expect(result.changedFiles.sort()).toEqual(["a b.txt", "café.txt"]);
@@ -177,7 +177,7 @@ describe("git status categorization", () => {
     await commitFile(dir, "old name.txt", "hello\n");
     await execGit("git", ["-C", dir, "mv", "old name.txt", "new name.txt"]);
 
-    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
     if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
     expect(result.changedFileDetail).toEqual([{ path: "new name.txt", status: "renamed", staged: true }]);
   });
@@ -186,7 +186,7 @@ describe("git status categorization", () => {
     const dir = await initRepo();
     await commitFile(dir, "file.txt", "hello\n");
 
-    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main", requireRemote: false });
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
     if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
     expect(result.changedFileDetail).toEqual([]);
     expect(result.valid).toBe(true);
@@ -225,7 +225,7 @@ describe("validateProject placeholder rejection", () => {
 
 describe("inspection failure handling", () => {
   test("nonexistent repository path returns ok:false, errorCode:'path_missing', not repository_dirty", async () => {
-    const result = await validateProject({ repositoryPath: "/nonexistent/path/dcc-test-" + Date.now(), defaultBranch: "main" });
+    const result = await validateProject({ repositoryPath: "/nonexistent/path/dcc-test-" + Date.now(), defaultBranch: "trunk" });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.errorCode).toBe("path_missing");
@@ -235,7 +235,7 @@ describe("inspection failure handling", () => {
     const dir = await mkdtemp(join(tmpdir(), "dcc-not-a-repo-"));
     tempDirs.push(dir);
 
-    const result = await validateProject({ repositoryPath: dir, defaultBranch: "main" });
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk" });
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.errorCode).toBe("not_a_repo");
