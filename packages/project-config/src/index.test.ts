@@ -241,3 +241,31 @@ describe("inspection failure handling", () => {
     expect(result.errorCode).toBe("not_a_repo");
   });
 });
+
+describe("validateProject real-path regression (no false positives)", () => {
+  it("does not flag a real, existing directory as a placeholder", async () => {
+    const { mkdtemp, rm } = await import("node:fs/promises");
+    const { tmpdir } = await import("node:os");
+    const { join } = await import("node:path");
+    const { execFile } = await import("node:child_process");
+    const { promisify } = await import("node:util");
+    const exec = promisify(execFile);
+    const dir = await mkdtemp(join(tmpdir(), "dcc-real-repo-"));
+    try {
+      await exec("git", ["-C", dir, "init", "-q"]);
+      await exec("git", ["-C", dir, "commit", "--allow-empty", "-q", "-m", "init"]);
+      await exec("git", ["-C", dir, "branch", "-m", "master"]);
+      const result = await validateProject({ repositoryPath: dir, defaultBranch: "master", requireRemote: false });
+      expect(result.ok).toBe(true);
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
+  it("path changes are picked up on the next call -- no caching inside validateProject", async () => {
+    const first = await validateProject({ repositoryPath: "/PLACEHOLDER/anything", defaultBranch: "master" });
+    expect(first).toMatchObject({ ok: false, errorCode: "placeholder_path" });
+    const second = await validateProject({ repositoryPath: "/definitely/does/not/exist/on/this/machine", defaultBranch: "master" });
+    expect(second).toMatchObject({ ok: false, errorCode: "path_missing" });
+  });
+});
