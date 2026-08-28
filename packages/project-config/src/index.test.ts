@@ -252,10 +252,9 @@ describe("validateProject real-path regression (no false positives)", () => {
     const exec = promisify(execFile);
     const dir = await mkdtemp(join(tmpdir(), "dcc-real-repo-"));
     try {
-      await exec("git", ["-C", dir, "init", "-q"]);
+      await exec("git", ["-C", dir, "init", "-q", "-b", "trunk"]);
       await exec("git", ["-C", dir, "commit", "--allow-empty", "-q", "-m", "init"]);
-      await exec("git", ["-C", dir, "branch", "-m", "master"]);
-      const result = await validateProject({ repositoryPath: dir, defaultBranch: "master", requireRemote: false });
+      const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
       expect(result.ok).toBe(true);
     } finally {
       await rm(dir, { recursive: true, force: true });
