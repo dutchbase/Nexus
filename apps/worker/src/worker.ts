@@ -35,6 +35,7 @@ import { invokeOpenCodeExecution, invokeOpenCodePlanning, OpenCodeError } from "
 import { runPrivateExecution } from "./execution-handoff.ts";
 import { failExecutionPublication, handleExecutionPublicationFailure, prepareExecutionPublication, PublicationError, publishExternalResult, storePublishedPullRequest } from "./execution-publication.ts";
 import { formatFollowUpDescription } from "./follow-up-description.ts";
+import { formatPrAiReviewFailureLog } from "./pr-ai-review-failure-log.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
 import {
   approvedExecutionInput, approvedPhaseSkills, assertApprovedSkillSnapshot, assertExecutionPublicationGate, finalizeAiUsage, prReviewSnapshotInput, shouldRetryPrReview,
@@ -1394,6 +1395,7 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     }
   } catch (error: any) {
     await lease.assertOwned();
+    console.error(formatPrAiReviewFailureLog({ jobId: job.id, prAiReviewId: payload.pr_ai_review_id, pullRequestId: payload.pull_request_id, error }));
     if (runId) await finalizeAiUsage(runId, error);
     const storedReview = (await pool.query("SELECT * FROM pr_ai_reviews WHERE id=$1", [payload.pr_ai_review_id])).rows[0];
     if (storedReview?.status !== "running") return;
