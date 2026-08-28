@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, test } from "vitest";
-import { getGithubPolicyEnforcementMode, normalizeAgentStartPath, validateAgentStartPath, validateProject } from "./index.ts";
+import { getGithubPolicyEnforcementMode, isPlaceholderRepositoryPath, normalizeAgentStartPath, validateAgentStartPath, validateProject } from "./index.ts";
 
 const execGit = promisify(execFile);
 const tempDirs: string[] = [];
@@ -190,6 +190,36 @@ describe("git status categorization", () => {
     if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
     expect(result.changedFileDetail).toEqual([]);
     expect(result.valid).toBe(true);
+  });
+});
+
+describe("isPlaceholderRepositoryPath", () => {
+  it("flags the known va-jobs-platform seed placeholder", () => {
+    expect(isPlaceholderRepositoryPath("/PLACEHOLDER/set-a-real-local-clone-path-for-va-jobs-platform")).toBe(true);
+  });
+  it("flags any /PLACEHOLDER/ prefixed path, case-insensitively", () => {
+    expect(isPlaceholderRepositoryPath("/placeholder/anything-else")).toBe(true);
+    expect(isPlaceholderRepositoryPath("/PLACEHOLDER/anything-else")).toBe(true);
+  });
+  it("flags empty, whitespace-only, and nullish paths", () => {
+    expect(isPlaceholderRepositoryPath("")).toBe(true);
+    expect(isPlaceholderRepositoryPath("   ")).toBe(true);
+    expect(isPlaceholderRepositoryPath(null)).toBe(true);
+    expect(isPlaceholderRepositoryPath(undefined)).toBe(true);
+  });
+  it("does not flag a real absolute path", () => {
+    expect(isPlaceholderRepositoryPath("/home/deploy/projects/va-jobs-platform")).toBe(false);
+  });
+});
+
+describe("validateProject placeholder rejection", () => {
+  it("returns errorCode placeholder_path without ever calling stat/realpath on a placeholder path", async () => {
+    const result = await validateProject({ repositoryPath: "/PLACEHOLDER/set-a-real-local-clone-path-for-va-jobs-platform", defaultBranch: "master" });
+    expect(result).toEqual({ ok: false, errorCode: "placeholder_path", message: "repository path is a placeholder and has not been configured" });
+  });
+  it("returns errorCode path_not_configured for an empty repositoryPath", async () => {
+    const result = await validateProject({ repositoryPath: "", defaultBranch: "master" });
+    expect(result).toEqual({ ok: false, errorCode: "path_not_configured", message: "repository path is not configured" });
   });
 });
 

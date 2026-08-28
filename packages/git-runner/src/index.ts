@@ -4,6 +4,7 @@ import { access, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, wri
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
+import { isPlaceholderRepositoryPath } from "@dcc/project-config";
 
 const exec = promisify(execFile);
 const privateCloneOrigins = new Map<string, string>();
@@ -849,6 +850,9 @@ export async function previewRemoteBranchMerge(input: {
   head?: string;
   base?: string;
 }): Promise<BranchMergePreview> {
+  if (isPlaceholderRepositoryPath(input.repositoryPath)) {
+    throw new Error("Project local repository path is not configured correctly. Set a real local clone path for this project on the Projects page before running merge pre-flight.");
+  }
   const repository = await realpath(input.repositoryPath);
   if (input.head !== undefined) await assertRemoteBranchName(input.head);
   if (input.base !== undefined) await assertRemoteBranchName(input.base);

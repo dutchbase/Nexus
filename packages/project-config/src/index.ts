@@ -13,6 +13,18 @@ export type ProjectConfigFile = {
   projects: Record<string, Record<string, any>>;
 };
 
+// Placeholder paths are seeded by migrations for projects that need admin
+// configuration before local-clone-dependent features (pre-flight, planning,
+// execution) can run -- see packages/database/migrations/059_va_jobs_platform_project.sql.
+// Treat one as invalid configuration, not as a real (if broken) filesystem
+// path, so callers never attempt stat()/realpath() against it.
+export function isPlaceholderRepositoryPath(path: string | null | undefined): boolean {
+  if (path === null || path === undefined) return true;
+  const trimmed = path.trim();
+  if (!trimmed) return true;
+  return /^\/placeholder\//i.test(trimmed);
+}
+
 export async function loadProjectConfig(path = process.env.PROJECTS_CONFIG_PATH ?? resolve("config/projects.yaml")) {
   const content = await readFile(path, "utf8");
   const parsed = parse(content) as ProjectConfigFile;
@@ -111,7 +123,7 @@ export function parsePorcelainStatus(stdout: string): { paths: string[]; detail:
   return { paths, detail };
 }
 
-export type InspectionErrorCode = "path_missing" | "not_a_repo" | "permission_denied" | "git_unavailable" | "timeout" | "unknown";
+export type InspectionErrorCode = "path_missing" | "not_a_repo" | "permission_denied" | "git_unavailable" | "timeout" | "unknown" | "placeholder_path" | "path_not_configured";
 
 export type ValidateProjectResult =
   | { ok: true; valid: boolean; errors: string[]; changedFiles: string[]; changedFileDetail: ChangedFileDetail[] }
@@ -137,6 +149,10 @@ function classifyInspectionError(error: unknown): { errorCode: InspectionErrorCo
 }
 
 export async function validateProject(input: ProjectValidationInput): Promise<ValidateProjectResult> {
+  const trimmedPath = input.repositoryPath?.trim() ?? "";
+  if (!trimmedPath) return { ok: false, errorCode: "path_not_configured", message: "repository path is not configured" };
+  if (isPlaceholderRepositoryPath(trimmedPath)) return { ok: false, errorCode: "placeholder_path", message: "repository path is a placeholder and has not been configured" };
+
   const errors: string[] = [];
   errors.push(...await validateAgentStartPath(input.agentStartPath));
 
