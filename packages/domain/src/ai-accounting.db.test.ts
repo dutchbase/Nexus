@@ -34,19 +34,19 @@ integration("AI invocation accounting persistence", () => {
       await client.query(`INSERT INTO ai_model_prices
         (model,provider,effective_from,input_usd_per_million,output_usd_per_million,cache_write_usd_per_million,cache_read_usd_per_million,source_url)
         VALUES ('sonnet','anthropic','2026-01-01',10,20,30,40,'https://example.test/old')`);
-      await createAiInvocation({ id: "priced", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high", startedAt: new Date("2026-06-01T00:00:00Z") }, client);
-      const priced = await recordAiUsage({ runId: "priced", inputTokens: 1_000_000, outputTokens: 1_000_000, cacheWriteTokens: 1_000_000, cacheReadTokens: 1_000_000, rawUsage: {} }, client);
+      await createAiInvocation({ id: "00000000-0000-4000-8000-000000000001", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high", startedAt: new Date("2026-06-01T00:00:00Z") }, client);
+      const priced = await recordAiUsage({ runId: "00000000-0000-4000-8000-000000000001", inputTokens: 1_000_000, outputTokens: 1_000_000, cacheWriteTokens: 1_000_000, cacheReadTokens: 1_000_000, rawUsage: {} }, client);
       expect(priced.total_tokens).toBe("4000000");
       expect(priced.estimated_cost_usd).toBe("100.0000000000");
       expect((await client.query("SELECT source_url FROM ai_model_prices WHERE id=$1", [priced.ai_model_price_id])).rows[0].source_url).toBe("https://example.test/old");
       await client.query(`INSERT INTO ai_model_prices
         (model,provider,effective_from,input_usd_per_million,output_usd_per_million,cache_write_usd_per_million,cache_read_usd_per_million,source_url)
         VALUES ('sonnet','anthropic','2027-01-01',100,200,300,400,'https://example.test/new')`);
-      expect((await client.query("SELECT ai_model_price_id,estimated_cost_usd FROM agent_runs WHERE id='priced' ")).rows[0])
+      expect((await client.query("SELECT ai_model_price_id,estimated_cost_usd FROM agent_runs WHERE id='00000000-0000-4000-8000-000000000001' ")).rows[0])
         .toEqual({ ai_model_price_id: priced.ai_model_price_id, estimated_cost_usd: "100.0000000000" });
 
-      await createAiInvocation({ id: "unpriced", projectId, runType: "planning", model: "haiku", reasoningLevel: "low", startedAt: new Date("2020-01-01T00:00:00Z") }, client);
-      const unpriced = await recordAiUsage({ runId: "unpriced", inputTokens: 1, outputTokens: 1, rawUsage: {} }, client);
+      await createAiInvocation({ id: "00000000-0000-4000-8000-000000000002", projectId, runType: "planning", model: "haiku", reasoningLevel: "low", startedAt: new Date("2020-01-01T00:00:00Z") }, client);
+      const unpriced = await recordAiUsage({ runId: "00000000-0000-4000-8000-000000000002", inputTokens: 1, outputTokens: 1, rawUsage: {} }, client);
       expect(unpriced.ai_model_price_id).toBeNull();
       expect(unpriced.estimated_cost_usd).toBeNull();
       expect((await client.query("INSERT INTO agent_runs (status) VALUES ('completed') RETURNING ai_usage_status,total_tokens")).rows[0]).toEqual({ ai_usage_status: null, total_tokens: null });
@@ -58,10 +58,10 @@ integration("AI invocation accounting persistence", () => {
     await client.connect();
     try {
       const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ('idempotent','Idempotent','/tmp') RETURNING id")).rows[0].id;
-      await createAiInvocation({ id: "once", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high", startedAt: new Date("2026-09-01T00:00:00Z") }, client);
-      await recordAiUsage({ runId: "once", inputTokens: 10, outputTokens: 20, rawUsage: { attempt: 1 } }, client);
-      expect((await recordAiUsage({ runId: "once", inputTokens: 100, outputTokens: 200, rawUsage: { attempt: 2 } }, client)).total_tokens).toBe("30");
-      expect((await recordAiUnavailable("once", client)).usage_status).toBe("captured");
+      await createAiInvocation({ id: "00000000-0000-4000-8000-000000000003", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high", startedAt: new Date("2026-09-01T00:00:00Z") }, client);
+      await recordAiUsage({ runId: "00000000-0000-4000-8000-000000000003", inputTokens: 10, outputTokens: 20, rawUsage: { attempt: 1 } }, client);
+      expect((await recordAiUsage({ runId: "00000000-0000-4000-8000-000000000003", inputTokens: 100, outputTokens: 200, rawUsage: { attempt: 2 } }, client)).total_tokens).toBe("30");
+      expect((await recordAiUnavailable("00000000-0000-4000-8000-000000000003", client)).ai_usage_status).toBe("captured");
     } finally { await client.end(); }
   });
 
@@ -70,12 +70,12 @@ integration("AI invocation accounting persistence", () => {
     await client.connect();
     try {
       const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ('raw-usage','Raw usage','/tmp') RETURNING id")).rows[0].id;
-      await createAiInvocation({ id: "pending-raw", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high" }, client);
-      await expect(client.query("UPDATE agent_runs SET raw_usage_json='{}' WHERE id='pending-raw'"))
+      await createAiInvocation({ id: "00000000-0000-4000-8000-000000000004", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high" }, client);
+      await expect(client.query("UPDATE agent_runs SET raw_usage_json='{}' WHERE id='00000000-0000-4000-8000-000000000004'"))
         .rejects.toThrow(/agent_runs_ai_accounting_check/);
-      await createAiInvocation({ id: "unavailable-raw", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high" }, client);
-      await recordAiUnavailable("unavailable-raw", client);
-      await expect(client.query("UPDATE agent_runs SET raw_usage_json='{}' WHERE id='unavailable-raw'"))
+      await createAiInvocation({ id: "00000000-0000-4000-8000-000000000005", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high" }, client);
+      await recordAiUnavailable("00000000-0000-4000-8000-000000000005", client);
+      await expect(client.query("UPDATE agent_runs SET raw_usage_json='{}' WHERE id='00000000-0000-4000-8000-000000000005'"))
         .rejects.toThrow(/agent_runs_ai_accounting_check/);
     } finally { await client.end(); }
   });
@@ -87,13 +87,13 @@ integration("AI invocation accounting persistence", () => {
     await contender.connect();
     try {
       const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ('concurrent','Concurrent','/tmp') RETURNING id")).rows[0].id;
-      await createAiInvocation({ id: "contended", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high" }, client);
+      await createAiInvocation({ id: "00000000-0000-4000-8000-000000000006", projectId, runType: "planning", model: "sonnet", reasoningLevel: "high" }, client);
       await client.query("BEGIN");
-      await client.query("SELECT id FROM agent_runs WHERE id='contended' FOR UPDATE");
-      const loser = recordAiUsage({ runId: "contended", inputTokens: 1, outputTokens: 1, rawUsage: {} }, contender);
-      await client.query("UPDATE agent_runs SET ai_usage_status='unavailable' WHERE id='contended'");
+      await client.query("SELECT id FROM agent_runs WHERE id='00000000-0000-4000-8000-000000000006' FOR UPDATE");
+      const loser = recordAiUsage({ runId: "00000000-0000-4000-8000-000000000006", inputTokens: 1, outputTokens: 1, rawUsage: {} }, contender);
+      await client.query("UPDATE agent_runs SET ai_usage_status='unavailable' WHERE id='00000000-0000-4000-8000-000000000006'");
       await client.query("COMMIT");
-      await expect(loser).resolves.toMatchObject({ id: "contended", ai_usage_status: "unavailable" });
+      await expect(loser).resolves.toMatchObject({ id: "00000000-0000-4000-8000-000000000006", ai_usage_status: "unavailable" });
     } finally { await client.query("ROLLBACK").catch(() => undefined); await contender.end(); await client.end(); }
   });
 });
