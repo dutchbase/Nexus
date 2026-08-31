@@ -194,6 +194,13 @@ describe("worker orchestration boundary", () => {
     expect(shouldRetry(mismatch, "persisted output", 1, 3)).toBe(false);
   });
 
+  test("retries a max-turns exhaustion before any output is persisted", () => {
+    const shouldRetry = (workerBoundary as any).shouldRetryPrReview;
+    expect(shouldRetry(new Error("Reached maximum number of turns (10)"), null, 1, 3)).toBe(true);
+    expect(shouldRetry(new Error("Reached maximum number of turns (10)"), null, 3, 3)).toBe(false);
+    expect(shouldRetry(new Error("some other failure"), null, 1, 3)).toBe(false);
+  });
+
   test("cleans up the detached review worktree after the review boundary", async () => {
     const root = await mkdtemp(path.join(tmpdir(), "worker-boundary-"));
     directories.push(root);

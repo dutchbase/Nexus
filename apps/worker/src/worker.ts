@@ -1400,7 +1400,13 @@ async function runPrAiReview(job: any, lease: LeaseGuard) {
     const storedReview = (await pool.query("SELECT * FROM pr_ai_reviews WHERE id=$1", [payload.pr_ai_review_id])).rows[0];
     if (storedReview?.status !== "running") return;
     const retryablePublication = Boolean(storedReview?.raw_output && storedReview.publication_status === "pending");
-    if (shouldRetryPrReview(error, storedReview?.raw_output, job.attempt, job.max_attempts)) throw error;
+    if (shouldRetryPrReview(error, storedReview?.raw_output, job.attempt, job.max_attempts)) {
+      if (runId && !agentRunCompleted) await lease.run(() => pool.query(
+        "UPDATE agent_runs SET status='failed',finished_at=now(),error_message=$2 WHERE id=$1",
+        [runId, error.message],
+      ));
+      throw error;
+    }
     const errorCode = retryablePublication
       ? "review_publication_failed"
       : typeof error?.code === "string" ? error.code : "review_failed";

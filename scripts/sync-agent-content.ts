@@ -51,6 +51,7 @@ export async function syncAgentContent(client: QueryClient, catalog: AgentConten
   const previous = syncRow.rows[0]?.sync ?? {};
   let promptsUpdated = 0;
   let promptsPreserved = 0;
+  let manualOverridesPreserved = 0;
   for (const skill of catalog.skills) {
     await client.query(
       `INSERT INTO skills (slug,name,description,category,source_type,filesystem_path,enabled,version,content_hash,configuration_json)
@@ -67,9 +68,17 @@ export async function syncAgentContent(client: QueryClient, catalog: AgentConten
   for (const [promptType, sourceHash] of Object.entries(catalog.prompt_hashes)) {
     if (previous.prompt_hashes?.[promptType] === sourceHash) { promptsPreserved++; continue; }
     const file = (await client.query(
-      `SELECT pf.id,pv.content_hash active_content_hash FROM prompt_files pf LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id WHERE pf.scope='global' AND pf.prompt_type=$1 FOR UPDATE OF pf`, [promptType],
+      // active_created_by is set only when the active version was published through the
+      // admin UI (see apps/web/src/server.ts's prompt-version routes, which always pass
+      // created_by). A system-synced version (this same loop's own INSERT below) never
+      // sets it. Once a human has customized a prompt, this sync must never touch it
+      // again — a routine vendored-content sync silently overwriting a live admin edit
+      // is exactly the bug this guard exists to prevent (docs/superpowers/plans, AI PR
+      // review max-turns investigation).
+      `SELECT pf.id,pv.content_hash active_content_hash,pv.created_by active_created_by FROM prompt_files pf LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id WHERE pf.scope='global' AND pf.prompt_type=$1 FOR UPDATE OF pf`, [promptType],
     )).rows[0];
     if (file?.active_content_hash === sourceHash) { promptsPreserved++; continue; }
+    if (file?.active_created_by) { promptsPreserved++; manualOverridesPreserved++; continue; }
     const promptFile = file ?? (await client.query(
       "INSERT INTO prompt_files (scope,prompt_type,file_path) VALUES ('global',$1,$2) RETURNING id", [promptType, `prompts/global/${promptType}.md`],
     )).rows[0];
@@ -85,14 +94,14 @@ export async function syncAgentContent(client: QueryClient, catalog: AgentConten
     "INSERT INTO agent_content (id,sync) VALUES (true,$1::jsonb) ON CONFLICT (id) DO UPDATE SET sync=EXCLUDED.sync,updated_at=now()",
     [JSON.stringify({ catalog_hash: catalog.catalog_hash, prompt_hashes: catalog.prompt_hashes })],
   );
-  return { promptsUpdated, promptsPreserved, skillsSynced: catalog.skills.length };
+  return { promptsUpdated, promptsPreserved, manualOverridesPreserved, skillsSynced: catalog.skills.length };
 }
 
 async function main() {
   const manifest = JSON.parse(await readFile(path.join(root, "config", "agent-content.json"), "utf8"));
   const catalog = await readImportedAgentContentCatalog({ manifest });
   const result = await inTransaction((client) => syncAgentContent(client, catalog));
-  console.log(`synced ${result.skillsSynced} skills and ${result.promptsUpdated} prompts`);
+  console.log(`synced ${result.skillsSynced} skills and ${result.promptsUpdated} prompts (${result.manualOverridesPreserved} manual prompt customizations left untouched)`);
 }
 
 if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
