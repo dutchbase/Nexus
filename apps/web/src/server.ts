@@ -1702,6 +1702,13 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const agentStartPath = normalizeAgentStartPath(body.agent_start_path);
     const agentStartPathErrors = await validateAgentStartPath(body.agent_start_path);
     if (agentStartPathErrors.length) return json(response, 400, { error: agentStartPathErrors.join("; ") });
+    if (body.github_owner && body.github_repository) {
+      const existing = await pool.query(
+        "SELECT id FROM projects WHERE github_owner=$1 AND github_repository=$2",
+        [body.github_owner, body.github_repository],
+      );
+      if (existing.rows.length) return json(response, 400, { error: `a project already exists for ${body.github_owner}/${body.github_repository}` });
+    }
     const result = await pool.query(
       `INSERT INTO projects (slug,name,description,enabled,repository_path,agent_start_path,github_owner,github_repository,default_branch,config_json)
        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) RETURNING *`,
