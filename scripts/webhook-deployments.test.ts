@@ -216,7 +216,7 @@ integration("webhook deployment store", () => {
 
   it("renews once, recovers once, then blocks without promoting the queue", async () => {
     const first = await deployments.enqueueDeploymentAttempt(pool, attempt("a"));
-    const second = await deployments.enqueueDeploymentAttempt(pool, attempt("b"));
+    const second = await deployments.enqueueDeploymentAttempt(pool, { ...attempt("b"), protectedBranch: "release", targetRef: "refs/heads/release" });
     await deployments.claimDeploymentAttempt(pool, { owner: "webhook-a", leaseMs: 60_000 });
     await expect(deployments.renewDeploymentLease(pool, { attemptId: first.attempt.id, owner: "webhook-a", leaseMs: 60_000 })).resolves.toMatchObject({ id: first.attempt.id, state: "running" });
 
