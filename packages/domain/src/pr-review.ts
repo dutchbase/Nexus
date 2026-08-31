@@ -11,6 +11,29 @@ export type PrReviewPromptVars = {
   };
 };
 
+// The injected code-review rubric (prompts/global/code-reviewer.md) is synced
+// verbatim from the upstream superpowers:requesting-code-review skill, which
+// expects a Bash-enabled reviewer to fetch its own diff via `git diff
+// {BASE_SHA}..{HEAD_SHA}` and a caller to fill {DESCRIPTION}/{PLAN_REFERENCE}
+// placeholders. The automated PR-review flow supplies the diff inline instead
+// and has no Bash tool, so left unsanitized this section sent the model literal
+// `{BASE_SHA}` placeholders plus an instruction to run a tool it doesn't have —
+// turns burned reconciling that, not reviewing the diff (root cause of the
+// "Reached maximum number of turns" failures; see docs/superpowers/plans).
+const GIT_RANGE_SECTION = /\n## Git Range to Review\n[\s\S]*?(?=\n## )/;
+
+const RUBRIC_PLACEHOLDER_FALLBACKS: Record<string, string> = {
+  WHAT_WAS_IMPLEMENTED: "the supplied pull request diff and checked-out repository",
+  PLAN_OR_REQUIREMENTS: "the pull request's stated intent (title and description above) — no separate plan document applies",
+  DESCRIPTION: "See the pull request title, description, and diff already supplied above.",
+  PLAN_REFERENCE: "Not applicable — this is an automated pull-request review with no separate plan document.",
+};
+
+export function sanitizeReviewRubricForPrReview(rubric: string): string {
+  const withoutGitRange = rubric.replace(GIT_RANGE_SECTION, "");
+  return withoutGitRange.replace(/\{([A-Z_]+)\}/g, (match, key: string) => RUBRIC_PLACEHOLDER_FALLBACKS[key] ?? match);
+}
+
 function flatten(vars: PrReviewPromptVars): Record<string, string> {
   const json = (value: string) => JSON.stringify(value).replaceAll("<", "\\u003c");
   return {
@@ -26,11 +49,12 @@ function flatten(vars: PrReviewPromptVars): Record<string, string> {
 }
 
 export function renderPrReviewPrompt(template: string, vars: PrReviewPromptVars): string {
-  const values = flatten(vars);
+  const sanitizedRubric = sanitizeReviewRubricForPrReview(vars.superpowersCodeReviewer);
+  const values = flatten({ ...vars, superpowersCodeReviewer: sanitizedRubric });
   const rendered = template.replace(/\{\{\s*([^{}]+?)\s*\}\}/g, (_match, key: string) => values[key] ?? _match);
   return /\{\{\s*superpowers\.code-reviewer\s*\}\}/.test(template)
     ? rendered
-    : `${rendered}\n\n## Required immutable review rubric\n\n${vars.superpowersCodeReviewer}`;
+    : `${rendered}\n\n## Required immutable review rubric\n\n${sanitizedRubric}`;
 }
 
 export type PrReviewVerdictErrorCode =

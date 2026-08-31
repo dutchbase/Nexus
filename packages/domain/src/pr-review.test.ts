@@ -1,6 +1,6 @@
 import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
-import { parsePrReviewVerdict, PrReviewVerdictError, renderPrReviewPrompt } from "./pr-review.ts";
+import { parsePrReviewVerdict, PrReviewVerdictError, renderPrReviewPrompt, sanitizeReviewRubricForPrReview } from "./pr-review.ts";
 
 const template = readFileSync(new URL("../../../prompts/global/pr-review.md", import.meta.url), "utf8");
 
@@ -60,6 +60,72 @@ describe("PR review prompt", () => {
     });
 
     expect(prompt).toContain("Pinned rubric.");
+  });
+});
+
+describe("review rubric sanitization", () => {
+  const rubricWithGitRangeSection = [
+    "# Code Review Agent",
+    "",
+    "**Your task:**",
+    "1. Review {WHAT_WAS_IMPLEMENTED}",
+    "2. Compare against {PLAN_OR_REQUIREMENTS}",
+    "",
+    "## What Was Implemented",
+    "",
+    "{DESCRIPTION}",
+    "",
+    "## Requirements/Plan",
+    "",
+    "{PLAN_REFERENCE}",
+    "",
+    "## Git Range to Review",
+    "",
+    "**Base:** {BASE_SHA}",
+    "**Head:** {HEAD_SHA}",
+    "",
+    "```bash",
+    "git diff --stat {BASE_SHA}..{HEAD_SHA}",
+    "git diff {BASE_SHA}..{HEAD_SHA}",
+    "```",
+    "",
+    "## Review Checklist",
+    "",
+    "**Code Quality:**",
+    "- Clean separation of concerns?",
+  ].join("\n");
+
+  it("removes the git-diff-via-Bash section entirely", () => {
+    const sanitized = sanitizeReviewRubricForPrReview(rubricWithGitRangeSection);
+    expect(sanitized).not.toContain("Git Range to Review");
+    expect(sanitized).not.toContain("git diff");
+    expect(sanitized).not.toContain("{BASE_SHA}");
+    expect(sanitized).not.toContain("{HEAD_SHA}");
+  });
+
+  it("fills remaining stray placeholders instead of leaving them literal", () => {
+    const sanitized = sanitizeReviewRubricForPrReview(rubricWithGitRangeSection);
+    expect(sanitized).not.toContain("{WHAT_WAS_IMPLEMENTED}");
+    expect(sanitized).not.toContain("{PLAN_OR_REQUIREMENTS}");
+    expect(sanitized).not.toContain("{DESCRIPTION}");
+    expect(sanitized).not.toContain("{PLAN_REFERENCE}");
+  });
+
+  it("keeps the rest of the rubric (checklist, output format) intact", () => {
+    const sanitized = sanitizeReviewRubricForPrReview(rubricWithGitRangeSection);
+    expect(sanitized).toContain("## Review Checklist");
+    expect(sanitized).toContain("Clean separation of concerns?");
+  });
+
+  it("is applied automatically inside renderPrReviewPrompt", () => {
+    const prompt = renderPrReviewPrompt(template, {
+      superpowersCodeReviewer: rubricWithGitRangeSection,
+      project: { name: "Control Center" },
+      pr: { title: "Title", author: "octocat", head_branch: "branch", base_branch: "main", body: "body", diff: "diff" },
+    });
+    expect(prompt).not.toContain("{BASE_SHA}");
+    expect(prompt).not.toContain("git diff");
+    expect(prompt).toContain("## Review Checklist");
   });
 });
 
