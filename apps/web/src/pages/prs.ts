@@ -217,7 +217,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       pool.query(
         `SELECT pr.*,p.name project_name,p.slug project_slug,p.config_json,t.ticket_number,t.status ticket_status,
                 (SELECT status FROM pr_ai_reviews WHERE pull_request_id=pr.id ORDER BY created_at DESC LIMIT 1) AS latest_ai_review_status
-         FROM pull_requests pr JOIN projects p ON p.id=pr.project_id
+         FROM pull_requests pr JOIN projects p ON p.id=pr.project_id AND p.enabled
          LEFT JOIN tickets t ON t.id=pr.ticket_id
          ${conditions.length ? `WHERE ${conditions.join(" AND ")}` : ""}
          ORDER BY COALESCE(pr.updated_at_provider,pr.updated_at) DESC LIMIT 200`,
