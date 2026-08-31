@@ -127,6 +127,26 @@ describe("review rubric sanitization", () => {
     expect(prompt).not.toContain("git diff");
     expect(prompt).toContain("## Review Checklist");
   });
+
+  it("removes the git-diff-via-Bash section even when it is the last section in the rubric", () => {
+    const rubricEndingInGitRange = [
+      "# Code Review Agent",
+      "",
+      "## Git Range to Review",
+      "",
+      "**Base:** {BASE_SHA}",
+      "**Head:** {HEAD_SHA}",
+      "",
+      "```bash",
+      "git diff --stat {BASE_SHA}..{HEAD_SHA}",
+      "git diff {BASE_SHA}..{HEAD_SHA}",
+      "```",
+    ].join("\n");
+    const sanitized = sanitizeReviewRubricForPrReview(rubricEndingInGitRange);
+    expect(sanitized).not.toContain("Git Range to Review");
+    expect(sanitized).not.toContain("git diff");
+    expect(sanitized).not.toContain("{BASE_SHA}");
+  });
 });
 
 describe("PR review verdict", () => {

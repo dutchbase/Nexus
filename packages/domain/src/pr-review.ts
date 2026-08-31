@@ -20,7 +20,7 @@ export type PrReviewPromptVars = {
 // `{BASE_SHA}` placeholders plus an instruction to run a tool it doesn't have —
 // turns burned reconciling that, not reviewing the diff (root cause of the
 // "Reached maximum number of turns" failures; see docs/superpowers/plans).
-const GIT_RANGE_SECTION = /\n## Git Range to Review\n[\s\S]*?(?=\n## )/;
+const GIT_RANGE_SECTION = /\n## Git Range to Review\n[\s\S]*?(?=\n## |$)/;
 
 const RUBRIC_PLACEHOLDER_FALLBACKS: Record<string, string> = {
   WHAT_WAS_IMPLEMENTED: "the supplied pull request diff and checked-out repository",
