@@ -151,10 +151,19 @@ export async function finalizeAiUsage(runId: string, result: { usage?: AiUsage }
     : recordAiUnavailable(runId, client);
 }
 
+// A max-turns exhaustion happens before any GitHub side effect or raw_output
+// write (see runPrAiReview in worker.ts) — retrying it is exactly as safe as
+// retrying a transient GitHub error, and the job already has maxAttempts
+// budget for it that was previously never used for this failure mode.
+function isMaxTurnsExhaustion(error: unknown): boolean {
+  return error instanceof Error && /Reached maximum number of turns/i.test(error.message);
+}
+
 export function shouldRetryPrReview(error: unknown, rawOutput: string | null, attempt: number, maxAttempts: number) {
   if (error instanceof PrReviewDestinationError) return false;
   return attempt < maxAttempts && (Boolean(rawOutput)
-    || error instanceof GitHubProviderError && ["transient", "rate_limited"].includes(error.code));
+    || error instanceof GitHubProviderError && ["transient", "rate_limited"].includes(error.code)
+    || isMaxTurnsExhaustion(error));
 }
 
 export function prReviewSnapshotInput(input: {
