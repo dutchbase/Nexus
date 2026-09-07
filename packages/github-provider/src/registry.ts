@@ -10,9 +10,14 @@ const manifestAcceptHeader = [
   "application/vnd.docker.distribution.manifest.list.v2+json",
 ].join(", ");
 
-async function ghcrToken(repository: string, bearerOverride?: string): Promise<string> {
+function registrySignal() {
+  const configured = Number(process.env.DCC_GHCR_TIMEOUT_MS ?? "10000");
+  return AbortSignal.timeout(Number.isFinite(configured) ? Math.max(1, configured) : 10_000);
+}
+
+async function ghcrToken(repository: string, bearerOverride?: string, signal?: AbortSignal): Promise<string> {
   if (bearerOverride) return bearerOverride;
-  const response = await fetch(`https://ghcr.io/token?service=ghcr.io&scope=repository:${encodeURIComponent(repository)}:pull`);
+  const response = await fetch(`https://ghcr.io/token?service=ghcr.io&scope=repository:${encodeURIComponent(repository)}:pull`, { signal });
   const body = await response.json() as { token: string };
   return body.token;
 }
@@ -24,9 +29,11 @@ async function ghcrToken(repository: string, bearerOverride?: string): Promise<s
 export async function checkImageExists(registry: string, repository: string, tag: string): Promise<ImageExistenceResult> {
   if (registry !== "ghcr.io") throw new Error(`checkImageExists only supports the ghcr.io registry (got "${registry}")`);
   const checkedAt = new Date().toISOString();
-  const anonymousToken = await ghcrToken(repository);
+  const signal = registrySignal();
+  const anonymousToken = await ghcrToken(repository, undefined, signal);
   const manifestUrl = `https://ghcr.io/v2/${repository}/manifests/${encodeURIComponent(tag)}`;
   const anonymousResponse = await fetch(manifestUrl, {
+    signal,
     headers: { authorization: `Bearer ${anonymousToken}`, accept: manifestAcceptHeader },
   });
   if (anonymousResponse.status === 200) {
@@ -41,6 +48,7 @@ export async function checkImageExists(registry: string, repository: string, tag
   }
   if ((anonymousResponse.status === 401 || anonymousResponse.status === 403) && process.env.GHCR_READ_TOKEN) {
     const authedResponse = await fetch(manifestUrl, {
+      signal,
       headers: { authorization: `Bearer ${process.env.GHCR_READ_TOKEN}`, accept: manifestAcceptHeader },
     });
     if (authedResponse.status === 200) return { exists: true, digest: authedResponse.headers.get("docker-content-digest") ?? undefined, checkedAt, authRequired: true };
@@ -64,9 +72,11 @@ export type ImageExistenceDetailedResult = { state: "exists" | "not_exists" | "u
 export async function checkImageExistsDetailed(registry: string, repository: string, tag: string): Promise<ImageExistenceDetailedResult> {
   try {
     if (registry !== "ghcr.io") return { state: "unknown", reason: `unsupported registry "${registry}"` };
-    const anonymousToken = await ghcrToken(repository);
+    const signal = registrySignal();
+    const anonymousToken = await ghcrToken(repository, undefined, signal);
     const manifestUrl = `https://ghcr.io/v2/${repository}/manifests/${encodeURIComponent(tag)}`;
     const anonymousResponse = await fetch(manifestUrl, {
+      signal,
       headers: { authorization: `Bearer ${anonymousToken}`, accept: manifestAcceptHeader },
     });
     if (anonymousResponse.status === 200) {
@@ -78,6 +88,7 @@ export async function checkImageExistsDetailed(registry: string, repository: str
     }
     if ((anonymousResponse.status === 401 || anonymousResponse.status === 403) && process.env.GHCR_READ_TOKEN) {
       const authedResponse = await fetch(manifestUrl, {
+        signal,
         headers: { authorization: `Bearer ${process.env.GHCR_READ_TOKEN}`, accept: manifestAcceptHeader },
       });
       if (authedResponse.status === 200) {

@@ -147,9 +147,10 @@ export async function failNotificationDelivery(
   error: unknown,
   responseStatus?: number,
   maxAttempts = 5,
+  client: Pick<typeof pool, "query"> = pool,
 ): Promise<boolean> {
-  const message = error instanceof Error ? error.message : "Notification delivery failed";
-  const result = await pool.query(
+  const message = typeof error === "string" ? error : error instanceof Error ? error.message : "Notification delivery failed";
+  const result = await client.query(
     `UPDATE notification_deliveries
      SET attempt_count=COALESCE(attempt_count,0)+1,
          status = CASE WHEN COALESCE(attempt_count,0)+1 >= $5 THEN 'exhausted' ELSE 'failed' END,

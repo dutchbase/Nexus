@@ -9,7 +9,7 @@ const sha = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
 const attemptId = "11111111-1111-4111-8111-111111111111";
 const directories: string[] = [];
 
-async function deploy({ fetchHead = sha, failVerification = false, failMigration = false, failHealth = false, failWorker = false, failWebhook = false, failBranch = false, extraArg = false, prior = true, launchAllowed = true } = {}) {
+async function deploy({ fetchHead = sha, failVerification = false, failMigration = false, failHealth = false, failWorker = false, failWebhook = false, failBranch = false, extraArg = false, prior = true, launchAllowed = true, existingRelease = false, conflictingLink = false } = {}) {
   const directory = await mkdtemp(join(tmpdir(), "dcc-deploy-"));
   directories.push(directory);
   const bin = join(directory, "bin");
@@ -22,6 +22,17 @@ async function deploy({ fetchHead = sha, failVerification = false, failMigration
   await mkdir(bin);
   await Promise.all([".env", ".env.worker"].map((file) => writeFile(join(directory, file), "# stable\n")));
   await mkdir(join(directory, "data"));
+  if (existingRelease) {
+    const release = join(releases, sha);
+    await mkdir(release, { recursive: true });
+    await writeFile(join(release, "ecosystem.config.cjs"), "module.exports = {};\n");
+    if (conflictingLink) await writeFile(join(release, "data"), "do not delete\n");
+    else {
+      await symlink(join(directory, ".env"), join(release, ".env"));
+      await symlink(join(directory, ".env.worker"), join(release, ".env.worker"));
+      await symlink(join(directory, "data"), join(release, "data"));
+    }
+  }
   if (prior) {
     await mkdir(previous);
     await writeFile(join(previous, "ecosystem.config.cjs"), "module.exports = {};\n");
@@ -35,6 +46,7 @@ case "$1" in
   rev-parse) printf '%s\n' "$DCC_FETCH_HEAD" ;;
   worktree) mkdir -p "$4" ;;
 esac
+if [ "$1" = -C ] && [ "$3" = rev-parse ]; then printf '%s\n' "$DCC_FETCH_HEAD"; fi
 `,
     pnpm: `#!/bin/sh
 echo "pnpm $* test_db=\${DCC_TEST_DATABASE_URL-unset} restore_db=\${DCC_TEST_RESTORE_DATABASE_URL-unset}" >> "$DCC_LOG"
@@ -139,6 +151,20 @@ describe("health-gated release deployment", () => {
     expect(await readlink(join(release, ".env"))).toBe(join(result.directory, ".env"));
     expect(await readlink(join(release, "data"))).toBe(join(result.directory, "data"));
     expect(result.commands).toContain("curl --fail --silent --show-error --retry 30 --retry-connrefused --retry-delay 1 --max-time 2 http://127.0.0.1/health");
+  });
+
+  it("reuses a verified same-SHA release with the expected shared links", async () => {
+    const result = await deploy({ existingRelease: true });
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.commands).not.toContain("git worktree add");
+    await expect(readFile(join(result.directory, "data"), "utf8")).rejects.toThrow();
+  });
+
+  it("rejects a conflicting release entry without deleting it or shared data", async () => {
+    const result = await deploy({ existingRelease: true, conflictingLink: true });
+    expect(result.status).not.toBe(0);
+    await expect(readFile(join(result.releases, sha, "data"), "utf8")).resolves.toBe("do not delete\n");
+    expect(await readFile(join(result.directory, "data", ".keep"), "utf8").catch(() => "missing")).toBe("missing");
   });
 
   it("verifies the staged release locally before migration without test databases", async () => {

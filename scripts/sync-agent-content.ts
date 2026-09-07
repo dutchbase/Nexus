@@ -75,10 +75,14 @@ export async function syncAgentContent(client: QueryClient, catalog: AgentConten
       // again — a routine vendored-content sync silently overwriting a live admin edit
       // is exactly the bug this guard exists to prevent (docs/superpowers/plans, AI PR
       // review max-turns investigation).
-      `SELECT pf.id,pv.content_hash active_content_hash,pv.created_by active_created_by FROM prompt_files pf LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id WHERE pf.scope='global' AND pf.prompt_type=$1 FOR UPDATE OF pf`, [promptType],
+      `SELECT pf.id,pf.active_version_id,pv.content_hash active_content_hash,pv.created_by active_created_by,
+              (SELECT count(*)::int FROM prompt_versions versions WHERE versions.prompt_file_id=pf.id) version_count
+       FROM prompt_files pf LEFT JOIN prompt_versions pv ON pv.id=pf.active_version_id
+       WHERE pf.scope='global' AND pf.prompt_type=$1 FOR UPDATE OF pf`, [promptType],
     )).rows[0];
     if (file?.active_content_hash === sourceHash) { promptsPreserved++; continue; }
     if (file?.active_created_by) { promptsPreserved++; manualOverridesPreserved++; continue; }
+    if (file && file.active_version_id === null && file.version_count > 0) { promptsPreserved++; continue; }
     const promptFile = file ?? (await client.query(
       "INSERT INTO prompt_files (scope,prompt_type,file_path) VALUES ('global',$1,$2) RETURNING id", [promptType, `prompts/global/${promptType}.md`],
     )).rows[0];

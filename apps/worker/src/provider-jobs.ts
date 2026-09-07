@@ -1,13 +1,16 @@
 import type pg from "pg";
+import { createHash } from "node:crypto";
 import {
   approveAndMergePullRequest, importGithubPullRequests, PullRequestMergeError, syncOpenPullRequests, syncPullRequest,
+  setPullRequestTicketStatus,
   checkProductionHealth, evaluatePromotionEligibility,
   evaluateActionsPreflight, computeDivergence, findAllowlistEntry, allowlistMismatches,
 } from "@dcc/domain";
 import {
   createPullRequest, findOpenPullRequestForHead, mergeBranch, closePullRequest,
   getBranchHeadCommit, getCommitCheckStatus, getPullRequestsForCommit, updateBranchReference, getPendingDeployments, checkImageExists,
-  findWorkflowRun, getWorkflowRunJobs, compareCommits, checkImageExistsDetailed, GitHubProviderError,
+  findWorkflowRun, getWorkflowRunJobs, compareCommits, checkImageExistsDetailed, GitHubProviderError, updateBranchReferenceIfMatches,
+  updateBranchReferencesIfMatches,
 } from "@dcc/github-provider";
 import type { DeploymentConfig } from "@dcc/project-config";
 import { assertRemoteBranchName, lsRemoteHeads, previewRemoteBranchMerge } from "../../../packages/git-runner/src/index.ts";
@@ -59,8 +62,12 @@ async function audit(
   );
 }
 
-async function fetchLiveDeploymentStatus(project: any, deployment: DeploymentConfig) {
-  const master = await getBranchHeadCommit(project.github_owner, project.github_repository, project.default_branch);
+async function fetchLiveDeploymentStatus(
+  project: any,
+  deployment: DeploymentConfig,
+  pinnedMaster?: Awaited<ReturnType<typeof getBranchHeadCommit>>,
+) {
+  const master = pinnedMaster ?? await getBranchHeadCommit(project.github_owner, project.github_repository, project.default_branch);
   const ciStatus = await getCommitCheckStatus(project.github_owner, project.github_repository, master.sha);
   let e2eGateSatisfied = true;
   let e2eGatePrNumber: number | null = null;
@@ -82,13 +89,16 @@ async function fetchLiveDeploymentStatus(project: any, deployment: DeploymentCon
 }
 
 // Sibling of fetchLiveDeploymentStatus for the "github_actions_jobs"
-// mechanism — used only when deployment.mechanism === "github_actions_jobs".
-// fetchLiveDeploymentStatus above is untouched and still serves every other
-// (health_check-mechanism) project.
-async function fetchActionsPreflightStatus(project: any, deployment: DeploymentConfig) {
-  const master = await getBranchHeadCommit(project.github_owner, project.github_repository, project.default_branch);
+// mechanism; the health-check path continues to use fetchLiveDeploymentStatus.
+async function fetchActionsPreflightStatus(
+  project: any,
+  deployment: DeploymentConfig,
+  pinnedMaster?: Awaited<ReturnType<typeof getBranchHeadCommit>>,
+) {
+  const master = pinnedMaster ?? await getBranchHeadCommit(project.github_owner, project.github_repository, project.default_branch);
   const masterRun = await findWorkflowRun(project.github_owner, project.github_repository, {
     sha: master.sha, branch: project.default_branch, event: "push",
+    requiredJobs: [deployment.actions!.docker_image_job_name],
   });
   const masterJobs = masterRun ? await getWorkflowRunJobs(project.github_owner, project.github_repository, masterRun.id) : [];
   const imageTag = deployment.image.tag_template.replace("{{commit}}", master.sha);
@@ -191,20 +201,35 @@ export async function runProviderJob(
     const pullRequestId = required(job.payload_json, "pull_request_id");
     await assertOwned();
     const pr = (await db.query(
-      `SELECT pr.id,pr.number,pr.state,p.github_owner,p.github_repository
+      `SELECT pr.id,pr.number,pr.state,pr.merged_at,pr.merge_commit_sha,p.github_owner,p.github_repository
        FROM pull_requests pr JOIN projects p ON p.id=pr.project_id WHERE pr.id=$1`,
       [pullRequestId],
     )).rows[0];
     if (!pr) throw new Error("pull request not found");
-    if (pr.state !== "open") {
+    if (pr.state === "merged" || pr.merged_at || pr.merge_commit_sha) {
+      await persistJobResult(db, job.id, { outcome: "skipped", reason: "pull request is already merged" });
+      return;
+    }
+    if (pr.state !== "open" && pr.state !== "closed") {
       await persistJobResult(db, job.id, { outcome: "skipped", reason: `pull request state is ${pr.state}, not open` });
       return;
     }
-    await assertOwned();
-    await closePullRequest(pr.github_owner, pr.github_repository, pr.number);
-    await db.query("UPDATE pull_requests SET state='closed',closed_at=now(),updated_at=now() WHERE id=$1", [pullRequestId]);
-    await persistJobResult(db, job.id, { outcome: "closed" });
-    await audit(db, job, actorId, "github.close_pull_request", "pull_request", pullRequestId, {});
+    if (pr.state === "open") {
+      await assertOwned();
+      await closePullRequest(pr.github_owner, pr.github_repository, pr.number);
+      await db.query("UPDATE pull_requests SET state='closed',closed_at=now(),updated_at=now() WHERE id=$1", [pullRequestId]);
+    }
+    await setPullRequestTicketStatus(
+      pullRequestId,
+      "Closed Without Merge",
+      "GitHub pull request closed without merge",
+      "admin",
+      actorId ?? undefined,
+      assertOwned,
+    );
+    await persistJobResult(db, job.id, { outcome: pr.state === "closed" ? "reconciled" : "closed" });
+    await audit(db, job, actorId, "github.close_pull_request", "pull_request", pullRequestId,
+      pr.state === "closed" ? { provider_already_closed: true } : {});
     return;
   }
 
@@ -214,38 +239,116 @@ export async function runProviderJob(
     const base = required(job.payload_json, "base");
     await assertRemoteBranchName(head);
     await assertRemoteBranchName(base);
+    if (head === base) throw new Error("head and base must differ");
+    const expectedHeadSha = required(job.payload_json, "expected_head_sha");
+    const expectedBaseSha = required(job.payload_json, "expected_base_sha");
+    if (!/^[0-9a-f]{40}$/.test(expectedHeadSha) || !/^[0-9a-f]{40}$/.test(expectedBaseSha)) {
+      throw new Error("expected branch SHAs must be lowercase 40-character hashes");
+    }
     const project = (await db.query("SELECT * FROM projects WHERE id=$1", [projectId])).rows[0];
     if (!project?.github_owner || !project.github_repository) throw new Error("project has no GitHub repository configured");
 
-    // Compare-and-swap: refuse when either ref moved since the preview the
-    // user based their decision on. A stale pair merges something they never saw.
-    if (typeof job.payload_json.expected_head_sha === "string"
-      || typeof job.payload_json.expected_base_sha === "string") {
+    const readHeads = async () => {
       await assertOwned();
-      const heads = await lsRemoteHeads(project.repository_path);
-      const liveHead = typeof job.payload_json.expected_head_sha === "string" ? heads.get(head) : undefined;
-      const liveBase = typeof job.payload_json.expected_base_sha === "string" ? heads.get(base) : undefined;
-      if ((liveHead && liveHead !== job.payload_json.expected_head_sha)
-        || (liveBase && liveBase !== job.payload_json.expected_base_sha)) {
-        await persistJobResult(db, job.id, { outcome: "refused", refusal_code: "refs_changed",
-          message: "A branch moved since the pre-flight check — re-check before merging." });
-        await audit(db, job, actorId, "project.merge_branches", "project", projectId,
-          { head, base, outcome: "refused", refusal_code: "refs_changed" });
-        return;
-      }
+      return lsRemoteHeads(project.repository_path);
+    };
+    const refsChanged = (heads: Map<string, string>) =>
+      heads.get(head) !== expectedHeadSha || heads.get(base) !== expectedBaseSha;
+    const refuseChangedRefs = async () => {
+      await persistJobResult(db, job.id, { outcome: "refused", refusal_code: "refs_changed",
+        message: "A branch moved since the pre-flight check — re-check before merging." });
+      await audit(db, job, actorId, "project.merge_branches", "project", projectId,
+        { head, base, outcome: "refused", refusal_code: "refs_changed" });
+    };
+    const reconcileAppliedMerge = async (heads: Map<string, string>) => {
+      const liveBase = heads.get(base);
+      if (heads.get(head) !== expectedHeadSha || !liveBase) return false;
+      const comparison = await compareCommits(
+        project.github_owner, project.github_repository, expectedHeadSha, liveBase,
+      ).catch(() => null);
+      if (comparison?.status !== "ahead" && comparison?.status !== "identical") return false;
+      await persistJobResult(db, job.id, { outcome: "already_up_to_date", reconciled: true, sha: liveBase, message: "base already contains the reviewed head" });
+      await audit(db, job, actorId, "project.merge_branches", "project", projectId,
+        { head, base, outcome: "already_up_to_date", reconciled: true, sha: liveBase });
+      return true;
+    };
+    const initialHeads = await readHeads();
+    if (refsChanged(initialHeads)) {
+      if (await reconcileAppliedMerge(initialHeads)) return;
+      await refuseChangedRefs();
+      return;
     }
 
-    await assertOwned();
+    const zeroOid = "0".repeat(40);
+    const temporaryBranch = `nexus/merge-${createHash("sha256").update(job.id).digest("hex").slice(0, 24)}`;
+    await assertRemoteBranchName(temporaryBranch);
     try {
-      const result = await mergeBranch(project.github_owner, project.github_repository, base, head);
+      await updateBranchReferencesIfMatches(project.github_owner, project.github_repository, [
+        { branch: base, beforeSha: expectedBaseSha, afterSha: expectedBaseSha },
+        { branch: head, beforeSha: expectedHeadSha, afterSha: expectedHeadSha },
+        { branch: temporaryBranch, beforeSha: zeroOid, afterSha: expectedBaseSha },
+      ]);
+    } catch (error) {
+      if (refsChanged(await readHeads())) {
+        await refuseChangedRefs();
+        return;
+      }
+      throw error;
+    }
+
+    let temporaryExists = true;
+    let remoteApplied = false;
+    let result: Awaited<ReturnType<typeof mergeBranch>> | undefined;
+    try {
       await assertOwned();
+      result = await mergeBranch(project.github_owner, project.github_repository, temporaryBranch, expectedHeadSha);
+      await assertOwned();
+      const preparedSha = result.outcome === "merged" ? result.sha : expectedBaseSha;
+      await updateBranchReferencesIfMatches(project.github_owner, project.github_repository, [
+        { branch: base, beforeSha: expectedBaseSha, afterSha: preparedSha },
+        { branch: head, beforeSha: expectedHeadSha, afterSha: expectedHeadSha },
+        { branch: temporaryBranch, beforeSha: preparedSha, afterSha: zeroOid },
+      ]);
+      temporaryExists = false;
+      remoteApplied = true;
       await persistJobResult(db, job.id, { outcome: result.outcome, ...("sha" in result ? { sha: result.sha } : {}) });
       await audit(db, job, actorId, "project.merge_branches", "project", projectId, {
         head, base, outcome: result.outcome, ...("sha" in result ? { sha: result.sha } : {}),
       });
     } catch (error) {
-      await persistJobResult(db, job.id, { outcome: "failed", error: error instanceof Error ? error.message : String(error) }).catch(() => {});
-      throw error;
+      if (remoteApplied) {
+        await persistJobResult(db, job.id, {
+          outcome: result!.outcome,
+          ...("sha" in result! ? { sha: result!.sha } : {}),
+          remote_applied: true,
+          persistence_error: error instanceof Error ? error.message : String(error),
+        }).catch(() => {});
+        throw error;
+      }
+      let failure: unknown = error;
+      if (temporaryExists) {
+        try {
+          const current = await getBranchHeadCommit(project.github_owner, project.github_repository, temporaryBranch);
+          await updateBranchReferencesIfMatches(project.github_owner, project.github_repository, [
+            { branch: temporaryBranch, beforeSha: current.sha, afterSha: zeroOid },
+          ]);
+          temporaryExists = false;
+        } catch (cleanupError: any) {
+          if (!(cleanupError instanceof GitHubProviderError && cleanupError.status === 404)) {
+            failure = new Error(`branch merge failed and temporary ref cleanup failed for ${temporaryBranch}: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`, { cause: error });
+          }
+        }
+      }
+      if (failure === error) {
+        const finalHeads = await readHeads();
+        if (refsChanged(finalHeads)) {
+          if (await reconcileAppliedMerge(finalHeads)) return;
+          await refuseChangedRefs();
+          return;
+        }
+      }
+      await persistJobResult(db, job.id, { outcome: "failed", error: failure instanceof Error ? failure.message : String(failure) }).catch(() => {});
+      throw failure;
     }
     return;
   }
@@ -281,7 +384,7 @@ export async function runProviderJob(
     const project = (await db.query("SELECT * FROM projects WHERE id=$1", [projectId])).rows[0];
     if (!project?.github_owner || !project.github_repository) throw new Error("project has no GitHub repository configured");
     await assertOwned();
-    const existing = await findOpenPullRequestForHead(project.github_owner, project.github_repository, head);
+    const existing = await findOpenPullRequestForHead(project.github_owner, project.github_repository, head, base);
     if (existing) {
       await persistJobResult(db, job.id, { outcome: "already_open", number: existing.number, url: existing.html_url });
       await audit(db, job, actorId, "project.open_pull_request", "project", projectId, { head, base, outcome: "already_open", number: existing.number });
@@ -328,6 +431,7 @@ export async function runProviderJob(
       if (recentRelease) {
         productionRun = await findWorkflowRun(project.github_owner, project.github_repository, {
           sha: recentRelease.commit_sha, branch: deployment.production_branch, event: "push", createdAfter: recentRelease.created_at,
+          requiredJobs: [deployment.actions!.migrations_job_name, deployment.actions!.deploy_job_name],
         });
         if (productionRun) productionJobs = await getWorkflowRunJobs(project.github_owner, project.github_repository, productionRun.id);
       }
@@ -351,7 +455,7 @@ export async function runProviderJob(
       if (recentRelease && recentRelease.status !== "healthy") {
         const bothSucceeded = migrationsJob?.conclusion === "success" && deployJob?.conclusion === "success";
         const eitherFailed = migrationsJob?.conclusion === "failure" || deployJob?.conclusion === "failure" || migrationsJob?.conclusion === "cancelled" || deployJob?.conclusion === "cancelled";
-        const stalled = !bothSucceeded && !eitherFailed && Date.now() - new Date(recentRelease.updated_at).getTime() > 15 * 60 * 1000;
+        const stalled = !bothSucceeded && !eitherFailed && Date.now() - new Date(recentRelease.created_at).getTime() > 15 * 60 * 1000;
         const nextStatus = bothSucceeded ? "healthy" : eitherFailed ? "failed" : stalled ? "failed" : "deploying";
         await db.query(
           `UPDATE production_releases SET status=$2, production_workflow_run_id=$3, health_checked_at=now(), updated_at=now()${stalled ? ",failure_reason='stalled — production workflow jobs did not resolve within 15 minutes'" : eitherFailed ? ",failure_reason='migrations-production or deploy-production job failed'" : ""} WHERE id=$1`,
@@ -375,7 +479,7 @@ export async function runProviderJob(
       // An in-flight release (requested/pending_approval/deploying) that never
       // resolves to healthy within 15 minutes is stuck — mark it failed so it
       // stops occupying the single-flight slot for this project.
-      const stalled = !nowLive && Date.now() - new Date(inFlight.updated_at).getTime() > 15 * 60 * 1000;
+      const stalled = !nowLive && Date.now() - new Date(inFlight.created_at).getTime() > 15 * 60 * 1000;
       const nextStatus = nowLive ? "healthy" : stalled ? "failed" : waitingApproval ? "pending_approval" : "deploying";
       await db.query(
         `UPDATE production_releases SET status=$2, health_checked_at=now(), health_detail_json=$3, updated_at=now()${stalled ? ", failure_reason=$4" : ""} WHERE id=$1`,
@@ -485,7 +589,7 @@ export async function runProviderJob(
         await audit(db, job, actorId, "deployment.promote", "project", projectId, { outcome: "refused", refusal_code: "force_not_allowed" });
         return;
       }
-      actionsStatus = await fetchActionsPreflightStatus(project, deployment);
+      actionsStatus = await fetchActionsPreflightStatus(project, deployment, freshMaster);
       eligibilityOk = actionsStatus.preflight.eligible;
       eligibilityReasons = actionsStatus.preflight.reasons;
       imageTag = actionsStatus.imageTag;
@@ -502,7 +606,7 @@ export async function runProviderJob(
         }
       }
     } else {
-      const live = await fetchLiveDeploymentStatus(project, deployment); // existing path, unchanged
+      const live = await fetchLiveDeploymentStatus(project, deployment, freshMaster);
       const eligibility = evaluatePromotionEligibility({
         ciState: live.ciStatus.overallState, imageExists: live.image.exists,
         e2eGateRequired: deployment.promotion.require_e2e_gate_label, e2eGateSatisfied: live.e2eGateSatisfied,
@@ -669,7 +773,14 @@ export async function runProviderJob(
     try {
       // force:true — rollback moves the branch BACKWARD (target is an ancestor of the
       // current head in the normal case), which a fast-forward-only update would reject.
-      await updateBranchReference(project.github_owner, project.github_repository, deployment.production_branch, targetCommitSha, true);
+      await updateBranchReferenceIfMatches(
+        project.github_owner,
+        project.github_repository,
+        deployment.production_branch,
+        expectedProductionSha,
+        targetCommitSha,
+        true,
+      );
     } catch (error) {
       // See the matching catch in the promote block — a release row must never
       // be left at 'requested' forever, or it permanently deadlocks the

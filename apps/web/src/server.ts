@@ -1,16 +1,16 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { clientIpOf, csrfMatches, secureCookieAttributes, securityHeaders, validateWebRuntime } from "./security.ts";
-import { rm, writeFile } from "node:fs/promises";
+import { clientIpOf, contentSecurityNonce, csrfMatches, secureCookieAttributes, securityHeaders, validateWebRuntime } from "./security.ts";
+import { realpath, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { dirname, resolve } from "node:path";
+import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
 import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
   allowlistMismatches, buildExecutionPrompt, checkPlanApprovalGate, derivePolicyStatus, ensurePolicySnapshot, enqueueJob, findAllowlistEntry, getPullRequestMergeSettings, getSystemAiSettings,
-  globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError,
+  globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError, ticketImageEvidence,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
   unionSkills, validateAiSelection, providerForModel, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
@@ -24,7 +24,7 @@ import {
 import { hashPassword, verifyPassword } from "../../../packages/database/src/password.ts";
 import { cronWebhookSecretReferencePattern, getGithubPolicyEnforcementMode, isPlaceholderRepositoryPath, normalizeAgentStartPath, validateAgentStartPath, validateDeploymentConfig, validateProject } from "@dcc/project-config";
 import { adminPage, escapeHtml, loginPage, publicFormPage, styles, submittedPage } from "./ui.ts";
-import { allowedTemplateVariables, fieldsFor, lineDiff, validStatuses } from "./pages/shared.ts";
+import { allowedTemplateVariables, fieldsFor, lineDiff, standardFields, validStatuses } from "./pages/shared.ts";
 import * as dashboardPage from "./pages/dashboard.ts";
 import * as ticketsPage from "./pages/tickets.ts";
 import * as runsPage from "./pages/runs.ts";
@@ -39,12 +39,14 @@ import * as queuePage from "./pages/queue.ts";
 import * as auditPage from "./pages/audit.ts";
 import * as aiUsagePage from "./pages/ai-usage.ts";
 import * as operatePage from "./pages/operate.ts";
+import { markLoginAttemptSucceeded, reserveLoginAttempt } from "./login-quota.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const { production, trustedProxyHops } = validateWebRuntime();
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", "..");
 const dataRoot = artifactDataRoot(REPO_ROOT);
 const legacyDataRoot = legacyArtifactDataRoot(REPO_ROOT);
+const configRoot = resolve(process.env.DCC_CONFIG_DIR ?? resolve(REPO_ROOT, "config"));
 const lockoutThreshold = 5;
 const lockoutWindowMinutes = 15;
 const sessionHours = 8;
@@ -66,6 +68,10 @@ const skillAttachmentTypes = new Set(["automatic", "required"]);
 
 function hash(value: string) {
   return createHash("sha256").update(value).digest("hex");
+}
+
+async function rootIdentity(path: string) {
+  return hash(await realpath(path).catch(() => resolve(path)));
 }
 
 async function terminalRerunSource(client: any, metadata: any) {
@@ -133,12 +139,14 @@ export async function approvalInputsFor(ticket: any, version: any, client: any) 
      FROM project_skills ps JOIN skills s ON s.id=ps.skill_id WHERE ps.project_id=$1 ORDER BY s.slug`,
     [project.id],
   )).rows;
+  const imageEvidence = await ticketImageEvidence(client, ticket.id);
   const approvedInput: ApprovedInputSnapshot = {
     plan: { versionId: version.id, version: Number(version.version), contentHash: version.content_hash },
     ticket: {
       title: ticket.title, description: ticket.description, category: ticket.category, priority: ticket.priority,
       environment: ticket.environment, expectedBehavior: ticket.expected_behavior, actualBehavior: ticket.actual_behavior,
       reproductionSteps: ticket.reproduction_steps, customValues: ticket.custom_values_json ?? {},
+      imageEvidence,
     },
     project: { configVersion: Number(project.config_version), config: {
       slug: project.slug, name: project.name, description: project.description, enabled: project.enabled,
@@ -167,8 +175,8 @@ function json(response: ServerResponse, status: number, body: unknown, headers: 
   response.end(JSON.stringify(body));
 }
 
-function html(response: ServerResponse, status: number, body: string, headers: Record<string, string> = {}) {
-  response.writeHead(status, { "content-type": "text/html; charset=utf-8", ...securityHeaders(), ...headers });
+function html(response: ServerResponse, status: number, body: string, headers: Record<string, string> = {}, nonce = contentSecurityNonce()) {
+  response.writeHead(status, { "content-type": "text/html; charset=utf-8", ...securityHeaders(production, nonce), ...headers });
   response.end(body);
 }
 
@@ -415,28 +423,23 @@ async function login(request: IncomingMessage, response: ServerResponse) {
   const username = typeof body.username === "string" ? body.username : "";
   const password = typeof body.password === "string" ? body.password : "";
   const ip = ipOf(request);
-  const failures = await pool.query(
-    `SELECT count(*)::integer AS count,
-       COALESCE(ceil(extract(epoch FROM (min(attempted_at) + make_interval(mins => $2) - now()))), 0)::integer AS retry_after_seconds
-     FROM login_attempts
-     WHERE ip_address = $1 AND succeeded = false AND attempted_at > now() - make_interval(mins => $2)`,
-    [ip, lockoutWindowMinutes],
-  );
-  if (failures.rows[0].count >= lockoutThreshold) {
+  const reservation = await reserveLoginAttempt({
+    username, ip, threshold: lockoutThreshold, windowMinutes: lockoutWindowMinutes,
+  });
+  if ("retryAfterSeconds" in reservation) {
     await audit({ actorType: "anonymous", action: "login.failed", entityType: "user", after: { success: false }, metadata: { reason: "throttled" }, ip });
-    return json(response, 429, { error: "too many login attempts", retry_after_seconds: Math.max(1, failures.rows[0].retry_after_seconds) });
+    return json(response, 429, { error: "too many login attempts", retry_after_seconds: reservation.retryAfterSeconds });
   }
   const user = (await pool.query("SELECT * FROM users WHERE username = $1 AND is_active = true", [username])).rows[0];
   const valid = await verifyPassword(user?.password_hash ?? dummyHash, password);
-  await pool.query("INSERT INTO login_attempts (username, ip_address, succeeded) VALUES ($1, $2, $3)", [username, ip, Boolean(user && valid)]);
   if (!user || !valid) {
     await audit({ actorType: "anonymous", action: "login.failed", entityType: "user", after: { success: false }, ip });
     return json(response, 401, { error: "invalid credentials" });
   }
   const token = randomBytes(32).toString("base64url");
   const csrf = randomBytes(32).toString("base64url");
+  await markLoginAttemptSucceeded(reservation.attemptId);
   await inTransaction(async (client) => {
-    await client.query("DELETE FROM login_attempts WHERE ip_address = $1", [ip]);
     await client.query(
       `INSERT INTO admin_sessions (user_id, token_hash, csrf_token_hash, expires_at)
        VALUES ($1, $2, $3, now() + make_interval(hours => $4))`,
@@ -466,11 +469,20 @@ export function validateFields(fields: any[], body: Record<string, any>) {
       else if (ids.some((id) => typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id))) errors[field.field_key] = "invalid upload";
       continue;
     }
-    const empty = value === undefined || value === null || value === "" || (Array.isArray(value) && !value.length);
+    const empty = value === undefined || value === null || value === "" || (Array.isArray(value) && !value.length)
+      || (field.field_type === "checkbox" && value === false);
     if (field.required && empty) errors[field.field_key] = "required";
     if (value === undefined || value === null) continue;
     if (field.field_type === "checkbox") {
       if (typeof value !== "boolean") errors[field.field_key] = "invalid value";
+      continue;
+    }
+    if (field.field_type === "number") {
+      if (value === "" && !field.required) continue;
+      const number = typeof value === "number" ? value : typeof value === "string" && value.trim() ? Number(value) : NaN;
+      if (!Number.isFinite(number)) errors[field.field_key] = "invalid number";
+      else if (Number.isFinite(field.validation_json?.min) && number < field.validation_json.min) errors[field.field_key] = `must be at least ${field.validation_json.min}`;
+      else if (Number.isFinite(field.validation_json?.max) && number > field.validation_json.max) errors[field.field_key] = `must be at most ${field.validation_json.max}`;
       continue;
     }
     if (field.field_type === "multi_select") {
@@ -537,6 +549,16 @@ export async function consumeSubmissionAttempt(formId: string, ip: string, limit
 
 export async function submitPublicForm(request: IncomingMessage, response: ServerResponse, form: any) {
   const body = await bodyOf(request);
+  const retryKey = typeof request.headers["idempotency-key"] === "string" && /^[0-9a-f-]{36}$/i.test(request.headers["idempotency-key"])
+    ? request.headers["idempotency-key"] : null;
+  const existingSubmissionSql = `SELECT t.id,t.ticket_number FROM audit_events ae JOIN tickets t ON t.id=ae.entity_id
+    WHERE ae.action='ticket.create' AND ae.actor_type='public'
+      AND ae.metadata_json->>'form_id'=$1 AND ae.metadata_json->>'idempotency_key'=$2
+    ORDER BY ae.created_at DESC LIMIT 1`;
+  if (retryKey) {
+    const existing = (await pool.query(existingSubmissionSql, [form.id, retryKey])).rows[0];
+    if (existing) return json(response, 201, { ticket_number: existing.ticket_number, ticket: existing });
+  }
   const fields = await fieldsFor(form.id);
   const honeypot = fields.find((field) => field.field_type === "hidden")?.field_key ?? "website";
   if (typeof body[honeypot] === "string" && body[honeypot].trim()) {
@@ -557,6 +579,14 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
       if (Array.isArray(value) ? value.length : value) errors[field.field_key] = "attachments disabled";
     }
   }
+  const imageUploads = fields.filter((field) => field.field_type === "image_upload").map((field) => ({
+    fieldKey: field.field_key,
+    ids: Array.isArray(body[field.field_key]) ? body[field.field_key] : typeof body[field.field_key] === "string" && body[field.field_key] ? [body[field.field_key]] : [],
+  }));
+  const uploadIds = imageUploads.flatMap(({ ids }) => ids);
+  if (new Set(uploadIds).size !== uploadIds.length) {
+    for (const upload of imageUploads.filter(({ ids }) => ids.some((id: string, index: number) => uploadIds.indexOf(id) !== uploadIds.lastIndexOf(id)))) errors[upload.fieldKey] = "upload used more than once";
+  }
   if (typeof body.title !== "string" || !body.title.trim()) errors.title = "required";
   if (typeof body.description !== "string" || !body.description.trim()) errors.description = "required";
   if (Object.keys(errors).length) return json(response, 400, { error: "validation failed", fields: errors });
@@ -571,14 +601,32 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
   // ponytail: silent oldest-project fallback removed per audit G06-F05 — forms must carry fixed_project_id or the client an explicit project.
   if (!project) return json(response, 400, { error: "project assignment required", code: "project_assignment_required" });
   const projectId = project.id;
-  const ticket = await inTransaction(async (client) => {
+  const result = await inTransaction(async (client) => {
+    if (retryKey) {
+      await client.query("SELECT pg_advisory_xact_lock(hashtextextended('public-submission/' || $1 || '/' || $2,0))", [form.id, retryKey]);
+      const existing = (await client.query(existingSubmissionSql, [form.id, retryKey])).rows[0];
+      if (existing) return { ticket: existing };
+    }
+    if (uploadIds.length) {
+      const available = (await client.query(
+        `SELECT a.upload_id FROM attachments a
+         JOIN uploads u ON u.id=a.upload_id
+         JOIN artifacts ar ON ar.upload_id=u.id
+         WHERE a.upload_id=ANY($1::uuid[]) AND a.ticket_id IS NULL AND u.form_id=$2
+           AND u.created_at > now() - interval '1 hour' AND ar.status='finalized'
+         FOR UPDATE OF a`,
+        [uploadIds, form.id],
+      )).rows.map((row: any) => row.upload_id);
+      const missing = new Set(uploadIds.filter((id: string) => !available.includes(id)));
+      if (missing.size) return { validationErrors: Object.fromEntries(imageUploads.filter(({ ids }) => ids.some((id: string) => missing.has(id))).map(({ fieldKey }) => [fieldKey, "upload unavailable"])) };
+    }
     const number = (await client.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
     const ticketNumber = `DCC-${number}`;
     const reservedKeys = [
       "project_id", "title", "description", "category", "priority", "submitter_name", "submitter_email",
       "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", honeypot,
     ];
-    const excludedKeys = new Set([...reservedKeys, ...fields.filter((f) => f.field_type === "static" || f.field_type === "hidden").map((f) => f.field_key)]);
+    const excludedKeys = new Set([...reservedKeys, ...fields.filter((f) => ["static", "hidden", "image_upload"].includes(f.field_type)).map((f) => f.field_key)]);
     const customValues = Object.fromEntries(Object.entries(body).filter(([key]) => !excludedKeys.has(key)));
     const result = await client.query(
       `INSERT INTO tickets
@@ -594,22 +642,22 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
        VALUES ($1,NULL,'Submitted','Public form submitted','public')`,
       [result.rows[0].id],
     );
-    const uploadIds = Object.values(body)
-      .flatMap((value) => (Array.isArray(value) ? value : [value]))
-      .filter((value) => typeof value === "string" && /^[0-9a-f-]{36}$/i.test(value));
-    if (uploadIds.length) {
-      await client.query(
-        `UPDATE attachments a SET ticket_id = $1
-         FROM uploads u
-         WHERE a.upload_id = u.id AND a.ticket_id IS NULL AND u.form_id = $3
-           AND u.created_at > now() - interval '1 hour' AND a.upload_id = ANY($2::uuid[])`,
-        [result.rows[0].id, uploadIds, form.id],
+    for (const { fieldKey, ids } of imageUploads) {
+      if (!ids.length) continue;
+      const claim = await client.query(
+        `UPDATE attachments a SET ticket_id=$1,field_key=$2 FROM uploads u
+         WHERE a.upload_id=u.id AND a.ticket_id IS NULL AND u.form_id=$4
+           AND u.created_at > now() - interval '1 hour' AND a.upload_id=ANY($3::uuid[])`,
+        [result.rows[0].id, fieldKey, ids, form.id],
       );
+      if (claim.rowCount !== ids.length) throw new Error("upload claim changed while locked");
     }
-    await audit({ actorType: "public", action: "ticket.create", entityType: "ticket", entityId: result.rows[0].id, after: result.rows[0], ip }, client);
+    await audit({ actorType: "public", action: "ticket.create", entityType: "ticket", entityId: result.rows[0].id, after: result.rows[0], metadata: { form_id: form.id, ...(retryKey ? { idempotency_key: retryKey } : {}) }, ip }, client);
     if (form.settings_json?.notify_on_submission !== false) await enqueueNotification(client, "ticket.created", result.rows[0].id, result.rows[0].id);
-    return result.rows[0];
+    return { ticket: result.rows[0] };
   });
+  if ("validationErrors" in result) return json(response, 400, { error: "validation failed", fields: result.validationErrors });
+  const ticket = result.ticket;
   json(response, 201, { ticket_number: ticket.ticket_number, ticket: { id: ticket.id, ticket_number: ticket.ticket_number } });
 }
 
@@ -651,15 +699,15 @@ export async function upload(request: IncomingMessage, response: ServerResponse,
     const row = await inTransaction(async (client) => {
       const upload = (await client.query(
         `INSERT INTO uploads (storage_path,original_name,media_type,size_bytes,form_id) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-        [staged.storagePath, originalName ? originalName.slice(0, 255) : null, sniffed.mediaType, bytes.length, form.id],
+        [staged.relativePath, originalName ? originalName.slice(0, 255) : null, sniffed.mediaType, bytes.length, form.id],
       )).rows[0];
       await client.query(
         `INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,upload_id)
          VALUES ($1,$2,'upload','staged',now() + interval '1 hour',$3)`,
         [artifactId, staged.relativePath, upload.id],
       );
-      await client.query("INSERT INTO attachments (upload_id) VALUES ($1)", [upload.id]);
-      return upload;
+      const attachment = (await client.query("INSERT INTO attachments (upload_id) VALUES ($1) RETURNING id", [upload.id])).rows[0];
+      return { ...upload, attachment_id: attachment.id };
     });
     registered = true;
     await inTransaction(async (client) => {
@@ -671,7 +719,7 @@ export async function upload(request: IncomingMessage, response: ServerResponse,
           [artifactId, finalized.sha256],
         )).rowCount) throw new Error("artifact is no longer staged");
     });
-    json(response, 201, { upload_id: row.id, reference: `/uploads/${row.id}` });
+    json(response, 201, { upload_id: row.id, reference: `/admin/attachments/${row.attachment_id}` });
   } catch (error) {
     if (!registered) await rm(staged.stagedPath, { force: true });
     throw error;
@@ -686,13 +734,66 @@ export function normalizeFields(fields: any[]) {
     if (optionTypes.has(field.field_type) && !(Array.isArray(field.options_json) && field.options_json.length && field.options_json.every((o: any) => typeof o === "string"))) {
       throw Object.assign(new Error("option fields require options"), { status: 400 });
     }
+    const validation = field.validation_json ?? {};
+    const maxLength = validation.max_length;
+    const min = validation.min;
+    const max = validation.max;
+    if ((maxLength !== undefined && (!Number.isInteger(maxLength) || maxLength < 1 || maxLength > 10000))
+      || (min !== undefined && !Number.isFinite(min)) || (max !== undefined && !Number.isFinite(max))
+      || (min !== undefined && max !== undefined && min > max)) throw Object.assign(new Error("invalid field validation"), { status: 400 });
     return {
       field_key: field.field_key, field_type: field.field_type, label: String(field.label ?? field.field_key).slice(0, 200),
       description: field.description ?? null, placeholder: field.placeholder ?? null, required: Boolean(field.required),
       position: Number.isInteger(field.position) ? field.position : index * 10,
-      validation_json: field.validation_json ?? {}, options_json: field.options_json ?? [],
+      validation_json: validation, options_json: field.options_json ?? [],
     };
   });
+}
+
+function formShapeError(form: any) {
+  if (typeof form.name !== "string" || !form.name.trim()) return "form name is required";
+  if (typeof form.title !== "string" || !form.title.trim()) return "public title is required";
+  if (typeof form.slug !== "string" || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(form.slug)) return "slug must contain lowercase letters, numbers, and single hyphens";
+  return null;
+}
+
+function publishabilityError(form: any, fields: any[]) {
+  const shape = formShapeError(form);
+  if (shape) return shape;
+  for (const key of ["title", "description"]) {
+    if (!fields.some((field) => field.field_key === key && !["static", "hidden", "image_upload"].includes(field.field_type))) return `public form requires a ${key} field`;
+  }
+  if (!form.fixed_project_id && !fields.some((field) => field.field_type === "project_selector")) return "public form requires a project selector or fixed project";
+  if (form.settings_json?.allow_image_attachments === false && fields.some((field) => field.field_type === "image_upload" && field.required)) return "required image fields cannot be published while attachments are disabled";
+  return null;
+}
+
+function managedPath(root: string, storagePath: string) {
+  if (!isAbsolute(storagePath)) return storagePath;
+  const candidate = relative(resolve(root), resolve(storagePath));
+  return candidate && candidate !== ".." && !candidate.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) && !isAbsolute(candidate) ? candidate : null;
+}
+
+export async function readUploadArtifact(row: {
+  artifact_id?: string | null; artifact_status?: string | null; storage_root?: string | null;
+  artifact_storage_path?: string | null; artifact_sha256?: string | null; upload_storage_path: string;
+}) {
+  if (row.artifact_id) {
+    if (row.artifact_status !== "finalized" || !row.artifact_storage_path) throw new Error("artifact is unavailable");
+    const root = row.storage_root === "legacy" ? legacyDataRoot : dataRoot;
+    const content = await readArtifact(root, row.artifact_storage_path);
+    if (row.artifact_sha256 && createHash("sha256").update(content).digest("hex") !== row.artifact_sha256) throw new Error("artifact checksum mismatch");
+    return content;
+  }
+  const paths = [row.upload_storage_path];
+  for (const root of [...new Set([dataRoot, legacyDataRoot])]) {
+    for (const storagePath of paths) {
+      const candidate = managedPath(root, storagePath);
+      if (!candidate) continue;
+      try { return await readArtifact(root, candidate); } catch { /* try controlled fallback */ }
+    }
+  }
+  throw new Error("artifact is missing");
 }
 
 async function replaceFields(client: any, formId: string, fields: any[]) {
@@ -781,7 +882,7 @@ async function counts() {
   return row;
 }
 
-export async function adminHtml(request: IncomingMessage, response: ServerResponse, url: URL) {
+export async function adminHtml(request: IncomingMessage, response: ServerResponse, url: URL, nonce = contentSecurityNonce()) {
   const session = await sessionFor(request);
   if (!session) {
     response.writeHead(302, { location: "/login" });
@@ -790,20 +891,23 @@ export async function adminHtml(request: IncomingMessage, response: ServerRespon
   const attachmentMatch = url.pathname.match(/^\/admin\/attachments\/([0-9a-f-]{36})$/);
   if (attachmentMatch && request.method === "GET") {
     const row = (await pool.query(
-      `SELECT u.storage_path,u.original_name,u.media_type FROM attachments a JOIN uploads u ON u.id=a.upload_id WHERE a.id=$1 AND a.ticket_id IS NOT NULL`,
+      `SELECT ar.id artifact_id,ar.status artifact_status,ar.storage_root,ar.storage_path artifact_storage_path,ar.sha256 artifact_sha256,
+              u.storage_path upload_storage_path,u.original_name,u.media_type
+       FROM attachments a JOIN uploads u ON u.id=a.upload_id LEFT JOIN artifacts ar ON ar.upload_id=u.id
+       WHERE a.id=$1 AND a.ticket_id IS NOT NULL`,
       [attachmentMatch[1]],
     )).rows[0];
-    if (!row) return html(response, 404, "<h1>Not found</h1>");
+    if (!row) return html(response, 404, "<h1>Not found</h1>", {}, nonce);
     try {
-      const content = await readArtifact(dataRoot, row.storage_path).catch(() => readArtifact(legacyDataRoot, row.storage_path));
+      const content = await readUploadArtifact(row);
       response.writeHead(200, {
         "content-type": row.media_type,
-        "content-disposition": `attachment; filename="${(row.original_name ?? "attachment").replace(/[^\w. -]/g, "_")}"`,
+        "content-disposition": `${url.searchParams.has("download") ? "attachment" : "inline"}; filename="${(row.original_name ?? "attachment").replace(/[^\w. -]/g, "_")}"`,
         ...securityHeaders(),
       });
       return response.end(content);
     } catch {
-      return html(response, 404, "<h1>Not found</h1>");
+      return html(response, 404, "<h1>Not found</h1>", {}, nonce);
     }
   }
   const metrics = await counts();
@@ -812,9 +916,9 @@ export async function adminHtml(request: IncomingMessage, response: ServerRespon
   ];
   for (const pageModule of pageModules) {
     const result = await pageModule.render(url, session, metrics);
-    if (result) return html(response, result.status, adminPage(url.pathname, result.title, result.body, metrics, session.username));
+    if (result) return html(response, result.status, adminPage(url.pathname, result.title, result.body, metrics, session.username, nonce), {}, nonce);
   }
-  return html(response, 404, adminPage(url.pathname, "Page not found", "<h1>Page not found</h1><p>Page not found.</p>", metrics, session.username));
+  return html(response, 404, adminPage(url.pathname, "Page not found", "<h1>Page not found</h1><p>Page not found.</p>", metrics, session.username, nonce), {}, nonce);
 }
 
 export async function adminApi(request: IncomingMessage, response: ServerResponse, url: URL, session: any) {
@@ -1401,7 +1505,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const shaPattern = /^[0-9a-f]{40}$/;
     const expectedHeadSha = typeof body.expected_head_sha === "string" && shaPattern.test(body.expected_head_sha) ? body.expected_head_sha : undefined;
     const expectedBaseSha = typeof body.expected_base_sha === "string" && shaPattern.test(body.expected_base_sha) ? body.expected_base_sha : undefined;
-    const job = await enqueueJob({ type: "github.merge_branches", payload: { actor_id: session.user_id, project_id: project.id, head, base, ...(expectedHeadSha || expectedBaseSha ? { expected_head_sha: expectedHeadSha, expected_base_sha: expectedBaseSha } : {}) }, idempotencyKey: `g07:github.merge_branches:${project.id}:${head}:${base}:${requestToken}` });
+    if (!expectedHeadSha || !expectedBaseSha) return json(response, 400, { error: "a fresh merge preview with exact head and base commit SHAs is required" });
+    const job = await enqueueJob({ type: "github.merge_branches", payload: { actor_id: session.user_id, project_id: project.id, head, base, expected_head_sha: expectedHeadSha, expected_base_sha: expectedBaseSha }, idempotencyKey: `g07:github.merge_branches:${project.id}:${head}:${base}:${requestToken}` });
     return json(response, 202, { job });
   }
   const deploymentStatusMatch = url.pathname.match(/^\/api\/admin\/projects\/([0-9a-f-]+)\/deployment$/i);
@@ -1444,9 +1549,10 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const body = await bodyOf(request);
     if (typeof body.commit_sha !== "string" || !/^[0-9a-f]{40}$/.test(body.commit_sha)) return json(response, 400, { error: "commit_sha must be a 40-character hex SHA" });
     if (typeof body.expected_master_sha !== "string" || !/^[0-9a-f]{40}$/.test(body.expected_master_sha)) return json(response, 400, { error: "expected_master_sha must be a 40-character hex SHA" });
+    const requestId = typeof body.request_id === "string" && /^[0-9a-f-]{36}$/i.test(body.request_id) ? body.request_id : randomUUID();
     const job = await enqueueJob({ type: "deployment.promote",
       payload: { project_id: project.id, actor_id: session.user_id, commit_sha: body.commit_sha, expected_master_sha: body.expected_master_sha },
-      idempotencyKey: `g07:deployment.promote:${project.id}:${body.commit_sha}:${Math.floor(Date.now() / 3600000)}`,
+      idempotencyKey: `g07:deployment.promote:${project.id}:${body.commit_sha}:${requestId}`,
       maxAttempts: 1 });
     return json(response, 202, { job });
   }
@@ -1475,9 +1581,10 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (body.confirm_diverged !== true) return json(response, 400, { error: "confirm_diverged:true is required to force a diverged production branch" });
     if (typeof body.commit_sha !== "string" || !/^[0-9a-f]{40}$/.test(body.commit_sha)) return json(response, 400, { error: "commit_sha must be a 40-character hex SHA" });
     if (typeof body.expected_master_sha !== "string" || !/^[0-9a-f]{40}$/.test(body.expected_master_sha)) return json(response, 400, { error: "expected_master_sha must be a 40-character hex SHA" });
+    const requestId = typeof body.request_id === "string" && /^[0-9a-f-]{36}$/i.test(body.request_id) ? body.request_id : randomUUID();
     const job = await enqueueJob({ type: "deployment.promote",
       payload: { project_id: project.id, actor_id: session.user_id, commit_sha: body.commit_sha, expected_master_sha: body.expected_master_sha, force: true },
-      idempotencyKey: `g07:deployment.promote:${project.id}:${body.commit_sha}:force:${Math.floor(Date.now() / 3600000)}`,
+      idempotencyKey: `g07:deployment.promote:${project.id}:${body.commit_sha}:force:${requestId}`,
       maxAttempts: 1 });
     return json(response, 202, { job });
   }
@@ -1660,7 +1767,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (projectPromptsBulkMatch && request.method === "POST") {
     const body = await bodyOf(request);
     const action = body.action;
-    if (!["activate", "deactivate", "delete"].includes(action)) return json(response, 400, { error: "invalid action" });
+    if (!["activate", "deactivate", "delete", "archive"].includes(action)) return json(response, 400, { error: "invalid action" });
     const ids = Array.isArray(body.ids) && body.ids.every((id: unknown): id is string => typeof id === "string" && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) ? body.ids : [];
     if (!ids.length) return json(response, 400, { error: "no prompts selected" });
     const project = (await pool.query("SELECT id FROM projects WHERE id=$1", [projectPromptsBulkMatch[1]])).rows[0];
@@ -1672,10 +1779,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       )).rows;
       if (!files.length) return { updated: 0 };
       const fileIds = files.map((file: any) => file.id);
-      if (action === "delete") {
-        await client.query("UPDATE prompt_files SET active_version_id=NULL WHERE id=ANY($1::uuid[])", [fileIds]);
-        await client.query("DELETE FROM prompt_versions WHERE prompt_file_id=ANY($1::uuid[])", [fileIds]);
-        await client.query("DELETE FROM prompt_files WHERE id=ANY($1::uuid[])", [fileIds]);
+      if (action === "delete" || action === "archive") {
+        await client.query("UPDATE prompt_files SET active_version_id=NULL,updated_at=now() WHERE id=ANY($1::uuid[])", [fileIds]);
       } else if (action === "deactivate") {
         await client.query("UPDATE prompt_files SET active_version_id=NULL,updated_at=now() WHERE id=ANY($1::uuid[])", [fileIds]);
       } else {
@@ -1690,7 +1795,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         );
       }
       for (const file of files) {
-        await audit({ actorType: "admin", actorId: session.user_id, action: `prompt.bulk.${action}`, entityType: "prompt_file", entityId: file.id, ip: ipOf(request) }, client);
+        await audit({ actorType: "admin", actorId: session.user_id, action: `prompt.bulk.${action === "delete" ? "archive" : action}`, entityType: "prompt_file", entityId: file.id, ip: ipOf(request) }, client);
       }
       return { updated: files.length };
     });
@@ -1764,6 +1869,12 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (url.pathname === "/api/admin/forms" && request.method === "POST") {
     const body = await bodyOf(request);
     const fields = normalizeFields(body.fields ?? []);
+    const shapeError = formShapeError(body);
+    if (shapeError) return json(response, 400, { error: shapeError });
+    if (body.status === "published") {
+      const publishError = publishabilityError({ ...body, settings_json: sanitizeFormSettings(body.settings_json) }, fields?.length ? fields : standardFields);
+      if (publishError) return json(response, 422, { error: publishError });
+    }
     const form = await inTransaction(async (client) => {
       const result = await client.query(
         `INSERT INTO forms (name,slug,title,description,status,fixed_project_id,settings_json,published_at)
@@ -1790,20 +1901,44 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const form = await inTransaction(async (client) => {
       const before = (await client.query("SELECT * FROM forms WHERE id=$1 FOR UPDATE", [formMatch[1]])).rows[0];
       if (!before) return null;
+      const candidate = { ...before, ...body, settings_json: body.settings_json === undefined ? before.settings_json : sanitizeFormSettings(body.settings_json) };
+      const shapeError = formShapeError(candidate);
+      if (shapeError) return { validationError: shapeError };
+      const storedFields = fields ?? (await client.query("SELECT * FROM form_fields WHERE form_id=$1 ORDER BY position,created_at", [before.id])).rows;
+      const effectiveFields = storedFields.length ? storedFields : standardFields;
+      if (before.status === "published") {
+        const publishError = publishabilityError(candidate, effectiveFields);
+        if (publishError) return { publishError };
+      }
       let after = before;
       if (entries.length) after = (await client.query(`UPDATE forms SET ${entries.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now() WHERE id=$1 RETURNING *`, [formMatch[1], ...entries.map(([, value]) => value)])).rows[0];
       if (fields) await replaceFields(client, before.id, fields);
       await audit({ actorType: "admin", actorId: session.user_id, action: "form.update", entityType: "form", entityId: before.id, before, after, ip: ipOf(request) }, client);
       return after;
     });
-    return form ? json(response, 200, { form: { ...form, fields: await fieldsFor(form.id) } }) : json(response, 404, { error: "form not found" });
+    if (!form) return json(response, 404, { error: "form not found" });
+    if ("validationError" in form) return json(response, 400, { error: form.validationError });
+    if ("publishError" in form) return json(response, 422, { error: form.publishError });
+    return json(response, 200, { form: { ...form, fields: await fieldsFor(form.id) } });
   }
   const publishMatch = url.pathname.match(/^\/api\/admin\/forms\/([0-9a-f-]+)\/(publish|unpublish)$/i);
   if (publishMatch && request.method === "POST") {
     const status = publishMatch[2] === "publish" ? "published" : "draft";
-    const form = (await pool.query("UPDATE forms SET status=$2,published_at=CASE WHEN $2='published' THEN now() ELSE NULL END,updated_at=now() WHERE id=$1 RETURNING *", [publishMatch[1], status])).rows[0];
-    if (!form) return json(response, 404, { error: "form not found" });
-    await audit({ actorType: "admin", actorId: session.user_id, action: `form.${publishMatch[2]}`, entityType: "form", entityId: form.id, after: form, ip: ipOf(request) });
+    const result = await inTransaction(async (client) => {
+      const before = (await client.query("SELECT * FROM forms WHERE id=$1 FOR UPDATE", [publishMatch[1]])).rows[0];
+      if (!before) return null;
+      if (status === "published") {
+        const storedFields = (await client.query("SELECT * FROM form_fields WHERE form_id=$1 ORDER BY position,created_at", [before.id])).rows;
+        const publishError = publishabilityError(before, storedFields.length ? storedFields : standardFields);
+        if (publishError) return { publishError };
+      }
+      const form = (await client.query("UPDATE forms SET status=$2,published_at=CASE WHEN $2='published' THEN now() ELSE NULL END,updated_at=now() WHERE id=$1 RETURNING *", [before.id, status])).rows[0];
+      await audit({ actorType: "admin", actorId: session.user_id, action: `form.${publishMatch[2]}`, entityType: "form", entityId: form.id, after: form, ip: ipOf(request) }, client);
+      return { form };
+    });
+    if (!result) return json(response, 404, { error: "form not found" });
+    if ("publishError" in result) return json(response, 422, { error: result.publishError });
+    const form = result.form;
     return json(response, 200, { form });
   }
   if (url.pathname === "/api/admin/skills" && request.method === "GET") {
@@ -2633,24 +2768,6 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     const ref = decodeURIComponent(ticketMatch[1]);
     let ticket = (await pool.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
     if (!ticket) return json(response, 404, { error: "ticket not found" });
-    if (ticket.status === "Submitted") {
-      // PRD §17.2 "Administrator opens triage": Submitted -> Triage fires
-      // as a side effect of an admin viewing the ticket.
-      ticket = await inTransaction(async (client) => {
-        const updated = (await client.query(
-          "UPDATE tickets SET status='Triage',updated_at=now() WHERE id=$1 AND status='Submitted' RETURNING *",
-          [ticket.id],
-        )).rows[0];
-        if (updated) {
-          await client.query(
-            `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
-             VALUES ($1,'Submitted','Triage','Administrator opened triage','admin',$2)`,
-            [ticket.id, session.user_id],
-          );
-        }
-        return updated ?? ticket;
-      });
-    }
     const [history, notes, attachments, notifications] = await Promise.all([
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at", [ticket.id]),
       pool.query("SELECT * FROM ticket_notes WHERE ticket_id=$1 ORDER BY created_at", [ticket.id]),
@@ -2670,6 +2787,10 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (ticketMatch && request.method === "PATCH") {
     const ref = decodeURIComponent(ticketMatch[1]);
     const body = await bodyOf(request);
+    if (body.status === "Cancelled") {
+      if (Object.keys(body).some((key) => key !== "status")) return json(response, 422, { error: "cancellation cannot be combined with ticket edits" });
+      return transitionTicket(ref, "Cancelled", "Cancelled by administrator", session, request, response);
+    }
     if (body.status !== undefined && ["Rejected", "Plan Approved"].includes(body.status)) {
       return json(response, 422, { error: "status must use its decision endpoint" });
     }
@@ -2722,6 +2843,16 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       }
       const updatedEntries = [...updates];
       const candidate = { ...before, ...Object.fromEntries(updatedEntries) };
+      const coreErrors: Record<string, string> = {};
+      if (updates.has("title")) {
+        if (typeof candidate.title !== "string" || !candidate.title.trim()) coreErrors.title = "required";
+        else if (candidate.title.length > 200) coreErrors.title = "too long";
+      }
+      if (updates.has("description")) {
+        if (typeof candidate.description !== "string" || !candidate.description.trim()) coreErrors.description = "required";
+        else if (candidate.description.length > 10000) coreErrors.description = "too long";
+      }
+      if (Object.keys(coreErrors).length) return { validationErrors: coreErrors };
       const project = (await client.query("SELECT * FROM projects WHERE id=$1", [candidate.project_id])).rows[0];
       const systemAi = await getSystemAiSettings(client);
       for (const phase of (candidate.ai_configuration_mode === "advanced"
@@ -2764,13 +2895,14 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
 }
 
 export async function route(request: IncomingMessage, response: ServerResponse) {
+  const nonce = contentSecurityNonce();
   const url = new URL(request.url ?? "/", `http://${request.headers.host ?? "localhost"}`);
   if (request.method === "GET" && (url.pathname === "/" || url.pathname === "/api/health")) {
     if (url.pathname === "/") { response.writeHead(302, { location: "/login" }); return response.end(); }
-    try { const health = await pool.query("SELECT current_database() AS name, (pg_control_system()).system_identifier AS system_identifier"); const database = health.rows[0]; return json(response, 200, { status: "ok", database: "ok", web: "ok", database_identity: createHash("sha256").update(`${database.name}|${database.system_identifier}`).digest("hex") }); }
+    try { const health = await pool.query("SELECT current_database() AS name, (pg_control_system()).system_identifier AS system_identifier"); const database = health.rows[0]; const [data_root_identity, config_root_identity] = await Promise.all([rootIdentity(dataRoot), rootIdentity(configRoot)]); return json(response, 200, { status: "ok", database: "ok", web: "ok", database_identity: createHash("sha256").update(`${database.name}|${database.system_identifier}`).digest("hex"), data_root_identity, config_root_identity }); }
     catch { return json(response, 503, { status: "degraded", database: "unavailable", web: "ok" }); }
   }
-  if (request.method === "GET" && url.pathname === "/login") return html(response, 200, loginPage());
+  if (request.method === "GET" && url.pathname === "/login") return html(response, 200, loginPage(nonce), {}, nonce);
   if (url.pathname === "/assets/design-tokens.css" && request.method === "GET") {
     response.writeHead(200, { "content-type": "text/css; charset=utf-8", "cache-control": "public, max-age=300", ...securityHeaders() });
     return response.end(styles);
@@ -2822,12 +2954,12 @@ export async function route(request: IncomingMessage, response: ServerResponse) 
   const publicPageMatch = url.pathname.match(/^\/f\/([^/]+)(\/submitted)?$/);
   if (publicPageMatch && request.method === "GET") {
     const form = await publicForm(decodeURIComponent(publicPageMatch[1]));
-    if (!form) return html(response, 404, "<h1>Form not found</h1>");
-    if (publicPageMatch[2]) return html(response, 200, submittedPage(form));
+    if (!form) return html(response, 404, "<h1>Form not found</h1>", {}, nonce);
+    if (publicPageMatch[2]) return html(response, 200, submittedPage(form, nonce), {}, nonce);
     const projects = (await pool.query("SELECT id,name FROM projects WHERE enabled=true ORDER BY name")).rows;
-    return html(response, 200, publicFormPage(form, await fieldsFor(form.id), projects));
+    return html(response, 200, publicFormPage(form, await fieldsFor(form.id), projects, nonce), {}, nonce);
   }
-  if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) return adminHtml(request, response, url);
+  if (url.pathname === "/admin" || url.pathname.startsWith("/admin/")) return adminHtml(request, response, url, nonce);
   if (!url.pathname.startsWith("/api/admin/")) return json(response, 404, { error: "not found" });
   const session = await requireAdmin(request, response);
   if (session) return adminApi(request, response, url, session);

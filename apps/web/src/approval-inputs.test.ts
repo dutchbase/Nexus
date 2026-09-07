@@ -44,6 +44,11 @@ test("preview and approval build the same canonical input hash through their tra
     scope, prompt_type, content, active_version_id: `prompt-${index}`, content_hash: String(index).repeat(64),
   }));
   let skillConfiguration = { validation_commands: ["pnpm test"] };
+  let imageEvidence = [{
+    attachment_id: "attachment", upload_id: "upload", artifact_id: "artifact",
+    storage_root: "legacy", storage_path: "uploads/form/upload/screenshot.png", original_name: "screenshot.png",
+    media_type: "image/png", size_bytes: 123, sha256: "b".repeat(64),
+  }];
   const client = { query: async (sql: string) => {
     if (sql.includes("FROM projects")) return { rows: [project] };
     if (sql.includes("FROM prompt_files")) return { rows: prompts };
@@ -53,6 +58,7 @@ test("preview and approval build the same canonical input hash through their tra
       source: "project_required", allow_ticket_override: false,
     }] };
     if (sql.includes("FROM project_skills ps")) return { rows: [] };
+    if (sql.includes("FROM attachments")) return { rows: imageEvidence };
     if (sql.includes("FROM system_ai_settings")) return { rows: [{
       default_model: null, default_reasoning_level: null,
       planning_model: null, planning_reasoning_level: null,
@@ -76,7 +82,11 @@ test("preview and approval build the same canonical input hash through their tra
   expect(preview.approvedInput.skills).toEqual([expect.objectContaining({
     slug: "validator", configuration: { validation_commands: ["pnpm test"] },
   })]);
+  expect((preview.approvedInput.ticket as any).imageEvidence).toEqual(imageEvidence);
   skillConfiguration = { validation_commands: ["pnpm lint"] };
+  expect((await approvalInputsFor(ticket, version, client)).inputHash).not.toBe(preview.inputHash);
+  skillConfiguration = { validation_commands: ["pnpm test"] };
+  imageEvidence = [{ ...imageEvidence[0], sha256: "c".repeat(64) }];
   expect((await approvalInputsFor(ticket, version, client)).inputHash).not.toBe(preview.inputHash);
   expect(preview.approvedInput.prompts.flatMap((prompt: any) => prompt.provenance.map((source: any) => `${source.scope}.${source.promptType}`))).toEqual([
     "global.base", "global.execution", "project.context", "project.execution", "project.testing",

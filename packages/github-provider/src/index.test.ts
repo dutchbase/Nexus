@@ -13,6 +13,9 @@ import {
   markReadyForReview,
   mergeBranch,
   mergePullRequest,
+  request,
+  updateBranchReferenceIfMatches,
+  updateBranchReferencesIfMatches,
   updateBranchReference,
 } from "./index.ts";
 
@@ -43,16 +46,16 @@ async function withServer(
   }
 }
 
-test("qualifies an open pull request head with its owner", async () => {
+test("qualifies an open pull request for the requested head and base", async () => {
   let url = "";
   await withServer((incoming, outgoing) => {
     url = incoming.url ?? "";
     outgoing.setHeader("content-type", "application/json");
     outgoing.end("[]");
   }, async () => {
-    await expect(findOpenPullRequestForHead("acme", "widgets", "feature")).resolves.toBeNull();
+    await expect(findOpenPullRequestForHead("acme", "widgets", "feature", "main")).resolves.toBeNull();
   });
-  expect(url).toBe("/repos/acme/widgets/pulls?state=open&head=acme%3Afeature");
+  expect(url).toBe("/repos/acme/widgets/pulls?state=open&head=acme%3Afeature&base=main");
 });
 
 test("lists all same-origin pages once and retains partial recovery metadata", async () => {
@@ -298,6 +301,18 @@ test("applies a ten-second abort and safe error policy", async () => {
     vi.stubGlobal("fetch", realFetch);
     abortTimeout.mockRestore();
   }
+});
+
+test("preserves a caller deadline and does not retry after it aborts", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  const fetchSpy = vi.spyOn(globalThis, "fetch");
+  process.env.GITHUB_API_BASE_URL = "https://github.example/api/v3";
+  process.env.GITHUB_TOKEN = "test-token";
+
+  await expect(request("/deadline", { signal: controller.signal })).rejects.toMatchObject({ code: "transient" });
+
+  expect(fetchSpy).not.toHaveBeenCalled();
 });
 
 test("uses 250 then 500 millisecond GET retry backoff", async () => {
@@ -564,6 +579,113 @@ test("getCommitCheckStatus reports overallState=none when there are no checks at
     const result = await getCommitCheckStatus("acme", "widgets", "a".repeat(40));
     expect(result.overallState).toBe("none");
   });
+});
+
+test("getCommitCheckStatus treats skipped and neutral checks as successful", async () => {
+  await withServer((incoming, outgoing) => {
+    outgoing.setHeader("content-type", "application/json");
+    if (incoming.url?.includes("/check-runs")) {
+      outgoing.end(JSON.stringify({ check_runs: [
+        { name: "optional", status: "completed", conclusion: "neutral", completed_at: "2026-08-04T11:00:00Z" },
+        { name: "platform", status: "completed", conclusion: "skipped", completed_at: "2026-08-04T11:01:00Z" },
+      ] }));
+      return;
+    }
+    outgoing.end(JSON.stringify({ statuses: [] }));
+  }, async () => {
+    const result = await getCommitCheckStatus("acme", "widgets", "a".repeat(40));
+    expect(result.overallState).toBe("success");
+    expect(result.checks.map((check) => check.state)).toEqual(["success", "success"]);
+  });
+});
+
+test("represents pull request and status-check requirements from active rulesets", async () => {
+  await withServer((incoming, outgoing) => {
+    const url = incoming.url ?? "";
+    outgoing.setHeader("content-type", "application/json");
+    if (url === "/repos/acme/widgets/pulls/42") {
+      outgoing.end(JSON.stringify({
+        number: 42, html_url: "url", state: "open", draft: false, title: "Policy",
+        head: { ref: "feature", sha: "head-sha" }, base: { ref: "main", sha: "base-sha" },
+        created_at: "2026-08-03", updated_at: "2026-08-04",
+      }));
+      return;
+    }
+    if (url.includes("/branches/main/protection")) {
+      outgoing.statusCode = 404;
+      outgoing.end("{}");
+      return;
+    }
+    if (url.includes("/rules/branches/main")) {
+      outgoing.end(JSON.stringify([
+        { type: "pull_request", parameters: { required_approving_review_count: 2 } },
+        { type: "required_status_checks", parameters: { required_status_checks: [{ context: "build", integration_id: 7 }] } },
+      ]));
+      return;
+    }
+    if (url.includes("/pulls/42/reviews")) {
+      outgoing.end(JSON.stringify([]));
+      return;
+    }
+    if (url.includes("/check-runs")) {
+      outgoing.end(JSON.stringify({ check_runs: [] }));
+      return;
+    }
+    if (url.includes("/status")) {
+      outgoing.end(JSON.stringify({ statuses: [] }));
+      return;
+    }
+    outgoing.statusCode = 404;
+    outgoing.end("{}");
+  }, async () => {
+    await expect(getPullRequestPolicyInputs("acme", "widgets", 42)).resolves.toMatchObject({
+      protected: true,
+      requiredApprovals: 2,
+      requiredChecks: [{ context: "build", appId: 7 }],
+      complete: true,
+    });
+  });
+});
+
+test("updateBranchReferenceIfMatches sends an atomic beforeOid ref update", async () => {
+  const bodies: any[] = [];
+  await withServer(async (incoming, outgoing) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
+    bodies.push(JSON.parse(Buffer.concat(chunks).toString()));
+    outgoing.setHeader("content-type", "application/json");
+    outgoing.end(JSON.stringify(bodies.length === 1
+      ? { data: { repository: { id: "repo-node-id" } } }
+      : { data: { updateRefs: { clientMutationId: null } } }));
+  }, async () => {
+    await updateBranchReferenceIfMatches("acme", "widgets", "production", "a".repeat(40), "b".repeat(40), true);
+  });
+  expect(bodies[1].variables).toEqual({
+    repositoryId: "repo-node-id",
+    refUpdates: [{ name: "refs/heads/production", beforeOid: "a".repeat(40), afterOid: "b".repeat(40), force: true }],
+  });
+});
+
+test("updateBranchReferencesIfMatches sends one atomic multi-ref mutation", async () => {
+  const bodies: any[] = [];
+  await withServer(async (incoming, outgoing) => {
+    const chunks: Buffer[] = [];
+    for await (const chunk of incoming) chunks.push(Buffer.from(chunk));
+    bodies.push(JSON.parse(Buffer.concat(chunks).toString()));
+    outgoing.setHeader("content-type", "application/json");
+    outgoing.end(JSON.stringify(bodies.length === 1
+      ? { data: { repository: { id: "repo-node-id" } } }
+      : { data: { updateRefs: { clientMutationId: null } } }));
+  }, async () => {
+    await updateBranchReferencesIfMatches("acme", "widgets", [
+      { branch: "main", beforeSha: "a".repeat(40), afterSha: "b".repeat(40) },
+      { branch: "nexus/merge-job", beforeSha: "b".repeat(40), afterSha: "0".repeat(40) },
+    ]);
+  });
+  expect(bodies[1].variables.refUpdates).toEqual([
+    { name: "refs/heads/main", beforeOid: "a".repeat(40), afterOid: "b".repeat(40), force: false },
+    { name: "refs/heads/nexus/merge-job", beforeOid: "b".repeat(40), afterOid: "0".repeat(40), force: false },
+  ]);
 });
 
 test("updateBranchReference sends force:false by default and surfaces a 422 as a GitHubProviderError", async () => {

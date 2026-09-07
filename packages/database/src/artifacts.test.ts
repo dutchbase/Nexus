@@ -1,8 +1,8 @@
-import { mkdtemp, readFile, rename, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rename, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { finalizeArtifact, reconcileArtifacts, stageArtifact } from "./artifacts.ts";
+import { finalizeArtifact, reconcileArtifactRoots, reconcileArtifacts, stageArtifact } from "./artifacts.ts";
 
 let root = "";
 
@@ -77,5 +77,32 @@ describe("artifact lifecycle", () => {
     }]);
     expect(abandoned).toEqual(["44444444-4444-4444-8444-444444444444", expired.id]);
     await expect(readFile(expired.stagedPath)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("unions registrations for roots that resolve to the same directory", async () => {
+    root = await mkdtemp(join(tmpdir(), "dcc-artifacts-roots-"));
+    const physical = join(root, "data");
+    const alias = join(root, "alias");
+    const registered = "66666666-6666-4666-8666-666666666666";
+    const orphan = "77777777-7777-4777-8777-777777777777";
+    await mkdir(join(physical, ".staged"), { recursive: true });
+    await symlink(physical, alias);
+    await Promise.all([
+      writeFile(join(physical, ".staged", registered), "registered"),
+      writeFile(join(physical, ".staged", orphan), "orphan"),
+    ]);
+    const old = new Date(Date.now() - 2 * 60 * 60 * 1000);
+    await Promise.all([utimes(join(physical, ".staged", registered), old, old), utimes(join(physical, ".staged", orphan), old, old)]);
+
+    await reconcileArtifactRoots({
+      roots: { primary: physical, legacy: alias },
+      records: [{ id: registered, storage_path: "uploads/missing", storage_root: "legacy", status: "staged", expires_at: null }],
+      finalize: async () => undefined,
+      abandon: async () => false,
+      now: new Date(),
+    });
+
+    await expect(readFile(join(physical, ".staged", registered), "utf8")).resolves.toBe("registered");
+    await expect(readFile(join(physical, ".staged", orphan))).rejects.toMatchObject({ code: "ENOENT" });
   });
 });

@@ -4,11 +4,14 @@ import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 import { assertExecutionSandboxVersion, buildExecutionArguments, buildPlanningArguments, ClaudeExecutionError, ClaudePlanningError, createExecutionSandboxSettings, invokeExecutionClaude, invokePlanningClaude, isClaudeSandboxVersionSupported, parseClaudeFinalUsage, parsePlanMarkdown, preflightClaudeAuthentication, summarizeClaudeFailure, type ExecutionInvocation, type PlanningInvocation } from "./index.ts";
 
 const directories: string[] = [];
-afterEach(async () => { await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true }))); });
+afterEach(async () => {
+  vi.restoreAllMocks();
+  await Promise.all(directories.splice(0).map((directory) => rm(directory, { recursive: true, force: true })));
+});
 
 const invocation: PlanningInvocation = {
   task: "Review this", sessionId: "session", model: "model", effort: "low", promptFile: "/prompt",
@@ -212,10 +215,11 @@ describe("buildPlanningArguments", () => {
   });
 
   test("loads the bundle layout and all materialized skills as session plugins without enabling Agent", () => {
-    const args = buildPlanningArguments({ ...invocation, pluginDirectories: ["/plugin-a", "/plugin-b"] });
+    const args = buildPlanningArguments({ ...invocation, pluginDirectories: ["/plugin-a", "/plugin-b"], additionalDirectories: ["/evidence"] });
     expect(args).toContain("Read,Glob,Grep,Skill");
     expect(args.join(" ")).not.toMatch(/Agent/);
     expect(args).toEqual(expect.arrayContaining(["--add-dir", "/skills"]));
+    expect(args).toEqual(expect.arrayContaining(["--add-dir", "/evidence"]));
     expect(args).toEqual(expect.arrayContaining(["--plugin-dir", "/plugin-a", "--plugin-dir", "/plugin-b"]));
   });
 });
@@ -476,6 +480,88 @@ sleep 1
   await expect(access(marker)).rejects.toThrow();
 });
 
+test("planning cancellation terminates descendants with the Claude process", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-cancel-tree-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const started = path.join(root, "started");
+  const marker = path.join(root, "descendant-ran");
+  await writeFile(executable, `#!/bin/sh
+printf started > ${JSON.stringify(started)}
+(sleep 0.2; printf descendant > ${JSON.stringify(marker)}) &
+sleep 1
+`);
+  await chmod(executable, 0o755);
+  const controller = new AbortController();
+  const originalKill = process.kill.bind(process);
+  const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => originalKill(pid, signal));
+  const running = invokePlanningClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root, signal: controller.signal, killGraceMs: 50,
+  });
+  void running.catch(() => undefined);
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try { await access(started); break; } catch { await new Promise((resolve) => setImmediate(resolve)); }
+  }
+  await expect(access(started)).resolves.toBeUndefined();
+  controller.abort();
+
+  await expect(running).rejects.toMatchObject({ code: "planning_cancelled" });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await expect(access(marker)).rejects.toThrow();
+  expect(kill.mock.calls.some(([, signal]) => signal === "SIGKILL")).toBe(false);
+  kill.mockRestore();
+});
+
+test("planning cancellation escalates after the parent exits when a descendant ignores SIGTERM", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-stubborn-tree-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const started = path.join(root, "started");
+  const marker = path.join(root, "stubborn-descendant-ran");
+  await writeFile(executable, `#!/bin/sh
+trap 'exit 0' TERM
+(trap '' TERM; sleep 0.2; printf descendant > ${JSON.stringify(marker)}; sleep 1) &
+printf started > ${JSON.stringify(started)}
+while :; do sleep 1; done
+`);
+  await chmod(executable, 0o755);
+  const controller = new AbortController();
+  const running = invokePlanningClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root,
+    signal: controller.signal, killGraceMs: 50,
+  });
+  void running.catch(() => undefined);
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try { await access(started); break; } catch { await new Promise((resolve) => setImmediate(resolve)); }
+  }
+  await expect(access(started)).resolves.toBeUndefined();
+  controller.abort();
+
+  await expect(running).rejects.toMatchObject({ code: "planning_cancelled" });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await expect(access(marker)).rejects.toThrow();
+});
+
+test("does not start planning when its ownership signal was already aborted", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-planning-pre-abort-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const invoked = path.join(root, "invoked");
+  await writeFile(executable, `#!/bin/sh
+printf invoked > ${JSON.stringify(invoked)}
+`);
+  await chmod(executable, 0o755);
+  const controller = new AbortController();
+  controller.abort();
+
+  await expect(invokePlanningClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root, signal: controller.signal,
+  })).rejects.toMatchObject({ code: "planning_cancelled" });
+  await expect(access(invoked)).rejects.toThrow();
+});
+
 test("invokes planning with only its documented minimal environment", async () => {
   const root = await mkdtemp(path.join(tmpdir(), "claude-planning-env-"));
   directories.push(root);
@@ -719,6 +805,112 @@ sleep 0.2
   } finally {
     process.off("unhandledRejection", onUnhandled);
   }
+});
+
+test("observes a rejected execution log write immediately and still rejects the invocation", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-log-rejection-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const started = path.join(root, "started");
+  const logPath = path.join(root, "run.log");
+  await mkdir(path.join(root, ".git"));
+  await writeFile(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '%s\\n' '2.1.220 (Claude Code)'; exit 0; fi
+printf started > ${JSON.stringify(started)}
+sleep 0.1
+printf '%s\\n' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}'
+sleep 0.2
+`);
+  await chmod(executable, 0o755);
+  const unhandled: unknown[] = [];
+  const onUnhandled = (error: unknown) => { unhandled.push(error); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    const running = invokeExecutionClaude({
+      ...invocation, claudeExecutable: executable, workingDirectory: root, executionDirectory: root,
+      gitMetadataPaths: [path.join(root, ".git")], logPath, timeoutMs: 1_000,
+      onEvent: async () => undefined,
+    });
+    await Promise.race([
+      (async () => {
+        const deadline = Date.now() + 2_000;
+        while (Date.now() < deadline) {
+          try { await access(started); return; } catch { await new Promise((resolve) => setImmediate(resolve)); }
+        }
+        throw new Error("Claude test process did not start");
+      })(),
+      running.then(
+        () => { throw new Error("Claude invocation settled before its test process started"); },
+        (error) => { throw error; },
+      ),
+    ]);
+    await rm(logPath);
+    await mkdir(logPath);
+    await expect(running).rejects.toMatchObject({ code: "EISDIR", usage: { inputTokens: 10, outputTokens: 20 } });
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(unhandled).toEqual([]);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("does not start execution when its ownership signal was already aborted", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-execution-pre-abort-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const invoked = path.join(root, "invoked");
+  await mkdir(path.join(root, ".git"));
+  await writeFile(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '%s\\n' '2.1.220 (Claude Code)'; exit 0; fi
+printf invoked > ${JSON.stringify(invoked)}
+`);
+  await chmod(executable, 0o755);
+  const controller = new AbortController();
+  controller.abort();
+
+  await expect(invokeExecutionClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root, executionDirectory: root,
+    gitMetadataPaths: [path.join(root, ".git")], logPath: path.join(root, "run.log"),
+    timeoutMs: 1_000, signal: controller.signal, onEvent: async () => undefined,
+  })).rejects.toMatchObject({ code: "execution_cancelled" });
+  await expect(access(invoked)).rejects.toThrow();
+});
+
+test("execution cancellation terminates descendants with the Claude process", async () => {
+  const root = await mkdtemp(path.join(tmpdir(), "claude-execution-cancel-tree-"));
+  directories.push(root);
+  const executable = path.join(root, "claude");
+  const started = path.join(root, "started");
+  const marker = path.join(root, "descendant-ran");
+  await mkdir(path.join(root, ".git"));
+  await writeFile(executable, `#!/bin/sh
+if [ "$1" = "--version" ]; then printf '%s\\n' '2.1.220 (Claude Code)'; exit 0; fi
+printf started > ${JSON.stringify(started)}
+(sleep 0.2; printf descendant > ${JSON.stringify(marker)}) &
+sleep 1
+`);
+  await chmod(executable, 0o755);
+  const controller = new AbortController();
+  const originalKill = process.kill.bind(process);
+  const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => originalKill(pid, signal));
+  const running = invokeExecutionClaude({
+    ...invocation, claudeExecutable: executable, workingDirectory: root, executionDirectory: root,
+    gitMetadataPaths: [path.join(root, ".git")], logPath: path.join(root, "run.log"),
+    timeoutMs: 2_000, killGraceMs: 50, signal: controller.signal, onEvent: async () => undefined,
+  });
+  void running.catch(() => undefined);
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    try { await access(started); break; } catch { await new Promise((resolve) => setImmediate(resolve)); }
+  }
+  await expect(access(started)).resolves.toBeUndefined();
+  controller.abort();
+
+  await expect(running).rejects.toMatchObject({ code: "execution_cancelled" });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  await expect(access(marker)).rejects.toThrow();
+  expect(kill.mock.calls.some(([, signal]) => signal === "SIGKILL")).toBe(false);
+  kill.mockRestore();
 });
 
 test("enables guarded shell execution", () => {

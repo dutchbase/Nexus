@@ -90,7 +90,8 @@ INSERT INTO project_skills (id, project_id, skill_id, attachment_type, required,
 (gen_random_uuid(),'00000000-0000-0000-0000-000000000004','00000000-0000-0000-0001-000000000001','automatic',true,false,now()),
 (gen_random_uuid(),'00000000-0000-0000-0000-000000000004','00000000-0000-0000-0001-000000000003','automatic',true,false,now()),
 (gen_random_uuid(),'00000000-0000-0000-0000-000000000004','00000000-0000-0000-0001-000000000012','automatic',true,false,now()),
-(gen_random_uuid(),'00000000-0000-0000-0000-000000000004','00000000-0000-0000-0001-000000000004','automatic',true,false,now());
+(gen_random_uuid(),'00000000-0000-0000-0000-000000000004','00000000-0000-0000-0001-000000000004','automatic',true,false,now())
+ON CONFLICT DO NOTHING;
 
 -- ============================================================ tickets
 -- project_id lookups: va-jobs-platform=...001, corporate-site=...002, customer-portal=...003, billing-api=...004
@@ -149,7 +150,7 @@ ON CONFLICT (id) DO NOTHING;
 -- ============================================================ notification_providers
 INSERT INTO notification_providers (id, name, type, enabled, configuration_encrypted_json, created_at, updated_at) VALUES
 ('00000000-0000-0000-0006-000000000001','WhatsApp server','whatsapp',false,'{"base_url":null,"endpoint":null}'::jsonb, now(), now()),
-('00000000-0000-0000-0006-000000000002','Generic webhook','webhook',true,'{"endpoint":"http://127.0.0.1:8992/notify"}'::jsonb, now(), now())
+('00000000-0000-0000-0006-000000000002','Generic webhook','webhook',false,'{"endpoint":"http://127.0.0.1:8992/notify"}'::jsonb, now(), now())
 ON CONFLICT (id) DO NOTHING;
 
 -- ============================================================ notification_deliveries

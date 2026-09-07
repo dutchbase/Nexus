@@ -29,12 +29,10 @@ test("unauthenticated visitors are redirected from admin pages to /login", async
   await page.waitForURL("**/login");
 });
 
-// KNOWN GAP: POST /api/admin/logout exists (server.ts:640) but no page or
-// shell component renders a sign-out control, so a user cannot log out from
-// the UI. test.fail() keeps this documented: it alerts when the control ships.
 test("user can sign out from the UI", async ({ page }) => {
-  test.fail(true, "no logout button exists anywhere in the admin UI");
   await loginViaUI(page);
-  await page.getByRole("button", { name: /sign out|log out/i }).or(page.getByRole("link", { name: /sign out|log out/i })).first().click({ timeout: 5_000 });
-  await page.waitForURL("**/login", { timeout: 5_000 });
+  await Promise.all([
+    page.waitForURL("**/login", { timeout: 5_000 }),
+    page.getByRole("button", { name: /sign out|log out/i }).or(page.getByRole("link", { name: /sign out|log out/i })).first().click({ timeout: 5_000 }),
+  ]);
 });

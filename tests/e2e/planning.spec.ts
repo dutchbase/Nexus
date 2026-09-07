@@ -10,6 +10,7 @@ import {
   scenarioRef,
   waitForTicketStatus,
   DEFAULT_PLAN_MARKDOWN,
+  clickAndWaitForPost,
 } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
@@ -21,7 +22,7 @@ async function generatePlan(page: Page, title: string): Promise<{ ticketNumber: 
   const ticketNumber = await createTicketViaUI(page, title);
   const scenario = scenarioRef({ mode: "plan_valid", plan_markdown: DEFAULT_PLAN_MARKDOWN });
   await injectScenarioOnce(page, "/approve-planning", scenario);
-  await page.locator("[data-start-planning]").click();
+  await clickAndWaitForPost(page, "[data-start-planning]", "/approve-planning");
 
   const row = await queryOne("select id from tickets where ticket_number = $1", [ticketNumber]);
   await waitForTicketStatus(row.id, ["Plan Ready for Review", "Planning Failed"]);
@@ -61,7 +62,7 @@ test("planning captures valid provider usage emitted by the mock", async ({ page
     mode: "plan_valid", plan_markdown: DEFAULT_PLAN_MARKDOWN,
     usage: { input_tokens: 12, output_tokens: 8, cache_read_input_tokens: 3, cache_creation_input_tokens: 4 },
   } as any));
-  await page.locator("[data-start-planning]").click();
+  await clickAndWaitForPost(page, "[data-start-planning]", "/approve-planning");
 
   const ticket = await queryOne("select id from tickets where ticket_number = $1", [ticketNumber]);
   await waitForTicketStatus(ticket.id, ["Plan Ready for Review", "Planning Failed"]);
@@ -90,7 +91,7 @@ test("request revision produces plan v2, which can then be approved", async ({ p
   await injectScenarioOnce(page, "/request-revision", revised);
   await page.locator("[data-open-revision-dialog]").click();
   await page.locator("[data-revision-feedback]").fill("Please revise: cover the rollback strategy in more detail.");
-  await page.locator("[data-submit-revision]").click();
+  await clickAndWaitForPost(page, "[data-submit-revision]", "/request-revision");
 
   // The ticket bounces through the revision statuses and returns to
   // "Plan Ready for Review" — the reliable signal is the v2 row itself.

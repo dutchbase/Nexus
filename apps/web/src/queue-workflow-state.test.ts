@@ -41,6 +41,8 @@ test("queue reports sequential capacity and the running job's workflow state", a
   expect(page?.body).toContain("lease expires");
   expect(page?.body).toContain("rerun of JOB-2222");
   expect(page?.body).toContain("recovery: lease expired");
+  expect(page?.body).toContain("data-auto-submit");
+  expect(page?.body).not.toContain("onchange=");
 });
 
 test("jobs API returns the observed running count with jobs", async () => {

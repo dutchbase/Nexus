@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { spawn } from "node:child_process";
-import { realpathSync, statSync } from "node:fs";
+import { readFileSync, realpathSync, statSync } from "node:fs";
 import { appendFile, chmod, copyFile, mkdtemp, open, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import path from "node:path";
@@ -9,7 +9,38 @@ import { assertSubscriptionOnlyEnvironment, ClaudeAuthError } from "./auth-guard
 import type { AiUsage } from "@dcc/domain";
 export { assertSubscriptionOnlyEnvironment, ClaudeAuthError, forbiddenClaudeAuthVariables } from "./auth-guard.ts";
 
-async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; executable?: string; signal?: AbortSignal; timeoutMs?: number } = {}) {
+function terminateProcessTree(child: ReturnType<typeof spawn>, signal: NodeJS.Signals) {
+  if (!child.pid) return child.kill(signal);
+  if (process.platform === "win32") {
+    const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    killer.on("error", () => child.kill(signal));
+    killer.unref();
+    return true;
+  }
+  try { return process.kill(-child.pid, signal); }
+  catch { return child.kill(signal); }
+}
+
+function processStartTime(pid: number) {
+  if (process.platform !== "linux") return undefined;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+  } catch {
+    return undefined;
+  }
+}
+
+function ownsProcessTree(child: ReturnType<typeof spawn>, startedAt: string | undefined) {
+  if (process.platform === "win32") return !child.killed;
+  if (!child.pid) return false;
+  const currentStart = processStartTime(child.pid);
+  if (startedAt && currentStart && currentStart !== startedAt) return false;
+  try { process.kill(-child.pid, 0); return true; }
+  catch { return false; }
+}
+
+async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.ProcessEnv; executable?: string; signal?: AbortSignal; timeoutMs?: number; killGraceMs?: number } = {}) {
   const directory = await mkdtemp(path.join(tmpdir(), "dcc-claude-output-"));
   const stdoutPath = path.join(directory, "stdout");
   const stderrPath = path.join(directory, "stderr");
@@ -18,38 +49,50 @@ async function runClaude(args: string[], options: { cwd?: string; env?: NodeJS.P
   try {
     const outcome = await new Promise<{ exitCode: number | null; timedOut: boolean }>((resolve, reject) => {
       const child = spawn(options.executable ?? "claude", args, {
-        cwd: options.cwd, env: options.env, stdio: ["ignore", stdoutFile.fd, stderrFile.fd], signal: options.signal,
+        cwd: options.cwd, env: options.env, stdio: ["ignore", stdoutFile.fd, stderrFile.fd],
         detached: process.platform !== "win32",
       });
+      const startedAt = child.pid ? processStartTime(child.pid) : undefined;
       let timedOut = false;
+      let terminating = false;
       let killTimer: NodeJS.Timeout | undefined;
-      const terminate = (signal: NodeJS.Signals) => {
-        if (!child.pid) return child.kill(signal);
-        if (process.platform === "win32") {
-          const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
-          killer.on("error", () => child.kill(signal));
-          killer.unref();
-          return true;
-        }
-        try { return process.kill(-child.pid, signal); }
-        catch { return child.kill(signal); }
+      const terminate = (signal: NodeJS.Signals) => terminateProcessTree(child, signal);
+      const beginTermination = () => {
+        if (terminating) return;
+        terminating = true;
+        terminate("SIGTERM");
+        killTimer = setTimeout(() => {
+          killTimer = undefined;
+          if (ownsProcessTree(child, startedAt)) terminate("SIGKILL");
+        }, options.killGraceMs ?? 5_000);
+        killTimer.unref();
       };
+      const clearFinishedEscalation = () => {
+        if (killTimer && !ownsProcessTree(child, startedAt)) {
+          clearTimeout(killTimer);
+          killTimer = undefined;
+        }
+      };
+      const abort = () => beginTermination();
+      options.signal?.addEventListener("abort", abort, { once: true });
+      if (options.signal?.aborted) abort();
       const timeout = options.timeoutMs === undefined ? undefined : setTimeout(() => {
         timedOut = true;
-        terminate("SIGTERM");
-        killTimer = setTimeout(() => terminate("SIGKILL"), 5_000);
+        beginTermination();
       }, options.timeoutMs);
       child.on("error", (error) => {
         // Aborting a spawned child emits `error` before `close`; wait for close
         // so callers can still inspect any output the CLI flushed before exit.
         if (options.signal?.aborted) return;
         if (timeout) clearTimeout(timeout);
-        if (killTimer) clearTimeout(killTimer);
+        clearFinishedEscalation();
+        options.signal?.removeEventListener("abort", abort);
         reject(error);
       });
       child.on("close", (exitCode) => {
         if (timeout) clearTimeout(timeout);
-        if (killTimer) clearTimeout(killTimer);
+        clearFinishedEscalation();
+        options.signal?.removeEventListener("abort", abort);
         resolve({ exitCode, timedOut });
       });
     });
@@ -119,7 +162,7 @@ export async function preflightClaudeAuthentication(env: NodeJS.ProcessEnv = pro
 export type PlanningInvocation = {
   task: string; sessionId: string; model: string; effort: string; promptFile: string;
   skillBundleDir?: string; pluginDirectories?: readonly string[]; workingDirectory: string; maxTurns: number; oauthToken: string; scenarioPath?: string; tools?: string[]; claudeExecutable?: string; guardPath?: string;
-  gitMetadataPaths?: string[]; sensitiveEnvironmentVariables?: string[]; signal?: AbortSignal; timeoutMs?: number;
+  gitMetadataPaths?: string[]; sensitiveEnvironmentVariables?: string[]; additionalDirectories?: readonly string[]; signal?: AbortSignal; timeoutMs?: number; killGraceMs?: number;
 };
 
 const trustedBashGuard = fileURLToPath(new URL("./bash-guard.mjs", import.meta.url));
@@ -148,6 +191,7 @@ export async function materializeBashGuard(sourcePath = trustedBashGuard) {
 function skillDirectoryArguments(input: PlanningInvocation) {
   return [
     ...(input.skillBundleDir ? ["--add-dir", input.skillBundleDir] : []),
+    ...(input.additionalDirectories ?? []).flatMap((directory) => ["--add-dir", directory]),
     ...(input.pluginDirectories ?? []).flatMap((directory) => ["--plugin-dir", directory]),
   ];
 }
@@ -482,6 +526,9 @@ export function parseClaudeFinalUsage(event: unknown): AiUsage | null {
 
 export async function invokePlanningClaude(input: PlanningInvocation) {
   assertSubscriptionOnlyEnvironment();
+  if (input.signal?.aborted) {
+    throw new ClaudePlanningError("Claude planning was cancelled", 1, "planning_cancelled");
+  }
   // Planning receives only locale/PATH, its subscription token, and runner
   // switches. Worker credentials must never cross this process boundary.
   const env = minimalClaudeEnvironment(process.env, input.oauthToken);
@@ -493,6 +540,7 @@ export async function invokePlanningClaude(input: PlanningInvocation) {
   try {
     result = await runClaude(buildPlanningArguments(input), {
       cwd: input.workingDirectory, env, executable: input.claudeExecutable, signal: input.signal, timeoutMs: input.timeoutMs,
+      killGraceMs: input.killGraceMs,
     });
   } catch (error) {
     if (cancelled) throw new ClaudePlanningError("Claude planning was cancelled", 1, "planning_cancelled");
@@ -585,6 +633,9 @@ async function requireClaudeSandboxVersion(
 
 export async function invokeExecutionClaude(input: ExecutionInvocation) {
   assertSubscriptionOnlyEnvironment();
+  if (input.signal?.aborted) {
+    throw new ClaudeExecutionError("Claude execution was cancelled", 1, "execution_cancelled");
+  }
   if (input.executionDirectory !== input.workingDirectory) {
     throw new Error("executionDirectory must match workingDirectory");
   }
@@ -616,25 +667,32 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
     const launch = scoped ? scopedBwrapLaunch(configuredInput, settingsDirectory, guard.path) : null;
     const sandboxInput = launch?.configuredInput ?? configuredInput;
     const { settingsFile } = await createExecutionSandboxSettings(sandboxInput, settingsDirectory);
+    if (input.signal?.aborted) throw new ClaudeExecutionError("Claude execution was cancelled", 1, "execution_cancelled");
     const command = launch?.bwrap ?? (input.claudeExecutable ?? "claude");
     const commandArgs = launch
       ? [...launch.args, launch.executable, ...buildExecutionArguments(sandboxInput, launch.settingsFile)]
       : buildExecutionArguments(sandboxInput, settingsFile);
     const childEnv = launch ? { ...env, ...launch.env } : env;
     await requireClaudeSandboxVersion(childEnv, input.workingDirectory, input.claudeExecutable, launch ?? undefined);
+    if (input.signal?.aborted) throw new ClaudeExecutionError("Claude execution was cancelled", 1, "execution_cancelled");
     return await new Promise<{ exitCode: number; stderr: string; usage?: AiUsage }>((resolve, reject) => {
     const child = spawn(command, commandArgs, {
       cwd: input.workingDirectory,
       env: childEnv,
       stdio: ["ignore", "pipe", "pipe"],
+      detached: process.platform !== "win32",
     });
+    const startedAt = child.pid ? processStartTime(child.pid) : undefined;
     let pending = "";
     let stderr = "";
     let usage: AiUsage | undefined;
     let eventWrites = Promise.resolve();
     let logWrites = Promise.resolve();
+    let persistenceError: unknown;
     const appendLog = (text: string) => {
-      logWrites = logWrites.then(() => appendFile(input.logPath, text));
+      logWrites = logWrites.then(() => appendFile(input.logPath, text)).catch((error) => {
+        persistenceError ??= error;
+      });
     };
     const queueEvent = (raw: string) => {
       if (!raw.trim()) return;
@@ -643,20 +701,26 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
         try { event = JSON.parse(raw); } catch { event = { type: "unparsed", text: raw }; }
         usage = parseClaudeFinalUsage(event) ?? usage;
         await input.onEvent({ eventType: String(event?.type ?? "event"), event, raw });
+      }).catch((error) => {
+        persistenceError ??= error;
       });
-      void eventWrites.catch(() => undefined);
     };
-    let terminationTimer: NodeJS.Timeout | undefined;
     let outcome: "running" | "timeout" | "cancelled" = "running";
+    let killTimer: NodeJS.Timeout | undefined;
     const stop = (reason: "timeout" | "cancelled") => {
       if (outcome !== "running") return;
       outcome = reason;
-      child.kill("SIGTERM");
-      terminationTimer = setTimeout(() => child.kill("SIGKILL"), 5000);
+      terminateProcessTree(child, "SIGTERM");
+      killTimer = setTimeout(() => {
+        killTimer = undefined;
+        if (ownsProcessTree(child, startedAt)) terminateProcessTree(child, "SIGKILL");
+      }, input.killGraceMs ?? 5_000);
+      killTimer.unref();
     };
     const timeout = setTimeout(() => stop("timeout"), input.timeoutMs);
     const abort = () => stop("cancelled");
     input.signal?.addEventListener("abort", abort, { once: true });
+    if (input.signal?.aborted) abort();
     child.stdout.on("data", (chunk: Buffer) => {
       const text = chunk.toString("utf8");
       appendLog(text);
@@ -677,10 +741,15 @@ export async function invokeExecutionClaude(input: ExecutionInvocation) {
       queueEvent(pending);
       pending = "";
       clearTimeout(timeout);
-      if (terminationTimer) clearTimeout(terminationTimer);
+      if (killTimer && !ownsProcessTree(child, startedAt)) {
+        clearTimeout(killTimer);
+        killTimer = undefined;
+      }
       input.signal?.removeEventListener("abort", abort);
       Promise.all([eventWrites, logWrites]).then(() => {
-        if (outcome === "cancelled") {
+        if (persistenceError) {
+          reject(Object.assign(persistenceError instanceof Error ? persistenceError : new Error(String(persistenceError)), usage ? { usage } : {}));
+        } else if (outcome === "cancelled") {
           reject(new ClaudeExecutionError("Claude execution was cancelled", code ?? 1, "execution_cancelled", usage));
         } else if (outcome === "timeout" || code === 124) {
           reject(new ClaudeExecutionError("Claude execution timed out", 124, "execution_timeout", usage));

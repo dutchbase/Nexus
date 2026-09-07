@@ -38,6 +38,13 @@ export async function waitFor(
   throw new Error(`waitFor: timed out after ${timeoutMs}ms`);
 }
 
+export async function clickAndWaitForPost(page: Page, selector: string, pathSuffix: string) {
+  await Promise.all([
+    page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname.endsWith(pathSuffix)),
+    page.locator(selector).click(),
+  ]);
+}
+
 export type MockClaudeScenario = {
   mode: "plan_valid" | "plan_invalid" | "timeout" | "exec_stream" | "invalid_model_combo";
   plan_markdown?: string;
@@ -107,8 +114,7 @@ export async function createTicketViaUI(page: Page, title: string): Promise<stri
   await form.locator('select[name="project_id"]').selectOption({ index: 1 });
   await form.locator('input[name="title"]').fill(title);
   await form.locator('textarea[name="description"]').fill("Created through the admin UI by the e2e journey suite.");
-  await form.locator('button[type="submit"]').click();
-  await page.waitForURL("**/admin/tickets/DCC-*");
+  await Promise.all([page.waitForURL("**/admin/tickets/DCC-*"), form.locator('button[type="submit"]').click()]);
   const row = await queryOne("select ticket_number, status from tickets where title = $1", [title]);
   if (row?.status !== "Triage") throw new Error(`expected Triage after modal create, got ${row?.status}`);
   return row.ticket_number as string;
@@ -120,8 +126,7 @@ export async function submitPublicTicket(page: Page, title: string): Promise<str
   await page.locator('select[name="project_id"]').selectOption({ index: 1 });
   await page.locator('input[name="title"]').fill(title);
   await page.locator('textarea[name="description"]').fill("Public submission created by the e2e journey suite.");
-  await page.locator('button[type="submit"]').click();
-  await page.waitForURL("**/submitted**");
+  await Promise.all([page.waitForURL("**/submitted**"), page.locator('button[type="submit"]').click()]);
   let row: any;
   await waitFor(async () => {
     row = await queryOne("select ticket_number from tickets where title = $1", [title]);
@@ -136,7 +141,7 @@ export async function driveTicketToPlanApproved(page: Page, title: string): Prom
   const ticketNumber = await createTicketViaUI(page, title);
   const scenario = scenarioRef({ mode: "plan_valid", plan_markdown: DEFAULT_PLAN_MARKDOWN });
   await injectScenarioOnce(page, "/approve-planning", scenario);
-  await page.locator("[data-start-planning]").click();
+  await clickAndWaitForPost(page, "[data-start-planning]", "/approve-planning");
 
   const row = await queryOne("select id from tickets where ticket_number = $1", [ticketNumber]);
   await waitForTicketStatus(row.id, ["Plan Ready for Review"]);
@@ -163,7 +168,7 @@ export async function driveTicketToPrReady(page: Page, title: string): Promise<{
     exit_code: 0,
   } as any);
   await injectScenarioOnce(page, "/execute", scenario);
-  await page.locator("[data-start-execution]").click();
+  await clickAndWaitForPost(page, "[data-start-execution]", "/execute");
   await waitForTicketStatus(ticketId, ["PR Ready for Review"], 90_000);
   const pr = await queryOne(
     `select pr.id, pr.number from pull_requests pr

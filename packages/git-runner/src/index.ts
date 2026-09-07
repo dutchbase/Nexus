@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { execFile, spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { access, cp, lstat, mkdir, mkdtemp, readFile, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -78,6 +79,7 @@ export async function createExecutionWorktree(input: {
   ticketNumber: string;
   title: string;
   attemptNumber: number;
+  existingBaseCommit?: string | null;
 }) {
   const repository = await realpath(input.repositoryPath);
   const worktreePath = await managedWorktreePath(input.dataRoot, [
@@ -90,12 +92,34 @@ export async function createExecutionWorktree(input: {
   await assertRemoteBranchName(input.defaultBranch);
   const baseRef = `refs/remotes/origin/${input.defaultBranch}`;
   await exec("git", ["-C", repository, "fetch", "origin", `+refs/heads/${input.defaultBranch}:${baseRef}`]);
-  const baseCommit = (await exec("git", ["-C", repository, "rev-parse", baseRef])).stdout.trim();
+  const fetchedBaseCommit = (await exec("git", ["-C", repository, "rev-parse", baseRef])).stdout.trim();
+  let existing: string | null = null;
+  try { existing = await realpath(worktreePath); }
+  catch (error: any) { if (error?.code !== "ENOENT") throw error; }
+  if (existing) {
+    const [topLevel, branch, worktreeCommon, repositoryCommon] = await Promise.all([
+      exec("git", ["-C", existing, "rev-parse", "--show-toplevel"]),
+      exec("git", ["-C", existing, "branch", "--show-current"]),
+      exec("git", ["-C", existing, "rev-parse", "--git-common-dir"]),
+      exec("git", ["-C", repository, "rev-parse", "--git-common-dir"]),
+    ]);
+    const commonPath = (cwd: string, value: string) => realpath(path.resolve(cwd, value.trim()));
+    const [existingCommon, expectedCommon] = await Promise.all([
+      commonPath(existing, worktreeCommon.stdout), commonPath(repository, repositoryCommon.stdout),
+    ]);
+    if (await realpath(topLevel.stdout.trim()) !== existing || branch.stdout.trim() !== branchName || existingCommon !== expectedCommon) {
+      throw new Error("existing execution worktree does not belong to this attempt");
+    }
+    const baseCommit = input.existingBaseCommit ?? fetchedBaseCommit;
+    await exec("git", ["-C", existing, "cat-file", "-e", `${baseCommit}^{commit}`]);
+    await exec("git", ["-C", existing, "merge-base", "--is-ancestor", baseCommit, "HEAD"]);
+    return { worktreePath: existing, branchName, baseCommit, reused: true };
+  }
   // ponytail: -B resets a leftover branch from a previously-failed attempt of
   // the same execution_attempt (nothing deletes feedback/* branches), which
   // otherwise made every retry fail with "branch already exists".
-  await exec("git", ["-C", repository, "worktree", "add", "-B", branchName, worktreePath, baseCommit]);
-  return { worktreePath, branchName, baseCommit };
+  await exec("git", ["-C", repository, "worktree", "add", "-B", branchName, worktreePath, fetchedBaseCommit]);
+  return { worktreePath, branchName, baseCommit: fetchedBaseCommit, reused: false };
 }
 
 export async function worktreeDiff(worktreePath: string, baseCommit?: string | null) {
@@ -271,6 +295,20 @@ export async function removeManagedWorktree(repositoryPath: string, dataRoot: st
     throw error;
   }
   await exec("git", ["-C", repository, "worktree", "prune"]);
+}
+
+export async function removeNewExecutionWorktree(input: {
+  repositoryPath: string;
+  dataRoot: string;
+  worktreePath: string;
+  branchName: string;
+  reused: boolean;
+}) {
+  if (input.reused) return false;
+  await removeManagedWorktree(input.repositoryPath, input.dataRoot, input.worktreePath);
+  const repository = await realpath(input.repositoryPath);
+  await exec("git", ["-C", repository, "branch", "-D", input.branchName]);
+  return true;
 }
 
 export async function createConflictResolutionWorktree(input: {
@@ -517,7 +555,38 @@ export async function validateEffectiveWorktree(input: {
   return { files, results };
 }
 
-async function runCommand(worktreePath: string, command: string) {
+function terminateProcessTree(child: ReturnType<typeof spawn>, signal: NodeJS.Signals) {
+  if (!child.pid) return child.kill(signal);
+  if (process.platform === "win32") {
+    const killer = spawn("taskkill", ["/pid", String(child.pid), "/T", "/F"], { stdio: "ignore", windowsHide: true });
+    killer.on("error", () => child.kill(signal));
+    killer.unref();
+    return true;
+  }
+  try { return process.kill(-child.pid, signal); }
+  catch { return child.kill(signal); }
+}
+
+function processStartTime(pid: number) {
+  if (process.platform !== "linux") return undefined;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+  } catch {
+    return undefined;
+  }
+}
+
+function ownsProcessTree(child: ReturnType<typeof spawn>, startedAt: string | undefined) {
+  if (process.platform === "win32") return !child.killed;
+  if (!child.pid) return false;
+  const currentStart = processStartTime(child.pid);
+  if (startedAt && currentStart && currentStart !== startedAt) return false;
+  try { process.kill(-child.pid, 0); return true; }
+  catch { return false; }
+}
+
+async function runCommand(worktreePath: string, command: string, signal: AbortSignal, killGraceMs: number) {
   const sandbox = process.env.DCC_VALIDATION_BWRAP_PATH ?? "bwrap";
   const nodeRoot = path.dirname(path.dirname(await realpath(process.execPath)));
   const args = [
@@ -529,13 +598,56 @@ async function runCommand(worktreePath: string, command: string) {
     "--setenv", "PATH", "/opt/node/bin:/usr/bin:/bin", "--setenv", "HOME", "/tmp",
     "--setenv", "LANG", process.env.LANG ?? "C.UTF-8", "sh", "-lc", command,
   ];
-  try {
-    const result = await exec(sandbox, args, { maxBuffer: 16 * 1024 * 1024 });
-    return (result.stdout + result.stderr).trim();
-  } catch (error: any) {
-    const output = sanitizeValidationOutput(((error?.stdout ?? "") + (error?.stderr ?? "")).trim());
-    throw Object.assign(new Error("command failed"), { output });
-  }
+  if (signal.aborted) throw Object.assign(new Error("validation command cancelled"), { code: "validation_cancelled" });
+  return new Promise<string>((resolve, reject) => {
+    const child = spawn(sandbox, args, { stdio: ["ignore", "pipe", "pipe"], detached: process.platform !== "win32" });
+    const startedAt = child.pid ? processStartTime(child.pid) : undefined;
+    let stdout = "";
+    let stderr = "";
+    let settled = false;
+    let killTimer: NodeJS.Timeout | undefined;
+    const append = (current: string, chunk: Buffer) => {
+      const next = current + chunk.toString("utf8");
+      if (Buffer.byteLength(next) > 16 * 1024 * 1024) {
+        terminateProcessTree(child, "SIGKILL");
+        throw new Error("validation command output exceeded 16 MiB");
+      }
+      return next;
+    };
+    const finish = (action: () => void) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", abort);
+      if (killTimer && !ownsProcessTree(child, startedAt)) {
+        clearTimeout(killTimer);
+        killTimer = undefined;
+      }
+      action();
+    };
+    const abort = () => {
+      terminateProcessTree(child, "SIGTERM");
+      killTimer = setTimeout(() => {
+        killTimer = undefined;
+        if (ownsProcessTree(child, startedAt)) terminateProcessTree(child, "SIGKILL");
+      }, killGraceMs);
+      killTimer.unref();
+    };
+    signal.addEventListener("abort", abort, { once: true });
+    if (signal.aborted) abort();
+    child.stdout.on("data", (chunk: Buffer) => {
+      try { stdout = append(stdout, chunk); } catch (error) { finish(() => reject(error)); }
+    });
+    child.stderr.on("data", (chunk: Buffer) => {
+      try { stderr = append(stderr, chunk); } catch (error) { finish(() => reject(error)); }
+    });
+    child.on("error", (error) => finish(() => reject(error)));
+    child.on("close", (code) => finish(() => {
+      const output = sanitizeValidationOutput((stdout + stderr).trim());
+      if (signal.aborted) reject(Object.assign(new Error("validation command cancelled"), { code: "validation_cancelled", output }));
+      else if (code !== 0) reject(Object.assign(new Error("command failed"), { output }));
+      else resolve(output);
+    }));
+  });
 }
 
 async function packageScripts(worktreePath: string) {
@@ -574,7 +686,12 @@ export async function validateExecutionWorktree(input: {
   commands?: Partial<Record<"install" | "lint" | "typecheck" | "test" | "build", string>>;
   projectValidationCommands?: string[];
   skillValidationCommands?: string[];
+  signal?: AbortSignal;
+  timeoutMs?: number;
+  killGraceMs?: number;
 }) {
+  const deadline = AbortSignal.timeout(input.timeoutMs ?? 10 * 60 * 1000);
+  const signal = input.signal ? AbortSignal.any([input.signal, deadline]) : deadline;
   const effective = await validateEffectiveWorktree(input);
   const { files, results } = effective;
 
@@ -599,9 +716,15 @@ export async function validateExecutionWorktree(input: {
       continue;
     }
     try {
-      await runCommand(input.worktreePath, command);
+      await runCommand(input.worktreePath, command, signal, input.killGraceMs ?? 5_000);
       results.push({ check, status: "passed" });
     } catch (error: any) {
+      if (input.signal?.aborted) {
+        throw Object.assign(new Error("execution validation was cancelled"), { code: "execution_cancelled" });
+      }
+      if (deadline.aborted) {
+        throw new WorktreeValidationError(check, `${check} validation timed out`, results, error?.output);
+      }
       throw new WorktreeValidationError(check, `${check} validation failed`, results, error?.output);
     }
   }
@@ -623,8 +746,14 @@ export async function validateExecutionWorktree(input: {
     }
     for (const command of commands) {
       try {
-        await runCommand(input.worktreePath, command);
+        await runCommand(input.worktreePath, command, signal, input.killGraceMs ?? 5_000);
       } catch (error: any) {
+        if (input.signal?.aborted) {
+          throw Object.assign(new Error("execution validation was cancelled"), { code: "execution_cancelled" });
+        }
+        if (deadline.aborted) {
+          throw new WorktreeValidationError(check, `${check} timed out`, results, error?.output);
+        }
         throw new WorktreeValidationError(check, `${check} failed`, results, error?.output);
       }
     }

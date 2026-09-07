@@ -275,9 +275,9 @@ export async function completeJob(id: string, workerId: string): Promise<boolean
   return result.rowCount === 1;
 }
 
-export async function failJob(id: string, workerId: string, error: unknown): Promise<boolean> {
+export async function failJob(id: string, workerId: string, error: unknown, client?: pg.PoolClient): Promise<boolean> {
   const message = error instanceof Error ? error.message : "job failed";
-  const result = await pool.query(
+  const result = await (client ?? pool).query(
     `UPDATE jobs SET
        status = CASE WHEN attempt < max_attempts THEN 'queued' ELSE 'failed' END,
        available_at = CASE WHEN attempt < max_attempts THEN now() + make_interval(secs => LEAST(300, power(2, attempt)::integer)) ELSE available_at END,

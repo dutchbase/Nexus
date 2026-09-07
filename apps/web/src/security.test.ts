@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { describe, expect, test } from "vitest";
-import { clientIpOf, csrfMatches, securityHeaders, secureCookieAttributes, validateWebRuntime } from "./security.ts";
+import { clientIpOf, contentSecurityNonce, csrfMatches, securityHeaders, secureCookieAttributes, validateWebRuntime } from "./security.ts";
 
 describe("web security", () => {
   test("production requires the web role and a HTTPS public URL", () => {
@@ -31,6 +31,15 @@ describe("web security", () => {
       "x-frame-options": "DENY", "x-content-type-options": "nosniff", "referrer-policy": "no-referrer",
       "permissions-policy": expect.stringContaining("camera=()"),
     });
+  });
+
+  test("uses a distinct nonce and never enables arbitrary inline scripts", () => {
+    const first = contentSecurityNonce();
+    const second = contentSecurityNonce();
+    expect(first).not.toBe(second);
+    const csp = securityHeaders(false, first)["content-security-policy"];
+    expect(csp).toContain(`script-src 'self' 'nonce-${first}'`);
+    expect(csp).not.toContain("script-src 'self' 'unsafe-inline'");
   });
 
   test("adds HSTS in production only", () => {

@@ -2,10 +2,11 @@ import { readFile } from "node:fs/promises";
 import pg from "pg";
 import { expect, test } from "vitest";
 
-const migrationTest = process.env.DATABASE_URL ? test : test.skip;
+const testDatabaseUrl = process.env.DCC_TEST_DATABASE_URL;
+const migrationTest = testDatabaseUrl ? test : test.skip;
 
-migrationTest("migration 020 removes unsafe legacy notification configuration idempotently", async () => {
-  const client = new pg.Client({ connectionString: process.env.DATABASE_URL });
+migrationTest("migration 034 removes unsafe legacy notification configuration idempotently", async () => {
+  const client = new pg.Client({ connectionString: testDatabaseUrl });
   await client.connect();
   try {
     await client.query("CREATE TEMP TABLE notification_providers (name text NOT NULL, configuration_encrypted_json jsonb NOT NULL)");

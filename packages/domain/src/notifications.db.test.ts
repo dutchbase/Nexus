@@ -186,15 +186,17 @@ integration("enqueueNotification rule filtering", () => {
         [providerId, "ticket.created", ticketId, projectId, "exhaust-key", JSON.stringify({})],
       )).rows[0].id;
 
-      const updated = await failNotificationDelivery(deliveryId, "exhaust-worker", new Error("boom"), undefined, 2);
+      const updated = await failNotificationDelivery(deliveryId, "exhaust-worker", "HTTP 401 from notification endpoint", 401, 2);
       expect(updated).toBe(true);
 
       const row = (await client.query(
-        "SELECT status,attempt_count FROM notification_deliveries WHERE id=$1",
+        "SELECT status,attempt_count,error_message,response_status FROM notification_deliveries WHERE id=$1",
         [deliveryId],
       )).rows[0];
       expect(row.status).toBe("exhausted");
       expect(row.attempt_count).toBe(2);
+      expect(row.error_message).toBe("HTTP 401 from notification endpoint");
+      expect(row.response_status).toBe(401);
 
       const claimed = await claimNotificationDelivery("another-worker");
       expect(claimed).toBeNull();

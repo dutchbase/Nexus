@@ -366,7 +366,14 @@ schedule (cron doesn't inherit your service environment, so source it
 explicitly in the crontab line). Each backup is atomically published as one
 directory containing a database dump, managed data/config, and a manifest;
 `.env` files and any `secrets/`, `.key`, `.pem`, `.secret` paths are always
-excluded. Run `scripts/restore-drill.sh <backup-dir>` after a successful
+excluded. Finalized Git worktrees are stored as content archives: backup
+checks their registered commit, records that identity in the checksum-covered
+manifest, and removes checkout-specific `.git` pointers so recovery does not
+depend on the live repository. These archives retain evidence and files; they
+are not runnable Git worktrees. Re-establish external repositories before
+resuming work. Current restore drills require the artifact registry ledger, so
+create a fresh backup before using the current drill with an older backup.
+Run `scripts/restore-drill.sh <backup-dir>` after a successful
 backup to verify it's actually restorable — see `README`'s prior revision
 or `scripts/restore-drill.sh` itself for the full flag/marker contract.
 

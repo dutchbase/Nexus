@@ -1,5 +1,5 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from "vitest";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { cp, mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import pg from "pg";
@@ -24,19 +24,27 @@ async function resetDatabase() {
 }
 
 integration("artifact integrity migration", () => {
-  beforeAll(async () => {
-    migrationDirectory = await mkdtemp(join(tmpdir(), "dcc-artifact-integrity-"));
-    await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
-  });
-
   beforeEach(async () => {
     await resetDatabase();
+    migrationDirectory = await mkdtemp(join(tmpdir(), "dcc-artifact-integrity-"));
+    await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
     await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
   });
 
-  afterAll(async () => {
+  afterEach(async () => {
     if (migrationDirectory) await rm(migrationDirectory, { recursive: true, force: true });
   });
+
+  async function migrateBefore(name: string) {
+    await resetDatabase();
+    await rm(migrationDirectory, { recursive: true, force: true });
+    migrationDirectory = await mkdtemp(join(tmpdir(), "dcc-artifact-history-"));
+    const source = new URL("../migrations/", import.meta.url);
+    for (const migration of (await readdir(source)).filter((migration) => migration.endsWith(".sql") && migration < name)) {
+      await cp(new URL(migration, source), join(migrationDirectory, migration));
+    }
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+  }
 
   it("requires valid owners and only permits forward lifecycle changes", async () => {
     const client = new pg.Client({ connectionString: testDatabaseUrl });
@@ -103,10 +111,8 @@ integration("artifact integrity migration", () => {
   });
 
   it("backfills and serves a pre-022 controlled legacy execution log", async () => {
-    await resetDatabase();
     const migrationName = "024_historic_execution_log_artifacts.sql";
-    await rm(join(migrationDirectory, migrationName));
-    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    await migrateBefore(migrationName);
     const root = await mkdtemp(join(tmpdir(), "dcc-legacy-log-"));
     const runId = randomUUID();
     const storagePath = `logs/${runId}.log`;
@@ -115,7 +121,7 @@ integration("artifact integrity migration", () => {
     await client.connect();
     try {
       await client.query(
-        "INSERT INTO agent_runs (id,status,metadata_json) VALUES ($1,$q$completed$q$,jsonb_build_object($q$log_path$q$,$2))",
+        "INSERT INTO agent_runs (id,status,metadata_json) VALUES ($1,$q$completed$q$,jsonb_build_object($q$log_path$q$,$2::text))",
         [runId, legacyPath],
       );
       await mkdir(join(root, "logs"), { recursive: true });
@@ -139,10 +145,8 @@ integration("artifact integrity migration", () => {
   });
 
   it("preserves the legacy root when DCC_DATA_DIR differs during upgrade", async () => {
-    await resetDatabase();
     const migrationNames = ["024_historic_execution_log_artifacts.sql", "025_legacy_artifact_root.sql"];
-    await Promise.all(migrationNames.map((name) => rm(join(migrationDirectory, name))));
-    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    await migrateBefore(migrationNames[0]);
     const primaryRoot = await mkdtemp(join(tmpdir(), "dcc-primary-root-"));
     const legacyRoot = await mkdtemp(join(tmpdir(), "dcc-legacy-root-"));
     const runId = randomUUID();
@@ -151,7 +155,7 @@ integration("artifact integrity migration", () => {
     await client.connect();
     try {
       await client.query(
-        "INSERT INTO agent_runs (id,status,metadata_json) VALUES ($1,$q$completed$q$,jsonb_build_object($q$log_path$q$,$2))",
+        "INSERT INTO agent_runs (id,status,metadata_json) VALUES ($1,$q$completed$q$,jsonb_build_object($q$log_path$q$,$2::text))",
         [runId, `/old-data/${storagePath}`],
       );
       await mkdir(join(primaryRoot, "logs"), { recursive: true });
@@ -172,10 +176,8 @@ integration("artifact integrity migration", () => {
   });
 
   it("backfills only controlled legacy upload and worktree paths", async () => {
-    await resetDatabase();
     const migrationName = "030_artifact_provenance.sql";
-    await rm(join(migrationDirectory, migrationName));
-    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    await migrateBefore(migrationName);
     const client = new pg.Client({ connectionString: testDatabaseUrl });
     await client.connect();
     try {

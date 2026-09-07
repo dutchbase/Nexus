@@ -1,0 +1,549 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Nexus audit remediation report — 2026-09-06</title>
+<style>
+:root{color-scheme:light;--ink:#17232c;--muted:#596974;--line:#d7e0e5;--paper:#fff;--wash:#f4f7f8;--accent:#075985;--good:#166534;--warn:#92400e}
+*{box-sizing:border-box}body{margin:0;background:var(--wash);color:var(--ink);font:16px/1.55 system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1180px;margin:auto;background:var(--paper);min-height:100vh;padding:clamp(1.2rem,4vw,3.5rem)}h1{font-size:clamp(2rem,5vw,3.4rem);line-height:1.05;letter-spacing:-.035em;margin:.25rem 0 .2rem}.date{margin:0 0 1.5rem;color:var(--muted);font-weight:650}h2{margin:3rem 0 1rem;border-top:2px solid var(--ink);padding-top:1rem;font-size:1.55rem}h3{display:inline;font-size:1.15rem}p{max-width:82ch}.status{border-left:6px solid #16a34a;background:#f0fdf4;padding:1rem 1.2rem;margin:1.5rem 0 2rem;font-size:1.05rem}.hero{border:1px solid #7dd3fc;background:#f0f9ff;border-radius:10px;padding:1rem 1.2rem;margin:1rem 0 2rem;font-size:1.08rem}.tools{position:sticky;top:0;z-index:2;display:flex;gap:.75rem;align-items:center;padding:.75rem 0;background:rgba(255,255,255,.96);border-bottom:1px solid var(--line)}label{font-weight:650}input[type=search]{width:min(34rem,100%);font:inherit;padding:.55rem .75rem;border:1px solid #94a3b8;border-radius:6px}button{font:inherit;border:1px solid #94a3b8;background:white;border-radius:6px;padding:.45rem .7rem;cursor:pointer}.report-group{border:1px solid var(--line);border-radius:8px;margin:1rem 0;background:#fff}.report-group>summary{cursor:pointer;padding:.85rem 1rem;background:#f8fafc}.group-body{padding:0 1rem 1rem}.table-wrap{overflow-x:auto;margin:1rem 0}table{border-collapse:collapse;width:100%;font-size:.92rem}th,td{border:1px solid var(--line);padding:.55rem .65rem;text-align:left;vertical-align:top}th{background:#eaf0f3}td:first-child{font-weight:700;white-space:nowrap}tr[hidden]{display:none}.search-empty{display:none;color:var(--warn);font-weight:650}code{background:#eef2f4;border-radius:3px;padding:.08rem .25rem;font-size:.9em}pre{overflow:auto;background:#17232c;color:#f8fafc;padding:1rem;border-radius:8px}pre code{background:transparent;padding:0}a{color:var(--accent)}li{margin:.35rem 0}.footer{margin-top:3rem;color:var(--muted);border-top:1px solid var(--line);padding-top:1rem}
+@media(max-width:700px){main{padding:1rem}.tools{align-items:stretch;flex-direction:column}.tools input{width:100%}th,td{min-width:10rem}td:first-child{min-width:7rem}}
+@media print{body{background:white;font-size:10pt}main{max-width:none;padding:0}.tools{display:none}.report-group{break-inside:avoid;border:0}.report-group>summary{padding:.25rem 0;background:white;list-style:none}.group-body{padding:0}.table-wrap{overflow:visible}table{font-size:8pt}a{color:inherit;text-decoration:none}.status{border:1px solid #999}details{display:block}details>*{display:block}}
+</style>
+</head>
+<body><main>
+<h1>Nexus audit fixes</h1>
+<p class="date">6 September 2026</p><div class="hero"><strong>Ticket images now display correctly and can be used by the agents.</strong><br>Uploads can be previewed or downloaded, and approved image evidence reaches planning and execution.</div>
+<div class="status"><strong>Status: all 39 confirmed findings and 23 qualified follow-ups are remediated, independently reviewed and verified.</strong> The original audit remains unchanged in <a href="./audit-2026-09-06.md"><code>audit-2026-09-06.md</code></a>. This report records the completed work without claiming production perfection or live-provider validation.</div>
+<h2 id="what-changed">What changed</h2>
+<p><strong>Ticket images now display correctly and can be used by the agents.</strong> People can preview or download uploaded evidence from a ticket, and the same approved image reaches planning and execution.</p>
+<p>Other changes make cancellation and retries reliable, prevent merges from using changed branches, keep prompt history when a prompt is archived, verify that backups can be restored, improve public forms, add a working sign-out control, and make automated tests safe to run in isolation.</p>
+<div class="table-wrap"><table><thead><tr>
+<th>Scope</th>
+<th>Count</th>
+<th>Current disposition</th>
+</tr></thead><tbody>
+<tr class="search-row">
+<td>Confirmed audit findings</td>
+<td>39</td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>Qualified follow-ups</td>
+<td>23</td>
+<td>Remediated or explicitly retained; verified</td>
+</tr>
+<tr class="search-row">
+<td>Original audit changes</td>
+<td>0</td>
+<td>Preserved as the evidence source</td>
+</tr>
+</tbody></table></div>
+<h2 id="final-verification">Final verification</h2>
+<p>All local integrated gates passed on the settled source tree.</p>
+<ul>
+<li>Final combined TypeScript/unit gate: <strong>145 files passed, 18 skipped; 1,033 tests passed, 81 skipped</strong>. TypeScript passed.</li>
+<li>Final database gate: <strong>21 files / 117 tests passed</strong>, each in a fresh PostgreSQL 16 database. The separate real restore drill passed <strong>1 file / 1 test</strong>, for <strong>22 files / 118 database tests</strong> overall.</li>
+<li>Final isolated browser gate: <strong>38/38 journeys passed</strong> in 2.1 minutes.</li>
+<li>Standalone visual sweep: <strong>1/1 passed</strong> in 25.3 seconds and retained exactly <strong>170 PNG screenshots</strong> in the external per-run artifact directory, with no new checkout writes.</li>
+<li>Additional Chromium/API checks all passed with zero page errors: image upload plus decoded preview/download, read-only ticket GET, distinct matching CSP nonces with an untrusted inline script blocked, queue filters, SHA-pinned default-branch merge against a temporary bare Git repository with explicit confirmation and temporary-ref cleanup, logout and session invalidation.</li>
+<li>Frozen install passed and <code>pnpm audit --json</code> reported <strong>zero advisories</strong> at every severity.</li>
+</ul>
+<details class="report-group"><summary><h3>Earlier focused evidence</h3></summary><div class="group-body">
+<ul>
+<li>Web/domain focused run: <strong>84 files passed, 9 skipped; 449 tests passed, 20 skipped</strong>. Two real PostgreSQL web regressions passed, including concurrent upload claims and prompt archival.</li>
+<li>Integration/provider focused run: <strong>9 files, 131 tests passed</strong>. No live GitHub or GHCR writes were made.</li>
+<li>Operations focused run: <strong>9 files, 103 tests passed</strong>. A real PostgreSQL 16 recovery test exercised both a recorded corrupt failure and a successful restore.</li>
+<li>Parent database gate before the last workflow/security additions: <strong>17 files, 107 tests passed</strong>, each in its own fresh database. Four later workflow lock-race tests also passed.</li>
+<li>Parent login-quota database regression: <strong>3/3 passed</strong> in a fresh isolated PostgreSQL database.</li>
+<li>Final security-owner web run: <strong>62 files passed, 7 skipped; 290 tests passed, 10 skipped</strong>. Focused CSP/merge checks passed <strong>6 files / 31 tests</strong>, and the real login route passed <strong>2/2</strong>.</li>
+<li>Stable worker/runner aggregate: <strong>294 tests passed, 4 opt-in database tests skipped</strong>; those four separately passed on migrated PostgreSQL 16.</li>
+<li>Runner-focused evidence: Claude <strong>40</strong>, Git runner <strong>44</strong>, and OpenCode <strong>24</strong> tests passed, including TERM-ignoring descendant cleanup.</li>
+<li>Safe isolated Playwright harness before the final security/provider tail: <strong>38/38 passed</strong> in 2.2 minutes. Cleanup isolation also passed and retained logs/results outside its disposable data root.</li>
+<li>Frozen offline install passed. <code>pnpm audit --json</code> reported <strong>0</strong> info, low, moderate, high or critical advisories.</li>
+<li>TypeScript passed after the last resolved test typing correction; the final combined run above supersedes these focused counts.</li>
+</ul>
+</div></details>
+<h2 id="confirmed-findings-ledger">Confirmed findings ledger</h2>
+<div class="tools"><label for="ledger-search">Find a ledger item</label><input id="ledger-search" type="search" placeholder="Try WEB-03, cancellation, backup…"><button id="expand" type="button">Expand all</button><button id="collapse" type="button">Collapse all</button></div>
+<p>Every confirmed item below is implemented and included in the completed integrated verification above.</p>
+<details class="report-group" open><summary><h3>Integrations, promotion and notification</h3></summary><div class="group-body">
+<div class="table-wrap"><table><thead><tr>
+<th>ID</th>
+<th>Root cause and repair</th>
+<th>Implementation and focused verification</th>
+<th>Disposition</th>
+</tr></thead><tbody>
+<tr class="search-row">
+<td>INT-01</td>
+<td>PostgreSQL supplied <code>Date</code> values to a string-only workflow filter. Workflow discovery now accepts <code>Date | string</code> and compares epoch milliseconds.</td>
+<td><code>packages/github-provider/src/actions.ts</code>; <code>actions.test.ts</code>, <code>provider-jobs.deployment.test.ts</code></td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>INT-02</td>
+<td>Polling refreshed <code>updated_at</code> and indefinitely postponed the stuck-release deadline. Both mechanisms measure the timeout from immutable <code>created_at</code>.</td>
+<td><code>apps/worker/src/provider-jobs.ts</code>; <code>provider-jobs.deployment.test.ts</code></td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>INT-03</td>
+<td>Promotion could validate a later master SHA and deploy the earlier one. Eligibility, image and E2E evidence now consume the already pinned commit.</td>
+<td><code>apps/worker/src/provider-jobs.ts</code>; <code>provider-jobs.production-promotion.test.ts</code></td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>INT-04</td>
+<td>Open-PR lookup filtered only by head and could reuse a PR targeting another base. Lookup and both callers now bind the requested base.</td>
+<td><code>packages/github-provider/src/index.ts</code>, <code>apps/worker/src/provider-jobs.ts</code>, <code>execution-publication.ts</code>; provider/publication tests</td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>INT-05</td>
+<td>Bulk close updated the cached PR but skipped the canonical ticket transition. It now calls <code>setPullRequestTicketStatus</code>, including crash-retry repair while preserving merged/admin-terminal states.</td>
+<td><code>apps/worker/src/provider-jobs.ts</code>, <code>packages/domain/src/pull-request-sync.ts</code>; <code>close-pull-request-job.test.ts</code>, <code>pull-request-sync.test.ts</code></td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>INT-06</td>
+<td>A redacted string crossed an <code>Error</code>-only notification helper and was replaced by a generic message. The helper accepts and persists the actual redacted diagnostic.</td>
+<td><code>packages/domain/src/notifications.ts</code>; <code>notifications.test.ts</code>, <code>notifications.db.test.ts</code></td>
+<td>Implemented; real PG passed</td>
+</tr>
+<tr class="search-row">
+<td>INT-07</td>
+<td>The newest unrelated workflow hid the configured build/deploy workflow. Discovery selects a stable workflow identity containing all configured jobs, with bounded run/job pagination and an aggregate deadline.</td>
+<td><code>packages/github-provider/src/actions.ts</code>, <code>apps/worker/src/provider-jobs.ts</code>; actions/deployment tests</td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>INT-08</td>
+<td>GHCR token/manifest reads had no deadline and advisory checks could stall promotion. One bounded abort signal covers the operation and timeout maps to advisory <code>unknown</code>.</td>
+<td><code>packages/github-provider/src/registry.ts</code>; <code>registry.test.ts</code>, promotion tests</td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>INT-09</td>
+<td>An hour-bucket key replayed failed/refused promotion jobs. A retained per-click UUID dedupes one request while a later deliberate retry gets a fresh key immediately.</td>
+<td><code>apps/web/src/server.ts</code>, <code>ui.ts</code>; <code>production-promotion-routes.test.ts</code></td>
+<td>Fixed and verified</td>
+</tr>
+</tbody></table></div>
+</div></details>
+<details class="report-group" open><summary><h3>Operations, persistence and configuration</h3></summary><div class="group-body">
+<div class="table-wrap"><table><thead><tr>
+<th>ID</th>
+<th>Root cause and repair</th>
+<th>Implementation and focused verification</th>
+<th>Disposition</th>
+</tr></thead><tbody>
+<tr class="search-row">
+<td>OPS-1</td>
+<td>Migration 062 assumed production UUIDs and failed on ordinary duplicate repositories. Corrected migration 062 and forward migration 063 deterministically retain a configured-path survivor, retire duplicates without deleting append-only history, and enforce case-insensitive identity; migration 059 is now a portable no-op.</td>
+<td><code>packages/database/migrations/059_*</code>, <code>062_*</code>, <code>063_*</code>; <code>va-jobs-platform-reconciliation.db.test.ts</code>, <code>operations-migrations.test.ts</code></td>
+<td>Implemented; real PG passed</td>
+</tr>
+<tr class="search-row">
+<td>OPS-2</td>
+<td>Prompt Delete attempted to delete immutable versions. UI/API now archive by clearing <code>active_version_id</code>; the legacy action aliases archive and history remains intact.</td>
+<td><code>apps/web/src/server.ts</code>, <code>pages/projects.ts</code>; <code>project-prompt-archive.test.ts</code>, <code>.db.test.ts</code></td>
+<td>Implemented; real PG passed</td>
+</tr>
+<tr class="search-row">
+<td>OPS-3</td>
+<td>Primary and legacy aliases of one physical artifact root were swept independently. Reconciliation canonicalizes roots, unions registrations and sweeps each physical root once.</td>
+<td><code>packages/database/src/artifacts.ts</code>, <code>scripts/reconcile-artifacts.ts</code>, <code>apps/worker/src/worker.ts</code>; <code>artifacts.test.ts</code></td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>OPS-4</td>
+<td>Restore outcome SQL used unsupported psql interpolation in <code>-c</code>. It now uses stdin, records failed and successful outcomes, verifies registry hashes/bytes and restored data/config identities, and removes checkout-specific <code>.git</code> pointers from archived worktrees.</td>
+<td><code>scripts/backup.sh</code>, <code>restore-drill.sh</code>, <code>verify-artifact-registry.mjs</code>; <code>backup.test.ts</code>, <code>backup.integration.test.ts</code></td>
+<td>Implemented; real restore passed</td>
+</tr>
+<tr class="search-row">
+<td>OPS-5</td>
+<td>Same-SHA deployment retries collided with existing release paths. Retries accept only the exact expected symlinks and refuse conflicting files/links without deleting them.</td>
+<td><code>deploy.sh</code>; <code>scripts/task-8.test.ts</code></td>
+<td>Implemented; focused test passed</td>
+</tr>
+<tr class="search-row">
+<td>OPS-6</td>
+<td>YAML import dropped disabled state, agent path and defaults. Normalization maps columns, merges documented defaults, validates effective config and relies on the existing material-change version trigger.</td>
+<td><code>scripts/import-projects.ts</code>, <code>packages/project-config/src/index.ts</code>; <code>import-projects.test.ts</code>, project-config tests</td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>OPS-7</td>
+<td>Content sync treated explicitly inactive prompts as new and reactivated them. Prior version history now distinguishes inactive existing prompts from a new prompt.</td>
+<td><code>scripts/sync-agent-content.ts</code>; <code>superpowers-content.test.ts</code></td>
+<td>Implemented; focused test passed</td>
+</tr>
+</tbody></table></div>
+</div></details>
+<details class="report-group" open><summary><h3>Workflow, orchestration and runners</h3></summary><div class="group-body">
+<div class="table-wrap"><table><thead><tr>
+<th>ID</th>
+<th>Root cause and repair</th>
+<th>Implementation and focused verification</th>
+<th>Disposition</th>
+</tr></thead><tbody>
+<tr class="search-row">
+<td>WF-01</td>
+<td>Global Claude preflight blocked DeepSeek work. The worker claims first and preflights only the selected provider/job.</td>
+<td><code>apps/worker/src/worker.ts</code>, <code>worker-loop.ts</code>; <code>worker-loop.test.ts</code>, <code>task-7.test.ts</code></td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>WF-03</td>
+<td>Initialization/finalization could overwrite a concurrent cancellation. Both lock and recheck ticket/run state before atomic transitions and publication.</td>
+<td><code>apps/worker/src/workflow-state.ts</code>, <code>worker.ts</code>; <code>workflow-state.test.ts</code>, <code>.db.test.ts</code></td>
+<td>Implemented; 4 real PG races passed</td>
+</tr>
+<tr class="search-row">
+<td>WF-04</td>
+<td>Validators lacked deadline/cancellation. Detached process groups now have abort, timeout, bounded output and TERM-to-KILL escalation.</td>
+<td><code>packages/git-runner/src/index.ts</code>; <code>index.test.ts</code></td>
+<td>Implemented; 44 runner tests passed</td>
+</tr>
+<tr class="search-row">
+<td>WF-05</td>
+<td>OpenCode/Claude persistence rejections escaped as unhandled promises. Handlers attach immediately, retain the first write error and drain outstanding writes before rejection.</td>
+<td><code>apps/worker/src/opencode.ts</code>, <code>packages/claude-runner/src/index.ts</code>; runner tests</td>
+<td>Implemented; focused tests passed</td>
+</tr>
+<tr class="search-row">
+<td>WF-06</td>
+<td>Review publication retry skipped requested merge intent. An idempotent <code>afterPublish</code> hook runs for fresh, resumed and already-published paths and enqueues the pinned merge.</td>
+<td><code>packages/domain/src/pr-review-publication.ts</code>, <code>apps/worker/src/worker.ts</code>; publication tests</td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>WF-07</td>
+<td>A busy claim loop starved heartbeat and maintenance. Independent timers keep heartbeats active and prevent maintenance overlap; one injectable tick provides a test seam.</td>
+<td><code>apps/worker/src/worker-loop.ts</code>, <code>worker.ts</code>; <code>worker-loop.test.ts</code></td>
+<td>Implemented; focused test passed</td>
+</tr>
+<tr class="search-row">
+<td>WF-08</td>
+<td>Shutdown was recorded as user cancellation. Worker interruption has its own outcome, while canonical cancellation stays reserved for user/admin action.</td>
+<td><code>apps/worker/src/workflow-state.ts</code>, <code>worker.ts</code>; workflow-state tests</td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>WF-09</td>
+<td>Uploaded screenshots stopped at intake. Finalized image identity is approval-bound; the worker verifies hash/size and supplies private read-only controlled copies to Claude/OpenCode and handoffs.</td>
+<td><code>packages/domain/src/planning-inputs.ts</code>, <code>apps/worker/src/image-evidence.ts</code>, <code>execution-handoff.ts</code>; planning/image/handoff tests</td>
+<td>Implemented; focused tests passed</td>
+</tr>
+<tr class="search-row">
+<td>WF-10</td>
+<td>Pre-initialization failures could leave attempts queued and race lock order. Exact-job failure and expiry recovery lock ticket before job and reconcile atomically, preserving terminal cancellation.</td>
+<td><code>apps/worker/src/workflow-state.ts</code>, <code>worker.ts</code>; <code>workflow-state.test.ts</code>, <code>.db.test.ts</code></td>
+<td>Implemented; 4 real PG races passed</td>
+</tr>
+<tr class="search-row">
+<td>WF-11</td>
+<td>Review/conflict jobs accepted cancellation but handlers did not observe it. Signals reach subprocess/validation and a final transaction fence blocks publication; conflict logs are finalized artifacts.</td>
+<td><code>apps/worker/src/worker.ts</code>, <code>worker-boundary.ts</code>; workflow/cancellation tests</td>
+<td>Fixed and verified</td>
+</tr>
+</tbody></table></div>
+</div></details>
+<details class="report-group" open><summary><h3>Intake, tickets, UI and verification</h3></summary><div class="group-body">
+<div class="table-wrap"><table><thead><tr>
+<th>ID</th>
+<th>Root cause and repair</th>
+<th>Implementation and focused verification</th>
+<th>Disposition</th>
+</tr></thead><tbody>
+<tr class="search-row">
+<td>WEB-01</td>
+<td>Upload records omitted the finalized artifact path and reads guessed roots. Reads now trust registered root/path/status/SHA and use legacy fallback only when no registry row exists.</td>
+<td><code>apps/web/src/server.ts</code>; <code>public-intake-upload.test.ts</code>, <code>attachment-download-auth.test.ts</code></td>
+<td>Implemented; browser image passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-02</td>
+<td>Ticket attachments exposed only a download. Ticket detail now renders a lazy authenticated inline image with alt text plus an explicit original download.</td>
+<td><code>apps/web/src/pages/tickets.ts</code>, <code>server.ts</code>; <code>ticket-attachments.test.ts</code></td>
+<td>Implemented; browser image passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-03</td>
+<td>Submission trusted and claimed uploads incompletely. It accepts IDs only from declared image fields, validates/locks exact finalized rows and claims them in the ticket transaction.</td>
+<td><code>apps/web/src/server.ts</code>; <code>public-intake-upload.test.ts</code>, <code>.db.test.ts</code></td>
+<td>Implemented; concurrent real PG passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-04</td>
+<td>Server validation diverged from controls and admin edits bypassed it. Shared boundary checks cover required booleans, optional/finite numbers, ranges, options and candidate form edits under lock.</td>
+<td><code>apps/web/src/server.ts</code>; validation/edit/form-boundary tests</td>
+<td>Implemented; focused tests passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-05</td>
+<td>Normal ticket view hid saved structured input. It renders standard fields and all saved custom values, including values for later-removed fields.</td>
+<td><code>apps/web/src/pages/tickets.ts</code>; <code>tickets-get-no-mutation.test.ts</code></td>
+<td>Implemented; focused test passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-06</td>
+<td>No UI sign-out control existed. Admin navigation now posts the existing CSRF-protected logout route, clears the session and returns to login.</td>
+<td><code>apps/web/src/ui.ts</code>; <code>web-audit-ui.test.ts</code>, <code>auth.spec.ts</code></td>
+<td>Implemented; browser logout passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-07</td>
+<td>Every page displayed a fabricated healthy worker. The static indicator was removed; measured health pages remain authoritative.</td>
+<td><code>apps/web/src/ui.ts</code>; <code>web-audit-ui.test.ts</code></td>
+<td>Implemented; focused test passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-08</td>
+<td>Generic ticket PATCH bypassed the cancellation cascade. <code>Cancelled</code> delegates to the canonical locked transition and cannot be mixed with unrelated edits.</td>
+<td><code>apps/web/src/server.ts</code>; <code>ticket-cancel-cascade.test.ts</code></td>
+<td>Implemented; focused test passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-09</td>
+<td>Form builder could publish unroutable/unrenderable forms. Create/edit/publish validate slug, routing, core fields and required attachments on one locked candidate snapshot; public controls expose native constraints/help.</td>
+<td><code>apps/web/src/server.ts</code>, <code>ui.ts</code>; <code>form-boundaries.test.ts</code>, submission tests</td>
+<td>Implemented; focused tests passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-10</td>
+<td>E2E cleanup used fixed names, broad process kills and checkout data deletion. Harness resources are per-run, marker/PID-owned, credential-scrubbed and cleaned precisely; artifacts live outside the disposable root.</td>
+<td><code>tests/e2e/run-e2e.sh</code>, <code>verify-cleanup.sh</code>, CI workflow</td>
+<td>Implemented; cleanup + 38/38 passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-11</td>
+<td>Seed collided on a fresh migrated database and was not repeatable. Inserts tolerate migration-owned rows, project skills are conflict-safe, notifications are disabled and the seed runs twice in a real DB test.</td>
+<td><code>tests/e2e/fixtures/seed.sql</code>, <code>seed.db.test.ts</code></td>
+<td>Implemented; real PG passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-12</td>
+<td>CI skipped browser journeys and DB suites. CI runs frozen unit verification, discovers DB-gated files into isolated PG16 databases, performs real restore setup, runs cleanup/full browser journeys and uploads retained artifacts. Visual screenshots use Playwright's per-test output path, so successful evidence is isolated and included in that upload.</td>
+<td><code>.github/workflows/ci.yml</code>, <code>vitest.config.ts</code>, <code>tests/e2e/visual-sweep.spec.ts</code>, E2E helpers/mocks</td>
+<td>Implemented; 38/38 + visual 1/1 passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-13</td>
+<td>Vitest's dependency graph carried six advisory matches. Vitest 3.2.7, Vite 6.4.3 and nanoid 3.3.11 are pinned within the existing Node floor.</td>
+<td><code>package.json</code>, <code>pnpm-lock.yaml</code>; frozen install and audit</td>
+<td>Implemented; audit 0</td>
+</tr>
+</tbody></table></div>
+</div></details>
+<h2 id="qualified-follow-up-ledger">Qualified follow-up ledger</h2>
+<p>These items were not counted as confirmed findings in the original audit. They remain separate here even when one implementation closes several related risks.</p>
+<details class="report-group" open><summary><h3>Integration follow-ups (5)</h3></summary><div class="group-body">
+<div class="table-wrap"><table><thead><tr>
+<th>ID</th>
+<th>Follow-up disposition</th>
+<th>Implementation and evidence</th>
+<th>Status</th>
+</tr></thead><tbody>
+<tr class="search-row">
+<td>INT-F1 branch preview/ref race</td>
+<td>Web and worker require valid expected head and base SHAs. Atomic <code>updateRefs</code> creates a temporary ref at reviewed base, GitHub merges the pinned head into it, then a second CAS updates base and removes the temporary ref. Ref movement fails closed; cleanup is ownership-checked and recoverable.</td>
+<td><code>apps/web/src/server.ts</code>, <code>apps/worker/src/provider-jobs.ts</code>, <code>packages/github-provider/src/index.ts</code>; route/provider tests; mock GitHub real-bare-repo tests</td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>INT-F2 rollback ref race</td>
+<td>Rollback uses GraphQL ref CAS with <code>beforeOid=expectedProductionSha</code>, target commit and force semantics, so an external ref move is not overwritten.</td>
+<td>provider implementation/tests</td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>INT-F3 check conclusion policy</td>
+<td>The product policy now consistently treats completed <code>success</code>, <code>skipped</code> and <code>neutral</code> checks as successful required checks.</td>
+<td><code>packages/github-provider/src/index.ts</code>; provider policy tests</td>
+<td>Retained product choice, tested</td>
+</tr>
+<tr class="search-row">
+<td>INT-F4 ruleset-only policy</td>
+<td>Exact-branch rules and classic protection are combined using the strictest approvals and unioned required checks; unsupported review constraints produce an incomplete result.</td>
+<td><code>packages/github-provider/src/index.ts</code>; ruleset tests and E2E mock route</td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>INT-F5 PR publication race</td>
+<td>After create failure, publication repeats exact head/base lookup: a concurrently created matching PR is linked; otherwise the original provider failure remains.</td>
+<td><code>apps/worker/src/execution-publication.ts</code>; <code>publish-artifact-atomicity.test.ts</code></td>
+<td>Fixed and verified</td>
+</tr>
+</tbody></table></div>
+</div></details>
+<details class="report-group" open><summary><h3>Operations/security follow-ups (6)</h3></summary><div class="group-body">
+<div class="table-wrap"><table><thead><tr>
+<th>ID</th>
+<th>Follow-up disposition</th>
+<th>Implementation and evidence</th>
+<th>Status</th>
+</tr></thead><tbody>
+<tr class="search-row">
+<td>OPS-F1 account/IP login quota</td>
+<td>Sorted account/IP advisory locks make quota reservation atomic. A successful login marks only its own reservation, preserving shared-IP failures.</td>
+<td><code>apps/web/src/login-quota.ts</code>, <code>server.ts</code>; <code>login-quota.db.test.ts</code>, <code>login-route.db.test.ts</code></td>
+<td>Implemented; parent PG 3/3 passed</td>
+</tr>
+<tr class="search-row">
+<td>OPS-F2 nonce CSP</td>
+<td>Trusted renderer scripts receive one per-response nonce and <code>script-src</code> drops <code>unsafe-inline</code>; native event listeners replace inline handlers. Inline style attributes retain the documented style allowance.</td>
+<td><code>apps/web/src/security.ts</code>, <code>server.ts</code>, UI/pages; security/CSP tests and browser CSP probe</td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>OPS-F3 recovery content assurance</td>
+<td>Backup coordinates an artifact metadata fence, hashes registered bytes/worktree commits, writes a manifest-covered ledger, and restore validates registry/path/hash plus service root identities.</td>
+<td>backup/restore scripts and health route; real <code>backup.integration.test.ts</code></td>
+<td>Implemented; real restore passed</td>
+</tr>
+<tr class="search-row">
+<td>OPS-F4 migration checksums</td>
+<td>Newly applied SQL stores SHA-256/source and future runs reject mutation. Existing/renamed rows receive a clearly labeled first-seen <code>legacy_baseline</code>.</td>
+<td><code>packages/database/src/migrate.ts</code>; <code>migrate.test.ts</code></td>
+<td>Implemented; focused test passed</td>
+</tr>
+<tr class="search-row">
+<td>OPS-F5 CI recovery coverage</td>
+<td>CI provisions two explicitly disposable PG16 databases with matching clients and runs the repaired real backup integration.</td>
+<td><code>.github/workflows/ci.yml</code>, <code>scripts/backup.integration.test.ts</code></td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>OPS-F6 portable project seed/repository identity</td>
+<td>Migration 059 no longer enables an external project on new installs; repository uniqueness is case-insensitive and duplicates are reconciled without erasing history.</td>
+<td>migrations 059/062/063; real migration tests</td>
+<td>Implemented; real PG passed</td>
+</tr>
+</tbody></table></div>
+</div></details>
+<details class="report-group" open><summary><h3>Workflow/runner follow-ups (7)</h3></summary><div class="group-body">
+<div class="table-wrap"><table><thead><tr>
+<th>ID</th>
+<th>Follow-up disposition</th>
+<th>Implementation and evidence</th>
+<th>Status</th>
+</tr></thead><tbody>
+<tr class="search-row">
+<td>WF-02 same-attempt worktree recovery</td>
+<td>A retry reuses only a contained worktree on the expected branch/common Git dir whose approved base remains an ancestor. New worktrees are removed with their branch if initialization fails; reused progress is preserved.</td>
+<td><code>packages/git-runner/src/index.ts</code>, <code>apps/worker/src/worker.ts</code>; real temporary-repository tests</td>
+<td>Implemented; 44 runner tests passed</td>
+</tr>
+<tr class="search-row">
+<td>WF-F1 pre-aborted Claude setup</td>
+<td>Claude checks abort before spawn and again after async setup, so a cancellation during setup cannot start the agent.</td>
+<td><code>packages/claude-runner/src/index.ts</code>; runner tests</td>
+<td>Implemented; 40 tests passed</td>
+</tr>
+<tr class="search-row">
+<td>WF-F2 process-tree cancellation</td>
+<td>Claude, Git validation and OpenCode use owned process groups, TERM/KILL escalation and Linux start-time checks; escalation survives direct-child exit while a descendant remains.</td>
+<td>three runner implementations/tests</td>
+<td>Implemented; 40/44/24 tests passed</td>
+</tr>
+<tr class="search-row">
+<td>WF-F3 publication snapshot</td>
+<td>Review retry uses the approved owner/repository/default branch snapshot and exact-base PR lookup rather than live project config.</td>
+<td><code>apps/worker/src/execution-publication.ts</code>; publication tests</td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>WF-F4 expired cancellation recovery</td>
+<td><code>cancellation_requested</code> work is recovered as cancellation and cannot be requeued into active ticket state.</td>
+<td><code>apps/worker/src/workflow-state.ts</code>; unit + real PG race tests</td>
+<td>Implemented; real PG passed</td>
+</tr>
+<tr class="search-row">
+<td>WF-F5 conflict diagnostics</td>
+<td>Bounded conflict logs are staged/finalized as persistent artifacts instead of disappearing with temporary directories.</td>
+<td><code>apps/worker/src/worker.ts</code>; conflict workflow tests</td>
+<td>Fixed and verified</td>
+</tr>
+<tr class="search-row">
+<td>WF-F6 worker test seam</td>
+<td>A small <code>runWorkerTick</code> boundary exposes claim/dispatch/idle behavior without introducing an orchestration framework.</td>
+<td><code>apps/worker/src/worker-loop.ts</code>; <code>worker-loop.test.ts</code></td>
+<td>Implemented; focused test passed</td>
+</tr>
+</tbody></table></div>
+</div></details>
+<details class="report-group" open><summary><h3>Intake/public workflow follow-ups (5)</h3></summary><div class="group-body">
+<div class="table-wrap"><table><thead><tr>
+<th>ID</th>
+<th>Follow-up disposition</th>
+<th>Implementation and evidence</th>
+<th>Status</th>
+</tr></thead><tbody>
+<tr class="search-row">
+<td>WEB-I1 read-only ticket GET</td>
+<td>Admin ticket GET no longer mutates Submitted to Triage; acknowledgment stays explicit.</td>
+<td><code>apps/web/src/server.ts</code>; <code>ticket-api-readonly.test.ts</code></td>
+<td>Implemented; focused test passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-I2 safe submission retries</td>
+<td>UI blocks concurrent clicks, retains unchanged upload IDs and one idempotency key through network/429/5xx retries, rotates after definite validation rejection, and preserves inputs/errors. Server checks cached success before quota/current-form validation and serializes concurrent keys.</td>
+<td><code>apps/web/src/ui.ts</code>, <code>server.ts</code>; submission/upload unit + real PG tests</td>
+<td>Implemented; real PG passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-I3 board truncation</td>
+<td>Board fetches one row beyond its 200-card cap and clearly directs users to filters/table view when older cards are hidden.</td>
+<td><code>apps/web/src/pages/tickets.ts</code>; <code>tickets-board-limit.test.ts</code></td>
+<td>Implemented; focused test passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-I4 safe Markdown/diff</td>
+<td>Renderer escapes HTML, restricts link schemes and supports declared headings/fences/tables/lists. Diff aligns lines by bounded LCS after common edges, with a truthful delete/add fallback above one million cells.</td>
+<td><code>apps/web/src/pages/shared.ts</code>; <code>shared.test.ts</code></td>
+<td>Implemented; focused tests passed</td>
+</tr>
+<tr class="search-row">
+<td>WEB-I5 form instructions/help</td>
+<td>Public forms render escaped static instructions, descriptions, placeholders, required state and numeric limits with accessible native controls.</td>
+<td><code>apps/web/src/ui.ts</code>; submission/UI tests</td>
+<td>Implemented; focused tests passed</td>
+</tr>
+</tbody></table></div>
+</div></details>
+<h2 id="operational-boundaries-and-retained-choices">Operational boundaries and retained choices</h2>
+<ul>
+<li>No live GitHub, model-provider or deployment writes were used. GitHub behavior is checked with a controlled mock that operates on temporary bare Git repositories and models atomic ref CAS, including zero-OID create/delete.</li>
+<li>Screenshot delivery is verified through selection, approval hashing, byte/hash validation and runner file/argument boundaries. It does not prove that a live model understood an image.</li>
+<li>Legacy migration checksums are first-seen baselines, not recovered historical signatures. New installations start with an empty project registry.</li>
+<li>Worktree backups are content/evidence archives without checkout-specific <code>.git</code> links. External source repositories must be re-established before work resumes. Backups created before the registry ledger change need a fresh backup for the current restore drill.</li>
+<li>CSP intentionally continues to allow inline <strong>style attributes</strong> for the existing UI. Executable scripts use trusted response nonces.</li>
+<li>The Markdown renderer documents and tests a small supported subset; it does not attempt full CommonMark. Oversized diffs use an explicit safe fallback instead of allocating an unbounded LCS matrix.</li>
+</ul>
+<h2 id="reproducible-release-gates">Reproducible release gates</h2>
+<p>The integrated verification used the following release commands against the settled tree:</p>
+<pre><code>
+rtk proxy npm exec --package=pnpm@11.17.0 -- pnpm install --frozen-lockfile
+rtk proxy npm exec --package=pnpm@11.17.0 -- pnpm verify
+rtk proxy npm exec --package=pnpm@11.17.0 -- pnpm audit --json
+</code></pre>
+<p>Database-gated test files must each receive a fresh disposable PostgreSQL 16 database; the backup integration additionally needs a second marked disposable restore database and matching PG16 clients. Browser verification uses:</p>
+<pre><code>
+E2E_ARTIFACT_DIR=/tmp/nexus-e2e-final tests/e2e/verify-cleanup.sh
+E2E_ARTIFACT_DIR=/tmp/nexus-e2e-final tests/e2e/run-e2e.sh
+</code></pre>
+<p>All local gates completed successfully. Live GitHub/model/deployment writes remain outside the declared verification boundary described above.</p>
+<p class="search-empty" id="search-empty">No ledger row matches this search.</p>
+<p class="footer">Generated from the matching Markdown remediation ledger. The original audit is preserved unchanged.</p>
+</main>
+<script>
+const search=document.querySelector('#ledger-search');
+const rows=[...document.querySelectorAll('.search-row')];
+const empty=document.querySelector('#search-empty');
+search.addEventListener('input',()=>{const q=search.value.trim().toLowerCase();let shown=0;for(const row of rows){const hit=!q||row.textContent.toLowerCase().includes(q);row.hidden=!hit;if(hit)shown++}empty.style.display=q&&shown===0?'block':'none';if(q)for(const detail of document.querySelectorAll('details'))detail.open=true});
+document.querySelector('#expand').addEventListener('click',()=>document.querySelectorAll('details').forEach(d=>d.open=true));
+document.querySelector('#collapse').addEventListener('click',()=>document.querySelectorAll('details').forEach(d=>d.open=false));
+</script>
+</body></html>

@@ -16,11 +16,11 @@ export function logoMark(letter = "N", size: "sm" | "md" = "md") {
   return `<span class="brand-mark" style="${dims}">${letter}</span>`;
 }
 
-function document(title: string, content: string, script = "") {
-  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><link rel="stylesheet" href="/assets/design-tokens.css"></head><body>${content}${script ? `<script>${script}</script>` : ""}</body></html>`;
+function document(title: string, content: string, script = "", nonce = "") {
+  return `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)}</title><link rel="stylesheet" href="/assets/design-tokens.css"></head><body>${content}${script ? `<script nonce="${escapeHtml(nonce)}">${script}</script>` : ""}</body></html>`;
 }
 
-export function loginPage() {
+export function loginPage(nonce = "") {
   return document("Sign in", `<main class="login"><section class="login-card">
     <div class="login-intro"><div style="display:flex;align-items:center;gap:10px;margin-bottom:14px">${logoMark("N", "md")}<span class="eyebrow" style="margin:0">Nexus</span></div><h1>Feedback in.<br><em>Reviewed code out.</em></h1><p>One controlled workflow from public feedback to reviewed delivery.</p></div>
     <form class="login-form" id="login"><div class="eyebrow">Sign in</div><h2>Administrator</h2>
@@ -33,7 +33,7 @@ export function loginPage() {
         const response=await fetch("/api/admin/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(Object.fromEntries(form))});
         const body=await response.json();if(!response.ok){document.querySelector(".error").textContent=body.error;return}
         sessionStorage.setItem("dccCsrf",body.csrfToken);location.href="/admin";
-      });`);
+      });`, nonce);
 }
 
 const groups = [
@@ -43,7 +43,7 @@ const groups = [
   ["Operate", [["Notifications", "/admin/notifications", "notifications"], ["AI usage", "/admin/ai-usage", ""], ["Audit log", "/admin/audit", ""], ["Settings", "/admin/settings", ""], ["System", "/admin/system", ""]]],
 ] as const;
 
-export function adminPage(path: string, title: string, body: string, counts: Record<string, number>, username: string) {
+export function adminPage(path: string, title: string, body: string, counts: Record<string, number>, username: string, nonce = "") {
   const nav = groups.map(([label, items]) => `<div class="nav-group"><div class="nav-label">${label}</div>${items.map(([name, href, count]) => {
     const active = href === "/admin" ? path === href : path === href || path.startsWith(`${href}/`);
     return `<a class="nav-item${active ? " active" : ""}" href="${href}"${active ? ' aria-current="page"' : ""}><span>${name}</span>${count ? `<span class="badge">${counts[count] ?? 0}</span>` : ""}</a>`;
@@ -65,14 +65,16 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
   const breadcrumb = section ? `<span class="eyebrow">${section}</span><span>/</span><span>${escapeHtml(title)}</span>` : `<span class="eyebrow">Nexus</span><span>/</span><span>${escapeHtml(title)}</span>`;
 
   return document(title, `<div class="shell"><aside class="sidebar" id="sidebar"><div class="brand">${logoMark("N", "md")}<div class="brand-title">Nexus</div></div>
-    <nav class="nav" aria-label="Primary">${nav}</nav><footer class="sidebar-footer"><div class="theme"><button data-theme-choice="light">Light</button><button data-theme-choice="auto">Auto</button><button data-theme-choice="dark">Dark</button></div><p>${escapeHtml(username)} · administrator</p></footer></aside>
+    <nav class="nav" aria-label="Primary">${nav}</nav><footer class="sidebar-footer"><div class="theme"><button data-theme-choice="light">Light</button><button data-theme-choice="auto">Auto</button><button data-theme-choice="dark">Dark</button></div><p>${escapeHtml(username)} · administrator</p><button class="button" type="button" data-logout>Sign out</button></footer></aside>
     <button class="scrim" type="button" data-scrim hidden aria-label="Close navigation menu"></button>
-    <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}<span class="worker"><span style="display:inline-block;width:6px;height:6px;border-radius:50%;background:var(--t-ok);box-shadow:0 0 0 4px color-mix(in srgb, var(--t-ok) 20%, transparent);margin-right:6px;vertical-align:middle"></span>worker-01 healthy</span>${path === "/admin/forms" || path.startsWith("/admin/forms/") ? `<a class="button" href="/f/website-feedback">Public form</a>` : ""}</header><main class="main">${body}</main></div></div>`, `
+    <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}${path === "/admin/forms" || path.startsWith("/admin/forms/") ? `<a class="button" href="/f/website-feedback">Public form</a>` : ""}</header><main class="main">${body}</main></div></div>`, `
       const cc=document.cookie.match(/(?:^|;\\s*)dcc_csrf=([^;]*)/);if(cc)sessionStorage.setItem("dccCsrf",cc[1]);
+      document.querySelector("[data-logout]")?.addEventListener("click",async()=>{const response=await fetch("/api/admin/logout",{method:"POST",headers:{"x-csrf-token":sessionStorage.getItem("dccCsrf")||""}});if(response.ok){sessionStorage.clear();location.href="/login"}});
       const choice=localStorage.getItem("dccTheme")||"auto";
       const apply=(value)=>{const dark=value==="dark"||(value==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light";document.querySelectorAll("[data-theme-choice]").forEach(b=>b.classList.toggle("selected",b.dataset.themeChoice===value))};
       apply(choice);matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{if((localStorage.getItem("dccTheme")||"auto")==="auto")apply("auto")});
-      document.querySelectorAll("[data-theme-choice]").forEach(b=>b.addEventListener("click",()=>{localStorage.setItem("dccTheme",b.dataset.themeChoice);apply(b.dataset.themeChoice)}));
+       document.querySelectorAll("[data-theme-choice]").forEach(b=>b.addEventListener("click",()=>{localStorage.setItem("dccTheme",b.dataset.themeChoice);apply(b.dataset.themeChoice)}));
+       document.querySelectorAll("[data-auto-submit]").forEach(el=>el.addEventListener("change",()=>el.form?.submit()));
       const sidebar=document.querySelector(".sidebar"),scrim=document.querySelector("[data-scrim]"),opener=document.querySelector("[data-nav-open]");
       const closeNav=()=>{sidebar.classList.remove("open");scrim.hidden=true;opener?.setAttribute("aria-expanded","false");opener?.focus()};
       opener?.addEventListener("click",()=>{sidebar.classList.add("open");scrim.hidden=false;opener.setAttribute("aria-expanded","true");sidebar.querySelector("a.nav-item")?.focus()});
@@ -404,44 +406,6 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             if(!response.ok){const result=await response.json();alert(result.error);checkbox.checked=!checkbox.checked}
           });
         });
-        document.querySelector("[data-merge-branches-form]")?.addEventListener("submit",async(event)=>{
-          event.preventDefault();
-          const form=event.currentTarget,button=form.querySelector("button[type=submit]");
-          const payload=Object.fromEntries(new FormData(form));
-          button.disabled=true;
-          // First attempt shares the hourly idempotency bucket (double-click
-          // dedupe). After a failure, a fresh request_id escapes the bucket so
-          // the merge can actually be retried.
-          let requestId="";
-          const send=(extra)=>fetch("/api/admin/projects/"+projectId+"/merge-branches",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({...payload,...(requestId?{request_id:requestId}:{}),...extra})});
-          let response=await send({});
-          if(response.status===409&&((await response.clone().json().catch(()=>({}))).code)==="confirm_default_branch"){
-            button.disabled=false;
-            if(!confirm("This merges directly into the default branch, bypassing PR review. Continue?"))return;
-            button.disabled=true;response=await send({confirm_default_branch:true});
-          }
-          const result=await response.json().catch(()=>({}));
-          if(!response.ok){button.disabled=false;alert(result.error||"Merge failed to queue");return}
-          // The merge runs in the worker — poll the job until it is terminal
-          // instead of pretending it succeeded.
-          const jobId=result.job&&result.job.id;
-          let settled=false;
-          for(let i=0;i<60;i++){
-            await new Promise(r=>setTimeout(r,1000));
-            const status=await fetch("/api/admin/jobs/"+jobId,{headers:{"x-csrf-token":csrf}}).then(r=>r.json()).catch(()=>null);
-            const s=status&&status.job&&status.job.status;
-            if(s==="completed"){
-              settled=true;
-              const outcome=status.job.result_json?status.job.result_json.outcome:null;
-              alert(outcome==="merged"?"Merged into "+payload.base+" ("+(status.job.result_json.sha||"").slice(0,7)+").":outcome==="already_up_to_date"?"Already up to date — nothing to merge.":outcome==="conflict"?"Merge CONFLICT: "+payload.head+" could not be merged into "+payload.base+" cleanly. Open a pull request to resolve it.":"Merge finished with unknown outcome: "+JSON.stringify(status.job.result_json||{}));
-              break;
-            }
-            if(s==="failed"){settled=true;alert("Merge failed: "+((status.job.error_json||{}).message||"see worker logs")+" — submitting again will retry with a fresh job.");break}
-          }
-          if(!settled)alert("Merge still running after a minute — check the Operate page for the job result.");
-          button.disabled=false;
-          if(settled&&s==="failed")requestId=crypto.randomUUID();
-        });
         document.querySelector("[data-add-override-form]")?.addEventListener("submit",async(event)=>{
           event.preventDefault();
           const form=event.currentTarget,button=form.querySelector("button[type=submit]");button.disabled=true;
@@ -461,7 +425,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           const ids=promptChecks.filter(c=>c.checked).map(c=>c.value);
           if(!ids.length){alert("Select one or more prompts");return}
           const action=button.dataset.promptBulk;
-          if(action==="delete"&&!confirm("Delete the selected prompt overrides?"))return;
+          if(action==="archive"&&!confirm("Archive the selected prompt overrides? Their version history will be preserved."))return;
           button.disabled=true;
           const response=await fetch("/api/admin/projects/"+projectId+"/prompts/bulk",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({action,ids})});
           const result=await response.json();
@@ -543,7 +507,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           dialog.querySelector("[data-promote-dialog-confirm]").addEventListener("click",async()=>{
             dialog.close();
             promoteButton.disabled=true;promoteReason.textContent="Promoting…";
-            const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/promote",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({commit_sha:lastCheck.master_sha,expected_master_sha:lastCheck.master_sha})});
+            const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/promote",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({commit_sha:lastCheck.master_sha,expected_master_sha:lastCheck.master_sha,request_id:crypto.randomUUID()})});
             const body=await queued.json().catch(()=>({}));
             if(!queued.ok){promoteReason.textContent="Could not start promotion: "+(body.error||queued.status);return;}
             const done=await pollJob(body.job.id,20000);
@@ -892,10 +856,12 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         mergeButton.addEventListener("click",async()=>{
           const projectId=projectSelect.value,head=fromSelect.value,base=intoSelect.value;
           const preview=lastPreview&&lastPreview.head===head&&lastPreview.base===base?lastPreview.result:null;
-          if(!preview||preview.outcome!=="clean"||!confirm("Merge "+head+" into "+base+" directly on GitHub (no pull request)?"))return;
+          const defaultBranch=projectSelect.selectedOptions[0]?.dataset.defaultBranch;
+          const targetsDefaultBranch=Boolean(defaultBranch&&base===defaultBranch);
+          if(!preview||preview.outcome!=="clean"||!confirm("Merge "+head+" into "+base+" directly on GitHub (no pull request)?"+(targetsDefaultBranch?" This is the project's default branch.":"")))return;
           mergeButton.disabled=true;setStatus("Merging "+head+" into "+base+"…");
           try{
-            const queued=await fetch("/api/admin/projects/"+projectId+"/merge-branches",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({head,base,expected_head_sha:preview.head.sha,expected_base_sha:preview.base.sha})});
+            const queued=await fetch("/api/admin/projects/"+projectId+"/merge-branches",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({head,base,expected_head_sha:preview.head.sha,expected_base_sha:preview.base.sha,confirm_default_branch:targetsDefaultBranch,request_id:crypto.randomUUID()})});
             const queuedBody=await queued.json().catch(()=>({}));
             if(!queued.ok){setStatus("Merge could not be queued: "+(queuedBody.error||queued.status),"danger");return;}
             const done=await pollJob(queuedBody.job.id,120000);
@@ -985,7 +951,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           dialog.querySelector("[data-production-promote-dialog-confirm]").addEventListener("click",async()=>{
             dialog.close();
             promoteButton.disabled=true;promoteReason.textContent="Deploying…";
-            const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/promote",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({commit_sha:lastCheck.master_sha,expected_master_sha:lastCheck.master_sha})});
+            const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/promote",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({commit_sha:lastCheck.master_sha,expected_master_sha:lastCheck.master_sha,request_id:crypto.randomUUID()})});
             const body=await queued.json().catch(()=>({}));
             if(!queued.ok){promoteReason.textContent="Could not start deployment: "+(body.error||queued.status);return;}
             const done=await pollProductionJob(body.job.id,20000);
@@ -1008,7 +974,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           forceDialog.querySelector("[data-production-force-dialog-confirm]").addEventListener("click",async()=>{
             forceDialog.close();
             promoteReason.textContent="Forcing production…";
-            const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/promote-force",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({commit_sha:lastCheck.master_sha,expected_master_sha:lastCheck.master_sha,confirm_diverged:true})});
+            const queued=await fetch("/api/admin/projects/"+projectId+"/deployment/promote-force",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({commit_sha:lastCheck.master_sha,expected_master_sha:lastCheck.master_sha,confirm_diverged:true,request_id:crypto.randomUUID()})});
             const body=await queued.json().catch(()=>({}));
             if(!queued.ok){promoteReason.textContent="Could not force: "+(body.error||queued.status);return;}
             const done=await pollProductionJob(body.job.id,20000);
@@ -1346,59 +1312,67 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           poll();
         }
       `:""}
-    `);
+     `, nonce);
 }
 
 export function formControls(fields: any[], projects: any[], values: Record<string, any> = {}, mode: "public" | "admin" = "public") {
-  return fields.filter((field) => field.field_type !== "static" && (mode === "public" || !["hidden", "image_upload"].includes(field.field_type))).map((field) => {
+  return fields.filter((field) => mode === "public" || !["static", "hidden", "image_upload"].includes(field.field_type)).map((field) => {
     const name = escapeHtml(field.field_key);
+    if (field.field_type === "static") return `<section class="form-help"><strong>${escapeHtml(field.label)}</strong>${field.description ? `<p>${escapeHtml(field.description)}</p>` : ""}</section>`;
     const required = field.required ? " required" : "";
     const type = field.field_type;
     const value = mode === "admin" ? escapeHtml(values[field.field_key]) : "";
+    const helpId = `field-${name}-help`;
+    const describedBy = field.description ? ` aria-describedby="${helpId}"` : "";
+    const placeholder = field.placeholder ? ` placeholder="${escapeHtml(field.placeholder)}"` : "";
     const options = (Array.isArray(field.options_json) ? field.options_json : []).map((option: any) => {
       const optionValue = option.value ?? option;
       const selected = mode === "admin" && (type === "multi_select" ? Array.isArray(values[field.field_key]) ? values[field.field_key] : values[field.field_key] == null ? [] : [values[field.field_key]] : [values[field.field_key]]).some((value: any) => String(optionValue) === String(value));
       return `<option value="${escapeHtml(optionValue)}"${selected ? " selected" : ""}>${escapeHtml(option.label ?? option)}</option>`;
     }).join("");
-    let control = `<input name="${name}" placeholder="${escapeHtml(field.placeholder)}"${mode === "admin" ? ` value="${value}"` : ""}${required}>`;
-    if (type === "long_text") control = `<textarea name="${name}" rows="5"${required}>${value}</textarea>`;
-    if (type === "email" || type === "url" || type === "number") control = `<input name="${name}" type="${type}"${mode === "admin" ? ` value="${value}"` : ""}${required}>`;
+    let control = `<input name="${name}"${placeholder}${describedBy}${mode === "admin" ? ` value="${value}"` : ""}${required}>`;
+    if (type === "long_text") control = `<textarea name="${name}" rows="5"${placeholder}${describedBy}${required}>${value}</textarea>`;
+    if (type === "email" || type === "url" || type === "number") control = `<input name="${name}" type="${type}"${placeholder}${describedBy}${type === "number" && Number.isFinite(field.validation_json?.min) ? ` min="${field.validation_json.min}"` : ""}${type === "number" && Number.isFinite(field.validation_json?.max) ? ` max="${field.validation_json.max}"` : ""}${mode === "admin" ? ` value="${value}"` : ""}${required}>`;
     if (type.includes("selector") || ["dropdown", "radio", "multi_select"].includes(type)) {
       const choices = type === "project_selector" ? projects.map((project) => `<option value="${project.id}"${mode === "admin" && String(project.id) === String(values[field.field_key]) ? " selected" : ""}>${escapeHtml(project.name)}</option>`).join("") : options;
-      control = `<select name="${name}"${type === "multi_select" ? " multiple" : ""}${required}>${choices}</select>`;
+      control = `<select name="${name}"${describedBy}${type === "multi_select" ? " multiple" : ""}${required}>${choices}</select>`;
     }
-    if (type === "checkbox") control = `<input name="${name}" type="checkbox" value="true"${mode === "admin" && values[field.field_key] ? " checked" : ""}>`;
+    if (type === "checkbox") control = `<input name="${name}" type="checkbox" value="true"${describedBy}${required}${mode === "admin" && values[field.field_key] ? " checked" : ""}>`;
     if (type === "hidden") return `<label class="honeypot" aria-hidden="true">${escapeHtml(field.label)}<input name="${name}" tabindex="-1" autocomplete="off"></label>`;
     if (type === "image_upload") control = `<input name="${name}" type="file" accept="image/png,image/jpeg" multiple><small>PNG of JPG · max 5 bestanden · max 5 MB per bestand · geen SVG</small>`;
-    return `<label class="field"><span>${escapeHtml(field.label)}</span>${control}</label>`;
+    return `<label class="field"><span>${escapeHtml(field.label)}</span>${control}${field.description ? `<small id="${helpId}">${escapeHtml(field.description)}</small>` : ""}</label>`;
   }).join("");
 }
 
-export function publicFormPage(form: any, fields: any[], projects: any[]) {
+export function publicFormPage(form: any, fields: any[], projects: any[], nonce = "") {
   const controls = formControls(fields, projects, {}, "public");
   const fieldTypes = JSON.stringify(Object.fromEntries(fields.map((field) => [field.field_key, field.field_type])));
   return document(form.title, `<main class="public"><div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">${logoMark("N", "sm")}<span style="font-size:13px;font-weight:700;color:var(--text2)">Nexus</span></div><div class="url-strip">/f/${escapeHtml(form.slug)}</div><form class="card" id="public-form"><div class="card-body"><div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description)}</p><div class="grid one">${controls}</div><br><button class="button primary" type="submit">Melding versturen</button><p class="error" role="alert"></p></div></form></main>`, `
+    let submitting=false,idempotencyKey=crypto.randomUUID();const retainedUploads=new Map();
     document.querySelector("#public-form").addEventListener("submit",async(event)=>{
-      event.preventDefault();const data=new FormData(event.currentTarget);const payload={};const files={};
+      event.preventDefault();if(submitting)return;submitting=true;const submit=event.currentTarget.querySelector('button[type="submit"]');submit.disabled=true;const error=event.currentTarget.querySelector(".error");error.textContent="";const data=new FormData(event.currentTarget);const payload={};const files={};
+      try{
       for(const [key,value] of data){if(value instanceof File&&value.size){(files[key]=files[key]||[]).push(value)}else if(!(value instanceof File))payload[key]=key in payload?[].concat(payload[key],value):value}
       for(const [key,type] of Object.entries(${fieldTypes})){if(type==="checkbox")payload[key]=payload[key]==="true";else if(type==="multi_select")payload[key]=Array.isArray(payload[key])?payload[key]:key in payload?[payload[key]]:[]}
       for(const [key,list] of Object.entries(files)){
         if(list.length>5){document.querySelector(".error").textContent="Max 5 bestanden per veld";return}
-        const ids=[];
-        for(const file of list){
+        const signatures=list.map(file=>file.name+":"+file.size+":"+file.lastModified);let ids=retainedUploads.get(key)?.signatures.join("|")===signatures.join("|")?retainedUploads.get(key).ids:[];
+        for(const file of list.slice(ids.length)){
           const upload=new FormData();upload.append("file",file);
           const result=await fetch("/api/public/forms/${escapeHtml(form.slug)}/uploads",{method:"POST",body:upload});
-          if(!result.ok){document.querySelector(".error").textContent="Upload geweigerd";return}
+          if(!result.ok){error.textContent="Upload geweigerd";return}
           ids.push((await result.json()).upload_id);
         }
+        retainedUploads.set(key,{signatures,ids});
         payload[key]=ids;
       }
-      const response=await fetch("/api/public/forms/${escapeHtml(form.slug)}/submissions",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(payload)});
-      const result=await response.json();if(!response.ok){document.querySelector(".error").textContent=result.error;return}
+      const response=await fetch("/api/public/forms/${escapeHtml(form.slug)}/submissions",{method:"POST",headers:{"content-type":"application/json","idempotency-key":idempotencyKey},body:JSON.stringify(payload)});
+      const result=await response.json();if(!response.ok){if(response.status===400||response.status===422)idempotencyKey=crypto.randomUUID();error.textContent=result.fields?Object.entries(result.fields).map(([key,message])=>key+": "+message).join(" · "):result.error;return}
       sessionStorage.setItem("submittedTicket",result.ticket_number);location.href="/f/${escapeHtml(form.slug)}/submitted";
-    });`);
+      }catch(caught){error.textContent="Verzenden mislukt. Probeer opnieuw; je invoer en uploads zijn bewaard."}finally{submitting=false;submit.disabled=false}
+      });`, nonce);
 }
 
-export function submittedPage(form: any) {
-  return document("Melding ontvangen", `<main class="public"><section class="card"><div class="card-body"><div class="eyebrow">Ontvangen</div><h1>Bedankt — je melding staat genoteerd.</h1><p>${escapeHtml(form.settings_json?.completion_message ?? "Bewaar je referentie als je er later naar wilt verwijzen.")}</p><div class="reference"><span class="eyebrow">Referentie</span><strong class="mono" id="reference"></strong></div></div></section></main>`, `document.querySelector("#reference").textContent=sessionStorage.getItem("submittedTicket")||"Referentie niet beschikbaar";`);
+export function submittedPage(form: any, nonce = "") {
+  return document("Melding ontvangen", `<main class="public"><section class="card"><div class="card-body"><div class="eyebrow">Ontvangen</div><h1>Bedankt — je melding staat genoteerd.</h1><p>${escapeHtml(form.settings_json?.completion_message ?? "Bewaar je referentie als je er later naar wilt verwijzen.")}</p><div class="reference"><span class="eyebrow">Referentie</span><strong class="mono" id="reference"></strong></div></div></section></main>`, `document.querySelector("#reference").textContent=sessionStorage.getItem("submittedTicket")||"Referentie niet beschikbaar";`, nonce);
 }

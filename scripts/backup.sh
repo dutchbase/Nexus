@@ -54,6 +54,23 @@ copy_tree() {
   (cd "$source" && tar "${excludes[@]}" -cf - .) | tar -C "$destination" -xf -
 }
 
+artifact_snapshot() {
+  psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --quiet --tuples-only --no-align <<'SQL'
+SELECT encode(digest(COALESCE(jsonb_agg(to_jsonb(snapshot) ORDER BY id),'[]'::jsonb)::text,'sha256'),'hex')
+FROM (
+  SELECT id,storage_path,storage_root,artifact_type,status,sha256,expires_at
+  FROM artifacts WHERE status IN ('staged','finalized') ORDER BY id
+) snapshot;
+SQL
+}
+
+artifact_registry() {
+  psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --quiet --tuples-only --no-align <<'SQL'
+SELECT json_build_object('id',id,'storage_path',storage_path,'storage_root',storage_root,'artifact_type',artifact_type,'status',status,'sha256',sha256)
+FROM artifacts WHERE status IN ('staged','finalized') ORDER BY id;
+SQL
+}
+
 data_backup_relative=""
 legacy_data_backup_relative=""
 if [ -d "$data_directory" ]; then
@@ -69,12 +86,21 @@ if [ -d "$legacy_data_directory" ]; then
   esac
 fi
 
+artifact_snapshot_before="$(artifact_snapshot)"
 pg_dump "$DATABASE_URL" --format=custom --file="$stage/database.dump"
 copy_tree "$data_directory" "$stage/data" "$data_backup_relative"
 if [ "$legacy_data_directory" != "$data_directory" ]; then
   copy_tree "$legacy_data_directory" "$stage/legacy-data" "$legacy_data_backup_relative"
 fi
 copy_tree "$config_directory" "$stage/config"
+stage_legacy="$stage/data"
+[ "$legacy_data_directory" = "$data_directory" ] || stage_legacy="$stage/legacy-data"
+artifact_registry | node "$repo_root/scripts/verify-artifact-registry.mjs" capture \
+  "$stage/data" "$stage_legacy" "$stage/artifact-registry-v1.json" "$data_directory" "$legacy_data_directory"
+if [ "$(artifact_snapshot)" != "$artifact_snapshot_before" ]; then
+  echo "artifact metadata changed while the backup snapshot was copied" >&2
+  exit 1
+fi
 (cd "$stage" && { find . -type f ! -path './manifest-v1.sha256' -print0 | LC_ALL=C sort -z | xargs -0 -r sha256sum; find . -type l -printf 'symlink %p %l\n'; } | LC_ALL=C sort) > "$stage/manifest-v1.sha256"
 if ! mv -T -n -- "$stage" "$backup" || [ -d "$stage" ]; then
   echo "backup destination appeared before publish" >&2

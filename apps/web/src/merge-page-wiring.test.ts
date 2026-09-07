@@ -131,7 +131,7 @@ describe("merge workbench page wiring", () => {
     expect(page).toBeTruthy();
     const shell = adminPage("/admin/merge", page!.title, page!.body, {}, "a");
 
-    const scripts = [...shell.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((match) => match[1]);
+    const scripts = [...shell.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((match) => match[1]);
     expect(scripts.length).toBeGreaterThan(0);
     const wired = scripts.find((source) => source.includes("merge-project"));
     expect(wired).toBeDefined();
@@ -195,7 +195,7 @@ describe("merge workbench page wiring", () => {
   test("a clean verdict enables the button and a conflict keeps it off with reasons", async () => {
     const page = await mergePage.render(new URL("http://x/admin/merge"), { username: "a", user_id: "u" }, {});
     const shell = adminPage("/admin/merge", page!.title, page!.body, {}, "a");
-    const wired = [...shell.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).find((s) => s.includes("merge-project"))!;
+    const wired = [...shell.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]).find((s) => s.includes("merge-project"))!;
 
     for (const verdict of [
       {
@@ -258,10 +258,69 @@ describe("merge workbench page wiring", () => {
     }
   });
 
+  test("direct merge sends the preview pins, default-branch confirmation, and a fresh request id", async () => {
+    const page = await mergePage.render(new URL("http://x/admin/merge"), { username: "a", user_id: "u" }, {});
+    const shell = adminPage("/admin/merge", page!.title, page!.body, {}, "a");
+    const wired = [...shell.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]).find((s) => s.includes("merge-project"))!;
+    const stubs = stubDocument();
+    stubs.projectSelect.value = "p1";
+    stubs.projectSelect.selectedOptions = [{ dataset: { defaultBranch: "master" } }];
+    stubs.fromSelect.value = "staging";
+    stubs.intoSelect.value = "master";
+    const headSha = "a".repeat(40);
+    const baseSha = "b".repeat(40);
+    let mergeBody: Record<string, unknown> | undefined;
+    const prompts: string[] = [];
+    globalThis.fetch = vi.fn(async (url: string, init?: RequestInit): Promise<any> => {
+      if (url.includes("/merge-preview")) return { ok: true, status: 202, json: async () => ({ job: { id: "preview" } }) };
+      if (url.includes("/merge-branches")) {
+        mergeBody = JSON.parse(String(init?.body));
+        return { ok: true, status: 202, json: async () => ({ job: { id: "merge" } }) };
+      }
+      if (url.endsWith("/preview")) {
+        return { ok: true, json: async () => ({ job: { status: "completed", result_json: { outcome: "clean", commits_ahead: 1, head: { name: "staging", sha: headSha }, base: { name: "master", sha: baseSha } } } }) };
+      }
+      if (url.endsWith("/merge")) return { ok: true, json: async () => ({ job: { status: "completed", result_json: { outcome: "merged", sha: "c".repeat(40) } } }) };
+      throw new Error("unexpected " + url);
+    }) as unknown as typeof fetch;
+
+    vi.useFakeTimers();
+    try {
+      new Function("document", "fetch", "sessionStorage", "localStorage", "location", "confirm", "alert", "matchMedia", "window", wired)(
+        stubs.documentStub,
+        globalThis.fetch,
+        { getItem: () => "csrf" },
+        { getItem: () => null, setItem: () => undefined },
+        { href: "" },
+        (message: string) => { prompts.push(message); return true; },
+        () => undefined,
+        () => ({ matches: false, addEventListener: () => undefined }),
+        { location: { pathname: "/admin/merge" } },
+      );
+      stubs.intoSelect.dispatch("change");
+      await vi.advanceTimersByTimeAsync(500);
+      expect(stubs.button.disabled).toBe(false);
+      stubs.button.dispatch("click");
+      await vi.advanceTimersByTimeAsync(500);
+    } finally {
+      vi.useRealTimers();
+    }
+
+    expect(prompts).toEqual([expect.stringContaining("default branch")]);
+    expect(mergeBody).toMatchObject({
+      head: "staging",
+      base: "master",
+      expected_head_sha: headSha,
+      expected_base_sha: baseSha,
+      confirm_default_branch: true,
+    });
+    expect(mergeBody?.request_id).toMatch(/^[0-9a-f-]{36}$/i);
+  });
+
   test("a timed-out branch load surfaces Retry, clears Loading, and Retry re-runs the check", async () => {
     const page = await mergePage.render(new URL("http://x/admin/merge"), { username: "a", user_id: "u" }, {});
     const shell = adminPage("/admin/merge", page!.title, page!.body, {}, "a");
-    const wired = [...shell.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).find((s) => s.includes("merge-project"))!;
+    const wired = [...shell.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]).find((s) => s.includes("merge-project"))!;
 
     const stubs = stubDocument();
     stubs.projectSelect.value = "p1";
@@ -317,7 +376,7 @@ describe("merge workbench page wiring", () => {
   test("existing merge-branches DOM elements and event listeners are still wired after the Production tab is added", async () => {
     const page = await mergePage.render(new URL("http://x/admin/merge"), { username: "a", user_id: "u" }, {});
     const shell = adminPage("/admin/merge", page!.title, page!.body, {}, "a");
-    const wired = [...shell.matchAll(/<script>([\s\S]*?)<\/script>/g)].map((m) => m[1]).find((s) => s.includes("merge-project"))!;
+    const wired = [...shell.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]).find((s) => s.includes("merge-project"))!;
 
     // Case A: the production-tab markup is absent from the DOM (defensive
     // guard — mirrors initDeploymentTab's own `if(!el)return` pattern).

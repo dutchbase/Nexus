@@ -92,6 +92,26 @@ export function assertApprovedSkillSnapshot(
   }
 }
 
+export function approvedProjectInput(material: any) {
+  const config = material?.project?.config;
+  if (!config?.enabled || !config.repositoryPath || !config.defaultBranch) {
+    throw new Error("approved project input is incomplete");
+  }
+  return {
+    config_version: material.project.configVersion,
+    config_json: config.configuration ?? {},
+    slug: config.slug,
+    name: config.name,
+    description: config.description,
+    enabled: config.enabled,
+    repository_path: config.repositoryPath,
+    agent_start_path: config.agentStartPath ?? config.repositoryPath,
+    default_branch: config.defaultBranch,
+    github_owner: config.githubOwner,
+    github_repository: config.githubRepository,
+  };
+}
+
 export function approvedExecutionInput(snapshot: {
   id: string;
   inputHash: string;
@@ -105,10 +125,10 @@ export function approvedExecutionInput(snapshot: {
   administratorFeedback?: string;
 }) {
   const material = snapshot.materialInput;
-  const config = material?.project?.config;
+  const project = approvedProjectInput(material);
   const ai = material?.models?.[phase];
   const prompt = material?.prompts?.find((item: any) => item.phase === phase);
-  if (!config?.enabled || !config.repositoryPath || !config.defaultBranch || !ai?.model || !ai.reasoningLevel || !prompt?.content) {
+  if (!ai?.model || !ai.reasoningLevel || !prompt?.content) {
     throw new Error("approved execution input is incomplete");
   }
   const runtime = [
@@ -122,20 +142,9 @@ export function approvedExecutionInput(snapshot: {
   return {
     approvedInputSnapshotId: snapshot.id,
     inputHash: snapshot.inputHash,
-    project: {
-      config_version: material.project.configVersion,
-      config_json: config.configuration ?? {},
-      slug: config.slug,
-      name: config.name,
-      description: config.description,
-      enabled: config.enabled,
-      repository_path: config.repositoryPath,
-      agent_start_path: config.agentStartPath ?? config.repositoryPath,
-      default_branch: config.defaultBranch,
-      github_owner: config.githubOwner,
-      github_repository: config.githubRepository,
-    },
+    project,
     ai: { model: ai.model, reasoning_level: ai.reasoningLevel },
+    imageEvidence: Array.isArray(material.ticket?.imageEvidence) ? material.ticket.imageEvidence : [],
     promptVersionIds: Object.fromEntries(prompt.provenance.map((source: any) => [`${source.scope}.${source.promptType}`, source.versionId])),
     content: `${prompt.content.trimEnd()}\n\n${runtime.join("\n\n")}\n`,
   };

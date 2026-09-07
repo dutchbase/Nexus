@@ -1,7 +1,8 @@
-import { expect, test, vi, beforeEach } from "vitest";
+import { expect, test, vi, beforeEach, afterEach } from "vitest";
 import { checkImageExists, checkImageExistsDetailed } from "./registry.ts";
 
 beforeEach(() => { vi.restoreAllMocks(); });
+afterEach(() => { delete process.env.DCC_GHCR_TIMEOUT_MS; });
 
 test("returns exists:true and a digest on a 200 manifest HEAD, using an anonymous token", async () => {
   const fetchMock = vi.spyOn(globalThis, "fetch")
@@ -93,6 +94,19 @@ test("checkImageExistsDetailed never throws — a fetch rejection is reported as
   const result = await checkImageExistsDetailed("ghcr.io", "dutchbase/va-jobs-platform", "sha-" + "a".repeat(40));
   expect(result.state).toBe("unknown");
   expect(result.reason).toBe("network down");
+});
+
+test("checkImageExistsDetailed bounds a stalled registry request", async () => {
+  process.env.DCC_GHCR_TIMEOUT_MS = "20";
+  vi.spyOn(globalThis, "fetch").mockImplementation(async (_url, init) => new Promise<Response>((_resolve, reject) => {
+    init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true });
+  }));
+
+  const started = Date.now();
+  const result = await checkImageExistsDetailed("ghcr.io", "dutchbase/va-jobs-platform", "sha-" + "a".repeat(40));
+
+  expect(result.state).toBe("unknown");
+  expect(Date.now() - started).toBeLessThan(500);
 });
 
 test("sends the multi-media-type accept header covering OCI and Docker manifest/index formats", async () => {

@@ -8,41 +8,116 @@ on:
   workflow_dispatch:
 
 jobs:
-  ci:
-    name: ci
+  unit:
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm verify
 
+  database:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
     services:
       postgres:
         image: postgres:16
         env:
-          POSTGRES_DB: dcc_test
+          POSTGRES_DB: postgres
           POSTGRES_PASSWORD: postgres
           POSTGRES_USER: postgres
         ports:
           - 5432:5432
         options: >-
-          --health-cmd "pg_isready -U postgres -d dcc_test"
+          --health-cmd "pg_isready -U postgres -d postgres"
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
-
     steps:
       - uses: actions/checkout@v4
-
       - uses: pnpm/action-setup@v4
-
+        with:
+          version: 11.17.0
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: pnpm
-
       - run: pnpm install --frozen-lockfile
-
-      - run: pnpm verify
-
-      - name: Deployment database tests
-        run: pnpm exec vitest run --no-file-parallelism --testTimeout=15000 scripts/webhook-deployments.test.ts packages/database/src/migrate.test.ts packages/domain/src/notifications.db.test.ts packages/domain/src/ai-accounting.db.test.ts apps/web/src/pages/ai-usage.db.test.ts packages/domain/src/pr-review-publication.db.test.ts packages/database/src/va-jobs-platform-reconciliation.db.test.ts
+      - name: Install PostgreSQL 16 client
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes postgresql-client-16
+          pg_dump --version | grep '16\.'
+      - name: Run every database-gated test in its own disposable database
         env:
-          DCC_TEST_DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/dcc_test
+          PGPASSWORD: postgres
+          PG_ADMIN_URL: postgresql://postgres:postgres@127.0.0.1:5432/postgres
+        run: |
+          set -euo pipefail
+          mapfile -t files < <(rg -l 'DCC_TEST_DATABASE_URL|DCC_TEST_RESTORE_DATABASE_URL' --glob '*.test.ts' --glob '*.test.js' | sort)
+          test "${#files[@]}" -gt 0
+          for index in "${!files[@]}"; do
+            file="${files[$index]}"
+            database="nexus_ci_${index}"
+            restore_database="nexus_ci_${index}_restore"
+            createdb --maintenance-db="$PG_ADMIN_URL" --host=127.0.0.1 --username=postgres "$database"
+            psql "$PG_ADMIN_URL" -v ON_ERROR_STOP=1 -c "ALTER DATABASE \"$database\" SET dcc.restore_disposable='true'"
+            if [ "$file" = scripts/backup.integration.test.ts ]; then
+              createdb --maintenance-db="$PG_ADMIN_URL" --host=127.0.0.1 --username=postgres "$restore_database"
+              psql "$PG_ADMIN_URL" -v ON_ERROR_STOP=1 -c "ALTER DATABASE \"$restore_database\" SET dcc.restore_disposable='true'"
+              DCC_TEST_RESTORE_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/$restore_database" \
+                DCC_TEST_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/$database" \
+                DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/$database" DCC_PROCESS_ROLE=web \
+                pnpm exec vitest run --no-file-parallelism --testTimeout=120000 "$file"
+              dropdb --force --maintenance-db="$PG_ADMIN_URL" --host=127.0.0.1 --username=postgres "$restore_database"
+            else
+              DCC_TEST_DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/$database" \
+                DATABASE_URL="postgresql://postgres:postgres@127.0.0.1:5432/$database" DCC_PROCESS_ROLE=web \
+                pnpm exec vitest run --no-file-parallelism --testTimeout=120000 "$file"
+            fi
+            dropdb --force --maintenance-db="$PG_ADMIN_URL" --host=127.0.0.1 --username=postgres "$database"
+          done
+
+  browser:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.17.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Install browser and sandbox dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes bubblewrap git postgresql-client-16
+          pg_dump --version | grep '16\.'
+          pnpm exec playwright install --with-deps chromium
+      - name: Prove failure cleanup is isolated
+        env:
+          E2E_ARTIFACT_DIR: ${{ runner.temp }}/e2e-cleanup-artifacts
+        run: tests/e2e/verify-cleanup.sh
+      - name: Run browser journeys
+        env:
+          E2E_ARTIFACT_DIR: ${{ runner.temp }}/e2e-artifacts
+        run: tests/e2e/run-e2e.sh
+      - name: Upload browser logs, traces, and screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: browser-verification
+          path: |
+            ${{ runner.temp }}/e2e-artifacts
+            ${{ runner.temp }}/e2e-cleanup-artifacts
+          if-no-files-found: error

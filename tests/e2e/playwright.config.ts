@@ -13,7 +13,7 @@ export default defineConfig({
   timeout: 120_000,
   expect: { timeout: 15_000 },
   reporter: [["list"]],
-  outputDir: `${__dirname}/.results`,
+  outputDir: process.env.E2E_RESULTS_DIR ?? `${__dirname}/.results`,
   use: {
     baseURL: process.env.APP_BASE_URL ?? "http://127.0.0.1:3100",
     screenshot: "only-on-failure",

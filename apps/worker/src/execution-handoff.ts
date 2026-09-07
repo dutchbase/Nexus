@@ -41,6 +41,16 @@ export async function runPrivateExecution<T extends Record<string, unknown>, R>(
           : directory;
       });
     }
+    if (Array.isArray(invocation.attachmentFiles)) {
+      invocation.attachmentFiles = invocation.attachmentFiles.map((file) => {
+        if (typeof file !== "string") throw new Error("execution attachment path is invalid");
+        const relative = path.relative(input.skillBundleDir, file);
+        if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+          throw new Error("execution attachment must be inside the approved skill bundle");
+        }
+        return path.join(skillBundleDir, relative);
+      });
+    }
     const result = await input.invoke({
       ...input.invocation,
       ...invocation,

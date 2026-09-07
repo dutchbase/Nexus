@@ -2,7 +2,7 @@
 // default in Settings, and a ticket's per-phase model override, which must
 // carry through to the plan the worker actually generates.
 import { test, expect } from "@playwright/test";
-import { loginViaUI, queryOne, createTicketViaUI, injectScenarioOnce, scenarioRef, waitForTicketStatus, DEFAULT_PLAN_MARKDOWN } from "./helpers";
+import { loginViaUI, queryOne, createTicketViaUI, injectScenarioOnce, scenarioRef, waitForTicketStatus, DEFAULT_PLAN_MARKDOWN, clickAndWaitForPost } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
   await loginViaUI(page);
@@ -128,7 +128,7 @@ test("per-ticket advanced AI config drives the planning run's model", async ({ p
   // in the Overview tab.
   await injectScenarioOnce(page, "/approve-planning", scenarioRef({ mode: "plan_valid", plan_markdown: DEFAULT_PLAN_MARKDOWN }));
   await page.getByRole("tab", { name: "Overview" }).click();
-  await page.locator("[data-start-planning]").click();
+  await clickAndWaitForPost(page, "[data-start-planning]", "/approve-planning");
   await waitForTicketStatus(ticket.id, ["Plan Ready for Review"]);
 
   const run = await queryOne("select model, reasoning_level from agent_runs where ticket_id = $1 and run_type = 'planning' order by created_at desc limit 1", [ticket.id]);

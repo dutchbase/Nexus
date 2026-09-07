@@ -17,6 +17,8 @@ const { URL } = require('url');
 const { randomBytes } = require('crypto');
 const fs = require('fs');
 const { execFileSync } = require('child_process');
+const { tmpdir } = require('os');
+const { join } = require('path');
 
 const repos = new Map(); // `owner/repo` -> { counter, prs: Map }
 const logFile = process.env.MOCK_GITHUB_LOG;
@@ -35,6 +37,77 @@ function git(repo, args) {
     return execFileSync('git', ['-C', remote, ...args], { encoding: 'utf8' }).trim();
   } catch {
     return null;
+  }
+}
+
+function commitFor(repo, ref) {
+  const sha = git(repo, ['rev-parse', '--verify', `${ref}^{commit}`]);
+  if (!sha) return null;
+  const details = (git(repo, ['show', '-s', '--format=%cI%x00%aI%x00%B', sha]) || '').split('\0');
+  return {
+    sha,
+    commit: {
+      message: details[2] || '',
+      author: { date: details[1] || now() },
+      committer: { date: details[0] || now() },
+    },
+  };
+}
+
+function mergeIntoBranch(repo, base, head) {
+  const remote = remotePathFor(repo);
+  if (!remote || typeof base !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(base)
+    || typeof head !== 'string' || !/^[0-9a-f]{40}$/i.test(head)) return { status: 422, body: { message: 'Invalid merge parameters' } };
+  const baseSha = git(repo, ['rev-parse', '--verify', `refs/heads/${base}^{commit}`]);
+  const headSha = git(repo, ['rev-parse', '--verify', `${head}^{commit}`]);
+  if (!baseSha || !headSha) return { status: 404, body: { message: 'Base or head was not found' } };
+  try {
+    execFileSync('git', ['-C', remote, 'merge-base', '--is-ancestor', headSha, baseSha], { stdio: 'ignore' });
+    return { status: 204, body: null };
+  } catch {}
+
+  const root = fs.mkdtempSync(join(tmpdir(), 'nexus-mock-github-merge-'));
+  const worktree = join(root, 'worktree');
+  try {
+    execFileSync('git', ['-C', remote, 'worktree', 'add', '--quiet', '--detach', worktree, baseSha], { stdio: 'ignore' });
+    try {
+      execFileSync('git', ['-C', worktree, '-c', 'user.name=Nexus Mock GitHub', '-c', 'user.email=nexus@example.invalid', 'merge', '--quiet', '--no-edit', headSha], { stdio: 'ignore' });
+    } catch {
+      return { status: 409, body: { message: 'Merge conflict' } };
+    }
+    const sha = git(repo, ['-C', worktree, 'rev-parse', 'HEAD']);
+    if (!sha || !updateRefsAtomically(repo, [{ name: `refs/heads/${base}`, beforeOid: baseSha, afterOid: sha }])) {
+      return { status: 409, body: { message: 'Base branch was modified' } };
+    }
+    return { status: 201, body: commitFor(repo, sha) };
+  } catch {
+    return { status: 409, body: { message: 'Merge could not be prepared' } };
+  } finally {
+    try { execFileSync('git', ['-C', remote, 'worktree', 'remove', '--force', worktree], { stdio: 'ignore' }); } catch {}
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+}
+
+function updateRefsAtomically(repo, updates) {
+  const remote = remotePathFor(repo);
+  const zero = '0'.repeat(40);
+  if (!remote || !updates.length) return false;
+  const commands = ['start'];
+  for (const update of updates) {
+    if (typeof update?.name !== 'string' || !/^refs\/heads\/[A-Za-z0-9][A-Za-z0-9._/-]{0,199}$/.test(update.name)
+      || typeof update.beforeOid !== 'string' || !/^[0-9a-f]{40}$/i.test(update.beforeOid)
+      || typeof update.afterOid !== 'string' || !/^[0-9a-f]{40}$/i.test(update.afterOid)
+      || update.beforeOid === zero && update.afterOid === zero) return false;
+    if (update.beforeOid === zero) commands.push(`create ${update.name} ${update.afterOid}`);
+    else if (update.afterOid === zero) commands.push(`delete ${update.name} ${update.beforeOid}`);
+    else commands.push(`update ${update.name} ${update.afterOid} ${update.beforeOid}`);
+  }
+  commands.push('prepare', 'commit');
+  try {
+    execFileSync('git', ['-C', remote, 'update-ref', '--stdin'], { input: commands.join('\n') + '\n', stdio: ['pipe', 'ignore', 'ignore'] });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -128,6 +201,31 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  if (pathname === '/graphql' && method === 'POST') {
+    return parseBody(req, (body) => {
+      if (body?.query?.includes('updateRefs')) {
+        let repository;
+        try { repository = Buffer.from(body.variables.repositoryId, 'base64url').toString('utf8'); } catch { repository = ''; }
+        const slash = repository.indexOf('/');
+        const repo = slash > 0 ? repository.slice(slash + 1) : '';
+        const updates = Array.isArray(body?.variables?.refUpdates) ? body.variables.refUpdates : [];
+        if (!repo || !updateRefsAtomically(repo, updates)) {
+          const payload = { errors: [{ type: 'REF_UPDATE_RULE_VIOLATION', message: 'reference no longer matches beforeOid' }] };
+          log(method, pathname, body, 200); respond(res, 200, payload); return;
+        }
+        log(method, pathname, body, 200);
+        respond(res, 200, { data: { updateRefs: { clientMutationId: null } } });
+        return;
+      }
+      const owner = body?.variables?.owner;
+      const repository = body?.variables?.repository;
+      const payload = typeof owner === 'string' && typeof repository === 'string'
+        ? { data: { repository: { id: Buffer.from(`${owner}/${repository}`).toString('base64url') } } }
+        : { errors: [{ type: 'NOT_FOUND', message: 'repository was not found' }] };
+      log(method, pathname, body, 200); respond(res, 200, payload);
+    });
+  }
+
   // /_control/repos/:owner/:repo/pulls/:number/:action — test-only state control
   if (parts[0] === '_control' && parts[1] === 'repos' && parts[4] === 'pulls' && parts[6]) {
     const [, , owner, repo] = parts;
@@ -200,12 +298,42 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    // GET /repos/:owner/:repo/rules/branches/:branch — no matching rulesets
+    if (parts[3] === 'rules' && parts[4] === 'branches' && parts[5] && method === 'GET') {
+      log(method, pathname, null, 200);
+      respond(res, 200, []);
+      return;
+    }
+
+    // POST /repos/:owner/:repo/merges — prepare a real merge on the requested
+    // branch. The product uses an owned temporary branch and publishes it with
+    // a separate atomic updateRefs mutation.
+    if (parts[3] === 'merges' && parts.length === 4 && method === 'POST') {
+      return parseBody(req, (body) => {
+        const result = mergeIntoBranch(repo, body?.base, body?.head);
+        log(method, pathname, body, result.status);
+        respond(res, result.status, result.body);
+      });
+    }
+
     // GET /repos/:owner/:repo/commits/:sha/check-runs | /status
     if (parts[3] === 'commits' && method === 'GET') {
-      log(method, pathname, null, 200);
-      if (parts[5] === 'check-runs') respond(res, 200, { total_count: 0, check_runs: [] });
-      else if (parts[5] === 'status') respond(res, 200, { state: 'success', total_count: 0, statuses: [] });
-      else respond(res, 404, { message: 'Not Found' });
+      if (parts[5] === 'check-runs') {
+        log(method, pathname, null, 200);
+        respond(res, 200, { total_count: 0, check_runs: [] });
+      } else if (parts[5] === 'status') {
+        log(method, pathname, null, 200);
+        respond(res, 200, { state: 'success', total_count: 0, statuses: [] });
+      } else if (!parts[5]) {
+        let ref;
+        try { ref = decodeURIComponent(parts[4]); } catch { ref = ''; }
+        const commit = ref ? commitFor(repo, ref) : null;
+        log(method, pathname, null, commit ? 200 : 404);
+        respond(res, commit ? 200 : 404, commit || { message: 'Not Found' });
+      } else {
+        log(method, pathname, null, 404);
+        respond(res, 404, { message: 'Not Found' });
+      }
       return;
     }
 

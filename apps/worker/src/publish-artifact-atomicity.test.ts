@@ -127,7 +127,7 @@ test("duplicate reconciliation completes the discovered pull request without cre
   const create = vi.fn(async () => ({ number: 8 }));
   let completed = 0;
 
-  await publishExternalResult({
+  await publishExternalResult<{ number: number }>({
     push: async () => undefined,
     find: async () => ({ number: 7 }),
     create,
@@ -136,6 +136,24 @@ test("duplicate reconciliation completes the discovered pull request without cre
   });
 
   expect(create).not.toHaveBeenCalled();
+  expect(completed).toBe(7);
+});
+
+test("publication recovers a pull request concurrently created after the initial lookup", async () => {
+  const find = vi.fn()
+    .mockResolvedValueOnce(null)
+    .mockResolvedValueOnce({ number: 7 });
+  let completed = 0;
+
+  await publishExternalResult<{ number: number }>({
+    push: async () => undefined,
+    find,
+    create: async () => { throw new Error("GitHub rejected duplicate pull request"); },
+    complete: async (pullRequest) => { completed = pullRequest.number; },
+    fail: async () => "failed",
+  });
+
+  expect(find).toHaveBeenCalledTimes(2);
   expect(completed).toBe(7);
 });
 

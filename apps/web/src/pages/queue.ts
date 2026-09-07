@@ -88,8 +88,8 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       </div>
     </div>
     <form class="toolbar" style="margin-top:16px">
-      <select name="status" onchange="this.form.submit()"><option value="">All statuses</option>${statuses.rows.filter((row) => row.status !== "failed").map((row) => `<option value="${escapeHtml(row.status)}"${status === row.status ? " selected" : ""}>${escapeHtml(cap(row.status))}</option>`).join("")}</select>
-      <select name="type" onchange="this.form.submit()"><option value="">All types</option>${types.rows.map((row) => `<option value="${escapeHtml(row.type)}"${type === row.type ? " selected" : ""}>${escapeHtml(row.type)}</option>`).join("")}</select>
+      <select name="status" data-auto-submit><option value="">All statuses</option>${statuses.rows.filter((row) => row.status !== "failed").map((row) => `<option value="${escapeHtml(row.status)}"${status === row.status ? " selected" : ""}>${escapeHtml(cap(row.status))}</option>`).join("")}</select>
+      <select name="type" data-auto-submit><option value="">All types</option>${types.rows.map((row) => `<option value="${escapeHtml(row.type)}"${type === row.type ? " selected" : ""}>${escapeHtml(row.type)}</option>`).join("")}</select>
       <a class="button" href="/admin/queue">Reset</a><span aria-live="polite">${jobs.rows.length} shown</span>
     </form>
     <section class="card"><div class="list-head queue-head"><span>Job</span><span>Type</span><span>Ticket · project</span><span>Priority</span><span>Attempt</span><span>Status</span><span style="text-align:right">Available · workflow</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">${status || type ? "No jobs match these filters." : "The queue is empty."}</div>`}</section>`;

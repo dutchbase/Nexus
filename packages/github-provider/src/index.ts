@@ -135,11 +135,14 @@ async function responseFor(url: string, init: RequestInit = {}, allowStatuses: n
   const retryDelays = method === "GET" ? [0, 250, 500] : [0];
   let lastError: unknown;
   for (const delay of retryDelays) {
+    if (init.signal?.aborted) throw new GitHubProviderError("transient", "GitHub provider request deadline exceeded");
     if (delay) await new Promise((resolve) => setTimeout(resolve, delay));
+    if (init.signal?.aborted) throw new GitHubProviderError("transient", "GitHub provider request deadline exceeded");
     try {
+      const timeout = AbortSignal.timeout(10_000);
       const response = await fetch(url, {
         ...init,
-        signal: AbortSignal.timeout(10_000),
+        signal: init.signal ? AbortSignal.any([init.signal, timeout]) : timeout,
         headers: {
           accept: "application/vnd.github+json",
           "content-type": "application/json",
@@ -153,6 +156,7 @@ async function responseFor(url: string, init: RequestInit = {}, allowStatuses: n
       if (error.code !== "transient") throw error;
       lastError = error;
     } catch (error) {
+      if (init.signal?.aborted) throw new GitHubProviderError("transient", "GitHub provider request deadline exceeded");
       if (error instanceof GitHubProviderError && error.code !== "transient") throw error;
       lastError = error instanceof GitHubProviderError
         ? error
@@ -174,8 +178,10 @@ function pullsPath(owner: string, repository: string) {
   return `/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repository)}/pulls`;
 }
 
-export async function findOpenPullRequestForHead(owner: string, repository: string, head: string) {
-  const path = `${pullsPath(owner, repository)}?state=open&head=${encodeURIComponent(`${owner}:${head}`)}`;
+export async function findOpenPullRequestForHead(owner: string, repository: string, head: string, base?: string) {
+  const query = new URLSearchParams({ state: "open", head: `${owner}:${head}` });
+  if (base) query.set("base", base);
+  const path = `${pullsPath(owner, repository)}?${query}`;
   const pullRequests = await request<ProviderPullRequest[]>(path);
   return pullRequests[0] ?? null;
 }
@@ -329,7 +335,9 @@ export async function getCommitCheckStatus(owner: string, repository: string, sh
     ...checkRunsResult.items.map((check: any) => ({
       context: check.name,
       appId: check.app?.id ?? null,
-      state: check.status !== "completed" ? "pending" as const : check.conclusion === "success" ? "success" as const : "failure" as const,
+      state: check.status !== "completed" ? "pending" as const
+        : ["success", "skipped", "neutral"].includes(check.conclusion) ? "success" as const
+        : "failure" as const,
       updatedAt: check.completed_at ?? check.started_at ?? check.created_at,
     })),
     ...statusesResult.items.map((status: any) => ({
@@ -361,11 +369,17 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
     && /upgrade to github (pro|team)/i.test(await protectionResponse.clone().text().catch(() => ""));
   if (protectionResponse.status === 403 && !protectionPlanRestricted) throw await errorFor(protectionResponse);
   const protection = protectionResponse.status === 404 || protectionPlanRestricted ? null : await jsonFor<any>(protectionResponse);
+  const rulesResponse = protectionPlanRestricted ? null : await responseFor(
+    `${apiBaseUrl()}${repoPath}/rules/branches/${encodeURIComponent(pullRequest.base.ref)}?per_page=100`,
+    {},
+    [404],
+  );
+  const rules = !rulesResponse || rulesResponse.status === 404 ? [] : await jsonFor<any[]>(rulesResponse);
   const requestedReviewers: ProviderGitHubPolicyInputs["requestedReviewers"] = [
     ...(pullRequest.requested_reviewers ?? []).flatMap((reviewer) => reviewer.login ? [{ type: "user" as const, name: reviewer.login }] : []),
     ...(pullRequest.requested_teams ?? []).flatMap((team) => team.slug ? [{ type: "team" as const, name: team.slug }] : []),
   ];
-  if (protection === null) return {
+  if (protection === null && rules.length === 0) return {
     pullRequest,
     protected: false,
     requiredApprovals: 0,
@@ -387,17 +401,33 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
       return [reviewer.toLowerCase(), ["admin", "write"].includes(permission.permission)] as const;
     })));
   const reviewRule = protection?.required_pull_request_reviews;
+  const rulesetReviewRules = rules.filter((rule) => rule.type === "pull_request");
+  const rulesetCheckRules = rules.filter((rule) => rule.type === "required_status_checks");
   const unsupported = [
     ...(reviewRule?.require_code_owner_reviews ? ["code_owner_reviews_unsupported"] : []),
     ...(reviewRule?.require_last_push_approval ? ["last_push_approval_unsupported"] : []),
+    ...(rulesetReviewRules.some((rule) => rule.parameters?.require_code_owner_review) ? ["code_owner_reviews_unsupported"] : []),
+    ...(rulesetReviewRules.some((rule) => rule.parameters?.require_last_push_approval) ? ["last_push_approval_unsupported"] : []),
+    ...(rulesetReviewRules.some((rule) => rule.parameters?.required_review_thread_resolution) ? ["review_thread_resolution_unsupported"] : []),
+    ...(rulesetReviewRules.some((rule) => rule.parameters?.required_reviewers?.length) ? ["required_reviewers_unsupported"] : []),
   ];
   const requiredChecks = (protection?.required_status_checks?.checks
     ?? protection?.required_status_checks?.contexts?.map((context: string) => ({ context, app_id: null }))
     ?? []).map((check: any) => ({ context: check.context, appId: check.app_id ?? null }));
+  for (const rule of rulesetCheckRules) {
+    for (const check of rule.parameters?.required_status_checks ?? []) {
+      if (!requiredChecks.some((current: { context: string; appId: number | null }) => current.context === check.context && current.appId === (check.integration_id ?? null))) {
+        requiredChecks.push({ context: check.context, appId: check.integration_id ?? null });
+      }
+    }
+  }
   return {
     pullRequest,
-    protected: protection !== null,
-    requiredApprovals: reviewRule?.required_approving_review_count ?? 0,
+    protected: true,
+    requiredApprovals: Math.max(
+      reviewRule?.required_approving_review_count ?? 0,
+      ...rulesetReviewRules.map((rule) => rule.parameters?.required_approving_review_count ?? 0),
+    ),
     reviews: reviewsResult.items.map((review: any) => ({
       id: review.id,
       reviewer: review.user?.login ?? "",
@@ -442,6 +472,53 @@ export async function updateBranchReference(owner: string, repository: string, b
   }
   const body = await jsonFor<{ object: { sha: string } }>(response);
   return { sha: body.object.sha };
+}
+
+export async function updateBranchReferenceIfMatches(
+  owner: string,
+  repository: string,
+  branch: string,
+  beforeSha: string,
+  afterSha: string,
+  force = false,
+): Promise<void> {
+  return updateBranchReferencesIfMatches(owner, repository, [
+    { branch, beforeSha, afterSha, force },
+  ]);
+}
+
+export type BranchReferenceUpdate = {
+  branch: string;
+  beforeSha: string;
+  afterSha: string;
+  force?: boolean;
+};
+
+export async function updateBranchReferencesIfMatches(
+  owner: string,
+  repository: string,
+  updates: BranchReferenceUpdate[],
+): Promise<void> {
+  if (!updates.length) throw new Error("at least one branch ref update is required");
+  const repositoryResult = await graphqlRequest<{ repository: { id: string } | null }>(
+    `query($owner: String!, $repository: String!) { repository(owner: $owner, name: $repository) { id } }`,
+    { owner, repository },
+  );
+  if (!repositoryResult.repository) throw new GitHubProviderError("not_found", "GitHub repository was not found");
+  await graphqlRequest(
+    `mutation($repositoryId: ID!, $refUpdates: [RefUpdate!]!) {
+      updateRefs(input: { repositoryId: $repositoryId, refUpdates: $refUpdates }) { clientMutationId }
+    }`,
+    {
+      repositoryId: repositoryResult.repository.id,
+      refUpdates: updates.map((update) => ({
+        name: `refs/heads/${update.branch}`,
+        beforeOid: update.beforeSha,
+        afterOid: update.afterSha,
+        force: update.force ?? false,
+      })),
+    },
+  );
 }
 
 export async function getPendingDeployments(owner: string, repository: string, sha: string):

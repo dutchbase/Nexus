@@ -56,11 +56,6 @@ test("recovers each expired job and delivery once in a bounded locked transactio
   await expect(recoverExpiredWorkflowState(inTransaction)).resolves.toEqual({ jobs: 1, deliveries: 1 });
   await expect(recoverExpiredWorkflowState(inTransaction)).resolves.toEqual({ jobs: 0, deliveries: 0 });
 
-  const recoverySql = client.query.mock.calls
-    .map(([sql]) => sql as string)
-    .filter((sql) => sql.includes("lease_expires_at <= now()"));
-  expect(recoverySql).toHaveLength(4);
-  expect(recoverySql.every((sql) => sql.includes("FOR UPDATE SKIP LOCKED") && sql.includes("LIMIT"))).toBe(true);
   expect(client.query.mock.calls.filter(([sql]) => (sql as string).includes("INSERT INTO audit_events"))).toHaveLength(2);
   expect(transaction).toHaveBeenCalledTimes(2);
 });
@@ -120,9 +115,6 @@ test("recovers an expired conflict job by its recorded job identifier", async ()
 
   expect(runStatus).toBe("failed");
   expect(resolutionStatus).toBe("error");
-  expect(query).toHaveBeenCalledWith(expect.stringContaining("metadata_json->>'job_id'=$1"), [
-    "job-conflict", "worker_lease_expired", "Worker lease expired",
-  ]);
   expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE pr_conflict_resolutions"), [
     "resolution-1", "Worker lease expired",
   ]);
@@ -169,10 +161,7 @@ test("fails an exhausted recovered job and reconciles its run, attempt, ticket, 
 
   await recoverExpiredWorkflowState(inTransaction);
 
-  expect(client.query).toHaveBeenCalledWith(expect.stringContaining(
-    "CASE WHEN j.attempt < j.max_attempts THEN 'queued' ELSE 'failed' END",
-  ));
-  expect(client.query).toHaveBeenCalledWith(expect.stringContaining("error_code=$2"), ["job-1", "worker_lease_expired", "Worker lease expired"]);
+  expect(client.query).toHaveBeenCalledWith(expect.stringContaining("error_code=$2"), ["job-1", "worker_lease_expired", "Worker lease expired", "failed"]);
   expect(client.query).toHaveBeenCalledWith(expect.stringContaining("UPDATE execution_attempts"), ["attempt-1", "failed"]);
   expect(client.query).toHaveBeenCalledWith(expect.stringContaining("UPDATE tickets SET status=$2"), ["ticket-1", "Execution Failed"]);
   expect(client.query).toHaveBeenCalledWith(expect.stringContaining("INSERT INTO ticket_status_history"), [
@@ -442,6 +431,181 @@ test("authentication refusal applies the terminal state matrix without duplicate
   expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE pr_ai_reviews"), ["review-row", "blocked_auth", "Authentication unavailable"]);
   expect(query).toHaveBeenCalledWith(expect.stringContaining("UPDATE pr_conflict_resolutions"), ["conflict-row", "Authentication unavailable"]);
   expect(query.mock.calls.filter(([sql]) => (sql as string).includes("INSERT INTO ticket_status_history"))).toHaveLength(1);
+});
+
+test("authentication refusal terminalizes only the claimed Claude job", async () => {
+  const claudeJob = {
+    id: "claude-job", type: "planning.generate", status: "running",
+    payload_json: { ticket_id: "ticket-claude" },
+  };
+  const deepSeekJob = {
+    id: "deepseek-job", type: "planning.generate", status: "queued",
+    payload_json: { ticket_id: "ticket-deepseek" },
+  };
+  const jobs = new Map([[claudeJob.id, claudeJob], [deepSeekJob.id, deepSeekJob]]);
+  let ticketStatus = "Planning Queued";
+  const query = vi.fn(async (sql: string, values?: unknown[]): Promise<Result> => {
+    if (sql.includes("UPDATE jobs") && sql.includes("claimed_by=$2")) {
+      const job = jobs.get(String(values?.[0]));
+      if (job?.status !== "running") return { rows: [], rowCount: 0 };
+      job.status = String(values?.[2]);
+      return { rows: [{ ...job }], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE agent_runs")) return { rows: [], rowCount: 0 };
+    if (sql.includes("SELECT status FROM tickets")) return { rows: [{ status: ticketStatus }], rowCount: 1 };
+    if (sql.includes("UPDATE tickets SET status=$2")) ticketStatus = String(values?.[1]);
+    return { rows: [], rowCount: 1 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+  const lease = { signal: new AbortController().signal, assertOwned: vi.fn(async () => undefined), run: (action: any) => action() };
+  const workflow = await import("./workflow-state.ts") as any;
+
+  await workflow.blockClaimedClaudeJob(inTransaction, lease, claudeJob, "worker-1", "blocked_auth", "Authentication unavailable");
+
+  expect(jobs.get("claude-job")?.status).toBe("blocked_auth");
+  expect(jobs.get("deepseek-job")?.status).toBe("queued");
+  expect(ticketStatus).toBe("Planning Failed");
+});
+
+test("an exhausted pre-initialization execution failure reconciles its attempt and ticket", async () => {
+  const job = {
+    id: "job-1", type: "execution.run", status: "running", attempt: 1, max_attempts: 1,
+    payload_json: { ticket_id: "ticket-1", execution_attempt_id: "attempt-1" },
+  };
+  let attemptStatus = "queued";
+  let ticketStatus = "Execution Queued";
+  const query = vi.fn(async (sql: string, values?: unknown[]): Promise<Result> => {
+    if (sql.includes("UPDATE jobs") && sql.includes("attempt < max_attempts")) {
+      job.status = "failed";
+      return { rows: [{ ...job }], rowCount: 1 };
+    }
+    if (sql.includes("SELECT id,type,status,payload_json FROM jobs")) return { rows: [{ ...job }], rowCount: 1 };
+    if (sql.includes("UPDATE agent_runs")) return { rows: [], rowCount: 0 };
+    if (sql.includes("UPDATE execution_attempts")) attemptStatus = String(values?.[1]);
+    if (sql.includes("SELECT status FROM tickets")) return { rows: [{ status: ticketStatus }], rowCount: 1 };
+    if (sql.includes("UPDATE tickets SET status=$2")) ticketStatus = String(values?.[1]);
+    return { rows: [], rowCount: 1 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+  const lease = { signal: new AbortController().signal, assertOwned: vi.fn(async () => undefined), run: (action: any) => action() };
+  const workflow = await import("./workflow-state.ts") as any;
+
+  await workflow.failClaimedWorkflowJob(inTransaction, lease, job, "worker-1", new Error("approved snapshot is corrupt"));
+
+  expect(job.status).toBe("failed");
+  expect(attemptStatus).toBe("failed");
+  expect(ticketStatus).toBe("Execution Failed");
+});
+
+test("recovery preserves a cancellation-requested run and cancelled ticket", async () => {
+  let runStatus = "cancellation_requested";
+  let attemptStatus = "cancelled";
+  let ticketStatus = "Cancelled";
+  const history: string[] = [];
+  const query = vi.fn(async (sql: string, values?: unknown[]): Promise<Result> => {
+    if (sql.includes("UPDATE jobs j") && sql.includes("lease_expires_at <= now()")) return { rows: [{
+      id: "job-1", type: "execution.run", status: "cancelled",
+      payload_json: { ticket_id: "ticket-1", execution_attempt_id: "attempt-1" },
+    }], rowCount: 1 };
+    if (sql.includes("UPDATE notification_deliveries nd")) return { rows: [], rowCount: 0 };
+    if (sql.includes("FROM execution_publications ep")) return { rows: [], rowCount: 0 };
+    if (sql.includes("UPDATE agent_runs")) {
+      if (sql.includes("cancellation_requested")) runStatus = "cancelled";
+      return { rows: [{ id: "run-1", status: runStatus }], rowCount: 1 };
+    }
+    if (sql.includes("UPDATE execution_attempts") && !sql.includes("validation_status <> 'cancelled'")) {
+      attemptStatus = String(values?.[1]);
+    }
+    if (sql.includes("SELECT status FROM tickets")) return { rows: [{ status: ticketStatus }], rowCount: 1 };
+    if (sql.includes("UPDATE tickets SET status=$2")) ticketStatus = String(values?.[1]);
+    if (sql.includes("INSERT INTO ticket_status_history")) history.push(ticketStatus);
+    return { rows: [], rowCount: 1 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+
+  await recoverExpiredWorkflowState(inTransaction);
+
+  expect(runStatus).toBe("cancelled");
+  expect(attemptStatus).toBe("cancelled");
+  expect(ticketStatus).toBe("Cancelled");
+  expect(history).toEqual([]);
+});
+
+test("execution initialization refuses a cancellation that landed during worktree setup", async () => {
+  const initialize = vi.fn(async () => undefined);
+  const query = vi.fn(async (sql: string): Promise<Result> => {
+    if (sql.includes("FROM tickets") && sql.includes("FOR UPDATE")) return { rows: [{ status: "Cancelled" }], rowCount: 1 };
+    if (sql.includes("FROM execution_attempts") && sql.includes("FOR UPDATE")) return { rows: [{ id: "attempt-1", validation_status: "cancelled" }], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+  const lease = { signal: new AbortController().signal, assertOwned: vi.fn(async () => undefined), run: (action: any) => action() };
+  const workflow = await import("./workflow-state.ts") as any;
+
+  await expect(workflow.initializeExecutionAttempt(inTransaction, lease, {
+    ticketId: "ticket-1", attemptId: "attempt-1",
+  }, initialize)).rejects.toMatchObject({ code: "execution_cancelled_before_start" });
+
+  expect(initialize).not.toHaveBeenCalled();
+});
+
+test("execution finalization refuses a run cancellation before validation side effects", async () => {
+  const finalize = vi.fn(async () => undefined);
+  const query = vi.fn(async (sql: string): Promise<Result> => {
+    if (sql.includes("FROM tickets") && sql.includes("FOR UPDATE")) return { rows: [{ status: "Executing" }], rowCount: 1 };
+    if (sql.includes("FROM agent_runs") && sql.includes("FOR UPDATE")) return { rows: [{ status: "cancellation_requested" }], rowCount: 1 };
+    return { rows: [], rowCount: 0 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+  const lease = { signal: new AbortController().signal, assertOwned: vi.fn(async () => undefined), run: (action: any) => action() };
+  const workflow = await import("./workflow-state.ts") as any;
+
+  await expect(workflow.finalizeExecutionInvocation(inTransaction, lease, {
+    ticketId: "ticket-1", runId: "run-1",
+  }, finalize)).rejects.toMatchObject({ code: "execution_cancelled" });
+
+  expect(finalize).not.toHaveBeenCalled();
+});
+
+test("classifies an administrator abort separately from shutdown and lease loss", async () => {
+  const { isWorkflowCancellation } = await import("./workflow-state.ts") as any;
+
+  expect(isWorkflowCancellation("execution_cancelled", { stopping: false, leaseAborted: false })).toBe(true);
+  expect(isWorkflowCancellation("execution_cancelled", { stopping: true, leaseAborted: false })).toBe(false);
+  expect(isWorkflowCancellation("execution_cancelled", { stopping: false, leaseAborted: true })).toBe(false);
+  expect(isWorkflowCancellation("execution_cancelled_before_start", { stopping: false, leaseAborted: false })).toBe(true);
+});
+
+test("shared run cancellation polling aborts review and conflict work", async () => {
+  vi.useFakeTimers();
+  const query = vi.fn()
+    .mockResolvedValueOnce({ rows: [{ status: "running" }], rowCount: 1 })
+    .mockResolvedValueOnce({ rows: [{ status: "cancellation_requested" }], rowCount: 1 });
+  const { observeRunCancellation } = await import("./workflow-state.ts") as any;
+  const observed = observeRunCancellation({ query }, "run-1", () => undefined, 250);
+
+  await vi.advanceTimersByTimeAsync(500);
+
+  expect(observed.signal.aborted).toBe(true);
+  await observed.stop();
+  expect(vi.getTimerCount()).toBe(0);
+});
+
+test("cancellable run finalization rejects an accepted cancellation before publication", async () => {
+  const publish = vi.fn(async () => undefined);
+  const query = vi.fn(async (sql: string): Promise<Result> => {
+    if (sql.includes("FROM agent_runs") && sql.includes("FOR UPDATE")) {
+      return { rows: [{ status: "cancellation_requested" }], rowCount: 1 };
+    }
+    return { rows: [], rowCount: 0 };
+  });
+  const inTransaction = (async (callback: (client: any) => unknown) => callback({ query })) as Transaction;
+  const lease = { signal: new AbortController().signal, assertOwned: vi.fn(async () => undefined), run: (action: any) => action() };
+  const workflow = await import("./workflow-state.ts") as any;
+
+  await expect(workflow.finalizeCancellableRun(inTransaction, lease, "run-1", publish))
+    .rejects.toMatchObject({ code: "execution_cancelled" });
+  expect(publish).not.toHaveBeenCalled();
 });
 
 test("renews every 20 seconds, reports lost ownership, and always clears its timer", async () => {

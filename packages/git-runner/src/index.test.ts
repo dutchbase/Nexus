@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
   abortMerge,
   assertNoConflictMarkers,
@@ -13,6 +13,7 @@ import {
   conflictedFiles,
   countCredentialShapes,
   createConflictResolutionWorktree,
+  createExecutionWorktree,
   createPullRequestReviewWorktree,
   createPrivateExecutionClone,
   executionBranchName,
@@ -20,6 +21,7 @@ import {
   matchesProtectedPath,
   mergeBaseIntoWorktree,
   previewRemoteBranchMerge,
+  removeNewExecutionWorktree,
   stageConflictResolutionPaths,
   sanitizeValidationOutput,
   validateEffectiveWorktree,
@@ -65,6 +67,89 @@ describe("assertRemoteBranchName", () => {
 
   it("accepts ordinary feature branch names", async () => {
     await expect(assertRemoteBranchName("feature/fix-1.2.3")).resolves.toBeUndefined();
+  });
+});
+
+describe("createExecutionWorktree", () => {
+  it("reuses the same validated attempt worktree without deleting partial progress", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-execution-retry-"));
+    try {
+      const origin = path.join(tmp, "origin");
+      await initRepo(origin);
+      await writeAndCommit(origin, "base.txt", "base\n", "base commit");
+      const repository = path.join(tmp, "repository");
+      await cloneRepo(origin, repository);
+      const input = {
+        repositoryPath: repository, defaultBranch: "main", dataRoot: path.join(tmp, "data"),
+        projectSlug: "acme", ticketNumber: "T-1", title: "Retry me", attemptNumber: 1,
+      };
+      const first = await createExecutionWorktree(input);
+      await writeFile(path.join(first.worktreePath, "partial.txt"), "keep me\n");
+
+      const retried = await createExecutionWorktree({ ...input, existingBaseCommit: first.baseCommit });
+
+      expect(first.reused).toBe(false);
+      expect(retried).toEqual({ ...first, reused: true });
+      expect(await readFile(path.join(retried.worktreePath, "partial.txt"), "utf8")).toBe("keep me\n");
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("removes a newly created unregistered worktree and branch but preserves a reused attempt", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-execution-cancel-"));
+    try {
+      const origin = path.join(tmp, "origin");
+      await initRepo(origin);
+      await writeAndCommit(origin, "base.txt", "base\n", "base commit");
+      const repository = path.join(tmp, "repository");
+      await cloneRepo(origin, repository);
+      const input = {
+        repositoryPath: repository, defaultBranch: "main", dataRoot: path.join(tmp, "data"),
+        projectSlug: "acme", ticketNumber: "T-2", title: "Cancel me", attemptNumber: 1,
+      };
+      const created = await createExecutionWorktree(input);
+
+      await expect(removeNewExecutionWorktree({ ...created, repositoryPath: repository, dataRoot: input.dataRoot }))
+        .resolves.toBe(true);
+      await expect(access(created.worktreePath)).rejects.toThrow();
+      expect((await git(repository, ["worktree", "list", "--porcelain"])).stdout).not.toContain(created.worktreePath);
+      await expect(git(repository, ["show-ref", "--verify", `refs/heads/${created.branchName}`])).rejects.toThrow();
+
+      const first = await createExecutionWorktree({ ...input, attemptNumber: 2 });
+      const reused = await createExecutionWorktree({ ...input, attemptNumber: 2, existingBaseCommit: first.baseCommit });
+      await expect(removeNewExecutionWorktree({ ...reused, repositoryPath: repository, dataRoot: input.dataRoot }))
+        .resolves.toBe(false);
+      await expect(access(reused.worktreePath)).resolves.toBeUndefined();
+      expect((await git(repository, ["worktree", "list", "--porcelain"])).stdout).toContain(reused.worktreePath);
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("refuses an existing attempt worktree that no longer descends from its recorded base", async () => {
+    const tmp = await mkdtemp(path.join(tmpdir(), "git-runner-execution-retry-"));
+    try {
+      const origin = path.join(tmp, "origin");
+      await initRepo(origin);
+      await writeAndCommit(origin, "base.txt", "base\n", "base commit");
+      const repository = path.join(tmp, "repository");
+      await cloneRepo(origin, repository);
+      const input = {
+        repositoryPath: repository, defaultBranch: "main", dataRoot: path.join(tmp, "data"),
+        projectSlug: "acme", ticketNumber: "T-1", title: "Retry me", attemptNumber: 1,
+      };
+      const first = await createExecutionWorktree(input);
+      const unrelated = (await git(first.worktreePath, [
+        "commit-tree", "4b825dc642cb6eb9a060e54bf8d69288fbee4904", "-m", "unrelated",
+      ])).stdout.trim();
+      await git(first.worktreePath, ["reset", "--hard", unrelated]);
+
+      await expect(createExecutionWorktree({ ...input, existingBaseCommit: first.baseCommit }))
+        .rejects.toThrow();
+    } finally {
+      await rm(tmp, { recursive: true, force: true });
+    }
   });
 });
 
@@ -309,6 +394,95 @@ describe("worker validation primitives", () => {
       delete process.env.DCC_VALIDATION_BWRAP_PATH;
       await new Promise<void>((resolve) => server.close(() => resolve()));
       await rm(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it("times out a hung validation command and terminates its descendants", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "git-runner-validation-timeout-"));
+    const fakeBwrap = path.join(root, "fake-bwrap.cjs");
+    const started = path.join(root, "started");
+    const descendant = path.join(root, "descendant-ran");
+    try {
+      await initRepo(root);
+      await writeAndCommit(root, "base.txt", "base\n", "base commit");
+      const baseCommit = (await git(root, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeFile(path.join(root, "result.txt"), "changed\n");
+      await writeFile(path.join(root, "hang.mjs"), [
+        "import { spawn } from 'node:child_process';",
+        "import { writeFileSync } from 'node:fs';",
+        `writeFileSync(${JSON.stringify(started)}, 'started');`,
+        `spawn(process.execPath, ['-e', ${JSON.stringify(`setTimeout(() => require('node:fs').writeFileSync(${JSON.stringify(descendant)}, 'ran'), 1800)`)}]);`,
+        "setTimeout(() => process.exit(0), 3000);",
+      ].join("\n"));
+      await writeFile(fakeBwrap, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const args = process.argv.slice(2);
+const bind = args.indexOf("--bind");
+const command = args.lastIndexOf("sh");
+const child = spawn(args[command], args.slice(command + 1), {
+  cwd: args[bind + 1], env: { PATH: process.env.PATH, HOME: "/tmp", LANG: "C.UTF-8" }, stdio: "inherit",
+});
+child.on("error", () => process.exit(1));
+child.on("close", (code) => process.exit(code ?? 1));
+`);
+      await chmod(fakeBwrap, 0o755);
+      process.env.DCC_VALIDATION_BWRAP_PATH = fakeBwrap;
+
+      await expect(validateExecutionWorktree({
+        worktreePath: root, baseCommit, commands: { test: "node hang.mjs" }, timeoutMs: 1500,
+      })).rejects.toMatchObject({ check: "tests", message: expect.stringMatching(/timed out/i) });
+      await new Promise((resolve) => setTimeout(resolve, 2100));
+      await expect(access(started)).resolves.toBeUndefined();
+      await expect(access(descendant)).rejects.toThrow();
+    } finally {
+      delete process.env.DCC_VALIDATION_BWRAP_PATH;
+      await rm(root, { recursive: true, force: true });
+    }
+  });
+
+  it("aborts validation from the caller signal", async () => {
+    const root = await mkdtemp(path.join(tmpdir(), "git-runner-validation-abort-"));
+    const fakeBwrap = path.join(root, "fake-bwrap.cjs");
+    const started = path.join(root, "started");
+    let restoreKill = () => undefined;
+    try {
+      await initRepo(root);
+      await writeAndCommit(root, "base.txt", "base\n", "base commit");
+      const baseCommit = (await git(root, ["rev-parse", "HEAD"])).stdout.trim();
+      await writeFile(path.join(root, "result.txt"), "changed\n");
+      await writeFile(path.join(root, "hang.mjs"), `import { writeFileSync } from "node:fs";\nwriteFileSync(${JSON.stringify(started)}, "started");\nsetTimeout(() => process.exit(0), 500);\n`);
+      await writeFile(fakeBwrap, `#!/usr/bin/env node
+const { spawn } = require("node:child_process");
+const args = process.argv.slice(2);
+const bind = args.indexOf("--bind");
+const command = args.lastIndexOf("sh");
+const child = spawn(args[command], args.slice(command + 1), { cwd: args[bind + 1], env: { PATH: process.env.PATH }, stdio: "inherit" });
+child.on("close", (code) => process.exit(code ?? 1));
+`);
+      await chmod(fakeBwrap, 0o755);
+      process.env.DCC_VALIDATION_BWRAP_PATH = fakeBwrap;
+      const controller = new AbortController();
+      const originalKill = process.kill.bind(process);
+      const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => originalKill(pid, signal));
+      restoreKill = () => { kill.mockRestore(); };
+      const running = validateExecutionWorktree({
+        worktreePath: root, baseCommit, commands: { test: "node hang.mjs" }, signal: controller.signal, killGraceMs: 50,
+      });
+      void running.catch(() => undefined);
+      const deadline = Date.now() + 2_000;
+      while (Date.now() < deadline) {
+        try { await access(started); break; } catch { await new Promise((resolve) => setImmediate(resolve)); }
+      }
+      await expect(access(started)).resolves.toBeUndefined();
+      controller.abort();
+
+      await expect(running).rejects.toMatchObject({ code: "execution_cancelled" });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(kill.mock.calls.some(([, signal]) => signal === "SIGKILL")).toBe(false);
+    } finally {
+      restoreKill();
+      delete process.env.DCC_VALIDATION_BWRAP_PATH;
+      await rm(root, { recursive: true, force: true });
     }
   });
 });

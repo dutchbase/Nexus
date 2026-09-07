@@ -13,6 +13,7 @@ const getBranchHeadCommit = vi.fn();
 const getCommitCheckStatus = vi.fn();
 const getPullRequestsForCommit = vi.fn();
 const updateBranchReference = vi.fn();
+const updateBranchReferenceIfMatches = vi.fn();
 const getPendingDeployments = vi.fn();
 const checkImageExists = vi.fn();
 
@@ -28,7 +29,7 @@ vi.mock("@dcc/domain", () => {
 });
 vi.mock("@dcc/github-provider", () => ({
   mergeBranch, createPullRequest, findOpenPullRequestForHead,
-  getBranchHeadCommit, getCommitCheckStatus, getPullRequestsForCommit, updateBranchReference, getPendingDeployments, checkImageExists,
+  getBranchHeadCommit, getCommitCheckStatus, getPullRequestsForCommit, updateBranchReference, updateBranchReferenceIfMatches, getPendingDeployments, checkImageExists,
 }));
 const previewRemoteBranchMerge = vi.fn();
 const lsRemoteHeads = vi.fn(async () => new Map());
@@ -101,9 +102,13 @@ test("deployment.sync_status happy path writes a status snapshot", async () => {
   expect(resultUpdate!.values![1]).toMatchObject({ outcome: "synced" });
 });
 
-test("deployment.sync_status marks a stalled in-flight release failed after 15 minutes with no resolution", async () => {
+test("deployment.sync_status uses release creation time even when a recent poll updated the row", async () => {
   const database = db([project]);
-  const staleRelease = { id: "release-9", commit_sha: "9".repeat(40), updated_at: new Date(Date.now() - 20 * 60 * 1000).toISOString() };
+  const staleRelease = {
+    id: "release-9", commit_sha: "9".repeat(40),
+    created_at: new Date(Date.now() - 20 * 60 * 1000).toISOString(),
+    updated_at: new Date(Date.now() - 60 * 1000).toISOString(),
+  };
   database.query.mockImplementation(async (text: string, values?: unknown[]) => {
     database.queries.push({ text, values });
     if (text.includes("FROM production_releases")) return { rows: [staleRelease], rowCount: 1 };
@@ -288,4 +293,56 @@ test("deployment.rollback refuses with image_gone when the target image no longe
   expect(resultUpdate!.values![1]).toMatchObject({ outcome: "refused", refusal_code: "image_gone" });
   const auditInsert = database.queries.find((q) => q.text.includes("audit_events"));
   expect(auditInsert!.values![5]).toMatchObject({ outcome: "refused", refusal_code: "image_gone" });
+});
+
+test("deployment.rollback atomically refuses to overwrite a moved production ref", async () => {
+  const productionSha = "3".repeat(40);
+  const targetSha = "4".repeat(40);
+  const database = db([project]);
+  database.query.mockImplementation(async (text: string, values?: unknown[]) => {
+    database.queries.push({ text, values });
+    if (text.includes("INSERT INTO production_releases")) return { rows: [{ id: "release-cas" }], rowCount: 1 };
+    return { rows: [project], rowCount: 1 };
+  });
+  lsRemoteHeads.mockResolvedValue(new Map([["production", productionSha]]));
+  checkImageExists.mockResolvedValue({ exists: true, checkedAt: "2026-01-01T00:00:00Z", authRequired: false });
+  updateBranchReferenceIfMatches.mockRejectedValueOnce(new Error("reference no longer matches beforeOid"));
+
+  await expect(runProviderJob({
+    id: "job-rollback-cas", type: "deployment.rollback",
+    idempotency_key: "g11:deployment.rollback:project-1:cas",
+    payload_json: { actor_id: "admin-1", project_id: "project-1", target_commit_sha: targetSha, expected_production_sha: productionSha },
+  } as any, database as any)).rejects.toThrow("reference no longer matches");
+
+  expect(updateBranchReferenceIfMatches).toHaveBeenCalledWith("acme", "widgets", "production", productionSha, targetSha, true);
+  expect(updateBranchReference).not.toHaveBeenCalled();
+});
+
+test("deployment.promote validates the exact commit it writes when master moves during eligibility", async () => {
+  const reviewedSha = "7".repeat(40);
+  const movedSha = "8".repeat(40);
+  const database = db([project]);
+  database.query.mockImplementation(async (text: string, values?: unknown[]) => {
+    database.queries.push({ text, values });
+    if (text.includes("INSERT INTO production_releases")) return { rows: [{ id: "release-pinned" }], rowCount: 1 };
+    return { rows: [project], rowCount: 1 };
+  });
+  getBranchHeadCommit.mockResolvedValueOnce({ sha: reviewedSha, committedAt: "2026-01-01T00:00:00Z", message: "reviewed" })
+    .mockResolvedValueOnce({ sha: movedSha, committedAt: "2026-01-01T00:01:00Z", message: "moved" });
+  getCommitCheckStatus.mockResolvedValue({ sha: reviewedSha, checks: [], overallState: "success", fetchedAt: "2026-01-01T00:00:00Z" });
+  checkImageExists.mockResolvedValue({ exists: true, checkedAt: "2026-01-01T00:00:00Z", authRequired: false });
+  checkProductionHealth.mockResolvedValue({ state: "healthy", healthy: true, commit_sha: "9".repeat(40), raw: null });
+  evaluatePromotionEligibility.mockReturnValue({ eligible: true, reasons: [] });
+  lsRemoteHeads.mockResolvedValue(new Map([["production", "9".repeat(40)]]));
+  updateBranchReference.mockResolvedValue({ sha: reviewedSha });
+
+  await runProviderJob({
+    id: "job-promote-pinned", type: "deployment.promote",
+    idempotency_key: "g11:deployment.promote:project-1:pinned",
+    payload_json: { actor_id: "admin-1", project_id: "project-1", commit_sha: reviewedSha, expected_master_sha: reviewedSha },
+  } as any, database as any);
+
+  expect(getCommitCheckStatus).toHaveBeenCalledWith("acme", "widgets", reviewedSha);
+  expect(checkImageExists).toHaveBeenCalledWith("ghcr.io", "acme/widgets", `sha-${reviewedSha}`);
+  expect(updateBranchReference).toHaveBeenCalledWith("acme", "widgets", "production", reviewedSha, false);
 });

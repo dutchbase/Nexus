@@ -156,6 +156,26 @@ describe("Superpowers content", () => {
     expect(calls.some((call) => call.sql.startsWith("UPDATE prompt_files"))).toBe(true);
   });
 
+  it("keeps an explicitly disabled prompt disabled when its tracked source changes", async () => {
+    const { root } = await fixture();
+    await mkdir(join(root, "prompts", "global"), { recursive: true });
+    await writeFile(join(root, "prompts", "global", "base.md"), "changed source\n");
+    const catalog = await buildAgentContentCatalog({ root, manifest: { superpowers: { tag: "v4.1.0" } }, skills: [] });
+    const calls: { sql: string; values?: unknown[] }[] = [];
+    const client = {
+      async query(sql: string, values?: unknown[]) {
+        calls.push({ sql, values });
+        if (sql.includes("FROM agent_content")) return { rows: [{ sync: { prompt_hashes: { base: hash("old source") } } }] };
+        if (sql.includes("FROM prompt_files")) return { rows: [{ id: "prompt-1", active_version_id: null, version_count: 1 }] };
+        return { rows: [] };
+      },
+    };
+
+    expect(await syncAgentContent(client, catalog)).toMatchObject({ promptsUpdated: 0, promptsPreserved: 1 });
+    expect(calls.some((call) => call.sql.includes("INSERT INTO prompt_versions"))).toBe(false);
+    expect(calls.some((call) => call.sql.startsWith("UPDATE prompt_files"))).toBe(false);
+  });
+
   it("never overwrites a prompt a human has customized, even when its source file changes", async () => {
     const { root } = await fixture();
     await mkdir(join(root, "prompts", "global"), { recursive: true });

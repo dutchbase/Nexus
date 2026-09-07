@@ -222,12 +222,8 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       ).join("")}</div></section>`;
     const mergeBranchesPanel = project.github_owner && project.github_repository
       ? `<section class="card"><div class="card-head">Merge branches</div><div class="card-body">
-      <form data-merge-branches-form style="display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap">
-        <label class="field"><span>From (head)</span><input name="head" value="${escapeHtml(project.default_branch)}" required></label>
-        <label class="field"><span>Into (base)</span><input name="base" placeholder="e.g. production" required></label>
-        <button class="button" type="submit">Merge</button>
-      </form>
-      <p style="font-size:12px;color:var(--text3)">Merges one branch directly into another on GitHub (no pull request). Use to promote master into staging/production.</p>
+      <p>Use the merge workbench to preview both branch commits before queuing a direct merge.</p>
+      <a class="button" href="/admin/merge">Open merge workbench</a>
     </div></section>`
       : "";
     const yamlPanel = `<section class="card"><div class="card-head">config/projects.yaml · version ${project.config_version}</div><div class="card-body"><pre style="background:var(--code-bg);padding:12px;border-radius:4px;font-family:'JetBrains Mono',monospace;font-size:12px;overflow-x:auto">${escapeHtml(yaml)}</pre></div></section>`;
@@ -238,7 +234,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
     const overriddenTypes = new Set(promptsResult.rows.map((prompt) => prompt.prompt_type));
     const availableTypes = globalPromptTypes.filter((type) => !overriddenTypes.has(type));
     const promptsPanel = `<section class="card"><div class="card-head">Project prompt overrides</div><div class="card-body">
-      ${promptsResult.rows.length > 0 ? `<div style="display:flex;gap:8px;padding:12px 18px;border-bottom:1px solid var(--border);align-items:center"><span style="font-size:12.5px;color:var(--text3)">Selected: <strong data-prompt-selected-count>0</strong></span><span style="flex:1"></span><button class="button" type="button" data-prompt-bulk="activate">Activate</button><button class="button" type="button" data-prompt-bulk="deactivate">Deactivate</button><button class="button" type="button" data-prompt-bulk="delete" style="border:1px solid var(--t-danger);color:var(--t-danger);background:transparent">Delete</button></div>
+      ${promptsResult.rows.length > 0 ? `<div style="display:flex;gap:8px;padding:12px 18px;border-bottom:1px solid var(--border);align-items:center"><span style="font-size:12.5px;color:var(--text3)">Selected: <strong data-prompt-selected-count>0</strong></span><span style="flex:1"></span><button class="button" type="button" data-prompt-bulk="activate">Activate</button><button class="button" type="button" data-prompt-bulk="deactivate">Deactivate</button><button class="button" type="button" data-prompt-bulk="archive" style="border:1px solid var(--t-danger);color:var(--t-danger);background:transparent">Archive</button></div>
       <div class="list-head" style="display:grid;grid-template-columns:28px minmax(200px,2fr) 1fr;gap:12px;padding:10px 18px;border-bottom:1px solid var(--border);background:var(--surface2)"><input type="checkbox" data-prompt-check-all aria-label="Select all prompts"><span style="font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3)">Prompt type</span><span style="font-size:10px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text3);justify-self:end">Status</span></div>${promptsResult.rows.map((prompt) =>
         `<div style="display:grid;grid-template-columns:28px minmax(200px,2fr) 1fr;gap:12px;padding:13px 18px;border-bottom:1px solid var(--border);align-items:center"><input type="checkbox" data-prompt-check="${prompt.id}" value="${prompt.id}" aria-label="Select ${escapeHtml(prompt.prompt_type)}"><div style="min-width:0"><a href="/admin/prompts/${prompt.id}"><strong>${escapeHtml(prompt.prompt_type)}</strong></a></div><span class="status ${prompt.active_version ? "ok" : "muted"}" style="justify-self:end">${prompt.active_version ? "Active" : "Inactive"}</span></div>`,
       ).join("")}` : "<p>This project uses the global prompts. Add an override to customize a prompt type.</p>"}

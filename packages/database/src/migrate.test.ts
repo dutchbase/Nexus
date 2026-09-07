@@ -170,6 +170,39 @@ integration("migrate", () => {
     }
   });
 
+  it("stores and verifies the checksum of newly applied migration SQL", async () => {
+    const file = join(migrationDirectory, "001_checked.sql");
+    await writeFile(file, "CREATE TABLE checksum_test (id integer);");
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      expect((await client.query("SELECT checksum_sha256,checksum_source FROM schema_migrations WHERE name='001_checked.sql'")).rows[0]).toMatchObject({
+        checksum_sha256: expect.stringMatching(/^[0-9a-f]{64}$/), checksum_source: "applied",
+      });
+    } finally { await client.end(); }
+    await writeFile(file, "CREATE TABLE checksum_test (id bigint);");
+    await expect(migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory })).rejects.toThrow("migration checksum mismatch");
+  });
+
+  it("records an explicit checksum baseline for legacy migration rows and aliases", async () => {
+    await writeFile(join(migrationDirectory, "019_project_agent_start_path.sql"), "SELECT 1;");
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    await client.query("CREATE TABLE schema_migrations (name text PRIMARY KEY)");
+    await client.query("INSERT INTO schema_migrations (name) VALUES ('015_project_agent_start_path.sql')");
+    await client.end();
+
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const verify = new pg.Client({ connectionString: testDatabaseUrl });
+    await verify.connect();
+    try {
+      expect((await verify.query("SELECT checksum_sha256,checksum_source FROM schema_migrations")).rows[0]).toMatchObject({
+        checksum_sha256: expect.stringMatching(/^[0-9a-f]{64}$/), checksum_source: "legacy_baseline",
+      });
+    } finally { await verify.end(); }
+  });
+
   it("rejects approved input snapshots whose hash does not match canonical JSON", async () => {
     await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
     await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
