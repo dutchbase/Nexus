@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, test } from "vitest";
-import { getGithubPolicyEnforcementMode, isPlaceholderRepositoryPath, normalizeAgentStartPath, validateAgentStartPath, validateProject } from "./index.ts";
+import { getGithubPolicyEnforcementMode, isLinkedWorktreeDir, isPlaceholderRepositoryPath, normalizeAgentStartPath, validateAgentStartPath, validateProject } from "./index.ts";
 
 const execGit = promisify(execFile);
 const tempDirs: string[] = [];
@@ -190,6 +190,46 @@ describe("git status categorization", () => {
     if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
     expect(result.changedFileDetail).toEqual([]);
     expect(result.valid).toBe(true);
+  });
+
+  test("a linked git worktree directory is excluded from changed files, but a genuine untracked file is still flagged", async () => {
+    const dir = await initRepo();
+    await commitFile(dir, "file.txt", "hello\n");
+    await execGit("git", ["-C", dir, "worktree", "add", ".worktrees/fix-g5", "-b", "fix-g5"]);
+    await writeFile(join(dir, "genuinely-dirty.txt"), "oops\n");
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
+    if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
+    expect(result.changedFiles).not.toContain(".worktrees/fix-g5/");
+    expect(result.changedFileDetail.map((entry) => entry.path)).not.toContain(".worktrees/fix-g5/");
+    expect(result.changedFileDetail).toContainEqual({ path: "genuinely-dirty.txt", status: "untracked", staged: false });
+  });
+});
+
+describe("isLinkedWorktreeDir", () => {
+  it("returns true for a directory whose .git is a gitdir-file worktree pointer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dcc-worktree-dir-"));
+    tempDirs.push(root);
+    const wt = join(root, ".worktrees/fix-g5");
+    await mkdir(wt, { recursive: true });
+    await writeFile(join(wt, ".git"), "gitdir: /some/repo/.git/worktrees/fix-g5\n");
+    await expect(isLinkedWorktreeDir(wt)).resolves.toBe(true);
+  });
+
+  it("returns false for a plain untracked directory with no .git", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dcc-worktree-dir-"));
+    tempDirs.push(root);
+    const plain = join(root, "some-untracked-dir");
+    await mkdir(plain, { recursive: true });
+    await expect(isLinkedWorktreeDir(plain)).resolves.toBe(false);
+  });
+
+  it("returns false for a nested full git repo (real .git directory, not a worktree pointer)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dcc-worktree-dir-"));
+    tempDirs.push(root);
+    const nested = join(root, "nested-repo");
+    await mkdir(join(nested, ".git"), { recursive: true });
+    await expect(isLinkedWorktreeDir(nested)).resolves.toBe(false);
   });
 });
 

@@ -103,6 +103,22 @@ function categorizePorcelainLine(record: string): ChangedFileDetail | null {
   return { path, status: "modified", staged: false };
 }
 
+// A linked git worktree (created via `git worktree add`) has a `.git` that is
+// a FILE containing `gitdir: <mainrepo>/.git/worktrees/<name>`, not a real
+// `.git` directory. `git status`/`git add` on the *parent* repo can only see
+// such a directory as a single untracked entry -- they can't stage or commit
+// into it, so it must never be treated as a plain changed file.
+export async function isLinkedWorktreeDir(absolutePath: string): Promise<boolean> {
+  try {
+    const info = await stat(resolve(absolutePath, ".git"));
+    if (!info.isFile()) return false;
+    const contents = await readFile(resolve(absolutePath, ".git"), "utf8");
+    return /^gitdir:\s*.+\/worktrees\//m.test(contents);
+  } catch {
+    return false;
+  }
+}
+
 // `-z` is what makes the reported paths the real ones: without it git
 // C-quotes any path containing a space, a quote or a non-ASCII byte
 // (`"caf\303\251.txt"`), which the diagnostics list would show verbatim.
@@ -171,7 +187,12 @@ export async function validateProject(input: ProjectValidationInput): Promise<Va
   try {
     await exec("git", ["-C", input.repositoryPath, "show-ref", "--verify", `refs/heads/${input.defaultBranch}`], { timeout: GIT_INSPECTION_TIMEOUT_MS });
     const status = (await exec("git", ["-C", input.repositoryPath, "status", "--porcelain", "-z"], { timeout: GIT_INSPECTION_TIMEOUT_MS })).stdout;
-    ({ paths: changedFiles, detail: changedFileDetail } = parsePorcelainStatus(status));
+    const parsed = parsePorcelainStatus(status);
+    const worktreeFlags = await Promise.all(
+      parsed.detail.map((entry) => isLinkedWorktreeDir(resolve(input.repositoryPath, entry.path.replace(/\/$/, ""))))
+    );
+    changedFiles = parsed.paths.filter((_, i) => !worktreeFlags[i]);
+    changedFileDetail = parsed.detail.filter((_, i) => !worktreeFlags[i]);
     if (changedFiles.length) errors.push("repository has uncommitted changes");
     if (input.requireRemote !== false) {
       const remotes = (await exec("git", ["-C", input.repositoryPath, "remote"], { timeout: GIT_INSPECTION_TIMEOUT_MS })).stdout.trim();
