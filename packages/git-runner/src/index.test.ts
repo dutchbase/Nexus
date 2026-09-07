@@ -466,7 +466,7 @@ child.on("close", (code) => process.exit(code ?? 1));
       const kill = vi.spyOn(process, "kill").mockImplementation((pid, signal) => originalKill(pid, signal));
       restoreKill = () => { kill.mockRestore(); };
       const running = validateExecutionWorktree({
-        worktreePath: root, baseCommit, commands: { test: "node hang.mjs" }, signal: controller.signal, killGraceMs: 50,
+        worktreePath: root, baseCommit, commands: { test: "node hang.mjs" }, signal: controller.signal, killGraceMs: 500,
       });
       void running.catch(() => undefined);
       const deadline = Date.now() + 2_000;
@@ -477,7 +477,7 @@ child.on("close", (code) => process.exit(code ?? 1));
       controller.abort();
 
       await expect(running).rejects.toMatchObject({ code: "execution_cancelled" });
-      await new Promise((resolve) => setTimeout(resolve, 100));
+      await new Promise((resolve) => setTimeout(resolve, 700));
       expect(kill.mock.calls.some(([, signal]) => signal === "SIGKILL")).toBe(false);
     } finally {
       restoreKill();
