@@ -1,4 +1,4 @@
-import { access, readFile, stat } from "node:fs/promises";
+import { access, readdir, readFile, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { execFile } from "node:child_process";
@@ -110,10 +110,30 @@ function categorizePorcelainLine(record: string): ChangedFileDetail | null {
 // into it, so it must never be treated as a plain changed file.
 export async function isLinkedWorktreeDir(absolutePath: string): Promise<boolean> {
   try {
-    const info = await stat(resolve(absolutePath, ".git"));
+    const gitPath = resolve(absolutePath, ".git");
+    const info = await stat(gitPath);
     if (!info.isFile()) return false;
-    const contents = await readFile(resolve(absolutePath, ".git"), "utf8");
+    const contents = await readFile(gitPath, "utf8");
     return /^gitdir:\s*.+\/worktrees\//m.test(contents);
+  } catch {
+    return false;
+  }
+}
+
+// `git status` never recurses into an untracked directory, so a `.worktrees/`
+// root that has nothing else tracked inside it -- the default result of a
+// bare `git worktree add .worktrees/x` -- is collapsed into one entry for the
+// parent (`?? .worktrees/`), one level above the `.git` pointer files that
+// isLinkedWorktreeDir looks for. Treat such a parent as worktree admin, too,
+// when every direct child is itself a linked worktree; a stray real file or
+// non-worktree subdirectory inside it means it's genuinely dirty content.
+async function isWorktreeAdminDir(absolutePath: string): Promise<boolean> {
+  if (await isLinkedWorktreeDir(absolutePath)) return true;
+  try {
+    const children = await readdir(absolutePath);
+    if (children.length === 0) return false;
+    const flags = await Promise.all(children.map((child) => isLinkedWorktreeDir(resolve(absolutePath, child))));
+    return flags.every(Boolean);
   } catch {
     return false;
   }
@@ -189,7 +209,11 @@ export async function validateProject(input: ProjectValidationInput): Promise<Va
     const status = (await exec("git", ["-C", input.repositoryPath, "status", "--porcelain", "-z"], { timeout: GIT_INSPECTION_TIMEOUT_MS })).stdout;
     const parsed = parsePorcelainStatus(status);
     const worktreeFlags = await Promise.all(
-      parsed.detail.map((entry) => isLinkedWorktreeDir(resolve(input.repositoryPath, entry.path.replace(/\/$/, ""))))
+      parsed.detail.map((entry) =>
+        entry.status === "untracked"
+          ? isWorktreeAdminDir(resolve(input.repositoryPath, entry.path.replace(/\/$/, "")))
+          : Promise.resolve(false)
+      )
     );
     changedFiles = parsed.paths.filter((_, i) => !worktreeFlags[i]);
     changedFileDetail = parsed.detail.filter((_, i) => !worktreeFlags[i]);
