@@ -25,7 +25,7 @@ export function isPlaceholderRepositoryPath(path: string | null | undefined): bo
   return /^\/placeholder\//i.test(trimmed);
 }
 
-export async function loadProjectConfig(path = process.env.PROJECTS_CONFIG_PATH ?? resolve("config/projects.yaml")) {
+export async function loadProjectConfig(path = process.env.PROJECTS_CONFIG_PATH ?? resolve(process.env.DCC_CONFIG_DIR ?? "config", "projects.yaml")) {
   const content = await readFile(path, "utf8");
   const parsed = parse(content) as ProjectConfigFile;
   if (!parsed || parsed.version !== 1 || !parsed.projects || typeof parsed.projects !== "object") {

@@ -124,6 +124,20 @@ test("normal promote route (unchanged) still uses maxAttempts:1 too — 422 must
   expect(values[4]).toBe(1); // max_attempts
 });
 
+test("promotion retries dedupe one client request but a deliberate retry gets a fresh job key", async () => {
+  const call = async (request_id: string) => adminApi(
+    request({ commit_sha: masterSha, expected_master_sha: masterSha, request_id }), newResponse(),
+    new URL(`http://test/api/admin/projects/${vaJobsPlatformId}/deployment/promote`), { user_id: "admin" },
+  );
+  const sameRequest = "11111111-1111-4111-8111-111111111111";
+  await call(sameRequest);
+  await call(sameRequest);
+  await call("22222222-2222-4222-8222-222222222222");
+  const keys = pool.query.mock.calls.filter(([sql]) => sql.includes("INSERT INTO jobs")).map(([, values]) => values[3]);
+  expect(keys[0]).toBe(keys[1]);
+  expect(keys[2]).not.toBe(keys[1]);
+});
+
 test("promote-force route refuses an allowlisted slug whose github_repository was edited away from the allowlist entry", async () => {
   const response = newResponse();
   await adminApi(

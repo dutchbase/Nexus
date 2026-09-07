@@ -2,7 +2,8 @@ import { readFile } from "node:fs/promises";
 import { expect, test } from "vitest";
 
 import {
-  finalizePlanningFailure, finalizePlanningSuccess, initializePlanningAttempt, recoverExpiredWorkflowState, type LeaseGuard,
+  finalizePlanningFailure, finalizePlanningSuccess, initializePlanningAttempt, isPlanningCancellation,
+  isWorkflowCancellation, recoverExpiredWorkflowState, type LeaseGuard,
 } from "./workflow-state.ts";
 
 type State = { job: "running" | "completed" | "failed"; ticket: string; plan: boolean; run: string };
@@ -124,17 +125,8 @@ test("captures truncated raw stdout from a failed planning invocation into agent
 });
 
 test("classifies a cancelled planning run separately from a failed one", async () => {
-  const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
-  const planning = worker.slice(worker.indexOf("async function runPlanning"), worker.indexOf("async function runExecution"));
-
-  // Cancellation must not route through finalizePlanningFailure (which hard-codes jobs.status='failed').
-  // The stateful terminal outcome is covered by planning-cancellation.test.ts.
-  expect(planning).toContain("isPlanningCancellation({");
-
-  // The outer job-loop catch must recognize planning_cancelled the same way it already
-  // recognizes execution_cancelled, so the job row lands on 'cancelled' not 'failed'.
-  const jobLoop = worker.slice(worker.indexOf("if (job.type === \"project.validate\")"));
-  expect(jobLoop).toContain("error.code === \"execution_cancelled\" || error.code === \"planning_cancelled\"");
+  expect(isWorkflowCancellation("planning_cancelled", { stopping: false, leaseAborted: false })).toBe(true);
+  expect(isWorkflowCancellation("planning_failed", { stopping: false, leaseAborted: false })).toBe(false);
 });
 
 test("transitionToPlanning refuses to un-cancel a ticket cancelled before planning started", async () => {
@@ -151,44 +143,15 @@ test("transitionToPlanning refuses to un-cancel a ticket cancelled before planni
 });
 
 test("distinguishes a real cancellation from a worker shutdown and from a genuine planning failure", async () => {
-  const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
-  const planning = worker.slice(worker.indexOf("async function runPlanning"), worker.indexOf("async function runExecution"));
-
-  // transitionToPlanning's sentinel is a plain Error, so it is classified via its own flag only.
-  expect(planning).toContain('const cancelledBeforeStart = (error as any)?.code === "ticket_cancelled_before_planning";');
-
-  // A SIGTERM/lease loss aborts the same AbortSignal.any([...]) a real cancellation does, so the
-  // invocation-level code alone is not trusted — the poll's own controller must have fired.
-  expect(planning).toContain("const invocationCancelled = (error instanceof ClaudePlanningError && error.code === \"planning_cancelled\")");
-
-  // The stateful cancellation test verifies that the shared classifier rejects a shutdown
-  // even though the invocation cancellation signal fired.
-
-  // `stopping` has to be the module-level shutdown flag those handlers set, not a local.
-  expect(worker).toContain("let stopping = false;");
-  expect(worker).toContain("stopping = true; activeExecutionCancellation?.abort(); activePlanningCancellation?.abort();");
-
-  // A genuine (non-cancelled) OpenCode/DeepSeek failure must keep the generic "planning_failed"
-  // code the ticket page's failure banner gates on, not leak the raw OpenCode code.
-  // errorCode must be derived FROM `cancelled`, so an abort that is not treated as a cancellation
-  // can never still report the ambiguous "planning_cancelled" code.
-  expect(planning.indexOf("const cancelled =")).toBeLessThan(planning.indexOf("const errorCode ="));
-  expect(planning).toContain('const errorCode = cancelled ? "planning_cancelled"');
-
-  // Both engines fall back to the generic "planning_failed" the ticket page's failure banner gates
-  // on when the run was NOT cancelled — Claude's ambiguous cancel code included, and every OpenCode
-  // code (opencode_failed / opencode_no_output / opencode_timeout), which is Bug 2's regression.
-  expect(planning).toContain('error instanceof ClaudePlanningError ? (error.code === "planning_cancelled" ? "planning_failed" : error.code)');
-  expect(planning).toContain('error instanceof OpenCodeError ? "planning_failed"');
+  expect(isPlanningCancellation({ cancelledBeforeStart: false, invocationCancelled: true, cancellationAborted: true, stopping: false })).toBe(true);
+  expect(isPlanningCancellation({ cancelledBeforeStart: false, invocationCancelled: true, cancellationAborted: true, stopping: true })).toBe(false);
+  expect(isPlanningCancellation({ cancelledBeforeStart: false, invocationCancelled: false, cancellationAborted: false, stopping: false })).toBe(false);
+  expect(isWorkflowCancellation("planning_cancelled", { stopping: true, leaseAborted: false })).toBe(false);
+  expect(isWorkflowCancellation("planning_cancelled", { stopping: false, leaseAborted: true })).toBe(false);
 });
 
 test("the outer job loop marks a pre-planning cancellation's job cancelled, not failed", async () => {
-  const worker = await readFile(new URL("./worker.ts", import.meta.url), "utf8");
-  const jobLoop = worker.slice(worker.indexOf("if (job.type === \"project.validate\")"));
-
-  expect(jobLoop).toContain('|| (error as any)?.code === "ticket_cancelled_before_planning"');
-  expect(jobLoop.indexOf('ticket_cancelled_before_planning'))
-    .toBeLessThan(jobLoop.indexOf("UPDATE jobs SET status='cancelled'"));
+  expect(isWorkflowCancellation("ticket_cancelled_before_planning", { stopping: false, leaseAborted: false })).toBe(true);
 });
 
 test("storePlan and storeRevisedPlan never overwrite a ticket that was cancelled mid-flight", async () => {

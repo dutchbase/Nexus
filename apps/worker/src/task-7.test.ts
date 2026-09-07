@@ -69,7 +69,11 @@ describe("worker orchestration boundary", () => {
     expect(approvedExecutionInput).toBeTypeOf("function");
     const materialInput: ApprovedInputSnapshot = {
       plan: { versionId: "plan-v1", version: 1, contentHash: "a".repeat(64) },
-      ticket: { title: "Approved title" },
+      ticket: { title: "Approved title", imageEvidence: [{
+        attachment_id: "attachment-1", upload_id: "upload-1", artifact_id: "artifact-1",
+        storage_root: "primary", storage_path: "uploads/artifact-1.png", original_name: "bug.png",
+        media_type: "image/png", size_bytes: 12, sha256: "b".repeat(64),
+      }] },
       skills: [], policySources: [],
       project: { configVersion: 7, config: {
         enabled: true, slug: "approved-project", repositoryPath: "/approved/repo",
@@ -96,6 +100,7 @@ describe("worker orchestration boundary", () => {
       project: { config_version: 7, repository_path: "/approved/repo", default_branch: "approved-main" },
       ai: { model: "approved-model", reasoning_level: "xhigh" },
       promptVersionIds: { "global.execution-repair": "prompt-v1" },
+      imageEvidence: [{ artifact_id: "artifact-1", storage_path: "uploads/artifact-1.png", sha256: "b".repeat(64) }],
     });
     expect(result.content).toContain("Approved immutable repair prompt.");
     expect(result.content).toContain('"path": "."');
@@ -103,6 +108,22 @@ describe("worker orchestration boundary", () => {
     expect(result.content).toContain("+runtime diff");
     expect(result.content).toContain("runtime feedback");
     expect(result.inputHash).toBe(preview.inputHash);
+  });
+
+  test("recovers the publication destination from approved material instead of mutable project fields", () => {
+    const approvedProjectInput = (workerBoundary as any).approvedProjectInput;
+    const material = {
+      project: { configVersion: 4, config: {
+        enabled: true, slug: "approved", name: "Approved Project", repositoryPath: "/approved/repo",
+        githubOwner: "approved-owner", githubRepository: "approved-repo", defaultBranch: "approved-main",
+        configuration: { known_limitations: "approved limitations" },
+      } },
+    };
+
+    expect(approvedProjectInput(material)).toMatchObject({
+      name: "Approved Project", github_owner: "approved-owner",
+      github_repository: "approved-repo", default_branch: "approved-main",
+    });
   });
 
   test("rejects a stored skill bundle that drifted from the approved input", () => {

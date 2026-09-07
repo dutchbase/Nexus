@@ -141,7 +141,10 @@ test("sync_status (github_actions_jobs mechanism) persists master workflow run i
 test("sync_status (github_actions_jobs mechanism) tracks the production-branch run's migrations/deploy jobs distinctly from the master run at the same SHA", async () => {
   const database = db([project]);
   const masterSha = "a".repeat(40);
-  const release = { id: "release-inflight", commit_sha: masterSha, status: "pending_approval", created_at: "2026-01-02T00:00:00Z", updated_at: new Date(Date.now() - 60_000).toISOString() };
+  const release = {
+    id: "release-inflight", commit_sha: masterSha, status: "pending_approval",
+    created_at: new Date(Date.now() - 60_000).toISOString(), updated_at: new Date().toISOString(),
+  };
   database.query.mockImplementation(async (text: string, values?: unknown[]) => {
     database.queries.push({ text, values });
     if (text.includes("FROM production_releases")) return { rows: [release], rowCount: 1 };
@@ -445,14 +448,15 @@ test("promote still proceeds when the project row matches its allowlist entry ex
   expect(resultUpdates[resultUpdates.length - 1]!.values![1]).toMatchObject({ outcome: "requested" });
 });
 
-test("sync_status reaps a release stuck at 'requested' instead of leaving it invisible in the single-flight slot", async () => {
+test("sync_status reaps a release whose creation deadline elapsed despite recent polling", async () => {
   const database = db([project]);
   // A release that crashed between the INSERT and the post-PATCH status
   // update: still 'requested', still occupying
   // production_releases_project_inflight_idx, last touched 16 minutes ago.
   const stuck = {
     id: "release-stuck", commit_sha: "a".repeat(40), status: "requested",
-    created_at: "2026-01-02T00:00:00Z", updated_at: new Date(Date.now() - 16 * 60 * 1000).toISOString(),
+    created_at: new Date(Date.now() - 16 * 60 * 1000).toISOString(),
+    updated_at: new Date(Date.now() - 60 * 1000).toISOString(),
   };
   database.query.mockImplementation(async (text: string, values?: unknown[]) => {
     database.queries.push({ text, values });

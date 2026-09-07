@@ -95,3 +95,15 @@ test("PATCH submission rejects invalid source URL and unknown keys", async () =>
     expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("UPDATE tickets SET"))).toBe(false);
   }
 });
+
+test("direct PATCH preserves nonempty bounded ticket title and description", async () => {
+  for (const [patch, fields] of [
+    [{ title: "  " }, { title: "required" }],
+    [{ description: "" }, { description: "required" }],
+  ] as const) {
+    const result = response();
+    await adminApi(request(patch), result, new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin" });
+    expect(result.writeHead).toHaveBeenCalledWith(400, expect.anything());
+    expect(body(result)).toEqual({ error: "validation failed", fields });
+  }
+});

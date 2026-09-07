@@ -135,26 +135,87 @@ export const allowedTemplateVariables = new Set([
 export function lineDiff(before: string, after: string) {
   const left = before.split("\n");
   const right = after.split("\n");
-  const lines: string[] = [];
-  const maximum = Math.max(left.length, right.length);
-  for (let index = 0; index < maximum; index += 1) {
-    if (left[index] === right[index]) lines.push(` ${left[index] ?? ""}`);
-    else {
-      if (left[index] !== undefined) lines.push(`-${left[index]}`);
-      if (right[index] !== undefined) lines.push(`+${right[index]}`);
-    }
+  let prefix = 0;
+  while (prefix < left.length && prefix < right.length && left[prefix] === right[prefix]) prefix += 1;
+  let suffix = 0;
+  while (suffix < left.length - prefix && suffix < right.length - prefix
+    && left[left.length - 1 - suffix] === right[right.length - 1 - suffix]) suffix += 1;
+  const oldLines = left.slice(prefix, left.length - suffix), newLines = right.slice(prefix, right.length - suffix);
+  const lines = left.slice(0, prefix).map((line) => ` ${line}`);
+  if (oldLines.length * newLines.length > 1_000_000) {
+    lines.push("@@ Diff simplified: changed section too large to align safely @@");
+    lines.push(...oldLines.map((line) => `-${line}`), ...newLines.map((line) => `+${line}`));
+    lines.push(...left.slice(left.length - suffix).map((line) => ` ${line}`));
+    return lines.join("\n");
   }
+  const common = Array.from({ length: oldLines.length + 1 }, () => new Uint32Array(newLines.length + 1));
+  for (let i = oldLines.length - 1; i >= 0; i -= 1) for (let j = newLines.length - 1; j >= 0; j -= 1) {
+    common[i][j] = oldLines[i] === newLines[j] ? common[i + 1][j + 1] + 1 : Math.max(common[i + 1][j], common[i][j + 1]);
+  }
+  let i = 0, j = 0;
+  while (i < oldLines.length || j < newLines.length) {
+    if (i < oldLines.length && j < newLines.length && oldLines[i] === newLines[j]) { lines.push(` ${oldLines[i++]}`); j += 1; }
+    else if (j < newLines.length && (i === oldLines.length || common[i][j + 1] >= common[i + 1][j])) lines.push(`+${newLines[j++]}`);
+    else lines.push(`-${oldLines[i++]}`);
+  }
+  lines.push(...left.slice(left.length - suffix).map((line) => ` ${line}`));
   return lines.join("\n");
 }
 
+function inlineMarkdown(value: string) {
+  let output = "", cursor = 0;
+  for (const match of value.matchAll(/\[([^\]]+)\]\(([^\s)]+)\)/g)) {
+    output += escapeHtml(value.slice(cursor, match.index));
+    let safe = false;
+    try { safe = match[2].startsWith("/") || ["http:", "https:"].includes(new URL(match[2]).protocol); } catch { /* plain text */ }
+    output += safe ? `<a href="${escapeHtml(match[2])}" rel="noopener">${escapeHtml(match[1])}</a>` : escapeHtml(match[0]);
+    cursor = (match.index ?? 0) + match[0].length;
+  }
+  return output + escapeHtml(value.slice(cursor));
+}
+
 export function renderMarkdown(content: string) {
-  return content.split("\n").map((line) => {
-    if (line.startsWith("### ")) return `<h3>${escapeHtml(line.slice(4))}</h3>`;
-    if (line.startsWith("## ")) return `<h2>${escapeHtml(line.slice(3))}</h2>`;
-    if (line.startsWith("# ")) return `<h1>${escapeHtml(line.slice(2))}</h1>`;
-    if (line.startsWith("- ")) return `<p>• ${escapeHtml(line.slice(2))}</p>`;
-    return line ? `<p>${escapeHtml(line)}</p>` : "<br>";
-  }).join("");
+  const lines = content.split("\n"), output: string[] = [];
+  for (let index = 0; index < lines.length;) {
+    const line = lines[index];
+    const fence = /^```([\w-]*)\s*$/.exec(line);
+    if (fence) {
+      const code: string[] = [];
+      for (index += 1; index < lines.length && !/^```\s*$/.test(lines[index]); index += 1) code.push(lines[index]);
+      if (index < lines.length) index += 1;
+      output.push(`<pre><code${fence[1] ? ` class="language-${escapeHtml(fence[1])}"` : ""}>${escapeHtml(code.join("\n"))}</code></pre>`);
+      continue;
+    }
+    if (/^\|.*\|\s*$/.test(line) && /^\|(?:\s*:?-+:?\s*\|)+\s*$/.test(lines[index + 1] ?? "")) {
+      const cells = (row: string) => row.trim().slice(1, -1).split("|").map((cell) => cell.trim());
+      output.push(`<table><thead><tr>${cells(line).map((cell) => `<th>${inlineMarkdown(cell)}</th>`).join("")}</tr></thead><tbody>`);
+      index += 2;
+      while (index < lines.length && /^\|.*\|\s*$/.test(lines[index])) output.push(`<tr>${cells(lines[index++]).map((cell) => `<td>${inlineMarkdown(cell)}</td>`).join("")}</tr>`);
+      output.push("</tbody></table>");
+      continue;
+    }
+    if (/^\s*-\s+/.test(line)) {
+      let depth = -1;
+      while (index < lines.length) {
+        const item = /^(\s*)-\s+(.*)$/.exec(lines[index]);
+        if (!item) break;
+        const nextDepth = depth < 0 ? 0 : Math.min(Math.floor(item[1].length / 2), depth + 1);
+        if (depth < 0) { output.push("<ul><li>"); depth = 0; }
+        else if (nextDepth > depth) { output.push("<ul><li>"); depth = nextDepth; }
+        else { while (depth > nextDepth) { output.push("</li></ul>"); depth -= 1; } output.push("</li><li>"); }
+        output.push(inlineMarkdown(item[2]));
+        index += 1;
+      }
+      while (depth >= 0) { output.push("</li></ul>"); depth -= 1; }
+      continue;
+    }
+    if (line.startsWith("### ")) output.push(`<h3>${inlineMarkdown(line.slice(4))}</h3>`);
+    else if (line.startsWith("## ")) output.push(`<h2>${inlineMarkdown(line.slice(3))}</h2>`);
+    else if (line.startsWith("# ")) output.push(`<h1>${inlineMarkdown(line.slice(2))}</h1>`);
+    else if (line) output.push(`<p>${inlineMarkdown(line)}</p>`);
+    index += 1;
+  }
+  return output.join("");
 }
 
 export const standardFields = [

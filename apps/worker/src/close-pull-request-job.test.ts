@@ -16,6 +16,7 @@ const updateBranchReference = vi.fn();
 const getPendingDeployments = vi.fn();
 const checkImageExists = vi.fn();
 const closePullRequest = vi.fn();
+const setPullRequestTicketStatus = vi.fn();
 
 vi.mock("@dcc/domain", () => {
   class PullRequestMergeError extends Error {
@@ -24,7 +25,7 @@ vi.mock("@dcc/domain", () => {
   }
   return {
     syncOpenPullRequests, syncPullRequest, importGithubPullRequests, approveAndMergePullRequest, PullRequestMergeError,
-    checkProductionHealth, evaluatePromotionEligibility,
+    checkProductionHealth, evaluatePromotionEligibility, setPullRequestTicketStatus,
   };
 });
 vi.mock("@dcc/github-provider", () => ({
@@ -39,7 +40,7 @@ vi.mock("../../../packages/git-runner/src/index.ts", () => ({
 
 const { runProviderJob } = await import("./provider-jobs.ts");
 
-beforeEach(() => vi.clearAllMocks());
+beforeEach(() => vi.resetAllMocks());
 
 type Query = { text: string; values?: unknown[] };
 function db(queue: any[][]) {
@@ -71,6 +72,9 @@ test("closes an open pull request and records the outcome", async () => {
   }, database as any);
 
   expect(closePullRequest).toHaveBeenCalledWith("acme", "widgets", 4);
+  expect(setPullRequestTicketStatus).toHaveBeenCalledWith(
+    "pr-1", "Closed Without Merge", "GitHub pull request closed without merge", "admin", "admin-1", expect.any(Function),
+  );
   const updateCall = database.queries.find((q) => q.text.includes("UPDATE pull_requests"));
   expect(updateCall).toBeDefined();
   expect(updateCall!.values).toEqual(["pr-1"]);
@@ -99,8 +103,57 @@ test("skips a pull request that is already closed or merged", async () => {
   expect(closePullRequest).not.toHaveBeenCalled();
   const resultUpdate = database.queries.find((q) => q.text.includes("result_json"));
   expect(resultUpdate).toBeDefined();
-  expect(resultUpdate!.values![1]).toMatchObject({ outcome: "skipped", reason: "pull request state is merged, not open" });
+  expect(resultUpdate!.values![1]).toMatchObject({ outcome: "skipped", reason: "pull request is already merged" });
   expect(database.queries.some((q) => q.text.includes("audit_events"))).toBe(false);
+});
+
+test("does not classify a cached GitHub-merged pull request as closed without merge", async () => {
+  const database = db([
+    [{ id: "pr-1", number: 4, state: "closed", merged_at: "2026-09-06T12:00:00Z", merge_commit_sha: "a".repeat(40), github_owner: "acme", github_repository: "widgets" }],
+    [],
+  ]);
+
+  await runProviderJob({
+    id: "job-2",
+    type: "github.close_pull_request",
+    idempotency_key: "g07:github.close_pull_request:pr-1:once",
+    payload_json: { actor_id: "admin-1", pull_request_id: "pr-1" },
+  }, database as any);
+
+  expect(closePullRequest).not.toHaveBeenCalled();
+  expect(setPullRequestTicketStatus).not.toHaveBeenCalled();
+  expect(database.queries.find((q) => q.text.includes("result_json"))?.values?.[1])
+    .toMatchObject({ outcome: "skipped", reason: "pull request is already merged" });
+});
+
+test("retries the ticket transition after the provider close was already cached", async () => {
+  let state = "open";
+  const queries: Query[] = [];
+  const database = {
+    queries,
+    query: vi.fn(async (text: string, values?: unknown[]) => {
+      queries.push({ text, values });
+      if (text.includes("SELECT pr.id")) return { rows: [{ id: "pr-1", number: 4, state, github_owner: "acme", github_repository: "widgets" }], rowCount: 1 };
+      if (text.includes("UPDATE pull_requests")) state = "closed";
+      return { rows: [], rowCount: 0 };
+    }),
+  };
+  setPullRequestTicketStatus.mockRejectedValueOnce(new Error("injected ticket transition failure"));
+  const job = {
+    id: "job-2",
+    type: "github.close_pull_request" as const,
+    idempotency_key: "g07:github.close_pull_request:pr-1:once",
+    payload_json: { actor_id: "admin-1", pull_request_id: "pr-1" },
+  };
+
+  await expect(runProviderJob(job, database as any)).rejects.toThrow("injected ticket transition failure");
+  await expect(runProviderJob(job, database as any)).resolves.toBeUndefined();
+
+  expect(closePullRequest).toHaveBeenCalledTimes(1);
+  expect(setPullRequestTicketStatus).toHaveBeenCalledTimes(2);
+  expect(setPullRequestTicketStatus).toHaveBeenLastCalledWith(
+    "pr-1", "Closed Without Merge", "GitHub pull request closed without merge", "admin", "admin-1", expect.any(Function),
+  );
 });
 
 test("throws when the pull request is not found", async () => {

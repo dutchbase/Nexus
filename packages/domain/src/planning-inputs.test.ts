@@ -18,6 +18,13 @@ const ticket = {
   default_model: "sonnet", default_reasoning_level: "high",
 };
 
+const evidence = [{
+  attachment_id: "attachment-1", upload_id: "upload-1", artifact_id: "artifact-1",
+  storage_root: "legacy", storage_path: "uploads/artifact-1.png", original_name: "screen.png", media_type: "image/png",
+  size_bytes: 123, sha256: "a".repeat(64),
+}];
+let evidenceQuery = "";
+
 const prompts: Record<string, any> = {
   base: { prompt_file_id: "pf-base", active_version_id: "pv-base", content: "Base for {{project.name}}.", version: 3 },
   planning: { prompt_file_id: "pf-plan", active_version_id: "pv-plan", content: "Plan {{ticket.title}}.", version: 7 },
@@ -47,6 +54,7 @@ const fixtureClient = {
     if (sql.includes("FROM prompt_files")) return { rows: [prompts[values[0]]].filter(Boolean) };
     if (sql.includes("SELECT resolved.*")) return { rows: skillRows };
     if (sql.includes("FROM system_ai_settings")) return { rows: [{ default_model: "sonnet", default_reasoning_level: "high", planning_model: null, planning_reasoning_level: null, execution_model: null, execution_reasoning_level: null, repair_model: null, repair_reasoning_level: null }] };
+    if (sql.includes("FROM attachments")) { evidenceQuery = sql; return { rows: evidence }; }
     throw new Error(`unexpected query: ${sql}`);
   },
 };
@@ -90,6 +98,15 @@ test("the planning prompt carries the full plan structure and rendered templates
   expect(content).toContain("## 1. Summary");
   expect(content).toContain("## 17. Open Questions");
   expect(content).toContain("Each execution task must use a ### Task N: heading.");
+});
+
+test("finalized ticket image evidence is ordered and bound into planning inputs", async () => {
+  const result = await planningPromptInputs(fixtureClient, ticket);
+  expect(result.imageEvidence).toEqual(evidence);
+  expect(evidenceQuery).toContain("ar.storage_root");
+  expect(result.content).toContain("screen.png");
+  expect(result.content).toContain("artifact-1");
+  expect(result.content).toContain("a".repeat(64));
 });
 
 test("a missing or disabled project is refused", async () => {

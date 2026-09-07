@@ -1,6 +1,6 @@
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { artifactDataRoot, legacyArtifactDataRoot, pool, reconcileArtifacts } from "../packages/database/src/index.ts";
+import { artifactDataRoot, legacyArtifactDataRoot, pool, reconcileArtifactRoots } from "../packages/database/src/index.ts";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const dataRoot = artifactDataRoot(repoRoot);
@@ -12,10 +12,9 @@ let finalized = 0;
 let abandoned = 0;
 
 try {
-  for (const storageRoot of ["primary", "legacy"] as const) {
-    await reconcileArtifacts({
-      root: storageRoot === "legacy" ? legacyDataRoot : dataRoot,
-      records: records.filter((record) => (record.storage_root ?? "primary") === storageRoot),
+  await reconcileArtifactRoots({
+      roots: { primary: dataRoot, legacy: legacyDataRoot },
+      records,
       finalize: async (id, sha256) => {
         finalized += (await pool.query(
           "UPDATE artifacts SET status='finalized',sha256=$2,finalized_at=now(),expires_at=NULL WHERE id=$1 AND status='staged'",
@@ -31,7 +30,6 @@ try {
         return changed > 0;
       },
     });
-  }
   console.log(`artifact reconciliation: ${finalized} finalized, ${abandoned} abandoned`);
 } finally {
   await pool.end();

@@ -3,6 +3,7 @@
 // events on stdout. Mirrors claude-runner's spawn pattern; worker-local
 // because the worker is the only consumer.
 import { spawn } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { appendFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -35,8 +36,8 @@ export function openCodeConfig(mode: "read-only" | "write") {
 // consumes the following positional — the task string MUST come immediately
 // after "run" or it gets parsed as a filename ("Error: File not found:
 // <task>"), verified against the real binary.
-function openCodeArgs(task: string, model: string, promptFile: string): string[] {
-  return ["run", task, "--pure", "--format", "json", "-m", model, "-f", promptFile];
+function openCodeArgs(task: string, model: string, promptFile: string, attachmentFiles: readonly string[] = []): string[] {
+  return ["run", task, "--pure", "--format", "json", "-m", model, "-f", promptFile, ...attachmentFiles];
 }
 
 function extractEvent(rawLine: string): any | null {
@@ -139,6 +140,25 @@ export function parseOpenCodeEvents(stdout: string): { markdown: string; session
 
 type SpawnResult = { exitCode: number; stdout: string; stderr: string };
 
+function processStartTime(pid: number) {
+  if (process.platform !== "linux") return undefined;
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, "utf8");
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[19];
+  } catch {
+    return undefined;
+  }
+}
+
+function ownsProcessTree(child: ReturnType<typeof spawn>, startedAt: string | undefined) {
+  if (process.platform === "win32") return !child.killed;
+  if (!child.pid) return false;
+  const currentStart = processStartTime(child.pid);
+  if (startedAt && currentStart && currentStart !== startedAt) return false;
+  try { process.kill(-child.pid, 0); return true; }
+  catch { return false; }
+}
+
 async function runOpenCode(input: {
   args: string[];
   mode: "read-only" | "write";
@@ -146,6 +166,7 @@ async function runOpenCode(input: {
   apiKey: string;
   signal?: AbortSignal;
   timeoutMs?: number;
+  killGraceMs?: number;
   executable?: string;
   onStdoutChunk?: (chunk: string) => void;
   // Codes to use when termination is attributable to the caller's abort
@@ -184,6 +205,7 @@ async function runOpenCode(input: {
       cwd: input.workingDirectory, env, stdio: ["ignore", "pipe", "pipe"],
       detached: process.platform !== "win32",
     });
+    const startedAt = child.pid ? processStartTime(child.pid) : undefined;
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     let stdout = "";
@@ -205,7 +227,11 @@ async function runOpenCode(input: {
     let killTimer: NodeJS.Timeout | undefined;
     const onAbort = () => {
       terminate("SIGTERM");
-      killTimer = setTimeout(() => terminate("SIGKILL"), 5_000);
+      killTimer = setTimeout(() => {
+        killTimer = undefined;
+        if (ownsProcessTree(child, startedAt)) terminate("SIGKILL");
+      }, input.killGraceMs ?? 5_000);
+      killTimer.unref();
     };
     combined.addEventListener("abort", onAbort, { once: true });
     if (combined.aborted) onAbort();
@@ -215,7 +241,10 @@ async function runOpenCode(input: {
       const timedOutNotCancelled = () => timeout.aborted && !input.signal?.aborted;
       const callerCancelled = () => !timeout.aborted && !!input.signal?.aborted;
       const settle = (fn: () => void) => {
-        if (killTimer) clearTimeout(killTimer);
+        if (killTimer && !ownsProcessTree(child, startedAt)) {
+          clearTimeout(killTimer);
+          killTimer = undefined;
+        }
         combined.removeEventListener("abort", onAbort);
         fn();
       };
@@ -258,16 +287,19 @@ export async function invokeOpenCodePlanning(input: {
   apiKey: string;
   signal?: AbortSignal;
   timeoutMs?: number;
+  killGraceMs?: number;
   executable?: string;
   cancelledErrorCode?: string;
+  attachmentFiles?: readonly string[];
 }): Promise<{ markdown: string; sessionId: string | null; exitCode: number; usage?: AiUsage }> {
   const result = await runOpenCode({
-    args: openCodeArgs(input.task, deepSeekModelFor(input.model), input.promptFile),
+    args: openCodeArgs(input.task, deepSeekModelFor(input.model), input.promptFile, input.attachmentFiles),
     mode: "read-only",
     workingDirectory: input.workingDirectory,
     apiKey: input.apiKey,
     signal: input.signal,
     timeoutMs: input.timeoutMs,
+    killGraceMs: input.killGraceMs,
     executable: input.executable,
     cancelledErrorCode: input.cancelledErrorCode,
   });
@@ -290,10 +322,13 @@ export async function invokeOpenCodeExecution(input: {
   onEvent: (event: { eventType: string; event: unknown; raw: string }) => Promise<void>;
   signal?: AbortSignal;
   timeoutMs?: number;
+  killGraceMs?: number;
   executable?: string;
+  attachmentFiles?: readonly string[];
 }): Promise<{ exitCode: number; stderr: string; usage?: AiUsage }> {
   let buffered = "";
   let streamError: OpenCodeError | null = null;
+  let persistenceError: unknown;
   const usageEvents: unknown[] = [];
   // Serialize onEvent like claude-runner's eventWrites chain: events must land
   // in agent_run_events in order.
@@ -302,7 +337,9 @@ export async function invokeOpenCodeExecution(input: {
   let logWrites: Promise<void> = Promise.resolve();
   const handleChunk = (chunk: string) => {
     // Append log writes through the chain to serialize them
-    logWrites = logWrites.then(() => appendFile(input.logPath, chunk));
+    logWrites = logWrites.then(() => appendFile(input.logPath, chunk)).catch((error) => {
+      persistenceError ??= error;
+    });
     buffered += chunk;
     const lines = buffered.split("\n");
     buffered = lines.pop() ?? "";
@@ -315,19 +352,22 @@ export async function invokeOpenCodeExecution(input: {
         streamError = new OpenCodeError(`OpenCode reported an error: ${message}`, "opencode_failed");
       }
       eventWrites = eventWrites.then(() =>
-        input.onEvent({ eventType: String(event.type ?? "unknown"), event, raw: rawLine }));
+        input.onEvent({ eventType: String(event.type ?? "unknown"), event, raw: rawLine })).catch((error) => {
+        persistenceError ??= error;
+      });
     }
   };
   let result: { exitCode: number; stderr: string } | undefined;
   let caught: unknown;
   try {
     result = await runOpenCode({
-      args: openCodeArgs(input.task, deepSeekModelFor(input.model), input.promptFile),
+      args: openCodeArgs(input.task, deepSeekModelFor(input.model), input.promptFile, input.attachmentFiles),
       mode: "write",
       workingDirectory: input.workingDirectory,
       apiKey: input.apiKey,
       signal: input.signal,
       timeoutMs: input.timeoutMs,
+      killGraceMs: input.killGraceMs,
       executable: input.executable,
       onStdoutChunk: handleChunk,
       // worker.ts's cancel/timeout classification for the execution path
@@ -350,15 +390,21 @@ export async function invokeOpenCodeExecution(input: {
           streamError = new OpenCodeError(`OpenCode reported an error: ${message}`, "opencode_failed");
         }
         eventWrites = eventWrites.then(() =>
-          input.onEvent({ eventType: String(event.type ?? "unknown"), event, raw: buffered }));
+          input.onEvent({ eventType: String(event.type ?? "unknown"), event, raw: buffered })).catch((error) => {
+          persistenceError ??= error;
+        });
       }
-      logWrites = logWrites.then(() => appendFile(input.logPath, buffered + "\n"));
+      logWrites = logWrites.then(() => appendFile(input.logPath, buffered + "\n")).catch((error) => {
+        persistenceError ??= error;
+      });
     }
     // Wait for all events and log writes to complete before resolving or rejecting
-    await eventWrites.catch(() => undefined);
-    await logWrites.catch(() => undefined);
+    await Promise.all([eventWrites, logWrites]);
   }
   const usage = parseOpenCodeFinalUsage(usageEvents);
+  if (persistenceError) {
+    throw Object.assign(persistenceError instanceof Error ? persistenceError : new Error(String(persistenceError)), usage ? { usage } : {});
+  }
   // Prefer streamError over generic exit error; otherwise throw caught exception.
   if (streamError) {
     if (usage) streamError.usage = usage;

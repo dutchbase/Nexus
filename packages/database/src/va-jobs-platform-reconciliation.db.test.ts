@@ -7,7 +7,6 @@ import { migrate } from "./migrate.ts";
 
 const testDatabaseUrl = process.env.DCC_TEST_DATABASE_URL;
 const integration = testDatabaseUrl ? describe : describe.skip;
-const PLACEHOLDER = "/PLACEHOLDER/set-a-real-local-clone-path-for-va-jobs-platform";
 let migrationDirectory = "";
 
 async function migrateUpTo(name: string) {
@@ -79,10 +78,7 @@ integration("va-jobs-platform placeholder path reconciliation (061)", () => {
       const rows = (await check.query(
         "SELECT slug, repository_path FROM projects WHERE github_owner='dutchbase' AND github_repository='va-jobs-platform' ORDER BY slug",
       )).rows;
-      expect(rows).toEqual([
-        { slug: "jobs-platform", repository_path: "/home/deploy/projects/va-jobs-platform" },
-        { slug: "va-jobs-platform", repository_path: "/home/deploy/projects/va-jobs-platform" },
-      ]);
+      expect(rows).toEqual([{ slug: "jobs-platform", repository_path: "/home/deploy/projects/va-jobs-platform" }]);
     } finally { await check.end(); }
     await rm(scratch, { recursive: true, force: true });
   });
@@ -92,7 +88,7 @@ integration("va-jobs-platform placeholder path reconciliation (061)", () => {
     const client = new pg.Client({ connectionString: testDatabaseUrl });
     await client.connect();
     try {
-      await client.query("UPDATE projects SET repository_path='/already/real/path' WHERE slug='va-jobs-platform'");
+      await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ('va-jobs-platform','VA Jobs Platform','/already/real/path')");
       // Re-running migrate() is a no-op (schema_migrations already records 061 as applied) --
       // this assertion instead directly re-runs the migration body to prove idempotency.
       const migrationSql = await (await import("node:fs/promises")).readFile(
@@ -105,7 +101,7 @@ integration("va-jobs-platform placeholder path reconciliation (061)", () => {
     } finally { await client.end(); }
   });
 
-  it("leaves the placeholder in place and does not throw when no other candidate row exists", async () => {
+  it("does not provision an external project on a fresh installation", async () => {
     const client = new pg.Client({ connectionString: testDatabaseUrl });
     await client.connect();
     try {
@@ -115,8 +111,7 @@ integration("va-jobs-platform placeholder path reconciliation (061)", () => {
     const check = new pg.Client({ connectionString: testDatabaseUrl });
     await check.connect();
     try {
-      const row = (await check.query("SELECT repository_path FROM projects WHERE slug='va-jobs-platform'")).rows[0];
-      expect(row.repository_path).toBe(PLACEHOLDER);
+      expect((await check.query("SELECT count(*)::int count FROM projects WHERE slug='va-jobs-platform'")).rows[0].count).toBe(0);
     } finally { await check.end(); }
   });
 });

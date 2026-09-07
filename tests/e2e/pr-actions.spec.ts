@@ -139,7 +139,11 @@ test("bulk AI review does not duplicate an already-running review", async ({ pag
   await page.goto(`/admin/pull-requests`);
   // Start one review directly first via the detail page, then attempt a bulk review on the same PR while it's still running.
   await page.locator(".prs-row", { hasText: a.ticketNumber }).first().click();
-  await page.locator("[data-pr-ai-review]").click();
+  await Promise.all([
+    page.waitForResponse((response) => response.request().method() === "POST" && new URL(response.url()).pathname.endsWith("/ai-review")),
+    page.waitForEvent("framenavigated", (frame) => frame === page.mainFrame()),
+    page.locator("[data-pr-ai-review]").click(),
+  ]);
   await page.goto("/admin/pull-requests");
   await page.locator(`[data-pr-check="${a.prId}"]`).check();
   page.on("dialog", (dialog) => dialog.accept());

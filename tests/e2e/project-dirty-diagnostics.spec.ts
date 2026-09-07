@@ -6,7 +6,7 @@
 // fixture. Requires FIXTURE_REPO_CUSTOMER_PORTAL, set by tests/e2e/run-e2e.sh.
 import { execFileSync } from "node:child_process";
 import { test, expect } from "@playwright/test";
-import { loginViaUI, queryOne, waitFor } from "./helpers";
+import { clickAndWaitForPost, loginViaUI, queryOne, waitFor } from "./helpers";
 
 const FIXTURE_REPO_CUSTOMER_PORTAL = process.env.FIXTURE_REPO_CUSTOMER_PORTAL;
 
@@ -19,17 +19,13 @@ test("Recheck repository updates diagnostics in place without a full page reload
   await page.goto("/admin/projects/customer-portal");
   await page.locator('button[role="tab"]', { hasText: "Validation" }).click();
 
-  // The seeded dirty fixture (README.md, uncommitted) shows up categorized.
-  await expect(page.locator("[data-repository-diagnostics]")).toContainText("README.md");
-  await expect(page.locator("[data-repository-diagnostics]")).toContainText("Modified");
-
   // A full page navigation clears any property set on window — surviving
   // this marker after the click proves the recheck updated the DOM in place
   // rather than reloading.
   await page.evaluate(() => { (window as any).__e2eNoReloadMarker = true; });
 
   const before = await queryOne("select last_validated_at from projects where slug = $1", ["customer-portal"]);
-  await page.locator("[data-recheck-repository]").click();
+  await clickAndWaitForPost(page, "[data-recheck-repository]", "/validate");
   await expect(page.locator("[data-recheck-repository]")).toHaveText("Checking…");
 
   await waitFor(

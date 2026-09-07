@@ -33,7 +33,11 @@ record_result() {
   if [ -n "$stage" ]; then rm -rf -- "$stage" || true; fi
   if [ "$code" -ne 0 ] && [ -n "$published" ]; then rm -rf -- "$published" || true; fi
   [ "$code" -eq 0 ] && status="passed"
-  if ! psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=backup_path="$backup_directory" --set=manifest_sha256="$manifest_sha256" --set=status="$status" --set=failure_step="$step" --command "INSERT INTO backup_recovery_verifications (backup_path,manifest_sha256,status,failure_step) VALUES (:'backup_path',NULLIF(:'manifest_sha256',''),:'status',NULLIF(:'failure_step',''));" ; then
+  if ! psql "$DATABASE_URL" --set=ON_ERROR_STOP=1 --set=backup_path="$backup_directory" --set=manifest_sha256="$manifest_sha256" --set=status="$status" --set=failure_step="$step" <<'SQL'
+INSERT INTO backup_recovery_verifications (backup_path,manifest_sha256,status,failure_step)
+VALUES (:'backup_path',NULLIF(:'manifest_sha256',''),:'status',NULLIF(:'failure_step',''));
+SQL
+  then
     [ "$code" -ne 0 ] || code=1
   fi
   exit "$code"
@@ -97,12 +101,14 @@ if [ "$restore_database_disposable" != "true" ]; then
 fi
 
 restore_database_fingerprint="$(node -e 'const { createHash } = require("node:crypto"); process.stdout.write(createHash("sha256").update(process.argv[1]).digest("hex"));' "$restore_database_identity")"
-if ! health_database_identity="$(curl --fail --silent --show-error "$DCC_RESTORE_HEALTH_URL" | node -e 'let body=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => body += chunk); process.stdin.on("end", () => { const identity = JSON.parse(body).database_identity; if (typeof identity !== "string" || !identity) process.exit(1); process.stdout.write(identity); });')"; then
+expected_data_root_identity="$(node -e 'const {createHash}=require("node:crypto"); const {resolve}=require("node:path"); process.stdout.write(createHash("sha256").update(resolve(process.argv[1])).digest("hex"))' "$recovery_root/data")"
+expected_config_root_identity="$(node -e 'const {createHash}=require("node:crypto"); const {resolve}=require("node:path"); process.stdout.write(createHash("sha256").update(resolve(process.argv[1])).digest("hex"))' "$recovery_root/config")"
+if ! health_identities="$(curl --fail --silent --show-error "$DCC_RESTORE_HEALTH_URL" | node -e 'let body=""; process.stdin.setEncoding("utf8"); process.stdin.on("data",chunk=>body+=chunk); process.stdin.on("end",()=>{const v=JSON.parse(body),ids=[v.database_identity,v.data_root_identity,v.config_root_identity]; if(ids.some(id=>typeof id!=="string"||!id)) process.exit(1); process.stdout.write(ids.join("|"));});')"; then
   echo "health endpoint must expose a database identity" >&2
   exit 1
 fi
-if [ "$health_database_identity" != "$restore_database_fingerprint" ]; then
-  echo "health endpoint is connected to a different database" >&2
+if [ "$health_identities" != "$restore_database_fingerprint|$expected_data_root_identity|$expected_config_root_identity" ]; then
+  echo "health endpoint is connected to different database or managed roots" >&2
   exit 1
 fi
 
@@ -120,6 +126,7 @@ fi
 if find "$backup_directory" -type f \
   ! -path "$manifest" \
   ! -path "$backup_directory/database.dump" \
+  ! -path "$backup_directory/artifact-registry-v1.json" \
   ! -path "$backup_directory/data/*" \
   ! -path "$backup_directory/config/*" \
   ! -path "$backup_directory/legacy-data/*" \
@@ -135,6 +142,10 @@ for payload in data config; do
 done
 if [ ! -f "$backup_directory/database.dump" ]; then
   echo "backup payload is missing: database.dump" >&2
+  exit 1
+fi
+if [ ! -f "$backup_directory/artifact-registry-v1.json" ]; then
+  echo "backup payload is missing: artifact-registry-v1.json" >&2
   exit 1
 fi
 
@@ -154,7 +165,8 @@ verify_exact_manifest "$backup_directory"
 
 step="payload"
 stage="$(mktemp -d "$recovery_parent/.dcc-restore.XXXXXX")"
-cp -- "$backup_directory/database.dump" "$backup_directory/manifest-v1.sha256" "$stage/"
+cp -- "$backup_directory/database.dump" "$backup_directory/manifest-v1.sha256" \
+  "$backup_directory/artifact-registry-v1.json" "$stage/"
 for payload in data config; do
   mkdir "$stage/$payload"
   (cd "$backup_directory/$payload" && tar -cf - .) | tar -C "$stage/$payload" -xf -
@@ -172,9 +184,19 @@ if [ "$(database_identity "$DCC_RESTORE_DATABASE_URL")" != "$restore_database_id
   echo "DCC_RESTORE_DATABASE_URL changed target during restore" >&2
   exit 1
 fi
+artifact_registry() {
+  psql "$DCC_RESTORE_DATABASE_URL" --set=ON_ERROR_STOP=1 --quiet --tuples-only --no-align <<'SQL'
+SELECT json_build_object('id',id,'storage_path',storage_path,'storage_root',storage_root,'artifact_type',artifact_type,'status',status,'sha256',sha256)
+FROM artifacts WHERE status IN ('staged','finalized') ORDER BY id;
+SQL
+}
+stage_legacy="$stage/data"
+[ ! -d "$stage/legacy-data" ] || stage_legacy="$stage/legacy-data"
+artifact_registry | node "$repo_root/scripts/verify-artifact-registry.mjs" restore \
+  "$stage/data" "$stage_legacy" "$stage/artifact-registry-v1.json"
 
 step="publish"
-rm -- "$stage/database.dump" "$stage/manifest-v1.sha256"
+rm -- "$stage/database.dump" "$stage/manifest-v1.sha256" "$stage/artifact-registry-v1.json"
 if ! mv -T -n -- "$stage" "$recovery_root" || [ -d "$stage" ]; then
   echo "DCC_RESTORE_ROOT appeared before publish" >&2
   exit 1
@@ -183,12 +205,12 @@ published="$recovery_root"
 stage=""
 
 step="health"
-if ! post_restore_health_database_identity="$(curl --fail --silent --show-error "$DCC_RESTORE_HEALTH_URL" | node -e 'let body=""; process.stdin.setEncoding("utf8"); process.stdin.on("data", chunk => body += chunk); process.stdin.on("end", () => { const identity = JSON.parse(body).database_identity; if (typeof identity !== "string" || !identity) process.exit(1); process.stdout.write(identity); });')"; then
+if ! post_restore_health_identities="$(curl --fail --silent --show-error "$DCC_RESTORE_HEALTH_URL" | node -e 'let body=""; process.stdin.setEncoding("utf8"); process.stdin.on("data",chunk=>body+=chunk); process.stdin.on("end",()=>{const v=JSON.parse(body),ids=[v.database_identity,v.data_root_identity,v.config_root_identity]; if(ids.some(id=>typeof id!=="string"||!id)) process.exit(1); process.stdout.write(ids.join("|"));});')"; then
   echo "health endpoint must expose a database identity after restore" >&2
   exit 1
 fi
-if [ "$post_restore_health_database_identity" != "$restore_database_fingerprint" ]; then
-  echo "health endpoint changed database after restore" >&2
+if [ "$post_restore_health_identities" != "$restore_database_fingerprint|$expected_data_root_identity|$expected_config_root_identity" ]; then
+  echo "health endpoint changed database or managed roots after restore" >&2
   exit 1
 fi
 if [ "$(psql "$DCC_RESTORE_DATABASE_URL" --quiet --tuples-only --no-align --command "SELECT to_regclass('public.projects')")" != "projects" ]; then

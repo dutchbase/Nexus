@@ -72,6 +72,17 @@ switch_current() {
   mv -Tf "$NEXT_CURRENT" "$CURRENT"
 }
 
+ensure_release_link() {
+  local path="$1" target="$2"
+  if [ -L "$path" ]; then
+    [ "$(readlink "$path")" = "$target" ] || die "$path points outside the shared deployment state"
+  elif [ -e "$path" ]; then
+    die "$path must be a symlink"
+  else
+    ln -s "$target" "$path"
+  fi
+}
+
 swap_webhook() {
   echo "swap_webhook entered" >> "${DCC_LOG:?}"
   # Spawn the swapper detached (own session): pm2 tree-kills the descendants
@@ -157,9 +168,9 @@ if [ -e "$RELEASE" ]; then
 else
   git worktree add --detach "$RELEASE" "$SHA"
 fi
-ln -s "$ROOT/.env" "$RELEASE/.env"
-ln -s "$ROOT/.env.worker" "$RELEASE/.env.worker"
-ln -s "$ROOT/data" "$RELEASE/data"
+ensure_release_link "$RELEASE/.env" "$ROOT/.env"
+ensure_release_link "$RELEASE/.env.worker" "$ROOT/.env.worker"
+ensure_release_link "$RELEASE/data" "$ROOT/data"
 record_event "staged"
 
 cd "$RELEASE"

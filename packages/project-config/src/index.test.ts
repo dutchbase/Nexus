@@ -253,7 +253,7 @@ describe("validateProject real-path regression (no false positives)", () => {
     const dir = await mkdtemp(join(tmpdir(), "dcc-real-repo-"));
     try {
       await exec("git", ["-C", dir, "init", "-q", "-b", "trunk"]);
-      await exec("git", ["-C", dir, "commit", "--allow-empty", "-q", "-m", "init"]);
+      await exec("git", ["-C", dir, "-c", "user.name=NexusTest", "-c", "user.email=nexus@example.invalid", "commit", "--allow-empty", "-q", "-m", "init"]);
       const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
       expect(result.ok).toBe(true);
     } finally {

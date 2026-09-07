@@ -49,6 +49,19 @@ describe("validateFields", () => {
     expect(validateFields([field({ field_type: "url" })], { f: true })).toEqual({ f: "invalid value" });
     expect(validateFields([field({ field_type: "multi_select", options_json: ["a"], required: true })], { f: [] })).toEqual({ f: "required" });
   });
+  test("requires consent checkboxes to be checked", () => {
+    expect(validateFields([field({ field_type: "checkbox", required: true })], { f: false })).toEqual({ f: "required" });
+    expect(validateFields([field({ field_type: "checkbox", required: true })], { f: true })).toEqual({});
+  });
+  test("requires finite numbers inside configured bounds", () => {
+    const number = field({ field_type: "number", validation_json: { min: 1, max: 10 } });
+    expect(validateFields([number], { f: "not-a-number" })).toEqual({ f: "invalid number" });
+    expect(validateFields([number], { f: "Infinity" })).toEqual({ f: "invalid number" });
+    expect(validateFields([number], { f: "0" })).toEqual({ f: "must be at least 1" });
+    expect(validateFields([number], { f: "11" })).toEqual({ f: "must be at most 10" });
+    expect(validateFields([number], { f: "4.5" })).toEqual({});
+    expect(validateFields([number], { f: "" })).toEqual({});
+  });
 });
 
 describe("normalizeFields", () => {
@@ -56,5 +69,9 @@ describe("normalizeFields", () => {
     expect(() => normalizeFields([{ field_key: "f", field_type: "dropdown", options_json: [] }])).toThrow();
     expect(() => normalizeFields([{ field_key: "f", field_type: "radio", options_json: [1, 2] }])).toThrow();
     expect(normalizeFields([{ field_key: "f", field_type: "dropdown", options_json: ["a"] }])).toHaveLength(1);
+  });
+  test("rejects unusable field validation rules", () => {
+    expect(() => normalizeFields([{ field_key: "f", field_type: "number", validation_json: { min: 5, max: 1 } }])).toThrow(/validation/);
+    expect(() => normalizeFields([{ field_key: "f", field_type: "short_text", validation_json: { max_length: -1 } }])).toThrow(/validation/);
   });
 });

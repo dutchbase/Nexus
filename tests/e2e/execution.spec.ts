@@ -10,6 +10,7 @@ import {
   injectScenarioOnce,
   scenarioRef,
   waitForTicketStatus,
+  clickAndWaitForPost,
 } from "./helpers";
 
 test.beforeEach(async ({ page }) => {
@@ -33,7 +34,7 @@ test("start execution runs the plan and produces a PR ready for review", async (
   } as any);
   await injectScenarioOnce(page, "/execute", scenario);
   await expect(page.locator("[data-start-execution]")).toBeEnabled();
-  await page.locator("[data-start-execution]").click();
+  await clickAndWaitForPost(page, "[data-start-execution]", "/execute");
 
   const finalStatus = await waitForTicketStatus(
     ticketId,
@@ -69,13 +70,13 @@ test("a failed execution can be retried with the approved plan", async ({ page }
   await injectScenarioOnce(page, "/execute", scenarioRef({
     mode: "timeout", events: [{ type: "turn", turn_index: 0 }], timeout_after_events: 1,
   }));
-  await page.locator("[data-start-execution]").click();
+  await clickAndWaitForPost(page, "[data-start-execution]", "/execute");
   expect(await waitForTicketStatus(ticketId, ["Execution Failed"], 90_000)).toBe("Execution Failed");
 
   await page.reload();
   await expect(page.locator("[data-start-execution]")).toBeEnabled();
   await expect(page.locator("[data-start-execution]")).toHaveText("Retry execution");
-  await expect(page.locator(`a[href="/admin/tickets/${ticketNumber}/plans/1"]`, { hasText: "Revise plan" })).toBeVisible();
+  await expect(page.locator(`a[href="/admin/tickets/${ticketNumber}/plans/1"]`, { hasText: "Update plan" })).toBeVisible();
 
   await injectScenarioOnce(page, "/execute", scenarioRef({
     mode: "exec_stream",
@@ -87,7 +88,7 @@ test("a failed execution can be retried with the approved plan", async ({ page }
     ],
     exit_code: 0,
   } as any));
-  await page.locator("[data-start-execution]").click();
+  await clickAndWaitForPost(page, "[data-start-execution]", "/execute");
   expect(await waitForTicketStatus(ticketId, ["PR Ready for Review"], 90_000)).toBe("PR Ready for Review");
 
   const attempts = await queryOne("select count(*)::int count from execution_attempts where ticket_id = $1", [ticketId]);
@@ -106,7 +107,7 @@ test("a running execution can be cancelled from the run page", async ({ page }) 
     event_delay_ms: 500,
   });
   await injectScenarioOnce(page, "/execute", scenario);
-  await page.locator("[data-start-execution]").click();
+  await clickAndWaitForPost(page, "[data-start-execution]", "/execute");
 
   let run: any;
   await waitFor(async () => {

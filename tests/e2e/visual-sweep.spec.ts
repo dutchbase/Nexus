@@ -39,7 +39,7 @@ async function setTheme(page: Page, theme: "light" | "dark") {
 
 test.describe.configure({ mode: "serial" });
 
-test("no route overflows the viewport at common widths", async ({ page }) => {
+test("no route overflows the viewport at common widths", async ({ page }, testInfo) => {
   await loginViaUI(page);
 
   for (const width of WIDTHS) {
@@ -97,7 +97,7 @@ test("no route overflows the viewport at common widths", async ({ page }) => {
           ).toBeLessThan(2);
         }
 
-        await page.screenshot({ path: `tests/e2e/.results/visual-sweep/${label}.png`, fullPage: false });
+        await page.screenshot({ path: testInfo.outputPath(`${label}.png`), fullPage: false });
       }
     }
   }

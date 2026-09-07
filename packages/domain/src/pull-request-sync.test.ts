@@ -15,7 +15,7 @@ const github = vi.hoisted(() => ({
 vi.mock("@dcc/database", () => database);
 vi.mock("../../github-provider/src/index.ts", () => github);
 
-import { importGithubPullRequests, syncOpenPullRequests, syncPullRequest } from "./pull-request-sync.ts";
+import { importGithubPullRequests, setPullRequestTicketStatus, syncOpenPullRequests, syncPullRequest } from "./pull-request-sync.ts";
 
 const pullRequest = {
   number: 42, html_url: "https://github.com/acme/widgets/pull/42", state: "open", draft: true,
@@ -38,6 +38,19 @@ const policyInputs = {
 beforeEach(() => {
   vi.resetAllMocks();
   database.inTransaction.mockImplementation(async (run: (client: { query: typeof database.pool.query }) => unknown) => run(database.pool));
+});
+
+test("does not overwrite an explicit administrator terminal status while reconciling a cached close", async () => {
+  database.pool.query.mockResolvedValueOnce({
+    rows: [{ id: "pr-id", ticket_id: "ticket-id", ticket_status: "Archived" }],
+  });
+
+  await expect(setPullRequestTicketStatus(
+    "pr-id", "Closed Without Merge", "GitHub pull request closed without merge", "admin", "admin-id",
+  )).resolves.toBe("Archived");
+
+  expect(database.pool.query).toHaveBeenCalledOnce();
+  expect(database.pool.query.mock.calls.some(([sql]) => String(sql).includes("UPDATE tickets"))).toBe(false);
 });
 
 test("syncs evaluated policy truth and points to its immutable snapshot atomically", async () => {

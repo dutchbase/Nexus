@@ -9,6 +9,8 @@ export type ArtifactRecord = {
   expires_at: Date | string | null;
 };
 
+export type RootedArtifactRecord = ArtifactRecord & { storage_root?: "primary" | "legacy" };
+
 export type StagedArtifact = {
   id: string;
   root: string;
@@ -178,5 +180,29 @@ export async function reconcileArtifacts(input: {
     }
   } catch (error: any) {
     if (error?.code !== "ENOENT") throw error;
+  }
+}
+
+export async function reconcileArtifactRoots(input: {
+  roots: Record<"primary" | "legacy", string>;
+  records: RootedArtifactRecord[];
+  finalize: (id: string, sha256: string) => Promise<void>;
+  abandon: (id: string, status: ArtifactRecord["status"]) => Promise<boolean | void>;
+  now?: Date;
+}) {
+  const groups = new Map<string, RootedArtifactRecord[]>();
+  for (const storageRoot of ["primary", "legacy"] as const) {
+    let physicalRoot: string;
+    try { physicalRoot = await realpath(input.roots[storageRoot]); }
+    catch (error: any) {
+      if (error?.code !== "ENOENT") throw error;
+      physicalRoot = path.resolve(input.roots[storageRoot]);
+    }
+    const records = groups.get(physicalRoot) ?? [];
+    records.push(...input.records.filter((record) => (record.storage_root ?? "primary") === storageRoot));
+    groups.set(physicalRoot, records);
+  }
+  for (const [root, records] of groups) {
+    await reconcileArtifacts({ root, records, finalize: input.finalize, abandon: input.abandon, now: input.now });
   }
 }

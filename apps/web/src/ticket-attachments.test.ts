@@ -35,6 +35,9 @@ describe("ticket detail attachments card", () => {
     expect(page?.body).toContain("Attachments");
     expect(page?.body).toContain("screenshot.png");
     expect(page?.body).toContain("/admin/attachments/11111111-1111-4111-8111-111111111111");
+    expect(page?.body).toContain('<img loading="lazy"');
+    expect(page?.body).toContain('alt="screenshot.png"');
+    expect(page?.body).toContain('/admin/attachments/11111111-1111-4111-8111-111111111111?download=1');
   });
 
   it("renders a no-attachments message when there are none", async () => {

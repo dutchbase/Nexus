@@ -34,8 +34,10 @@ async function createSupportFiles(root: string) {
   const skillBundleDir = path.join(root, "host-skills");
   await writeFile(promptFile, "host prompt\n");
   await mkdir(path.join(skillBundleDir, "ponytail"), { recursive: true });
+  await mkdir(path.join(skillBundleDir, "evidence"), { recursive: true });
   await writeFile(path.join(skillBundleDir, "execution-plan.md"), "host plan\n");
   await writeFile(path.join(skillBundleDir, "ponytail", "SKILL.md"), "host skill\n");
+  await writeFile(path.join(skillBundleDir, "evidence", "image-001.png"), "image bytes");
   return { promptFile, skillBundleDir };
 }
 
@@ -51,7 +53,10 @@ it("runs Claude in a private clone and imports its final tree from the saved att
       worktreePath,
       baseCommit,
       ...support,
-      invocation: { task: "execute with PLAN_FILE=.git/dcc-support/skills/execution-plan.md" },
+      invocation: {
+        task: "execute with PLAN_FILE=.git/dcc-support/skills/execution-plan.md",
+        attachmentFiles: [path.join(support.skillBundleDir, "evidence", "image-001.png")],
+      },
       invoke: async (input) => {
         privateDirectory = input.workingDirectory;
         expect(privateDirectory).not.toBe(worktreePath);
@@ -63,6 +68,8 @@ it("runs Claude in a private clone and imports its final tree from the saved att
         expect(await readFile(input.promptFile, "utf8")).toBe("host prompt\n");
         expect(await readFile(path.join(input.skillBundleDir, "execution-plan.md"), "utf8")).toBe("host plan\n");
         expect(await readFile(path.join(input.skillBundleDir, "ponytail", "SKILL.md"), "utf8")).toBe("host skill\n");
+        expect(input.attachmentFiles).toEqual([path.join(input.skillBundleDir, "evidence", "image-001.png")]);
+        expect(await readFile(input.attachmentFiles[0], "utf8")).toBe("image bytes");
         expect((await git(privateDirectory, ["remote"])).stdout.trim()).toBe("");
         await writeFile(path.join(input.skillBundleDir, "ponytail", "SKILL.md"), "clone edit\n");
         expect(await readFile(path.join(privateDirectory, "result.txt"), "utf8")).toBe("repair seed\n");

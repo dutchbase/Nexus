@@ -28,6 +28,8 @@ function newResponse() {
 const projectId = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb";
 const mergePath = `http://test/api/admin/projects/${projectId}/merge-branches`;
 const jobId = "cccccccc-cccc-4ccc-8ccc-cccccccccccc";
+const headSha = "a".repeat(40);
+const baseSha = "b".repeat(40);
 
 beforeEach(() => {
   pool.query.mockReset();
@@ -56,10 +58,30 @@ test("merge-branches into the default branch requires explicit confirmation", as
 
   // With confirm_default_branch=true the job is enqueued with a deterministic key.
   const okResponse = newResponse();
-  await adminApi(request({ head: "master", base: "main", confirm_default_branch: true }), okResponse, new URL(mergePath), { user_id: "admin" });
+  await adminApi(request({ head: "master", base: "main", confirm_default_branch: true, expected_head_sha: headSha, expected_base_sha: baseSha }), okResponse, new URL(mergePath), { user_id: "admin" });
   const enqueue = pool.query.mock.calls.find(([sql]) => sql.includes("INSERT INTO jobs"));
   expect(enqueue).toBeDefined();
   expect(String(enqueue![1]?.find((value: unknown) => typeof value === "string" && value.startsWith("g07:github.merge_branches:")))).toContain(":master:main:");
+});
+
+test("merge-branches requires both exact preview commit pins", async () => {
+  for (const body of [
+    { head: "feature", base: "staging" },
+    { head: "feature", base: "staging", expected_head_sha: headSha },
+    { head: "feature", base: "staging", expected_head_sha: headSha, expected_base_sha: "not-a-sha" },
+  ]) {
+    pool.query.mockClear();
+    const response = newResponse();
+    await adminApi(request(body), response, new URL(mergePath), { user_id: "admin" });
+    expect(response.writeHead).toHaveBeenCalledWith(400, expect.any(Object));
+    expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(false);
+  }
+
+  pool.query.mockClear();
+  const response = newResponse();
+  await adminApi(request({ head: "feature", base: "staging", expected_head_sha: headSha, expected_base_sha: baseSha }), response, new URL(mergePath), { user_id: "admin" });
+  const enqueue = pool.query.mock.calls.find(([sql]) => sql.includes("INSERT INTO jobs"));
+  expect(enqueue?.[1]?.[2]).toMatchObject({ expected_head_sha: headSha, expected_base_sha: baseSha });
 });
 
 test("jobs status endpoint returns 404 for a missing job", async () => {

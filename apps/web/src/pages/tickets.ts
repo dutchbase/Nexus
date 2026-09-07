@@ -83,7 +83,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     // rarely get updated_at bumped, silently fall out of the board as newer
     // tickets push them past the top-50 window. Board also ignores any
     // cursor: it has no "Next" affordance to have produced one.
-    const effectiveLimit = isBoard ? PAGE_SIZE_MAX : limit;
+    const effectiveLimit = isBoard ? PAGE_SIZE_MAX + 1 : limit;
     if (!isBoard) {
       const keyset = keysetCondition(cursor, "t.updated_at", "t.id", values);
       if (keyset) conditions.push(keyset);
@@ -98,7 +98,8 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       ),
       pool.query("SELECT id, slug, name FROM projects ORDER BY name"),
     ]);
-    const tickets = ticketsResult.rows;
+    const boardTruncated = isBoard && ticketsResult.rows.length > PAGE_SIZE_MAX;
+    const tickets = boardTruncated ? ticketsResult.rows.slice(0, PAGE_SIZE_MAX) : ticketsResult.rows;
     const projects = projectsResult.rows;
     const ticketsNext = nextCursor(tickets, effectiveLimit, "updated_at");
 
@@ -197,7 +198,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
             ${statusFilterHtml}
           </div>
           <a class="button" data-tickets-reset href="/admin/tickets">Reset</a>
-          <span aria-live="polite" style="margin-left:auto">${tickets.length} shown</span>
+          <span aria-live="polite" style="margin-left:auto">${boardTruncated ? `Showing newest ${PAGE_SIZE_MAX} tickets; use the table or filters to find older tickets.` : `${tickets.length} shown`}</span>
         </form>
         <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(230px,1fr));gap:12px;margin-top:16px">${boardColumnsHtml}</div>`;
       return { status: 200, title: "Tickets", body };
@@ -409,8 +410,16 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     const executionGate = await checkPlanApprovalGate(pool, ticket.id);
     const panel = (index: number, content: string) => `<div role="tabpanel" id="panel-${index}" aria-labelledby="tab-${index}"${index === 0 ? "" : " hidden"}>${content}</div>`;
     const submissionValues = { ...(ticket.custom_values_json ?? {}), ...ticket };
+    const sourceLabels = new Map(sourceFields.map((field) => [field.field_key, field.label]));
+    const submissionRows = [
+      ["Description", ticket.description], ["Submitter", ticket.submitter_name], ["Submitter email", ticket.submitter_email],
+      ["Category", ticket.category], ["Environment", ticket.environment], ["Source URL", ticket.source_url],
+      ["Expected behavior", ticket.expected_behavior], ["Actual behavior", ticket.actual_behavior], ["Reproduction steps", ticket.reproduction_steps],
+      ...Object.entries(ticket.custom_values_json ?? {}).map(([key, value]) => [sourceLabels.get(key) ?? key.replaceAll("_", " "), value]),
+    ].filter(([, value]) => value !== undefined && value !== null && value !== "" && (!Array.isArray(value) || value.length));
+    const submissionDetails = submissionRows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd style="white-space:pre-wrap">${escapeHtml(Array.isArray(value) ? value.join(", ") : typeof value === "boolean" ? value ? "Yes" : "No" : value)}</dd>`).join("");
     const overviewPanel = `<div class="grid two"><section class="card"><div class="card-head">Original submission <button class="button" type="button" data-edit-ticket>Edit</button></div><div class="card-body">
-      <div data-ticket-view><p>${escapeHtml(ticket.description)}</p><dl><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Environment</dt><dd>${escapeHtml(ticket.environment)}</dd><dt>Source URL</dt><dd>${escapeHtml(ticket.source_url)}</dd></dl></div>
+      <div data-ticket-view><dl>${submissionDetails}</dl></div>
       <form data-ticket-edit-form data-ticket-id="${ticket.id}" hidden>
         ${formControls(sourceFields, projectsResult.rows, submissionValues, "admin")}
         <button class="button" type="submit">Save</button> <button class="button" type="button" data-cancel-edit-ticket>Cancel</button><p class="error" role="alert"></p>
@@ -418,7 +427,11 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       </div></section>
       <section class="card"><div class="card-head">Internal notes</div><div class="card-body notes">${notes.map((note) => `<div class="note"><strong>${escapeHtml(note.username ?? "Administrator")}</strong><p>${escapeHtml(note.body)}</p></div>`).join("") || "<p>No notes yet.</p>"}<form data-notes-form><label class="field"><span>Add an internal note…</span><textarea name="body" placeholder="Add an internal note…" rows="3"></textarea></label><button class="button" type="submit">Save note</button><p class="error" role="alert"></p></form></div></section></div>
       <div class="grid rail"><section class="card"><div class="card-head">Ticket</div><div class="card-body"><dl><dt>Project</dt><dd>${escapeHtml(ticket.project_name)}</dd><dt>Category</dt><dd>${escapeHtml(ticket.category)}</dd><dt>Source form</dt><dd>${escapeHtml(ticket.form_name ?? "—")}</dd><dt>Created</dt><dd>${new Date(ticket.created_at).toLocaleDateString("nl-NL")}</dd></dl></div></section>
-      <section class="card"><div class="card-head">Attachments</div><div class="card-body">${attachmentsResult.rows.map((a) => `<p><a href="/admin/attachments/${a.id}">${escapeHtml(a.original_name ?? "attachment")}</a> <span class="mono">${escapeHtml(a.media_type)} · ${Math.round(a.size_bytes / 1024)} kB</span></p>`).join("") || "<p>No attachments.</p>"}</div></section>
+      <section class="card"><div class="card-head">Attachments</div><div class="card-body">${attachmentsResult.rows.map((a) => {
+        const name = a.original_name ?? "attachment";
+        const href = `/admin/attachments/${a.id}`;
+        return `<figure><a href="${href}" target="_blank" rel="noopener"><img loading="lazy" src="${href}" alt="${escapeHtml(name)}" style="display:block;max-width:100%;max-height:420px;object-fit:contain"></a><figcaption>${escapeHtml(name)} · <span class="mono">${escapeHtml(a.media_type)} · ${Math.round(a.size_bytes / 1024)} kB</span> · <a href="${href}?download=1">Download original</a></figcaption></figure>`;
+      }).join("") || "<p>No attachments.</p>"}</div></section>
       ${approvalGatesCard(ticket)}
       <section class="card"><div class="card-head">Danger zone</div><div class="card-body"><p>Destructive actions are hard to undo — archiving lives outside this zone.</p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reject-ticket${["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : " disabled"} title="${
         ["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : "Can only reject early-stage tickets"}">Reject</button></p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-cancel-ticket${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : " disabled"} title="${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : "Can only cancel in-progress tickets"}">Cancel</button></p></div></section></div>`;

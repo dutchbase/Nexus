@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { readdir, readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -12,6 +13,8 @@ const legacyAppliedNames: Record<string, string> = {
 const legacyPendingNames: Record<string, string> = {
   "015_follow_up_ticket_prompt.sql": "015_project_agent_start_path.sql",
 };
+
+const checksum = (sql: string) => createHash("sha256").update(sql).digest("hex");
 
 export function validateMigrations(names: string[], appliedNames: string[]) {
   const prefixes = new Set<string>();
@@ -52,7 +55,25 @@ export async function migrate(input: { connectionString?: string; directory?: st
       : [];
     validateMigrations(names, appliedNames);
     await client.query("CREATE TABLE IF NOT EXISTS schema_migrations (name text PRIMARY KEY, applied_at timestamptz NOT NULL DEFAULT now())");
+    await client.query("ALTER TABLE schema_migrations ADD COLUMN IF NOT EXISTS checksum_sha256 text, ADD COLUMN IF NOT EXISTS checksum_source text");
     await client.query("CREATE TABLE IF NOT EXISTS migration_attempts (id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY, migration_name text NOT NULL, status text NOT NULL CHECK (status IN ('running', 'applied', 'failed')), started_at timestamptz NOT NULL DEFAULT now(), finished_at timestamptz, error_text text)");
+
+    const sqlByName = new Map(await Promise.all(names.map(async (name) => [name, await readFile(join(directory, name), "utf8")] as const)));
+    const appliedRows = (await client.query<{ name: string; checksum_sha256: string | null }>("SELECT name,checksum_sha256 FROM schema_migrations")).rows;
+    for (const row of appliedRows) {
+      const currentName = sqlByName.has(row.name)
+        ? row.name
+        : names.find((name) => legacyAppliedNames[name] === row.name);
+      if (!currentName) continue;
+      const expected = checksum(sqlByName.get(currentName)!);
+      if (row.checksum_sha256 === null) {
+        // This anchors legacy history to the first checked-in SQL observed after
+        // checksum support; it does not pretend to reconstruct bytes once applied.
+        await client.query("UPDATE schema_migrations SET checksum_sha256=$2,checksum_source='legacy_baseline' WHERE name=$1 AND checksum_sha256 IS NULL", [row.name, expected]);
+      } else if (row.checksum_sha256 !== expected) {
+        throw new Error(`migration checksum mismatch for ${currentName}`);
+      }
+    }
 
     for (const name of names) {
       if (appliedNames.includes(name) || appliedNames.includes(legacyAppliedNames[name])) continue;
@@ -61,8 +82,9 @@ export async function migrate(input: { connectionString?: string; directory?: st
       try {
         await client.query("BEGIN");
         transactionStarted = true;
-        await client.query(await readFile(join(directory, name), "utf8"));
-        await client.query("INSERT INTO schema_migrations (name) VALUES ($1)", [name]);
+        const sql = sqlByName.get(name)!;
+        await client.query(sql);
+        await client.query("INSERT INTO schema_migrations (name,checksum_sha256,checksum_source) VALUES ($1,$2,'applied')", [name, checksum(sql)]);
         await client.query("COMMIT");
         transactionStarted = false;
         await client.query("UPDATE migration_attempts SET status='applied', finished_at=now() WHERE id=$1", [attempt.rows[0].id]);

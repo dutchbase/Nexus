@@ -7,7 +7,7 @@ function since(date: string | Date) {
 }
 
 function kpiTile(label: string, value: number, detail: string, tone: string, href: string) {
-  return `<a href="${escapeHtml(href)}" style="display:grid;grid-template-rows:auto 1fr auto;gap:12px;padding:18px;background:var(--surface);border:1px solid var(--border);border-radius:6px;text-decoration:none;color:inherit;cursor:pointer;transition:all .2s ease;outline:2px solid transparent;outline-offset:-2px" onmouseover="this.style.borderColor='var(--border2)';this.style.background='var(--surface2)'" onmouseout="this.style.borderColor='var(--border)';this.style.background='var(--surface)'">
+  return `<a href="${escapeHtml(href)}" style="display:grid;grid-template-rows:auto 1fr auto;gap:12px;padding:18px;background:var(--surface);border:1px solid var(--border);border-radius:6px;text-decoration:none;color:inherit;cursor:pointer;transition:all .2s ease;outline:2px solid transparent;outline-offset:-2px">
     <div style="font-size:13px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text2)">${escapeHtml(label)}</div>
     <div style="font-family:'Cormorant Garamond',serif;font-size:38px;font-weight:700;color:var(--t-${tone})">${escapeHtml(String(value))}</div>
     <div style="font-size:12px;color:var(--text3)">${escapeHtml(detail)}</div>
@@ -15,7 +15,7 @@ function kpiTile(label: string, value: number, detail: string, tone: string, hre
 }
 
 function waitingRow(ticketNum: string, title: string, meta: string, pillLabel: string, pillTone: string, href: string) {
-  return `<a href="${escapeHtml(href)}" style="display:grid;grid-template-columns:80px 1fr auto;gap:16px;align-items:center;padding:13px 18px;border-bottom:1px solid var(--border);text-decoration:none;color:inherit;cursor:pointer" onmouseover="this.style.background='var(--surface2)'" onmouseout="this.style.background='transparent'">
+  return `<a href="${escapeHtml(href)}" style="display:grid;grid-template-columns:80px 1fr auto;gap:16px;align-items:center;padding:13px 18px;border-bottom:1px solid var(--border);text-decoration:none;color:inherit;cursor:pointer">
     <div style="font-family:'JetBrains Mono',monospace;font-size:12px;font-weight:600">${escapeHtml(ticketNum)}</div>
     <div>
       <div style="font-size:13px;font-weight:500">${escapeHtml(title)}</div>
@@ -173,8 +173,8 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
           <h1>${escapeHtml(totalNeedAttention)} ${escapeHtml(needsPlural)} need you.</h1>
         </div>
         <div style="display:flex;gap:8px">
-          <a class="button" href="/admin/queue" style="border:1px solid var(--border);background:transparent;color:var(--text2);border-radius:4px;padding:9px 14px;font-size:13px;text-decoration:none;cursor:pointer" onmouseover="this.style.borderColor='var(--border2)';this.style.color='var(--text)'" onmouseout="this.style.borderColor='var(--border)';this.style.color='var(--text2)'">Job queue</a>
-          <a class="button" href="/admin/tickets?status=Triage" style="border:0;background:var(--primary);color:var(--primary-fg);border-radius:4px;padding:9px 16px;font-size:13px;font-weight:600;text-decoration:none;cursor:pointer" onmouseover="this.style.filter='brightness(1.08)'" onmouseout="this.style.filter='brightness(1)'" >Open triage</a>
+          <a class="button" href="/admin/queue" style="border:1px solid var(--border);background:transparent;color:var(--text2);border-radius:4px;padding:9px 14px;font-size:13px;text-decoration:none;cursor:pointer">Job queue</a>
+          <a class="button" href="/admin/tickets?status=Triage" style="border:0;background:var(--primary);color:var(--primary-fg);border-radius:4px;padding:9px 16px;font-size:13px;font-weight:600;text-decoration:none;cursor:pointer">Open triage</a>
         </div>
       </div>
 
@@ -196,7 +196,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
           <section class="card" style="margin-top:0">
             <div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between;align-items:center">
               <div style="font-size:11.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text2)">Active Claude runs</div>
-              <a href="/admin/runs" style="font-size:12px;color:var(--primary);text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">All runs →</a>
+              <a href="/admin/runs" style="font-size:12px;color:var(--primary);text-decoration:none">All runs →</a>
             </div>
             ${runRows ? `<div style="flex:1;min-height:0;overflow-y:auto">${runRows}</div>` : `<div style="padding:20px 18px;color:var(--text3);font-size:13px">No active runs.</div>`}
             <a href="/admin/queue" style="display:block;padding:10px 18px;border-top:1px solid var(--border);font-size:12px;color:var(--text3);text-decoration:none">Queued behind: ${queuedCount} jobs · Inspect queue</a>
@@ -207,7 +207,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
           <section class="card" style="margin-top:0">
             <div style="padding:13px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between">
               <div style="font-size:11.5px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--text2)">System health</div>
-              <a href="/admin/system" style="font-size:12px;color:var(--primary);text-decoration:none" onmouseover="this.style.textDecoration='underline'" onmouseout="this.style.textDecoration='none'">Details →</a>
+              <a href="/admin/system" style="font-size:12px;color:var(--primary);text-decoration:none">Details →</a>
             </div>
             <div style="flex:1;min-height:0;overflow-y:auto">${healthRows}</div>
           </section>

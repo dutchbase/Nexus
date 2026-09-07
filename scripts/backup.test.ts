@@ -1,4 +1,5 @@
 import { chmod, mkdtemp, mkdir, readdir, readFile, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { createHash } from "node:crypto";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
@@ -58,7 +59,9 @@ printf "curl %s\n" "$*" >> "$DCC_TEST_COMMAND_LOG"
 if [ "$DCC_TEST_HEALTH_UNREACHABLE" = "true" ]; then exit 7; fi
 identity="\${DCC_TEST_HEALTH_DATABASE_IDENTITY:-1639b9318a3b6e0d3c7ac28cc33e5cebd5adcf7919669ad672453e235f6f181a}"
 if [ -f "\${DCC_TEST_RESTORE_COMPLETE:-}" ]; then identity="\${DCC_TEST_POST_RESTORE_HEALTH_DATABASE_IDENTITY:-\$identity}"; fi
-printf "{\\"status\\":\\"ok\\",\\"database_identity\\":\\"%s\\"}\n" "$identity"
+data_identity="$(node -e 'const {createHash}=require("node:crypto"),{resolve}=require("node:path");process.stdout.write(createHash("sha256").update(resolve(process.argv[1])).digest("hex"))' "$DCC_RESTORE_ROOT/data")"
+config_identity="$(node -e 'const {createHash}=require("node:crypto"),{resolve}=require("node:path");process.stdout.write(createHash("sha256").update(resolve(process.argv[1])).digest("hex"))' "$DCC_RESTORE_ROOT/config")"
+printf "{\\"status\\":\\"ok\\",\\"database_identity\\":\\"%s\\",\\"data_root_identity\\":\\"%s\\",\\"config_root_identity\\":\\"%s\\"}\n" "$identity" "$data_identity" "$config_identity"
 `);
   await shellTool(bin, "mv", `#!/usr/bin/env bash
 target="$(printf "%s\n" "$@" | tail -n 1)"
@@ -69,27 +72,39 @@ exec /bin/mv "$@"
   await shellTool(bin, "psql", `#!/usr/bin/env bash
 set -euo pipefail
 printf 'psql %s\\n' "$*" >> "$DCC_TEST_COMMAND_LOG"
-if [[ "$*" == *"pg_control_system()"* ]]; then
+query="$(cat)"
+printf '%s\n' "$query" >> "$DCC_TEST_COMMAND_LOG"
+input="$* $query"
+if [[ "$input" == *"pg_control_system()"* ]]; then
   if [ "$1" = "$DATABASE_URL" ]; then
     printf "%s\n" "\${DCC_TEST_PRIMARY_DATABASE_IDENTITY:-dcc_primary|127.0.0.1|5432}"
   else
     printf "%s\n" "\${DCC_TEST_RESTORE_DATABASE_IDENTITY:-dcc_restore|127.0.0.1|5433}"
   fi
-elif [[ "$*" == *"SELECT current_database()"* ]]; then
+elif [[ "$input" == *"SELECT current_database()"* ]]; then
   if [ "$1" = "$DATABASE_URL" ]; then
     printf "%s\n" "legacy-primary"
   else
     printf "%s\n" "legacy-restore"
   fi
 fi
-if [[ "$*" == *"pg_db_role_setting"* ]]; then
+if [[ "$input" == *"pg_db_role_setting"* ]]; then
   printf "%s\n" "\${DCC_TEST_RESTORE_DATABASE_MARKER:-true}"
 fi
-if [[ "$*" == *"current_setting"* ]]; then
+if [[ "$input" == *"current_setting"* ]]; then
   printf "%s\n" "\${DCC_TEST_SESSION_DISPOSABLE:-false}"
 fi
-if [[ "$*" == *"to_regclass"* ]]; then
+if [[ "$input" == *"to_regclass"* ]]; then
   printf "%s\n" "\${DCC_TEST_RESTORED_PROJECTS_TABLE:-projects}"
+fi
+if [[ "$input" == *"SELECT encode(digest"* ]] && [[ "$input" == *"FROM artifacts WHERE status"* ]]; then
+  if [ "\${DCC_TEST_INCONSISTENT_SNAPSHOT:-false}" = true ] && [ -f "$DCC_TEST_ARTIFACT_SNAPSHOT_SEEN" ]; then printf '%064d\n' 2; else printf '%064d\n' 1; fi
+  touch "$DCC_TEST_ARTIFACT_SNAPSHOT_SEEN"
+fi
+if [[ "$input" == *"SELECT json_build_object"* ]]; then
+  row="\${DCC_TEST_ARTIFACT_REGISTRY_ROW:-}"
+  if [ "$1" != "$DATABASE_URL" ]; then row="\${DCC_TEST_RESTORED_ARTIFACT_REGISTRY_ROW:-\$row}"; fi
+  if [ -n "$row" ]; then printf '%s\n' "$row"; fi
 fi
 `);
   return {
@@ -110,12 +125,29 @@ fi
       DCC_DATA_ROOT: join(root, "legacy"),
       DCC_CONFIG_DIR: config,
       DCC_TEST_COMMAND_LOG: commandLog,
+      DCC_TEST_ARTIFACT_SNAPSHOT_SEEN: join(root, "artifact-snapshot-seen"),
     },
   };
 }
 
 function run(script: string, args: string[], env: NodeJS.ProcessEnv) {
   return spawnSync("bash", [script, ...args], { cwd: repoRoot, env, encoding: "utf8" });
+}
+
+function git(cwd: string, args: string[]) {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    env: {
+      ...process.env,
+      GIT_AUTHOR_NAME: "NexusTest",
+      GIT_AUTHOR_EMAIL: "nexus@example.invalid",
+      GIT_COMMITTER_NAME: "NexusTest",
+      GIT_COMMITTER_EMAIL: "nexus@example.invalid",
+    },
+  });
+  if (result.status !== 0) throw new Error(result.stderr);
+  return result.stdout.trim();
 }
 
 async function newestBackup(backups: string) {
@@ -191,6 +223,88 @@ describe("backup and recovery drill", () => {
     expect(result.stderr).toContain("required backup root");
     expect(await readdir(test.backups)).toContain("dcc-prior");
     await expect(readFile(test.commandLog, "utf8")).rejects.toThrow();
+  });
+
+  it("fails before publication when artifact metadata changes during capture", async () => {
+    const test = await fixture();
+    const result = run("scripts/backup.sh", [], { ...test.env, DCC_TEST_INCONSISTENT_SNAPSHOT: "true" });
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("artifact metadata changed");
+    expect((await readdir(test.backups)).filter((name) => name.startsWith("dcc-"))).toEqual([]);
+  });
+
+  it("fails before publication when copied finalized bytes disagree with the registry hash", async () => {
+    const test = await fixture();
+    const row = JSON.stringify({
+      id: "11111111-1111-4111-8111-111111111111", storage_path: "artifact.txt",
+      storage_root: "primary", artifact_type: "execution_log", status: "finalized", sha256: "0".repeat(64),
+    });
+    const result = run("scripts/backup.sh", [], { ...test.env, DCC_TEST_ARTIFACT_REGISTRY_ROW: row });
+    expect(result.status).not.toBe(0);
+    expect((await readdir(test.backups)).filter((name) => name.startsWith("dcc-"))).toEqual([]);
+  });
+
+  it("rejects a registered artifact reached through an intermediate symlink", async () => {
+    const test = await fixture();
+    const outside = join(test.root, "outside");
+    await mkdir(outside);
+    await writeFile(join(outside, "artifact.txt"), "outside artifact");
+    await symlink(outside, join(test.env.DCC_DATA_DIR!, "escape"));
+    const row = JSON.stringify({
+      id: "11111111-1111-4111-8111-111111111111", storage_path: "escape/artifact.txt",
+      storage_root: "primary", artifact_type: "execution_log", status: "finalized",
+      sha256: createHash("sha256").update("outside artifact").digest("hex"),
+    });
+
+    const result = run("scripts/backup.sh", [], { ...test.env, DCC_TEST_ARTIFACT_REGISTRY_ROW: row });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("escapes backup root");
+  });
+
+  it("archives a finalized Git worktree without retaining its live checkout metadata", async () => {
+    const test = await fixture();
+    const repository = join(test.root, "repository");
+    const worktree = join(test.env.DCC_DATA_DIR!, "worktrees", "acme", "T-1", "1");
+    await mkdir(repository);
+    git(repository, ["init", "--initial-branch=main"]);
+    await writeFile(join(repository, "result.txt"), "committed result\n");
+    git(repository, ["add", "result.txt"]);
+    git(repository, ["commit", "-m", "result"]);
+    await mkdir(join(worktree, ".."), { recursive: true });
+    git(repository, ["worktree", "add", "--detach", worktree, "HEAD"]);
+    const commit = git(worktree, ["rev-parse", "HEAD"]);
+    const row = JSON.stringify({
+      id: "11111111-1111-4111-8111-111111111111", storage_path: "worktrees/acme/T-1/1",
+      storage_root: "primary", artifact_type: "worktree", status: "finalized",
+      sha256: createHash("sha256").update(commit).digest("hex"),
+    });
+
+    const result = run("scripts/backup.sh", [], { ...test.env, DCC_TEST_ARTIFACT_REGISTRY_ROW: row });
+
+    expect(result.status, result.stderr).toBe(0);
+    const backup = await newestBackup(test.backups);
+    await expect(readFile(join(backup, "data", "worktrees", "acme", "T-1", "1", "result.txt"), "utf8"))
+      .resolves.toBe("committed result\n");
+    await expect(readFile(join(backup, "data", "worktrees", "acme", "T-1", "1", ".git")))
+      .rejects.toThrow();
+  });
+
+  it("rejects a restored database whose artifact registry is absent from the backup payload", async () => {
+    const test = await fixture();
+    expect(run("scripts/backup.sh", [], test.env).status).toBe(0);
+    const missing = JSON.stringify({
+      id: "11111111-1111-4111-8111-111111111111", storage_path: "missing.txt",
+      storage_root: "primary", artifact_type: "execution_log", status: "finalized", sha256: "0".repeat(64),
+    });
+
+    const result = run("scripts/restore-drill.sh", [await newestBackup(test.backups)], {
+      ...test.env,
+      DCC_TEST_RESTORED_ARTIFACT_REGISTRY_ROW: missing,
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain("restored artifact registry");
   });
 
 

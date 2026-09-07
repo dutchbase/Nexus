@@ -62,4 +62,10 @@ describe("ticket submission form controls", () => {
     expect(page).toContain('"labels":"multi_select"');
     expect(page).toContain('else if(type==="multi_select")payload[key]=Array.isArray(payload[key])?payload[key]:key in payload?[payload[key]]:[]');
   });
+
+  it("retains the submission key across rate limits and server/network failures", () => {
+    const page = publicFormPage({ slug: "feedback", title: "Feedback", description: "" }, [], []);
+    expect(page).toContain('if(response.status===400||response.status===422)idempotencyKey=crypto.randomUUID()');
+    expect(page).not.toContain('if(!response.ok){idempotencyKey=crypto.randomUUID()');
+  });
 });

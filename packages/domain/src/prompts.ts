@@ -47,6 +47,7 @@ export type PlanningPromptInputs = {
     actualBehavior?: string | null;
     reproductionSteps?: string | null;
     customValues?: PromptValue;
+    imageEvidence?: PromptValue;
   };
   requiredPlanStructure: string;
   outputConstraints: string;
@@ -80,6 +81,9 @@ function ticketMarkdown(ticket: PlanningPromptInputs["ticket"]) {
   const custom = ticket.customValues === undefined
     ? ""
     : `### Additional fields\n\n\`\`\`json\n${stableJson(ticket.customValues)}\n\`\`\`\n\n`;
+  const evidence = ticket.imageEvidence === undefined || (Array.isArray(ticket.imageEvidence) && ticket.imageEvidence.length === 0)
+    ? ""
+    : `### Attached image evidence\n\n\`\`\`json\n${stableJson(ticket.imageEvidence)}\n\`\`\`\n\n`;
   const render = (fields: readonly (readonly [string, unknown])[]) =>
     fields
       .filter(([, value]) => value !== undefined && value !== null && value !== "")
@@ -92,7 +96,7 @@ function ticketMarkdown(ticket: PlanningPromptInputs["ticket"]) {
     "---\nBEGIN TICKET CONTENT\n---",
     primaryBody,
     "---",
-    custom + secondaryBody,
+    custom + evidence + secondaryBody,
     "---\nEND TICKET CONTENT\n---",
   ]
     .filter((part) => part && part.trim())

@@ -1,67 +1,71 @@
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { pool } from "../packages/database/src/index.ts";
-import { loadProjectConfig } from "../packages/project-config/src/index.ts";
+import { loadProjectConfig, normalizeAgentStartPath, validateAgentStartPath, validateDeploymentConfig } from "../packages/project-config/src/index.ts";
 
 function value(flag: string) {
   const index = process.argv.indexOf(flag);
   return index >= 0 ? process.argv[index + 1] : undefined;
 }
 
-const filePath = value("--file");
-try {
-  const { config } = await loadProjectConfig(filePath);
+export function normalizeProjectImport(slug: string, defaults: Record<string, any>, project: Record<string, any>) {
+  const data: Record<string, any> = { ...defaults, ...project, ai: { ...(defaults.ai ?? {}), ...(project.ai ?? {}) } };
+  const configJson = structuredClone(data);
+  for (const key of ["name", "description", "paths", "github", "default_branch", "enabled", "agent_start_path"]) delete configJson[key];
+  return {
+    name: data.name || slug, description: data.description || null,
+    repositoryPath: data.paths?.repository || null,
+    githubOwner: data.github?.owner || null, githubRepository: data.github?.repository || null,
+    defaultBranch: data.default_branch || "main", enabled: data.enabled ?? true,
+    agentStartPath: normalizeAgentStartPath(data.agent_start_path), configJson,
+  };
+}
 
+export async function importProjects(config: { defaults?: Record<string, any>; projects: Record<string, Record<string, any>> }, client: { query(sql: string, values?: unknown[]): Promise<any> } = pool) {
   let imported = 0;
   let skipped = 0;
 
   for (const [slug, projectData] of Object.entries(config.projects || {})) {
-    const data = projectData as Record<string, any>;
+    const data = normalizeProjectImport(slug, config.defaults ?? {}, projectData);
 
-    // Extract known columns
-    const name = data.name || slug;
-    const description = data.description || null;
-    const repositoryPath = data.paths?.repository || null;
-    const githubOwner = data.github?.owner || null;
-    const githubRepository = data.github?.repository || null;
-    const defaultBranch = data.default_branch || "main";
-
-    if (!repositoryPath) {
+    if (!data.repositoryPath) {
       console.warn(`⚠️  ${slug}: missing paths.repository, skipping`);
       skipped++;
       continue;
     }
 
-    // Build config_json: all keys except known columns
-    const configJson = JSON.parse(JSON.stringify(data));
-    delete configJson.name;
-    delete configJson.description;
-    delete configJson.paths;
-    delete configJson.github;
-    delete configJson.default_branch;
+    const errors = [
+      ...(typeof data.enabled === "boolean" ? [] : ["enabled must be a boolean"]),
+      ...await validateAgentStartPath(data.agentStartPath),
+      ...validateDeploymentConfig(data.configJson.deployment),
+    ];
+    if (errors.length) throw new Error(`${slug}: ${errors.join("; ")}`);
 
-    // Upsert into projects table
-    await pool.query(
-      `INSERT INTO projects (slug, name, description, repository_path, github_owner, github_repository, default_branch, config_json)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+    await client.query(
+      `INSERT INTO projects (slug,name,description,repository_path,github_owner,github_repository,default_branch,enabled,agent_start_path,config_json)
+       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
        ON CONFLICT (slug) DO UPDATE SET
-         name = $2,
-         description = $3,
-         repository_path = $4,
-         github_owner = $5,
-         github_repository = $6,
-         default_branch = $7,
-         config_json = $8,
-         updated_at = now()`,
-      [slug, name, description, repositoryPath, githubOwner, githubRepository, defaultBranch, JSON.stringify(configJson)],
+         name=EXCLUDED.name,description=EXCLUDED.description,repository_path=EXCLUDED.repository_path,
+         github_owner=EXCLUDED.github_owner,github_repository=EXCLUDED.github_repository,
+         default_branch=EXCLUDED.default_branch,enabled=EXCLUDED.enabled,
+         agent_start_path=EXCLUDED.agent_start_path,config_json=EXCLUDED.config_json,updated_at=now()`,
+      [slug, data.name, data.description, data.repositoryPath, data.githubOwner, data.githubRepository,
+        data.defaultBranch, data.enabled, data.agentStartPath, JSON.stringify(data.configJson)],
     );
     imported++;
   }
+  return { imported, skipped };
+}
 
+async function main() {
+  const { config } = await loadProjectConfig(value("--file"));
+  const { imported, skipped } = await importProjects(config);
   console.log(`✓ imported ${imported} project(s)` + (skipped ? `; skipped ${skipped}` : ""));
-} catch (error) {
-  console.error(
-    `✗ import failed: ${error instanceof Error ? error.message : "unknown error"}`,
-  );
-  process.exitCode = 1;
-} finally {
-  await pool.end();
+}
+
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((error) => {
+    console.error(`✗ import failed: ${error instanceof Error ? error.message : "unknown error"}`);
+    process.exitCode = 1;
+  }).finally(() => pool.end());
 }

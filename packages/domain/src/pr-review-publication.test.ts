@@ -146,6 +146,27 @@ test("retries one review identity without invoking Claude or posting twice", asy
   expect(db.row.publication_attempt_count).toBe(3);
 });
 
+test("retries post-publication merge intent without invoking or posting the review twice", async () => {
+  const db = database();
+  const invoke = vi.fn(async () => ({
+    markdown, reviewedHeadSha: "head-1", reviewedBaseBranch: "main", reviewedBaseSha: "base-1",
+  }));
+  const createComment = vi.fn(async () => ({ id: 7, html_url: "https://github.test/comment/7" }));
+  const mergeJobs = new Set<string>();
+  const afterPublish = vi.fn()
+    .mockRejectedValueOnce(new Error("job queue temporarily unavailable"))
+    .mockImplementationOnce(async (review: any) => { mergeJobs.add(`merge:${review.reviewed_head_sha}`); });
+  const args = input({ invoke, createComment, afterPublish });
+
+  await expect((domain as any).resumePrReviewPublication(db, args)).rejects.toThrow("job queue temporarily unavailable");
+  await expect((domain as any).resumePrReviewPublication(db, args)).resolves.toMatchObject({ status: "approved" });
+
+  expect(invoke).toHaveBeenCalledTimes(1);
+  expect(createComment).toHaveBeenCalledTimes(1);
+  expect(afterPublish).toHaveBeenCalledTimes(2);
+  expect(mergeJobs).toEqual(new Set(["merge:head-1"]));
+});
+
 test("leaves terminal review history untouched", async () => {
   const db = database();
   Object.assign(db.row, { status: "error", error_code: "invalid_verdict_json", completed_at: "now" });

@@ -129,6 +129,30 @@ export async function resolvedPromptFor(client: QueryClient, promptType: string,
   return row ?? { prompt_file_id: null, active_version_id: null, content: "", version: null };
 }
 
+export type TicketImageEvidence = {
+  attachment_id: string;
+  upload_id: string;
+  artifact_id: string;
+  storage_root: "primary" | "legacy";
+  storage_path: string;
+  original_name: string | null;
+  media_type: "image/png" | "image/jpeg";
+  size_bytes: number;
+  sha256: string;
+};
+
+export async function ticketImageEvidence(client: QueryClient, ticketId: string): Promise<TicketImageEvidence[]> {
+  return (await client.query(
+    `SELECT a.id attachment_id,u.id upload_id,ar.id artifact_id,ar.storage_root,ar.storage_path,
+            u.original_name,u.media_type,u.size_bytes,ar.sha256
+     FROM attachments a JOIN uploads u ON u.id=a.upload_id
+     JOIN artifacts ar ON ar.upload_id=u.id AND ar.status='finalized'
+     WHERE a.ticket_id=$1 AND u.media_type IN ('image/png','image/jpeg')
+     ORDER BY a.created_at,a.id`,
+    [ticketId],
+  )).rows;
+}
+
 export function unionSkills(...sets: ResolvedSkill[][]) {
   const union = new Map<string, ResolvedSkill>();
   for (const skill of sets.flat()) {
@@ -150,12 +174,13 @@ export function unionSkills(...sets: ResolvedSkill[][]) {
 export async function planningPromptInputs(client: QueryClient, ticket: any) {
   const project = (await client.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
   if (!project?.enabled) throw Object.assign(new Error("project is missing or disabled"), { status: 404 });
-  const [base, planning, skills, executionSkills, repairSkills] = await Promise.all([
+  const [base, planning, skills, executionSkills, repairSkills, imageEvidence] = await Promise.all([
     resolvedPromptFor(client, "base", project.id),
     resolvedPromptFor(client, "planning", project.id),
     resolvedSkillsFor(client, ticket, "planning"),
     resolvedSkillsFor(client, ticket, "execution"),
     resolvedSkillsFor(client, ticket, "repair"),
+    ticketImageEvidence(client, ticket.id),
   ]);
   const systemAi = await getSystemAiSettings(client);
   const ai = resolvedAiFor(ticket, project, "planning", systemAi);
@@ -184,9 +209,10 @@ export async function planningPromptInputs(client: QueryClient, ticket: any) {
       environment: ticket.environment, expectedBehavior: ticket.expected_behavior,
       actualBehavior: ticket.actual_behavior, reproductionSteps: ticket.reproduction_steps,
       customValues: ticket.custom_values_json,
+      imageEvidence,
     },
     requiredPlanStructure,
     outputConstraints: planningOutputConstraints,
   });
-  return { project, ai, skills, skillUnion: unionSkills(skills, executionSkills, repairSkills), promptVersionIds, content };
+  return { project, ai, skills, skillUnion: unionSkills(skills, executionSkills, repairSkills), imageEvidence, promptVersionIds, content };
 }

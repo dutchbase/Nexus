@@ -157,7 +157,15 @@ export async function publishExternalResult<T>(input: {
 }): Promise<void> {
   try {
     await input.push();
-    const pullRequest = await input.find() ?? await input.create();
+    let pullRequest = await input.find();
+    if (!pullRequest) {
+      try {
+        pullRequest = await input.create();
+      } catch (error) {
+        pullRequest = await input.find();
+        if (!pullRequest) throw error;
+      }
+    }
     await input.complete(pullRequest);
   } catch (error) {
     await handleExecutionPublicationFailure(error, input.fail);

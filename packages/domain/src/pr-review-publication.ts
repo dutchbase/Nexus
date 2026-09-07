@@ -37,11 +37,15 @@ export async function resumePrReviewPublication(db: Database, input: {
   listComments: () => Promise<{ items: Comment[]; complete: boolean }>;
   createComment: (body: string) => Promise<Comment>;
   assertOwned?: () => Promise<void>;
+  afterPublish?: (review: any) => Promise<void>;
 }) {
   const assertOwned = input.assertOwned ?? (async () => {});
   let review = (await db.query("SELECT * FROM pr_ai_reviews WHERE id=$1", [input.reviewId])).rows[0];
   if (!review) throw new Error("pr_ai_reviews row not found");
-  if (review.status !== "running") return review;
+  if (review.status !== "running") {
+    if (review.publication_status === "published") await input.afterPublish?.(review);
+    return review;
+  }
 
   if (!review.raw_output) {
     const result = await input.invoke();
@@ -95,9 +99,15 @@ export async function resumePrReviewPublication(db: Database, input: {
        WHERE id=$1 AND status='running' AND parsed_verdict IS NOT NULL RETURNING *`,
       [input.reviewId, comment.id, comment.html_url],
     )).rows[0];
-    if (published) return published;
+    if (published) {
+      await input.afterPublish?.(published);
+      return published;
+    }
     review = (await db.query("SELECT * FROM pr_ai_reviews WHERE id=$1", [input.reviewId])).rows[0];
-    if (review?.publication_status === "published") return review;
+    if (review?.publication_status === "published") {
+      await input.afterPublish?.(review);
+      return review;
+    }
     throw new Error("PR review publication could not be finalized");
   } catch (error) {
     try {

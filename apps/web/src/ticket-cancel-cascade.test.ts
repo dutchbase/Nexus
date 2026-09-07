@@ -47,6 +47,19 @@ test("cancelling a ticket cancels its queued jobs, queued execution attempt, and
   expect(response.writeHead).toHaveBeenCalledWith(200, expect.any(Object));
 });
 
+test("generic PATCH cancellation uses the same cancellation cascade", async () => {
+  transactionClient = { query: vi.fn(async (sql: string) => {
+    if (sql.includes("SELECT *,updated_at::text ticket_version FROM tickets")) return { rows: [{ id: "ticket-1", status: "Executing", ticket_version: "v1" }] };
+    if (sql.includes("UPDATE tickets SET status = $2")) return { rows: [{ id: "ticket-1", status: "Cancelled" }] };
+    return { rows: [], rowCount: 1 };
+  }) };
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+  await adminApi(request({ status: "Cancelled" }, "PATCH"), response,
+    new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin" });
+  expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("UPDATE jobs SET status='cancelled'"))).toBe(true);
+  expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("UPDATE agent_runs SET status='cancellation_requested'"))).toBe(true);
+});
+
 test("rejecting or archiving a ticket does not touch jobs/execution_attempts/agent_runs", async () => {
   transactionClient = { query: vi.fn(async (sql: string) => {
     if (sql.includes("SELECT *,updated_at::text ticket_version FROM tickets")) {

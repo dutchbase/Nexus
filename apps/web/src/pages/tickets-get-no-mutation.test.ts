@@ -175,4 +175,20 @@ describe("ticket detail GET", () => {
     expect(body).toContain('href="/admin/tickets/T-1/plans/1"');
     expect(body).toContain(">Update plan</a>");
   });
+
+  it("shows all saved submission evidence before Edit, including removed custom fields", async () => {
+    query.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM tickets t JOIN projects p")) return { rows: [{
+        ...ticket, form_id: "form-1", submitter_name: "Ada", submitter_email: "ada@example.test",
+        expected_behavior: "Expected unique", actual_behavior: "Actual unique", reproduction_steps: "Steps unique",
+        custom_values_json: { impact: "High impact", removed_field: "Historical answer" },
+      }] };
+      if (sql.includes("FROM form_fields")) return { rows: [{ field_key: "impact", field_type: "long_text", label: "Impact", required: false }] };
+      return { rows: [] };
+    });
+    const body = (await tickets.render(new URL("http://test/admin/tickets/T-1"), session, {}))?.body ?? "";
+    for (const value of ["Ada", "ada@example.test", "Expected unique", "Actual unique", "Steps unique", "High impact", "Historical answer"]) {
+      expect(body).toContain(value);
+    }
+  });
 });

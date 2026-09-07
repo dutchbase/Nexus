@@ -91,7 +91,7 @@ describe("openCodeConfig", () => {
   });
 });
 
-import { mkdtemp, writeFile as writeFileFs, chmod, readFile, access } from "node:fs/promises";
+import { mkdtemp, writeFile as writeFileFs, chmod, readFile, access, mkdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { invokeOpenCodePlanning, invokeOpenCodeExecution } from "./opencode.ts";
@@ -120,13 +120,14 @@ describe("invokeOpenCodePlanning", () => {
     const result = await invokeOpenCodePlanning({
       task: "Plan ticket T-1", promptFile: "/tmp/prompt.md", model: "deepseek-v4-flash",
       workingDirectory: tmpdir(), apiKey: "sk-ds", executable: stub.stubPath,
+      attachmentFiles: ["/tmp/image-001.png", "/tmp/image-002.jpg"],
     });
     expect(result).toEqual({ markdown: "plan body", sessionId: "ses_test", exitCode: 0 });
     const captured = await stub.capture();
     // Regression for C1: OpenCode's -f/--file is a yargs array option that
     // greedily consumes the following positional, so the task string MUST
     // come immediately after "run" or it gets parsed as a filename.
-    expect(captured.argv).toEqual(["run", "Plan ticket T-1", "--pure", "--format", "json", "-m", "deepseek/deepseek-v4-flash", "-f", "/tmp/prompt.md"]);
+    expect(captured.argv).toEqual(["run", "Plan ticket T-1", "--pure", "--format", "json", "-m", "deepseek/deepseek-v4-flash", "-f", "/tmp/prompt.md", "/tmp/image-001.png", "/tmp/image-002.jpg"]);
     expect(captured.config.permission).toEqual({ "*": "allow", edit: "deny", bash: "deny", webfetch: "deny" });
     expect(captured.env.DEEPSEEK_API_KEY).toBe("sk-ds");
     expect(captured.env.CLAUDE_CODE_OAUTH_TOKEN).toBeUndefined();
@@ -212,6 +213,54 @@ sleep 5
 });
 
 describe("invokeOpenCodeExecution", () => {
+  it("observes a rejected log write immediately and rejects after draining the stream", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "opencode-log-rejection-"));
+    const executable = path.join(dir, "opencode");
+    const logPath = path.join(dir, "log-is-a-directory");
+    await mkdir(logPath);
+    await writeFileFs(executable, `#!/bin/sh
+printf '%s\\n' '{"type":"session.idle"}'
+sleep 0.2
+`);
+    await chmod(executable, 0o755);
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown) => { unhandled.push(error); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      await expect(invokeOpenCodeExecution({
+        task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
+        workingDirectory: tmpdir(), apiKey: "k", executable, logPath,
+        onEvent: async () => undefined,
+      })).rejects.toMatchObject({ code: "EISDIR" });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
+  it("observes a rejected event write immediately and rejects after draining available usage", async () => {
+    const usage = { type: "message.part.updated", properties: { part: {
+      id: "step-1", type: "step-finish", tokens: { input: 10, output: 20 },
+    } } };
+    const stub = await makeStub([usage]);
+    const logDir = await mkdtemp(path.join(tmpdir(), "opencode-event-rejection-"));
+    const unhandled: unknown[] = [];
+    const onUnhandled = (error: unknown) => { unhandled.push(error); };
+    process.on("unhandledRejection", onUnhandled);
+    try {
+      await expect(invokeOpenCodeExecution({
+        task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
+        workingDirectory: tmpdir(), apiKey: "k", executable: stub.stubPath,
+        logPath: path.join(logDir, "x.log"), onEvent: async () => { throw new Error("event write failed"); },
+      })).rejects.toMatchObject({ message: "event write failed", usage: { inputTokens: 10, outputTokens: 20 } });
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(unhandled).toEqual([]);
+    } finally {
+      process.off("unhandledRejection", onUnhandled);
+    }
+  });
+
   it("streams events to onEvent, appends raw output to the log, uses write config", async () => {
     const events = [
       { type: "message.part.updated", sessionID: "ses_e", properties: { part: { id: "p1", type: "tool", tool: "bash" } } },
@@ -225,6 +274,7 @@ describe("invokeOpenCodeExecution", () => {
     const result = await invokeOpenCodeExecution({
       task: "Implement the plan", promptFile: "/tmp/p.md", model: "deepseek-v4-pro",
       workingDirectory: tmpdir(), apiKey: "k", executable: stub.stubPath, logPath,
+      attachmentFiles: ["/tmp/image-001.png"],
       onEvent: async (event) => { seen.push({ eventType: event.eventType }); },
     });
     expect(result.exitCode).toBe(0);
@@ -233,7 +283,7 @@ describe("invokeOpenCodeExecution", () => {
     const captured = await stub.capture();
     // Full-argv assertion (not just the model index) to keep argv order
     // unambiguous — see the C1 regression note in invokeOpenCodePlanning's test.
-    expect(captured.argv).toEqual(["run", "Implement the plan", "--pure", "--format", "json", "-m", "deepseek/deepseek-v4-pro", "-f", "/tmp/p.md"]);
+    expect(captured.argv).toEqual(["run", "Implement the plan", "--pure", "--format", "json", "-m", "deepseek/deepseek-v4-pro", "-f", "/tmp/p.md", "/tmp/image-001.png"]);
     expect(captured.config.permission).toEqual({ "*": "allow" });
     expect(await readFile(logPath, "utf8")).toContain('"session.idle"');
   });
@@ -324,5 +374,49 @@ describe("invokeOpenCodeExecution", () => {
       signal: controller.signal,
       logPath: path.join(logDir, "x.log"), onEvent: async () => undefined,
     })).rejects.toMatchObject({ code: "execution_cancelled" });
+  });
+
+  it("kills a TERM-ignoring descendant after the CLI exits on cancellation", async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "opencode-cancel-tree-"));
+    const stubPath = path.join(dir, "tree.mjs");
+    const started = path.join(dir, "started");
+    const descendantStarted = path.join(dir, "descendant-started");
+    const marker = path.join(dir, "descendant-ran");
+    const descendant = [
+      "import { writeFileSync } from 'node:fs';",
+      "process.on('SIGTERM',()=>{});",
+      `writeFileSync(${JSON.stringify(descendantStarted)}, 'started');`,
+      `setTimeout(()=>writeFileSync(${JSON.stringify(marker)}, 'ran'), 200);`,
+      "setInterval(()=>{}, 1000);",
+    ].join("\n");
+    await writeFileFs(stubPath, [
+      "#!/usr/bin/env node",
+      "import { spawn } from 'node:child_process';",
+      "import { writeFileSync } from 'node:fs';",
+      `spawn(process.execPath, ['--input-type=module', '-e', ${JSON.stringify(descendant)}], { stdio: 'ignore' });`,
+      `writeFileSync(${JSON.stringify(started)}, 'started');`,
+      "process.on('SIGTERM',()=>process.exit(0));",
+      "setInterval(()=>{}, 1000);",
+    ].join("\n"));
+    await chmod(stubPath, 0o755);
+    const controller = new AbortController();
+    const running = invokeOpenCodeExecution({
+      task: "t", promptFile: "/tmp/p.md", model: "deepseek-v4-flash",
+      workingDirectory: tmpdir(), apiKey: "k", executable: stubPath, timeoutMs: 60_000,
+      killGraceMs: 50, signal: controller.signal,
+      logPath: path.join(dir, "x.log"), onEvent: async () => undefined,
+    });
+    void running.catch(() => undefined);
+    const deadline = Date.now() + 2_000;
+    while (Date.now() < deadline) {
+      try { await Promise.all([access(started), access(descendantStarted)]); break; }
+      catch { await new Promise((resolve) => setImmediate(resolve)); }
+    }
+    await expect(Promise.all([access(started), access(descendantStarted)])).resolves.toBeDefined();
+    controller.abort();
+
+    await expect(running).rejects.toMatchObject({ code: "execution_cancelled" });
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await expect(access(marker)).rejects.toThrow();
   });
 });
