@@ -2217,7 +2217,11 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       const unlockPath = resolve(project.repository_path, commonDir, "MASTER_UNLOCK");
       await writeFile(unlockPath, "");
       try {
-        await exec("git", ["-C", project.repository_path, "add", "--all"]);
+        // Scoped to the exact paths validateProject() flagged as dirty --
+        // never `--all` -- so a linked git worktree dir (e.g. .worktrees/fix-g5,
+        // already excluded from repoCheck.changedFiles) can never be staged as
+        // a gitlink even when the repo also has genuine uncommitted work.
+        await exec("git", ["-C", project.repository_path, "add", "--", ...repoCheck.changedFiles]);
         await exec("git", ["-C", project.repository_path, "commit", "-m", commitMessage]);
       } catch (error) {
         return json(response, 409, {

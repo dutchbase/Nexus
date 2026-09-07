@@ -1,4 +1,4 @@
-import { access, readFile, stat } from "node:fs/promises";
+import { access, readdir, readFile, stat } from "node:fs/promises";
 import { constants } from "node:fs";
 import { dirname, isAbsolute, resolve } from "node:path";
 import { execFile } from "node:child_process";
@@ -103,6 +103,42 @@ function categorizePorcelainLine(record: string): ChangedFileDetail | null {
   return { path, status: "modified", staged: false };
 }
 
+// A linked git worktree (created via `git worktree add`) has a `.git` that is
+// a FILE containing `gitdir: <mainrepo>/.git/worktrees/<name>`, not a real
+// `.git` directory. `git status`/`git add` on the *parent* repo can only see
+// such a directory as a single untracked entry -- they can't stage or commit
+// into it, so it must never be treated as a plain changed file.
+export async function isLinkedWorktreeDir(absolutePath: string): Promise<boolean> {
+  try {
+    const gitPath = resolve(absolutePath, ".git");
+    const info = await stat(gitPath);
+    if (!info.isFile()) return false;
+    const contents = await readFile(gitPath, "utf8");
+    return /^gitdir:\s*.+\/worktrees\//m.test(contents);
+  } catch {
+    return false;
+  }
+}
+
+// `git status` never recurses into an untracked directory, so a `.worktrees/`
+// root that has nothing else tracked inside it -- the default result of a
+// bare `git worktree add .worktrees/x` -- is collapsed into one entry for the
+// parent (`?? .worktrees/`), one level above the `.git` pointer files that
+// isLinkedWorktreeDir looks for. Treat such a parent as worktree admin, too,
+// when every direct child is itself a linked worktree; a stray real file or
+// non-worktree subdirectory inside it means it's genuinely dirty content.
+async function isWorktreeAdminDir(absolutePath: string): Promise<boolean> {
+  if (await isLinkedWorktreeDir(absolutePath)) return true;
+  try {
+    const children = await readdir(absolutePath);
+    if (children.length === 0) return false;
+    const flags = await Promise.all(children.map((child) => isLinkedWorktreeDir(resolve(absolutePath, child))));
+    return flags.every(Boolean);
+  } catch {
+    return false;
+  }
+}
+
 // `-z` is what makes the reported paths the real ones: without it git
 // C-quotes any path containing a space, a quote or a non-ASCII byte
 // (`"caf\303\251.txt"`), which the diagnostics list would show verbatim.
@@ -171,7 +207,16 @@ export async function validateProject(input: ProjectValidationInput): Promise<Va
   try {
     await exec("git", ["-C", input.repositoryPath, "show-ref", "--verify", `refs/heads/${input.defaultBranch}`], { timeout: GIT_INSPECTION_TIMEOUT_MS });
     const status = (await exec("git", ["-C", input.repositoryPath, "status", "--porcelain", "-z"], { timeout: GIT_INSPECTION_TIMEOUT_MS })).stdout;
-    ({ paths: changedFiles, detail: changedFileDetail } = parsePorcelainStatus(status));
+    const parsed = parsePorcelainStatus(status);
+    const worktreeFlags = await Promise.all(
+      parsed.detail.map((entry) =>
+        entry.status === "untracked"
+          ? isWorktreeAdminDir(resolve(input.repositoryPath, entry.path.replace(/\/$/, "")))
+          : Promise.resolve(false)
+      )
+    );
+    changedFiles = parsed.paths.filter((_, i) => !worktreeFlags[i]);
+    changedFileDetail = parsed.detail.filter((_, i) => !worktreeFlags[i]);
     if (changedFiles.length) errors.push("repository has uncommitted changes");
     if (input.requireRemote !== false) {
       const remotes = (await exec("git", ["-C", input.repositoryPath, "remote"], { timeout: GIT_INSPECTION_TIMEOUT_MS })).stdout.trim();

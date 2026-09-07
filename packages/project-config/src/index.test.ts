@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { execFile } from "node:child_process";
 import { promisify } from "node:util";
 import { afterEach, describe, expect, it, test } from "vitest";
-import { getGithubPolicyEnforcementMode, isPlaceholderRepositoryPath, normalizeAgentStartPath, validateAgentStartPath, validateProject } from "./index.ts";
+import { getGithubPolicyEnforcementMode, isLinkedWorktreeDir, isPlaceholderRepositoryPath, normalizeAgentStartPath, validateAgentStartPath, validateProject } from "./index.ts";
 
 const execGit = promisify(execFile);
 const tempDirs: string[] = [];
@@ -190,6 +190,84 @@ describe("git status categorization", () => {
     if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
     expect(result.changedFileDetail).toEqual([]);
     expect(result.valid).toBe(true);
+  });
+
+  // The default/common shape: `.worktrees/` itself is untracked (nothing
+  // inside it committed), so `git status` collapses it into a single `?? .worktrees/`
+  // entry rather than reporting each child worktree dir separately. This is
+  // the case a naive per-child-only check (stat `<path>/.git` on the reported
+  // path itself) misses, since the `.git` pointer files live one level deeper.
+  test("a repo containing only linked git worktree directories (untracked parent, no placeholder) is reported clean", async () => {
+    const dir = await initRepo();
+    await commitFile(dir, "file.txt", "hello\n");
+    await execGit("git", ["-C", dir, "worktree", "add", ".worktrees/fix-g5", "-b", "fix-g5"]);
+    await execGit("git", ["-C", dir, "worktree", "add", ".worktrees/seo-agent-readiness", "-b", "seo-agent-readiness"]);
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
+    if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
+    expect(result.changedFiles).toEqual([]);
+    expect(result.changedFileDetail).toEqual([]);
+    expect(result.valid).toBe(true);
+    expect(result.errors).toEqual([]);
+  });
+
+  test("worktree dirs (untracked parent) are excluded while a genuinely dirty file in the same repo is still the only flagged entry", async () => {
+    const dir = await initRepo();
+    await commitFile(dir, "file.txt", "hello\n");
+    await execGit("git", ["-C", dir, "worktree", "add", ".worktrees/fix-g5", "-b", "fix-g5"]);
+    await execGit("git", ["-C", dir, "worktree", "add", ".worktrees/seo-agent-readiness", "-b", "seo-agent-readiness"]);
+    await writeFile(join(dir, "genuinely-dirty.txt"), "oops\n");
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
+    if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
+    expect(result.changedFiles).toEqual(["genuinely-dirty.txt"]);
+    expect(result.changedFileDetail).toEqual([{ path: "genuinely-dirty.txt", status: "untracked", staged: false }]);
+    expect(result.valid).toBe(false);
+  });
+
+  // Secondary shape: the `.worktrees/` parent is itself tracked (e.g. a
+  // committed `.gitkeep` placeholder), so git recurses into it and reports
+  // each child worktree dir as its own `?? .worktrees/<name>/` entry.
+  test("when the worktree parent directory is tracked, each child worktree dir is still individually excluded", async () => {
+    const dir = await initRepo();
+    await commitFile(dir, "file.txt", "hello\n");
+    await mkdir(join(dir, ".worktrees"), { recursive: true });
+    await commitFile(dir, ".worktrees/.gitkeep", "");
+    await execGit("git", ["-C", dir, "worktree", "add", ".worktrees/fix-g5", "-b", "fix-g5"]);
+    await writeFile(join(dir, "genuinely-dirty.txt"), "oops\n");
+
+    const result = await validateProject({ repositoryPath: dir, defaultBranch: "trunk", requireRemote: false });
+    if (!result.ok) throw new Error("expected ok:true, got " + JSON.stringify(result));
+    expect(result.changedFiles).toEqual(["genuinely-dirty.txt"]);
+    expect(result.changedFileDetail).toEqual([{ path: "genuinely-dirty.txt", status: "untracked", staged: false }]);
+    expect(result.valid).toBe(false);
+  });
+});
+
+describe("isLinkedWorktreeDir", () => {
+  it("returns true for a directory whose .git is a gitdir-file worktree pointer", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dcc-worktree-dir-"));
+    tempDirs.push(root);
+    const wt = join(root, ".worktrees/fix-g5");
+    await mkdir(wt, { recursive: true });
+    await writeFile(join(wt, ".git"), "gitdir: /some/repo/.git/worktrees/fix-g5\n");
+    await expect(isLinkedWorktreeDir(wt)).resolves.toBe(true);
+  });
+
+  it("returns false for a plain untracked directory with no .git", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dcc-worktree-dir-"));
+    tempDirs.push(root);
+    const plain = join(root, "some-untracked-dir");
+    await mkdir(plain, { recursive: true });
+    await expect(isLinkedWorktreeDir(plain)).resolves.toBe(false);
+  });
+
+  it("returns false for a nested full git repo (real .git directory, not a worktree pointer)", async () => {
+    const root = await mkdtemp(join(tmpdir(), "dcc-worktree-dir-"));
+    tempDirs.push(root);
+    const nested = join(root, "nested-repo");
+    await mkdir(join(nested, ".git"), { recursive: true });
+    await expect(isLinkedWorktreeDir(nested)).resolves.toBe(false);
   });
 });
 
