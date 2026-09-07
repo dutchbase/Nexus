@@ -267,7 +267,7 @@ describe("backup and recovery drill", () => {
     const repository = join(test.root, "repository");
     const worktree = join(test.env.DCC_DATA_DIR!, "worktrees", "acme", "T-1", "1");
     await mkdir(repository);
-    git(repository, ["init", "--initial-branch=main"]);
+    git(repository, ["init", "--initial-branch=trunk"]);
     await writeFile(join(repository, "result.txt"), "committed result\n");
     git(repository, ["add", "result.txt"]);
     git(repository, ["commit", "-m", "result"]);
