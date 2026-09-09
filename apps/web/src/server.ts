@@ -2876,6 +2876,43 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if ("noSupportedFields" in after) return json(response, 400, { error: "no supported fields" });
     return json(response, 200, { ticket: after });
   }
+  if (ticketMatch && request.method === "DELETE") {
+    const ref = decodeURIComponent(ticketMatch[1]);
+    // Mirrors ticketQuickActions()'s delete gate in pages/tickets.ts — keep the
+    // two lists in sync or the button lies about what the API will accept.
+    const deletableStatuses = ["Submitted", "Triage", "Needs Information", "Rejected", "Cancelled"];
+    let outcome;
+    try {
+      outcome = await inTransaction(async (client) => {
+        const before = (await client.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE", [ref])).rows[0];
+        if (!before) return { missing: true } as const;
+        if (!deletableStatuses.includes(before.status)) return { blocked: before.status } as const;
+        await client.query("DELETE FROM tickets WHERE id=$1", [before.id]);
+        await audit({ actorType: "admin", actorId: session.user_id, action: "ticket.delete", entityType: "ticket", entityId: before.id, before, ip: ipOf(request) }, client);
+        return { deleted: before } as const;
+      });
+    } catch (error: any) {
+      // plans / plan_approval_decisions / prompt_snapshots / skill_snapshots /
+      // execution_attempts / approved_input_snapshots are ON DELETE RESTRICT, and
+      // agent_runs / pull_requests / notification_deliveries default to NO ACTION:
+      // a ticket that ever reached planning stays undeletable by design.
+      if (error?.code === "23503") {
+        return json(response, 409, {
+          error: "ticket has planning or execution history and cannot be deleted",
+          error_code: "ticket_has_dependents",
+          recovery_action: "Cancel or archive the ticket instead.",
+        });
+      }
+      throw error;
+    }
+    if ("missing" in outcome) return json(response, 404, { error: "ticket not found" });
+    if ("blocked" in outcome) {
+      throw operationalError(`ticket cannot be deleted from ${outcome.blocked}`, {
+        status: 409, code: "ticket_not_deletable", recovery: "Cancel or archive the ticket instead.",
+      });
+    }
+    return json(response, 200, { deleted: { id: outcome.deleted.id, ticket_number: outcome.deleted.ticket_number } });
+  }
   if (url.pathname === "/api/admin/audit" && request.method === "GET") {
     const search = url.searchParams.get("search") ?? "";
     const values: any[] = [];
