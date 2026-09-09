@@ -25,10 +25,17 @@ test("table rows expose an overlay link plus four quick-action buttons and one s
   expect((body.match(/data-ticket-action-dialog/g) ?? []).length).toBe(1);
 });
 
-import { styles } from "../ui.ts";
+import { adminPage, styles } from "../ui.ts";
 
 test("the tickets grid has an actions column and an overlay link that does not swallow clicks", () => {
   expect(styles).toContain(".tickets7.list-head,.tickets7.ticket-row { grid-template-columns:110px minmax(220px,3fr) 1.2fr 1fr 1.1fr 1.3fr .8fr 150px }");
   expect(styles).toContain(".tickets7.ticket-row > :not(.ticket-row-link) { position:relative;z-index:1;pointer-events:none }");
   expect(styles).toContain(".ticket-quick-actions,.ticket-quick-actions * { pointer-events:auto }");
+});
+
+test("the tickets list page ships the quick-action dialog wiring", () => {
+  const page = adminPage("/admin/tickets", "Tickets", "", {}, "admin");
+  expect(page).toContain("[data-ticket-action]");
+  expect(page).toContain('"x-csrf-token":csrf');
+  expect(page).toContain('delete:{method:"DELETE"');
 });
