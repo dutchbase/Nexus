@@ -662,6 +662,42 @@ integration("migrate", () => {
     }
   });
 
+  it("rejects standalone history mutations but allows ticket deletion to cascade", async () => {
+    // DCC-1032: reject_ticket_status_history_change() (064_ticket_delete.sql) relies on
+    // Postgres running the tickets -> ticket_status_history ON DELETE CASCADE as an
+    // AFTER-ROW referential action, so the parent ticket row is already gone by the time
+    // the history row's BEFORE DELETE trigger fires. This test pins that behavior: a
+    // standalone mutation of a live ticket's history row must still be rejected, while
+    // deleting the ticket itself must succeed and cascade away its dependents.
+    await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
+    await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });
+    const client = new pg.Client({ connectionString: testDatabaseUrl });
+    await client.connect();
+    try {
+      const projectId = (await client.query("INSERT INTO projects (slug,name,repository_path) VALUES ($q$ticket-delete$q$,$q$Project$q$,$q$/tmp/project$q$) RETURNING id")).rows[0].id;
+      const ticketId = (await client.query("INSERT INTO tickets (ticket_number,project_id,title,status) VALUES ($q$T-DELETE$q$,$1,$q$Ticket$q$,$q$Submitted$q$) RETURNING id", [projectId])).rows[0].id;
+      const historyId = (await client.query("INSERT INTO ticket_status_history (ticket_id,new_status,actor_type) VALUES ($1,$q$Submitted$q$,$q$test$q$) RETURNING id", [ticketId])).rows[0].id;
+      await client.query("INSERT INTO ticket_notes (ticket_id,body) VALUES ($1,$q$note$q$)", [ticketId]);
+      const uploadId = (await client.query("INSERT INTO uploads (storage_path,media_type,size_bytes) VALUES ($q$/tmp/ticket-delete-upload$q$,$q$text/plain$q$,1) RETURNING id")).rows[0].id;
+      await client.query("INSERT INTO attachments (ticket_id,upload_id) VALUES ($1,$2)", [ticketId, uploadId]);
+      const skillId = (await client.query("INSERT INTO skills (slug,name) VALUES ($q$ticket-delete-skill$q$,$q$Ticket delete skill$q$) RETURNING id")).rows[0].id;
+      await client.query("INSERT INTO ticket_skills (ticket_id,skill_id) VALUES ($1,$2)", [ticketId, skillId]);
+
+      // A standalone delete/update of a history row on a live ticket is still append-only.
+      await expect(client.query("DELETE FROM ticket_status_history WHERE id=$1", [historyId])).rejects.toThrow("append-only");
+      await expect(client.query("UPDATE ticket_status_history SET new_status=$q$Cancelled$q$ WHERE id=$1", [historyId])).rejects.toThrow("append-only");
+
+      // Deleting the ticket succeeds (the cascade is exempt) and takes its dependents with it.
+      await expect(client.query("DELETE FROM tickets WHERE id=$1", [ticketId])).resolves.toMatchObject({ rowCount: 1 });
+      expect((await client.query("SELECT count(*)::int AS count FROM ticket_status_history WHERE ticket_id=$1", [ticketId])).rows[0].count).toBe(0);
+      expect((await client.query("SELECT count(*)::int AS count FROM ticket_notes WHERE ticket_id=$1", [ticketId])).rows[0].count).toBe(0);
+      expect((await client.query("SELECT count(*)::int AS count FROM attachments WHERE ticket_id=$1", [ticketId])).rows[0].count).toBe(0);
+      expect((await client.query("SELECT count(*)::int AS count FROM ticket_skills WHERE ticket_id=$1", [ticketId])).rows[0].count).toBe(0);
+    } finally {
+      await client.end();
+    }
+  });
+
   it("persists backup recovery verification outcomes", async () => {
     await cp(new URL("../migrations/", import.meta.url), migrationDirectory, { recursive: true });
     await migrate({ connectionString: testDatabaseUrl!, directory: migrationDirectory });

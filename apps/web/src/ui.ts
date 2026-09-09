@@ -156,8 +156,8 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             const confirmButton=event.currentTarget;confirmButton.disabled=true;
             try{
               const response=await fetch("/api/admin/tickets/"+encodeURIComponent(currentAction.ticket)+currentAction.config.path,{method:currentAction.config.method,headers:{"x-csrf-token":csrf}});
-              if(pendingTicketAction!==currentAction)return;
               if(response.ok){location.reload();return}
+              if(pendingTicketAction!==currentAction)return;
               const result=await response.json().catch(()=>({}));
               if(pendingTicketAction!==currentAction)return;
               actionDialog.querySelector(".error").textContent=result.error||"request failed";
