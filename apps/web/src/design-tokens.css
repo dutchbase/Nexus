@@ -115,7 +115,13 @@ pre { white-space:pre-wrap; overflow-wrap:anywhere; word-break:break-word }
 .event-row { display:flex;align-items:center;justify-content:space-between;gap:12px;padding:13px 18px;border-top:1px solid var(--border) }
 .event-row .mono { min-width:0;overflow-wrap:anywhere;flex:1 1 auto }
 .event-row .status { flex-shrink:0 }
-.tickets7.list-head,.tickets7.ticket-row { grid-template-columns:110px minmax(220px,3fr) 1.2fr 1fr 1.1fr 1.3fr .8fr }
+.tickets7.list-head,.tickets7.ticket-row { grid-template-columns:110px minmax(220px,3fr) 1.2fr 1fr 1.1fr 1.3fr .8fr 150px }
+.tickets7.ticket-row { position:relative }
+.ticket-row-link { position:absolute;inset:0;z-index:0 }
+.tickets7.ticket-row > :not(.ticket-row-link) { position:relative;z-index:1;pointer-events:none }
+.ticket-quick-actions { display:flex;justify-content:flex-end;gap:4px }
+.ticket-quick-actions,.ticket-quick-actions * { pointer-events:auto }
+.ticket-quick-actions .button { padding:6px 8px }
 .runs-head,.runs-row { grid-template-columns:90px 1.4fr 1fr .9fr 1fr 110px }
 .projects-head,.projects-row { grid-template-columns:minmax(170px,1.4fr) 150px minmax(0,1fr) minmax(0,1.5fr) }
 .prs-head,.prs-row { grid-template-columns:28px 70px minmax(200px,3fr) 1.1fr .9fr 1.1fr 1fr .8fr 52px }
