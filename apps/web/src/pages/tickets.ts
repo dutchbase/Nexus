@@ -57,6 +57,23 @@ export function approvalGatesCard(ticket: { status: string }) {
     <p><button class="button" type="button" data-acknowledge-ticket${canAcknowledge ? "" : " disabled"} title="${canAcknowledge ? "" : "Ticket must be Submitted"}">Acknowledge</button></p></div></section>`;
 }
 
+// DCC-1032: one source of truth for the ticket-list row buttons and their
+// status gates, so the disabled state matches what the API will actually
+// accept instead of drifting from server.ts.
+const quickActionRules: Array<{ key: string; glyph: string; label: string; statuses: string[]; reason: string }> = [
+  { key: "acknowledge", glyph: "✓", label: "Acknowledge", statuses: ["Submitted"], reason: "Only a Submitted ticket can be acknowledged" },
+  { key: "start-planning", glyph: "✎", label: "Start planning", statuses: ["Triage", "Needs Information", "Planning Failed"], reason: "Planning starts from Triage, Needs Information or Planning Failed" },
+  { key: "execute", glyph: "▶", label: "Execute plan", statuses: ["Plan Approved", "Execution Failed"], reason: "Execution needs an approved plan" },
+  { key: "delete", glyph: "✕", label: "Delete", statuses: ["Submitted", "Triage", "Needs Information", "Rejected", "Cancelled"], reason: "Only a ticket with no planning or execution history can be deleted" },
+];
+
+export function ticketQuickActions(ticket: { status: string }) {
+  return quickActionRules.map((rule) => {
+    const enabled = rule.statuses.includes(ticket.status);
+    return { key: rule.key, glyph: rule.glyph, label: rule.label, enabled, disabledReason: enabled ? "" : rule.reason };
+  });
+}
+
 export function ticketCreateModal(projects: Array<{ id: string; name: string }>) {
   const priorities = ["critical", "high", "medium", "low"];
   return `<button class="button primary" type="button" data-add-ticket-button>Add ticket</button><dialog data-add-ticket-modal aria-label="Add ticket"><div class="card-head">Add ticket</div><form data-add-ticket-form><div class="card-body"><label class="field"><span>Project</span><select name="project_id" required><option value="">Choose a project</option>${projects.map((project) => `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`).join("")}</select></label><label class="field"><span>Title</span><input name="title" required></label><label class="field"><span>Description</span><textarea name="description" rows="4" required></textarea></label><div class="grid two"><label class="field"><span>Category</span><input name="category"></label><label class="field"><span>Priority</span><select name="priority"><option value="">Choose priority</option>${priorities.map((priority) => `<option value="${priority}">${priority[0].toUpperCase()}${priority.slice(1)}</option>`).join("")}</select></label></div><label class="field"><span>Environment</span><input name="environment"></label><label class="field"><span>Expected behavior</span><textarea name="expected_behavior" rows="3"></textarea></label><label class="field"><span>Actual behavior</span><textarea name="actual_behavior" rows="3"></textarea></label><label class="field"><span>Reproduction steps</span><textarea name="reproduction_steps" rows="3"></textarea></label><p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Create ticket</button></div></form></dialog>`;
