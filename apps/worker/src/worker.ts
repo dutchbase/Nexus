@@ -714,7 +714,13 @@ async function runExecution(job: any, lease: LeaseGuard) {
             model: input.ai.model,
             apiKey: executionDeepSeekKey,
             logPath: stagedLog.stagedPath,
-            timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 30 * 60 * 1000),
+            // DCC-1032, 2026-09: agent_run 5f5d83a0 was killed at exactly 30:08
+            // mid code-quality-review of the last of five implementation tasks;
+            // because a timeout skips the clone-to-worktree copy-back, the whole
+            // run's work was destroyed along with the temp clone. 45 min gives a
+            // real execution the extra headroom it needed without masking a
+            // genuinely hung process.
+            timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 45 * 60 * 1000),
             signal: AbortSignal.any([cancellation.signal, lease.signal]),
             attachmentFiles: imageEvidence.map((evidence) => evidence.path),
             onEvent: async ({ eventType, event }: { eventType: string; event: unknown }) => {
@@ -751,7 +757,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
             oauthToken: process.env.CLAUDE_CODE_OAUTH_TOKEN ?? "",
             scenarioPath: typeof job.payload_json[scenarioKey] === "string" ? job.payload_json[scenarioKey] : undefined,
             logPath: stagedLog.stagedPath,
-            timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 30 * 60 * 1000),
+            timeoutMs: Number(input.project.config_json?.execution_timeout_ms ?? 45 * 60 * 1000),
             signal: AbortSignal.any([cancellation.signal, lease.signal]),
             onEvent: async ({ eventType, event }: { eventType: string; event: unknown }) => {
               lastPhase = eventType;
@@ -885,10 +891,16 @@ async function runExecution(job: any, lease: LeaseGuard) {
     const cancelled = isWorkflowCancellation(executionErrorCode, { stopping, leaseAborted: lease.signal.aborted });
     const terminalErrorCode = executionErrorCode === "execution_cancelled" && !cancelled
       ? "worker_interrupted" : executionErrorCode ?? "execution_failed";
+    // Mirrors the planning path's rawStdoutOnFailure above: DCC-1032's
+    // execution_timeout left nothing in agent_runs but a one-line message,
+    // so root-causing it meant hand-reading a 2.2MB JSONL artifact instead
+    // of one DB row.
+    const rawStdoutOnFailure = typeof (error as any)?.stdout === "string" ? (error as any).stdout : undefined;
     await pool.query(
-      `UPDATE agent_runs SET status=$2,finished_at=now(),exit_code=$3,error_code=$4,error_message=$5 WHERE id=$1`,
+      `UPDATE agent_runs SET status=$2,finished_at=now(),exit_code=$3,error_code=$4,error_message=$5,metadata_json=metadata_json || $6::jsonb WHERE id=$1`,
       [runId, cancelled ? "cancelled" : "failed", executionExitCode ?? 1,
-        terminalErrorCode, error instanceof Error ? error.message : "execution failed"],
+        terminalErrorCode, error instanceof Error ? error.message : "execution failed",
+        JSON.stringify(rawStdoutOnFailure ? { raw_stdout_on_failure: rawStdoutOnFailure } : {})],
     );
     await pool.query(
       "UPDATE execution_attempts SET validation_status=$2,completed_at=now() WHERE id=$1",
