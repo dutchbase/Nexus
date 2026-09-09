@@ -135,27 +135,33 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             delete:{method:"DELETE",path:"",verb:"Permanently delete"}
           };
           let pendingTicketAction=null;
+          const ticketActionConfirmButton=actionDialog?.querySelector("[data-ticket-action-confirm]");
           document.addEventListener("click",event=>{
             const button=event.target.closest?.("[data-ticket-action]");
             if(!button||button.disabled||!actionDialog)return;
             event.preventDefault();
             const config=ticketActions[button.dataset.ticketAction];if(!config)return;
             pendingTicketAction={config:config,ticket:button.dataset.ticketNumber};
+            if(ticketActionConfirmButton)ticketActionConfirmButton.disabled=false;
             actionDialog.querySelector("[data-ticket-action-title]").textContent=config.verb+" "+button.dataset.ticketNumber+"?";
             actionDialog.querySelector("[data-ticket-action-message]").textContent=button.dataset.ticketTitle||"";
             actionDialog.querySelector(".error").textContent="";
             actionDialog.showModal();
           });
+          actionDialog?.addEventListener("close",()=>{pendingTicketAction=null});
           actionDialog?.querySelector("[data-close-dialog]")?.addEventListener("click",()=>actionDialog.close());
-          actionDialog?.querySelector("[data-ticket-action-confirm]")?.addEventListener("click",async(event)=>{
+          ticketActionConfirmButton?.addEventListener("click",async(event)=>{
             if(!pendingTicketAction)return;
+            const currentAction=pendingTicketAction;
             const confirmButton=event.currentTarget;confirmButton.disabled=true;
             try{
-              const response=await fetch("/api/admin/tickets/"+encodeURIComponent(pendingTicketAction.ticket)+pendingTicketAction.config.path,{method:pendingTicketAction.config.method,headers:{"x-csrf-token":csrf}});
+              const response=await fetch("/api/admin/tickets/"+encodeURIComponent(currentAction.ticket)+currentAction.config.path,{method:currentAction.config.method,headers:{"x-csrf-token":csrf}});
+              if(pendingTicketAction!==currentAction)return;
               if(response.ok){location.reload();return}
               const result=await response.json().catch(()=>({}));
+              if(pendingTicketAction!==currentAction)return;
               actionDialog.querySelector(".error").textContent=result.error||"request failed";
-            }finally{confirmButton.disabled=false}
+            }finally{if(pendingTicketAction===currentAction)confirmButton.disabled=false}
           });
         ` : ""}
       ` : ""}
