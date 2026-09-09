@@ -222,7 +222,13 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     }
 
     // Table view
-    const rows = tickets.map((ticket) => `<a class="ticket-row tickets7" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}"><span class="mono">${escapeHtml(ticket.ticket_number)}</span><strong>${escapeHtml(ticket.title)}</strong><span>${escapeHtml(ticket.project_name)}</span><span>${escapeHtml(ticket.priority || "—")}</span><span class="mono">${escapeHtml(ticket.default_model || "—")} · ${escapeHtml(ticket.default_reasoning_level || "—")}</span>${statusBadge(ticket.status)}<time>${new Date(ticket.updated_at).toLocaleDateString("nl-NL")}</time></a>`).join("");
+    // DCC-1032: the row is a <div> with an absolutely-positioned overlay link
+    // rather than an <a>, so the quick-action buttons are never nested inside
+    // an anchor (invalid HTML, and every click would navigate first). Same
+    // shape as the pull-request list — see prs.ts's .pr-row-link.
+    const quickActionCell = (ticket: any) => `<span class="ticket-quick-actions" data-label="Actions">${ticketQuickActions(ticket).map((action) =>
+      `<button class="button" type="button" data-ticket-action="${action.key}" data-ticket-number="${escapeHtml(ticket.ticket_number)}" data-ticket-title="${escapeHtml(ticket.title)}" aria-label="${escapeHtml(action.label)} ${escapeHtml(ticket.ticket_number)}" title="${escapeHtml(action.enabled ? action.label : action.disabledReason)}"${action.enabled ? "" : " disabled"}>${action.glyph}</button>`).join("")}</span>`;
+    const rows = tickets.map((ticket) => `<div class="ticket-row tickets7"><a class="ticket-row-link" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}" aria-label="Open ticket ${escapeHtml(ticket.ticket_number)}"></a><span class="mono">${escapeHtml(ticket.ticket_number)}</span><strong>${escapeHtml(ticket.title)}</strong><span>${escapeHtml(ticket.project_name)}</span><span>${escapeHtml(ticket.priority || "—")}</span><span class="mono">${escapeHtml(ticket.default_model || "—")} · ${escapeHtml(ticket.default_reasoning_level || "—")}</span>${statusBadge(ticket.status)}<time>${new Date(ticket.updated_at).toLocaleDateString("nl-NL")}</time>${quickActionCell(ticket)}</div>`).join("");
     const emptyState = tickets.length === 0 ? `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No tickets match these filters.</div>` : "";
     const body = `<div class="eyebrow">Work · intake</div><h1>Tickets</h1>
       <div class="toolbar">
@@ -249,7 +255,15 @@ export async function render(url: URL, session: Session, _metrics: Record<string
         <a class="button" data-tickets-reset href="/admin/tickets">Reset</a>
         <span aria-live="polite" style="margin-left:auto">${tickets.length} shown</span>
       </form>
-      <section class="card">${emptyState || `<div class="list-head tickets7"><span>Ticket</span><span>Title</span><span>Project</span><span>Priority</span><span>AI config</span><span>Status</span><span>Updated</span></div>${rows}`}</section>
+      <section class="card">${emptyState || `<div class="list-head tickets7"><span>Ticket</span><span>Title</span><span>Project</span><span>Priority</span><span>AI config</span><span>Status</span><span>Updated</span><span>Actions</span></div>${rows}`}</section>
+      <dialog data-ticket-action-dialog aria-label="Confirm ticket action">
+        <div class="card-head" data-ticket-action-title>Confirm</div>
+        <div class="card-body"><p data-ticket-action-message></p><p class="error" role="alert"></p></div>
+        <div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">
+          <button class="button" type="button" data-close-dialog>Cancel</button>
+          <button class="button primary" type="button" data-ticket-action-confirm>Confirm</button>
+        </div>
+      </dialog>
       ${pagerHtml(url, ticketsNext)}`;
     return { status: 200, title: "Tickets", body };
   }
