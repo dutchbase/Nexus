@@ -57,6 +57,23 @@ export function approvalGatesCard(ticket: { status: string }) {
     <p><button class="button" type="button" data-acknowledge-ticket${canAcknowledge ? "" : " disabled"} title="${canAcknowledge ? "" : "Ticket must be Submitted"}">Acknowledge</button></p></div></section>`;
 }
 
+// DCC-1032: one source of truth for the ticket-list row buttons and their
+// status gates, so the disabled state matches what the API will actually
+// accept instead of drifting from server.ts.
+const quickActionRules: Array<{ key: string; glyph: string; label: string; statuses: string[]; reason: string }> = [
+  { key: "acknowledge", glyph: "✓", label: "Acknowledge", statuses: ["Submitted"], reason: "Only a Submitted ticket can be acknowledged" },
+  { key: "start-planning", glyph: "✎", label: "Start planning", statuses: ["Triage", "Needs Information", "Planning Failed"], reason: "Planning starts from Triage, Needs Information or Planning Failed" },
+  { key: "execute", glyph: "▶", label: "Execute plan", statuses: ["Plan Approved", "Execution Failed"], reason: "Execution needs an approved plan" },
+  { key: "delete", glyph: "✕", label: "Delete", statuses: ["Submitted", "Triage", "Needs Information", "Rejected", "Cancelled"], reason: "Only a ticket with no planning or execution history can be deleted" },
+];
+
+export function ticketQuickActions(ticket: { status: string }) {
+  return quickActionRules.map((rule) => {
+    const enabled = rule.statuses.includes(ticket.status);
+    return { key: rule.key, glyph: rule.glyph, label: rule.label, enabled, disabledReason: enabled ? "" : rule.reason };
+  });
+}
+
 export function ticketCreateModal(projects: Array<{ id: string; name: string }>) {
   const priorities = ["critical", "high", "medium", "low"];
   return `<button class="button primary" type="button" data-add-ticket-button>Add ticket</button><dialog data-add-ticket-modal aria-label="Add ticket"><div class="card-head">Add ticket</div><form data-add-ticket-form><div class="card-body"><label class="field"><span>Project</span><select name="project_id" required><option value="">Choose a project</option>${projects.map((project) => `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`).join("")}</select></label><label class="field"><span>Title</span><input name="title" required></label><label class="field"><span>Description</span><textarea name="description" rows="4" required></textarea></label><div class="grid two"><label class="field"><span>Category</span><input name="category"></label><label class="field"><span>Priority</span><select name="priority"><option value="">Choose priority</option>${priorities.map((priority) => `<option value="${priority}">${priority[0].toUpperCase()}${priority.slice(1)}</option>`).join("")}</select></label></div><label class="field"><span>Environment</span><input name="environment"></label><label class="field"><span>Expected behavior</span><textarea name="expected_behavior" rows="3"></textarea></label><label class="field"><span>Actual behavior</span><textarea name="actual_behavior" rows="3"></textarea></label><label class="field"><span>Reproduction steps</span><textarea name="reproduction_steps" rows="3"></textarea></label><p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Create ticket</button></div></form></dialog>`;
@@ -205,7 +222,13 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     }
 
     // Table view
-    const rows = tickets.map((ticket) => `<a class="ticket-row tickets7" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}"><span class="mono">${escapeHtml(ticket.ticket_number)}</span><strong>${escapeHtml(ticket.title)}</strong><span>${escapeHtml(ticket.project_name)}</span><span>${escapeHtml(ticket.priority || "—")}</span><span class="mono">${escapeHtml(ticket.default_model || "—")} · ${escapeHtml(ticket.default_reasoning_level || "—")}</span>${statusBadge(ticket.status)}<time>${new Date(ticket.updated_at).toLocaleDateString("nl-NL")}</time></a>`).join("");
+    // DCC-1032: the row is a <div> with an absolutely-positioned overlay link
+    // rather than an <a>, so the quick-action buttons are never nested inside
+    // an anchor (invalid HTML, and every click would navigate first). Same
+    // shape as the pull-request list — see prs.ts's .pr-row-link.
+    const quickActionCell = (ticket: any) => `<span class="ticket-quick-actions" data-label="Actions">${ticketQuickActions(ticket).map((action) =>
+      `<button class="button" type="button" data-ticket-action="${action.key}" data-ticket-number="${escapeHtml(ticket.ticket_number)}" data-ticket-title="${escapeHtml(ticket.title)}" aria-label="${escapeHtml(action.label)} ${escapeHtml(ticket.ticket_number)}" title="${escapeHtml(action.enabled ? action.label : action.disabledReason)}"${action.enabled ? "" : " disabled"}>${action.glyph}</button>`).join("")}</span>`;
+    const rows = tickets.map((ticket) => `<div class="ticket-row tickets7"><a class="ticket-row-link" href="/admin/tickets/${escapeHtml(ticket.ticket_number)}" aria-label="Open ticket ${escapeHtml(ticket.ticket_number)}"></a><span class="mono">${escapeHtml(ticket.ticket_number)}</span><strong>${escapeHtml(ticket.title)}</strong><span>${escapeHtml(ticket.project_name)}</span><span>${escapeHtml(ticket.priority || "—")}</span><span class="mono">${escapeHtml(ticket.default_model || "—")} · ${escapeHtml(ticket.default_reasoning_level || "—")}</span>${statusBadge(ticket.status)}<time>${new Date(ticket.updated_at).toLocaleDateString("nl-NL")}</time>${quickActionCell(ticket)}</div>`).join("");
     const emptyState = tickets.length === 0 ? `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No tickets match these filters.</div>` : "";
     const body = `<div class="eyebrow">Work · intake</div><h1>Tickets</h1>
       <div class="toolbar">
@@ -232,7 +255,15 @@ export async function render(url: URL, session: Session, _metrics: Record<string
         <a class="button" data-tickets-reset href="/admin/tickets">Reset</a>
         <span aria-live="polite" style="margin-left:auto">${tickets.length} shown</span>
       </form>
-      <section class="card">${emptyState || `<div class="list-head tickets7"><span>Ticket</span><span>Title</span><span>Project</span><span>Priority</span><span>AI config</span><span>Status</span><span>Updated</span></div>${rows}`}</section>
+      <section class="card">${emptyState || `<div class="list-head tickets7"><span>Ticket</span><span>Title</span><span>Project</span><span>Priority</span><span>AI config</span><span>Status</span><span>Updated</span><span>Actions</span></div>${rows}`}</section>
+      <dialog data-ticket-action-dialog aria-label="Confirm ticket action">
+        <div class="card-head" data-ticket-action-title>Confirm</div>
+        <div class="card-body"><p data-ticket-action-message></p><p class="error" role="alert"></p></div>
+        <div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px">
+          <button class="button" type="button" data-close-dialog>Cancel</button>
+          <button class="button primary" type="button" data-ticket-action-confirm>Confirm</button>
+        </div>
+      </dialog>
       ${pagerHtml(url, ticketsNext)}`;
     return { status: 200, title: "Tickets", body };
   }

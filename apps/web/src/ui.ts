@@ -127,6 +127,42 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             event.preventDefault();const response=await fetch("/api/admin/tickets",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(Object.fromEntries(new FormData(form)))});const result=await response.json();
             if(response.ok)location.href="/admin/tickets/"+result.ticket.ticket_number;else form.querySelector(".error").textContent=result.error;
           });
+          const actionDialog=document.querySelector("[data-ticket-action-dialog]");
+          const ticketActions={
+            acknowledge:{method:"POST",path:"/acknowledge",verb:"Acknowledge"},
+            "start-planning":{method:"POST",path:"/approve-planning",verb:"Start planning for"},
+            execute:{method:"POST",path:"/execute",verb:"Execute the approved plan for"},
+            delete:{method:"DELETE",path:"",verb:"Permanently delete"}
+          };
+          let pendingTicketAction=null;
+          const ticketActionConfirmButton=actionDialog?.querySelector("[data-ticket-action-confirm]");
+          document.addEventListener("click",event=>{
+            const button=event.target.closest?.("[data-ticket-action]");
+            if(!button||button.disabled||!actionDialog)return;
+            event.preventDefault();
+            const config=ticketActions[button.dataset.ticketAction];if(!config)return;
+            pendingTicketAction={config:config,ticket:button.dataset.ticketNumber};
+            if(ticketActionConfirmButton)ticketActionConfirmButton.disabled=false;
+            actionDialog.querySelector("[data-ticket-action-title]").textContent=config.verb+" "+button.dataset.ticketNumber+"?";
+            actionDialog.querySelector("[data-ticket-action-message]").textContent=button.dataset.ticketTitle||"";
+            actionDialog.querySelector(".error").textContent="";
+            actionDialog.showModal();
+          });
+          actionDialog?.addEventListener("close",()=>{pendingTicketAction=null});
+          actionDialog?.querySelector("[data-close-dialog]")?.addEventListener("click",()=>actionDialog.close());
+          ticketActionConfirmButton?.addEventListener("click",async(event)=>{
+            if(!pendingTicketAction)return;
+            const currentAction=pendingTicketAction;
+            const confirmButton=event.currentTarget;confirmButton.disabled=true;
+            try{
+              const response=await fetch("/api/admin/tickets/"+encodeURIComponent(currentAction.ticket)+currentAction.config.path,{method:currentAction.config.method,headers:{"x-csrf-token":csrf}});
+              if(response.ok){location.reload();return}
+              if(pendingTicketAction!==currentAction)return;
+              const result=await response.json().catch(()=>({}));
+              if(pendingTicketAction!==currentAction)return;
+              actionDialog.querySelector(".error").textContent=result.error||"request failed";
+            }finally{if(pendingTicketAction===currentAction)confirmButton.disabled=false}
+          });
         ` : ""}
       ` : ""}
       ${/^\/admin\/tickets\/[^/]+$/.test(path) ? `
