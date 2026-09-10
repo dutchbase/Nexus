@@ -113,6 +113,8 @@ test("required source-form images survive edits and only detach after validation
     expect(serverValidation).toEqual({ status: 422, body: { error: "validation failed", fields: { evidence: "required" } } });
 
     await queryOne("UPDATE form_fields SET required=false WHERE form_id=$1 AND field_key='evidence' RETURNING id", [form.form_id]);
+    await editor.page.goto(`/tickets/${ticketNumber}`);
+    await editor.page.getByRole("button", { name: "Remove", exact: true }).click();
     await editor.page.getByRole("button", { name: "Save changes" }).click();
     await expect(editor.page.getByText("No images attached.", { exact: true })).toBeVisible();
     expect((await queryOne("SELECT ticket_id FROM attachments WHERE id=$1", [attachment.id])).ticket_id).toBeNull();
