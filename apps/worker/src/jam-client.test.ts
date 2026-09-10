@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { Client, Tool } from "@modelcontextprotocol/client";
+import { SdkError, SdkErrorCode, type Client, type Tool } from "@modelcontextprotocol/client";
 import { JamImportError, bindJamToolArguments, boundedJamFetch, callJamToolPages, fetchJamContext, normalizeJamEvidence, parseJamToolResult, redactJamValue, safeJamSchema, setJamFetchForTests } from "./jam-client.ts";
 
 afterEach(() => setJamFetchForTests(fetch));
@@ -149,14 +149,20 @@ describe("Jam MCP integration boundary", () => {
     await expect(fetchJamContext(source, { token: "x", signal: new AbortController().signal }, { createClient: () => protocolFailure as never, createTransport: () => ({} as never) })).rejects.toMatchObject({ code: "invalid_response", retryable: false, message: "invalid_response" });
   });
 
-  it.each([
-    Object.assign(new Error("provider secret"), { code: "REQUEST_TIMEOUT" }),
-    Object.assign(new Error("provider secret"), { code: "ETIMEDOUT" }),
-    Object.assign(new Error("provider secret"), { name: "TimeoutError" }),
-    new Error("Request timed out with provider secret"),
-  ])("maps an SDK request timeout to a safe retryable timeout", async (timeoutError) => {
+  it("maps the typed SDK request timeout to a safe retryable timeout", async () => {
+    const timeoutError = new SdkError(SdkErrorCode.RequestTimeout, "provider secret");
     const client = fakeClient({ callTool: vi.fn(async () => { throw timeoutError; }) });
     await expect(fetchJamContext(source, { token: "x", signal: new AbortController().signal }, { createClient: () => client as never, createTransport: () => ({} as never) })).rejects.toMatchObject({ code: "timeout", retryable: true, message: "timeout" });
+  });
+
+  it.each([
+    Object.assign(new Error("protocol failure"), { code: "REQUEST_TIMEOUT" }),
+    Object.assign(new Error("protocol failure"), { code: "ETIMEDOUT" }),
+    Object.assign(new Error("protocol failure"), { name: "TimeoutError" }),
+    new Error("Request timed out while parsing protocol data"),
+  ])("keeps a timeout lookalike nonretryable", async (lookalike) => {
+    const client = fakeClient({ callTool: vi.fn(async () => { throw lookalike; }) });
+    await expect(fetchJamContext(source, { token: "x", signal: new AbortController().signal }, { createClient: () => client as never, createTransport: () => ({} as never) })).rejects.toMatchObject({ code: "invalid_response", retryable: false, message: "invalid_response" });
   });
 
   it("closes after partial connect and maps an expired deadline to retryable timeout", async () => {

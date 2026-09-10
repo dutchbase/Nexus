@@ -122,9 +122,7 @@ export function parseJamToolResult(result: any): unknown {
 
 const toolNames = { details: "getDetails", console: "getConsoleLogs", network: "getNetworkRequests", events: "getUserEvents", metadata: "getMetadata", transcript: "getVideoTranscript" } as const;
 function sdkTimeout(error: unknown) {
-  if (error instanceof SdkError && error.code === SdkErrorCode.RequestTimeout) return true;
-  const value = asRecord(error);
-  return value.code === "REQUEST_TIMEOUT" || value.code === "ETIMEDOUT" || value.name === "TimeoutError" || (typeof value.message === "string" && /\b(?:timed out|timeout exceeded)\b/i.test(value.message));
+  return error instanceof SdkError && error.code === SdkErrorCode.RequestTimeout;
 }
 export async function fetchJamContext(source: JamSource, options: { token: string; signal: AbortSignal }, dependencies: JamDependencies = {}): Promise<JamImportResult> {
   if (!options.token) throw new JamImportError("not_configured", false);
