@@ -1,7 +1,7 @@
 DO $$
 BEGIN
   IF EXISTS (SELECT 1 FROM users WHERE role NOT IN ('admin', 'reporter')) THEN
-    RAISE EXCEPTION 'cannot apply 064: users contain roles other than admin or reporter';
+    RAISE EXCEPTION 'cannot apply 067: users contain roles other than admin or reporter';
   END IF;
 END $$;
 

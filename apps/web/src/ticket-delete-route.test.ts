@@ -31,7 +31,7 @@ test("deletes a Triage ticket in one transaction and audits it", async () => {
   }) };
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request(), response, url(), { user_id: "admin" });
+  await adminApi(request(), response, url(), { user_id: "admin", role: "admin" });
 
   const calls = transactionClient.query.mock.calls;
   expect(calls.some(([sql, values]: [string, unknown[]]) =>
@@ -45,7 +45,7 @@ test("404s for an unknown ticket without deleting anything", async () => {
   transactionClient = { query: vi.fn(async () => ({ rows: [], rowCount: 0 })) };
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request(), response, url(), { user_id: "admin" });
+  await adminApi(request(), response, url(), { user_id: "admin", role: "admin" });
 
   expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("DELETE FROM tickets"))).toBe(false);
   expect(response.writeHead).toHaveBeenCalledWith(404, expect.any(Object));
@@ -58,7 +58,7 @@ test("refuses to delete a ticket that has moved past intake", async () => {
   }) };
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await expect(adminApi(request(), response, url(), { user_id: "admin" }))
+  await expect(adminApi(request(), response, url(), { user_id: "admin", role: "admin" }))
     .rejects.toMatchObject({ status: 409, code: "ticket_not_deletable" });
   expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("DELETE FROM tickets"))).toBe(false);
 });
@@ -71,7 +71,7 @@ test("maps a foreign-key violation to a 409 instead of a 500", async () => {
   }) };
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request(), response, url(), { user_id: "admin" });
+  await adminApi(request(), response, url(), { user_id: "admin", role: "admin" });
 
   expect(response.writeHead).toHaveBeenCalledWith(409, expect.any(Object));
   expect(String(response.end.mock.calls[0][0])).toContain("ticket_has_dependents");

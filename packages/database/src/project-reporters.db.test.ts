@@ -19,7 +19,7 @@ integration("project reporters migration", () => {
   beforeAll(async () => {
     legacyMigrationDirectory = await mkdtemp(join(tmpdir(), "dcc-project-reporters-"));
     for (const name of await readdir(migrationDirectory)) {
-      if (name.endsWith(".sql") && name < "064_project_reporters.sql") await cp(new URL(name, migrationDirectory), join(legacyMigrationDirectory, name));
+      if (name.endsWith(".sql") && name < "067_project_reporters.sql") await cp(new URL(name, migrationDirectory), join(legacyMigrationDirectory, name));
     }
   });
 

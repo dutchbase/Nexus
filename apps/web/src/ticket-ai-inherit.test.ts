@@ -48,6 +48,7 @@ const systemAiRow = {
 function makeTransactionClient() {
   return {
     query: vi.fn(async (sql: string) => {
+      if (sql.includes("FROM users") && sql.includes("FOR UPDATE")) return { rows: [{ role: "admin", is_active: true }] };
       if (sql.includes("FROM tickets") && sql.includes("FOR UPDATE")) return { rows: [ticketRow] };
       if (sql.includes("FROM projects")) return { rows: [projectRow] };
       if (sql.includes("FROM system_ai_settings")) return { rows: [systemAiRow] };
@@ -77,6 +78,7 @@ test("PATCHing an empty-string AI field stores SQL NULL, not the empty string", 
 test("PATCHing an empty-string AI field that would leave planning unresolvable still 422s", async () => {
   transactionClient = {
     query: vi.fn(async (sql: string) => {
+      if (sql.includes("FROM users") && sql.includes("FOR UPDATE")) return { rows: [{ role: "admin", is_active: true }] };
       if (sql.includes("FROM tickets") && sql.includes("FOR UPDATE")) return { rows: [ticketRow] };
       if (sql.includes("FROM projects")) return { rows: [projectRow] };
       if (sql.includes("FROM system_ai_settings")) return { rows: [{
