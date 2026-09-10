@@ -9,6 +9,8 @@ const CALL_TIMEOUT = 10_000;
 let jamFetch: typeof fetch = fetch;
 
 export type JamImportResult = { state: "ready" | "partial"; evidence: JamEvidence; contentHash: string };
+type JamClient = Pick<Client, "connect" | "listTools" | "callTool" | "close">;
+type JamDependencies = { createClient?: () => JamClient; createTransport?: (token: string) => StreamableHTTPClientTransport; timeout?: (milliseconds: number) => AbortSignal };
 export class JamImportError extends Error {
   constructor(public code: JamErrorCode, public retryable: boolean, public retryAfterSeconds?: number) { super(code); this.name = "JamImportError"; }
 }
@@ -22,8 +24,18 @@ const secretKey = (key: string) => /password|secret|token|authorization|cookie|a
 export function redactJamValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redactJamValue);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([key]) => !secretKey(key)).map(([key, child]) => [key, redactJamValue(child)]));
-  if (typeof value === "string") return safeUrl(value)?.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/([?&](?:token|key|secret)=)[^\s&#]+/gi, "$1[redacted]");
+  if (typeof value === "string") return safeUrl(value)?.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/\b(access_token|token|api[-_]?key|secret|password|cookie|auth(?:orization)?)\s*([=:])\s*(?:"[^"]*"|'[^']*'|[^\s,;&#]+)/gi, "$1$2[redacted]");
   return value;
+}
+
+export function safeJamSchema(value: unknown): unknown {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const schema = value as Record<string, unknown>, result: Record<string, unknown> = {};
+  if (typeof schema.type === "string") result.type = schema.type;
+  if (schema.properties && typeof schema.properties === "object" && !Array.isArray(schema.properties)) result.properties = Object.fromEntries(Object.entries(schema.properties).map(([name, child]) => [name, safeJamSchema(child)]));
+  if (Array.isArray(schema.required)) result.required = schema.required.filter((name): name is string => typeof name === "string");
+  if (schema.items) result.items = safeJamSchema(schema.items);
+  return result;
 }
 
 function asRecord(value: unknown): Record<string, any> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {}; }
@@ -70,8 +82,9 @@ function capEvidence(evidence: JamEvidence): JamEvidence {
 
 export function bindJamToolArguments(schema: unknown, id: string, options: { limit?: number; after?: string } = {}): Record<string, unknown> {
   const shape = asRecord(schema), properties = asRecord(shape.properties), required = Array.isArray(shape.required) ? shape.required : [];
-  const selector = ["jamId", "id", "jam_id"].find((name) => asRecord(properties[name]).type === "string");
-  if (!selector || required.some((name) => name !== selector && name !== "limit" && name !== "after")) throw new JamImportError("unsupported_schema", false);
+  const selectors = ["jamId", "id", "jam_id"].filter((name) => properties[name] !== undefined);
+  if (selectors.length !== 1 || asRecord(properties[selectors[0]]).type !== "string" || required.some((name) => name !== selectors[0]) || (properties.limit && !["number", "integer"].includes(asRecord(properties.limit).type)) || (properties.after && asRecord(properties.after).type !== "string")) throw new JamImportError("unsupported_schema", false);
+  const selector = selectors[0];
   return { [selector]: id, ...(options.limit !== undefined && properties.limit ? { limit: options.limit } : {}), ...(options.after !== undefined && properties.after ? { after: options.after } : {}) };
 }
 
@@ -95,7 +108,7 @@ export async function boundedJamFetch(input: RequestInfo | URL, init: RequestIni
   const abort = () => controller.abort(); init.signal?.addEventListener("abort", abort, { once: true });
   if (init.signal?.aborted) controller.abort();
   try { return await limitedResponse(await jamFetch(url, { ...init, redirect: "error", signal: controller.signal })); }
-  catch (error) { if (error instanceof JamImportError) throw error; if (controller.signal.aborted) throw new JamImportError("timeout", true); throw new JamImportError("unavailable", true); }
+  catch (error) { if (error instanceof JamImportError) throw error; if (controller.signal.aborted) throw new JamImportError("timeout", true); if (error instanceof TypeError) throw new JamImportError("unavailable", true); throw new JamImportError("invalid_response", false); }
   finally { clearTimeout(timer); init.signal?.removeEventListener("abort", abort); }
 }
 
@@ -108,12 +121,12 @@ export function parseJamToolResult(result: any): unknown {
 }
 
 const toolNames = { details: "getDetails", console: "getConsoleLogs", network: "getNetworkRequests", events: "getUserEvents", metadata: "getMetadata", transcript: "getVideoTranscript" } as const;
-export async function fetchJamContext(source: JamSource, options: { token: string; signal: AbortSignal }): Promise<JamImportResult> {
+export async function fetchJamContext(source: JamSource, options: { token: string; signal: AbortSignal }, dependencies: JamDependencies = {}): Promise<JamImportResult> {
   if (!options.token) throw new JamImportError("not_configured", false);
-  const deadline = AbortSignal.any([options.signal, AbortSignal.timeout(30_000)]);
+  const deadline = AbortSignal.any([options.signal, (dependencies.timeout ?? AbortSignal.timeout)(30_000)]);
   const authProvider: AuthProvider = { token: async () => options.token };
-  const client = new Client({ name: "nexus-jam-ingestion", version: "1.0.0" }, { versionNegotiation: { mode: "legacy" } });
-  const transport = new StreamableHTTPClientTransport(new URL(ENDPOINT), { authProvider, fetch: boundedJamFetch, onInsufficientScope: "throw" });
+  const client = dependencies.createClient?.() ?? new Client({ name: "nexus-jam-ingestion", version: "1.0.0" });
+  const transport = dependencies.createTransport?.(options.token) ?? new StreamableHTTPClientTransport(new URL(ENDPOINT), { authProvider, fetch: boundedJamFetch, onInsufficientScope: "throw" });
   try {
     await client.connect(transport, { signal: deadline, timeout: CALL_TIMEOUT, maxTotalTimeout: 30_000 });
     const { tools } = await client.listTools(undefined, { signal: deadline, timeout: CALL_TIMEOUT, maxTotalTimeout: 30_000 });
@@ -128,11 +141,11 @@ export async function fetchJamContext(source: JamSource, options: { token: strin
     const evidence = normalizeJamEvidence(source, sections);
     if (!Object.keys(evidence.device).length && !evidence.console.length && !evidence.network.length && !evidence.events.length && !Object.keys(evidence.metadata).length && !evidence.transcript) throw new JamImportError("invalid_response", false);
     return { state: evidence.unavailableSections.length ? "partial" : "ready", evidence, contentHash: createHash("sha256").update(canonical(evidence)).digest("hex") };
-  } catch (error) { if (error instanceof JamImportError) throw error; if (deadline.aborted) throw new JamImportError("timeout", true); throw new JamImportError("unavailable", true); }
+  } catch (error) { if (error instanceof JamImportError) throw error; if (deadline.aborted) throw new JamImportError("timeout", true); throw new JamImportError("invalid_response", false); }
   finally { await client.close().catch(() => undefined); }
 }
 
-export async function callJamToolPages(client: Client, tool: Tool, id: string, signal: AbortSignal): Promise<unknown> {
+export async function callJamToolPages(client: Pick<Client, "callTool">, tool: Tool, id: string, signal: AbortSignal): Promise<unknown> {
   const collected: unknown[] = []; let after: string | undefined; const seen = new Set<string>(); let truncated = false;
   for (let page = 0; page < 5; page++) {
     const result = parseJamToolResult(await client.callTool({ name: tool.name, arguments: bindJamToolArguments(tool.inputSchema, id, { limit: 100, after }) }, { signal, timeout: CALL_TIMEOUT, maxTotalTimeout: CALL_TIMEOUT, toolDefinition: tool }));

@@ -1,13 +1,14 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Client, Tool } from "@modelcontextprotocol/client";
-import { bindJamToolArguments, boundedJamFetch, callJamToolPages, normalizeJamEvidence, parseJamToolResult, redactJamValue, setJamFetchForTests } from "./jam-client.ts";
+import { JamImportError, bindJamToolArguments, boundedJamFetch, callJamToolPages, fetchJamContext, normalizeJamEvidence, parseJamToolResult, redactJamValue, safeJamSchema, setJamFetchForTests } from "./jam-client.ts";
 
 afterEach(() => setJamFetchForTests(fetch));
 
 describe("Jam trust boundary", () => {
   it("recursively redacts secrets and request material", () => {
-    const value = redactJamValue({ authorization: "Bearer secret-one", cookie: "session=secret-two", nested: { password: "secret-three", access_token: "secret-four" }, requestBody: "private form input", safe: "render failed" });
+    const value = redactJamValue({ authorization: "Bearer secret-one", cookie: "session=secret-two", nested: { password: "secret-three", access_token: "secret-four" }, requestBody: "private form input", safe: "render failed; token=plain-one apiKey: 'plain-two' password:plain-three cookie=plain-four auth:plain-five" });
     expect(JSON.stringify(value)).not.toMatch(/secret-one|secret-two|secret-three|secret-four|private form input/);
+    expect(JSON.stringify(value)).not.toMatch(/plain-one|plain-two|plain-three|plain-four|plain-five/);
     expect(JSON.stringify(value)).toContain("render failed");
   });
 
@@ -41,6 +42,16 @@ describe("Jam trust boundary", () => {
       .toEqual({ jamId: "abc", limit: 100 });
     expect(() => bindJamToolArguments({ type: "object", properties: { capture: { type: "string" } }, required: ["capture"] }, "abc"))
       .toThrow("unsupported_schema");
+    expect(() => bindJamToolArguments({ type: "object", properties: { jamId: { type: "string" }, id: { type: "string" } }, required: ["jamId"] }, "abc")).toThrow("unsupported_schema");
+    expect(() => bindJamToolArguments({ type: "object", properties: { jamId: { type: "string" }, id: { type: "number" } }, required: ["jamId"] }, "abc")).toThrow("unsupported_schema");
+    expect(() => bindJamToolArguments({ type: "object", properties: { jamId: { type: "string" }, after: { type: "string" } }, required: ["jamId", "after"] }, "abc")).toThrow("unsupported_schema");
+    expect(() => bindJamToolArguments({ type: "object", properties: { jamId: { type: "string" }, limit: { type: "string" } }, required: ["jamId"] }, "abc")).toThrow("unsupported_schema");
+    expect(() => bindJamToolArguments({ type: "object", properties: { jamId: { type: "string" }, after: { type: "number" } }, required: ["jamId"] }, "abc")).toThrow("unsupported_schema");
+  });
+
+  it("reduces recorded schemas to structural fields recursively", () => {
+    expect(safeJamSchema({ type: "object", description: "secret", properties: { rows: { type: "array", examples: ["secret"], items: { type: "object", properties: { id: { type: "string", default: "secret" } }, required: ["id", 4] } } }, required: ["rows"] }))
+      .toEqual({ type: "object", properties: { rows: { type: "array", items: { type: "object", properties: { id: { type: "string" } }, required: ["id"] } } }, required: ["rows"] });
   });
 
   it("rejects provider errors and preserves bounded non-JSON prose", () => {
@@ -74,5 +85,80 @@ describe("Jam trust boundary", () => {
   it("honors an abort deadline", async () => {
     setJamFetchForTests(((_input, init) => new Promise((_resolve, reject) => init?.signal?.addEventListener("abort", () => reject(init.signal?.reason), { once: true }))) as typeof fetch);
     await expect(boundedJamFetch("https://mcp.jam.dev/mcp", { signal: AbortSignal.timeout(5) })).rejects.toMatchObject({ code: "timeout" });
+  });
+
+  it("classifies only transport failures as retryable", async () => {
+    setJamFetchForTests((async () => { throw new TypeError("network secret"); }) as typeof fetch);
+    await expect(boundedJamFetch("https://mcp.jam.dev/mcp")).rejects.toMatchObject({ code: "unavailable", retryable: true });
+    setJamFetchForTests((async () => { throw new Error("protocol secret"); }) as typeof fetch);
+    await expect(boundedJamFetch("https://mcp.jam.dev/mcp")).rejects.toMatchObject({ code: "invalid_response", retryable: false, message: "invalid_response" });
+  });
+});
+
+const source = { id: "abc", url: "https://jam.dev/c/abc" };
+const details = { name: "getDetails", inputSchema: { type: "object", properties: { jamId: { type: "string" } }, required: ["jamId"] } } as Tool;
+const optional = ["getConsoleLogs", "getNetworkRequests", "getUserEvents", "getMetadata", "getVideoTranscript"].map((name) => ({ ...details, name } as Tool));
+
+function fakeClient(overrides: Record<string, unknown> = {}) {
+  return {
+    connect: vi.fn(async () => undefined),
+    listTools: vi.fn(async () => ({ tools: [details, ...optional] })),
+    callTool: vi.fn(async ({ name }: { name: string }) => ({ structuredContent: name === "getDetails" ? { browser: "Firefox" } : { items: [] } })),
+    close: vi.fn(async () => undefined),
+    ...overrides,
+  };
+}
+
+describe("Jam MCP integration boundary", () => {
+  it("discovers tools, passes auth to transport, and always closes", async () => {
+    const client = fakeClient(), createTransport = vi.fn(() => ({} as never));
+    const result = await fetchJamContext(source, { token: "token-value", signal: new AbortController().signal }, { createClient: () => client as never, createTransport });
+    expect(result.state).toBe("ready");
+    expect(createTransport).toHaveBeenCalledWith("token-value");
+    expect(client.connect).toHaveBeenCalledOnce();
+    expect(client.close).toHaveBeenCalledOnce();
+  });
+
+  it("returns partial evidence when optional tools are missing or fail", async () => {
+    const missing = fakeClient({ listTools: vi.fn(async () => ({ tools: [details] })) });
+    await expect(fetchJamContext(source, { token: "x", signal: new AbortController().signal }, { createClient: () => missing as never, createTransport: () => ({} as never) })).resolves.toMatchObject({ state: "partial" });
+    const failed = fakeClient({ callTool: vi.fn(async ({ name }: { name: string }) => { if (name === "getConsoleLogs") throw new JamImportError("unavailable", true); return { structuredContent: name === "getDetails" ? { browser: "Firefox" } : { items: [] } }; }) });
+    const result = await fetchJamContext(source, { token: "x", signal: new AbortController().signal }, { createClient: () => failed as never, createTransport: () => ({} as never) });
+    expect(result.state).toBe("partial");
+    expect(result.evidence.unavailableSections).toContain("console");
+  });
+
+  it("paginates discovered collection tools through the adapter", async () => {
+    let consoleCalls = 0;
+    const client = fakeClient({ callTool: vi.fn(async ({ name }: { name: string }) => {
+      if (name === "getDetails") return { structuredContent: { browser: "Firefox" } };
+      if (name === "getConsoleLogs") return { structuredContent: consoleCalls++ === 0 ? { items: [{ message: "one" }], nextCursor: "next" } : { items: [{ message: "two" }] } };
+      return { structuredContent: { items: [] } };
+    }) });
+    const result = await fetchJamContext(source, { token: "x", signal: new AbortController().signal }, { createClient: () => client as never, createTransport: () => ({} as never) });
+    expect(result.evidence.console.map((row) => row.message)).toEqual(["one", "two"]);
+    expect(consoleCalls).toBe(2);
+  });
+
+  it("fails safely on discovery, required details, and unknown SDK errors", async () => {
+    const undiscoverable = fakeClient({ listTools: vi.fn(async () => ({ tools: optional })) });
+    await expect(fetchJamContext(source, { token: "x", signal: new AbortController().signal }, { createClient: () => undiscoverable as never, createTransport: () => ({} as never) })).rejects.toMatchObject({ code: "unsupported_schema", retryable: false });
+    const detailsFailure = fakeClient({ callTool: vi.fn(async () => { throw new JamImportError("access_denied", false); }) });
+    await expect(fetchJamContext(source, { token: "x", signal: new AbortController().signal }, { createClient: () => detailsFailure as never, createTransport: () => ({} as never) })).rejects.toMatchObject({ code: "access_denied" });
+    const protocolFailure = fakeClient({ listTools: vi.fn(async () => { throw new Error("provider secret"); }) });
+    await expect(fetchJamContext(source, { token: "x", signal: new AbortController().signal }, { createClient: () => protocolFailure as never, createTransport: () => ({} as never) })).rejects.toMatchObject({ code: "invalid_response", retryable: false, message: "invalid_response" });
+  });
+
+  it("closes after partial connect and maps an expired deadline to retryable timeout", async () => {
+    const client = fakeClient({ connect: vi.fn(async () => { throw new Error("partial connect secret"); }) });
+    const expired = AbortSignal.abort();
+    await expect(fetchJamContext(source, { token: "x", signal: new AbortController().signal }, { createClient: () => client as never, createTransport: () => ({} as never), timeout: () => expired })).rejects.toMatchObject({ code: "timeout", retryable: true });
+    expect(client.close).toHaveBeenCalledOnce();
+  });
+
+  it("hashes normalized evidence deterministically", async () => {
+    const first = fakeClient(), second = fakeClient();
+    const run = (client: ReturnType<typeof fakeClient>) => fetchJamContext(source, { token: "x", signal: new AbortController().signal }, { createClient: () => client as never, createTransport: () => ({} as never) });
+    expect((await run(first)).contentHash).toBe((await run(second)).contentHash);
   });
 });

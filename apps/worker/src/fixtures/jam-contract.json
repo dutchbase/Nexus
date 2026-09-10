@@ -14,6 +14,10 @@
     "network": [{ "method": "string", "url": "origin/path", "status": "number?", "durationMs": "number?" }],
     "events": [{ "type": "string", "description": "string", "time": "string?" }],
     "metadata": { "key": "primitive" },
-    "transcript": "string?"
+    "transcript": "string?",
+    "screenshot": { "present": "boolean", "content": "omitted" },
+    "video": { "present": "boolean", "content": "omitted" },
+    "instantReplay": { "present": "boolean", "content": "omitted" },
+    "optional": { "section": "missing|present" }
   }
 }
