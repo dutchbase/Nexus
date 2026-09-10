@@ -2,6 +2,7 @@ import { escapeHtml, fieldsFor, keysetCondition, lineDiff, nextCursor, pageReque
 import type { PageResult, Session } from "./shared.ts";
 import { checkPlanApprovalGate, aiInvocationPhases, aiLifecycleGroup, aiModels } from "@dcc/domain";
 import { formControls } from "../ui.ts";
+import { imageUploadControl } from "../image-upload-control.ts";
 
 function usd(value: number) {
   return new Intl.NumberFormat("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 8 }).format(value);
@@ -76,7 +77,7 @@ export function ticketQuickActions(ticket: { status: string }) {
 
 export function ticketCreateModal(projects: Array<{ id: string; name: string }>) {
   const priorities = ["critical", "high", "medium", "low"];
-  return `<button class="button primary" type="button" data-add-ticket-button>Add ticket</button><dialog data-add-ticket-modal aria-label="Add ticket"><div class="card-head">Add ticket</div><form data-add-ticket-form><div class="card-body"><label class="field"><span>Project</span><select name="project_id" required><option value="">Choose a project</option>${projects.map((project) => `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`).join("")}</select></label><label class="field"><span>Title</span><input name="title" required></label><label class="field"><span>Description</span><textarea name="description" rows="4" required></textarea></label><div class="grid two"><label class="field"><span>Category</span><input name="category"></label><label class="field"><span>Priority</span><select name="priority"><option value="">Choose priority</option>${priorities.map((priority) => `<option value="${priority}">${priority[0].toUpperCase()}${priority.slice(1)}</option>`).join("")}</select></label></div><label class="field"><span>Environment</span><input name="environment"></label><label class="field"><span>Expected behavior</span><textarea name="expected_behavior" rows="3"></textarea></label><label class="field"><span>Actual behavior</span><textarea name="actual_behavior" rows="3"></textarea></label><label class="field"><span>Reproduction steps</span><textarea name="reproduction_steps" rows="3"></textarea></label><p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Create ticket</button></div></form></dialog>`;
+  return `<button class="button primary" type="button" data-add-ticket-button>Add ticket</button><dialog data-add-ticket-modal aria-label="Add ticket"><div class="card-head">Add ticket</div><form data-add-ticket-form><div class="card-body"><label class="field"><span>Project</span><select name="project_id" required><option value="">Choose a project</option>${projects.map((project) => `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`).join("")}</select></label><label class="field"><span>Title</span><input name="title" required></label><label class="field"><span>Description</span><textarea name="description" rows="4" required></textarea></label><div class="grid two"><label class="field"><span>Category</span><input name="category"></label><label class="field"><span>Priority</span><select name="priority"><option value="">Choose priority</option>${priorities.map((priority) => `<option value="${priority}">${priority[0].toUpperCase()}${priority.slice(1)}</option>`).join("")}</select></label></div><label class="field"><span>Environment</span><input name="environment"></label><label class="field"><span>Expected behavior</span><textarea name="expected_behavior" rows="3"></textarea></label><label class="field"><span>Actual behavior</span><textarea name="actual_behavior" rows="3"></textarea></label><label class="field"><span>Reproduction steps</span><textarea name="reproduction_steps" rows="3"></textarea></label>${imageUploadControl({ fieldKey: "screenshots", label: "Screenshots", required: false, uploadUrl: "/api/projects/{project_id}/uploads", existing: [], disabled: true })}<p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-modal>Cancel</button><button class="button primary" type="submit">Create ticket</button></div></form></dialog>`;
 }
 export async function render(url: URL, session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname === "/admin/tickets") {
@@ -411,7 +412,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
          WHERE p.ticket_id=$1 ORDER BY pv.version DESC`,
         [ticket.id],
       ),
-      pool.query("SELECT a.id,u.original_name,u.media_type,u.size_bytes FROM attachments a JOIN uploads u ON u.id=a.upload_id WHERE a.ticket_id=$1 ORDER BY a.created_at", [ticket.id]),
+      pool.query("SELECT a.id,a.upload_id,coalesce(a.field_key,'screenshots') field_key,u.original_name,u.media_type,u.size_bytes FROM attachments a JOIN uploads u ON u.id=a.upload_id WHERE a.ticket_id=$1 ORDER BY a.created_at", [ticket.id]),
       pool.query("SELECT id, slug, name FROM projects ORDER BY name"),
       ticket.form_id ? fieldsFor(ticket.form_id) : Promise.resolve(standardFields),
     ]);
@@ -452,8 +453,8 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     const deletionMarker = ticket.submitter_deleted_at ? `<p class="status warn"><strong>Deleted by submitter</strong> · ${new Date(ticket.submitter_deleted_at).toLocaleString("nl-NL")}</p>` : "";
     const overviewPanel = `${deletionMarker}<div class="grid two"><section class="card"><div class="card-head">Original submission <button class="button" type="button" data-edit-ticket>Edit</button></div><div class="card-body">
       <div data-ticket-view><dl>${submissionDetails}</dl></div>
-      <form data-ticket-edit-form data-ticket-id="${ticket.id}" hidden>
-        ${formControls(sourceFields, projectsResult.rows, submissionValues, "admin")}
+      <form data-ticket-edit-form data-ticket-id="${ticket.id}" data-project-id="${ticket.project_id}" hidden>
+        ${formControls(sourceFields, projectsResult.rows, submissionValues, "admin", { uploadUrl: "/api/projects/{project_id}/uploads", existing: attachmentsResult.rows.map((attachment) => ({ ...attachment, url: `/admin/attachments/${attachment.id}` })) })}
         <button class="button" type="submit">Save</button> <button class="button" type="button" data-cancel-edit-ticket>Cancel</button><p class="error" role="alert"></p>
       </form>
       </div></section>

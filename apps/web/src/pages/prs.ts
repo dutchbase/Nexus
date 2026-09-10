@@ -2,6 +2,7 @@ import { escapeHtml, fmtDateTime, pool, prFreshness, renderMarkdown, shortRef, s
 import type { PageResult, Session } from "./shared.ts";
 import { aiModels, derivePolicyStatus, reasoningLevels } from "@dcc/domain";
 import { getGithubPolicyEnforcementMode } from "@dcc/project-config";
+import { imageUploadControl } from "../image-upload-control.ts";
 
 const detailQuery = `SELECT pr.*,p.name project_name,p.slug project_slug,p.config_json,t.ticket_number,t.title ticket_title,t.status ticket_status,t.approved_plan_hash,
               pv.content_markdown approved_plan,ar.id run_id,ar.model run_model,ar.reasoning_level run_reasoning_level,
@@ -162,7 +163,7 @@ function renderDetail(item: any, aiReviews: any[], conflictResolutions: any[], r
         </div>
       </details>
     </div>
-    <dialog data-create-ticket-dialog aria-label="Create follow-up ticket"><div class="card-head">Create follow-up ticket</div><form data-create-ticket-form><div class="card-body"><label class="field"><span>Title</span><input name="title" required></label><label class="field"><span>Feedback for AI</span><textarea name="feedback" rows="4"></textarea></label><label class="field"><span>Description</span><textarea name="description" rows="4"></textarea></label><label><input name="generate_description" type="checkbox" checked> Generate a description with AI in the background</label><p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-dialog>Cancel</button><button class="button primary" type="submit">Create</button></div></form></dialog>
+    <dialog data-create-ticket-dialog aria-label="Create follow-up ticket"><div class="card-head">Create follow-up ticket</div><form data-create-ticket-form data-project-id="${item.project_id}"><div class="card-body"><label class="field"><span>Title</span><input name="title" required></label><label class="field"><span>Feedback for AI</span><textarea name="feedback" rows="4"></textarea></label><label class="field"><span>Description</span><textarea name="description" rows="4"></textarea></label>${imageUploadControl({ fieldKey: "screenshots", label: "Screenshots", required: false, uploadUrl: `/api/projects/${item.project_id}/uploads`, existing: [] })}<label><input name="generate_description" type="checkbox" checked> Generate a description with AI in the background</label><p class="error" role="alert"></p></div><div style="padding:12px 18px;border-top:1px solid var(--border);display:flex;justify-content:flex-end;gap:8px"><button class="button" type="button" data-close-dialog>Cancel</button><button class="button primary" type="submit">Create</button></div></form></dialog>
     <div class="grid two"><section class="card"><div class="card-head">Metadata</div><div class="card-body"><dl>
     <dt>Ticket</dt><dd>${item.ticket_number ? `<a href="/admin/tickets/${escapeHtml(item.ticket_number)}">${escapeHtml(item.ticket_number)} · ${escapeHtml(item.ticket_title)}</a> (${escapeHtml(item.ticket_status)})` : `<span style="color:var(--text3)">Not linked</span>`}</dd>
     <dt>Author</dt><dd>${escapeHtml(item.author)}</dd><dt>Branches</dt><dd>${escapeHtml(item.head_branch)} → ${escapeHtml(item.base_branch)}</dd>

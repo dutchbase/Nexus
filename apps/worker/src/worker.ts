@@ -42,6 +42,7 @@ import {
   approvedExecutionInput, approvedPhaseSkills, approvedProjectInput, assertApprovedSkillSnapshot, assertExecutionPublicationGate, finalizeAiUsage, prReviewSnapshotInput, shouldRetryPrReview,
 } from "./worker-boundary.ts";
 import { runSessionCleanup } from "./security-maintenance.ts";
+import { expireUnclaimedUploads } from "./ticket-upload-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
 import { runProjectValidateJob } from "./project-validate-job.ts";
 import { runWorkerTick, startWorkerServices } from "./worker-loop.ts";
@@ -1857,6 +1858,8 @@ async function runMaintenancePass() {
     lastSessionCleanup = Date.now();
     try { await runSessionCleanup(pool); }
     catch (error) { console.error(`session cleanup failed: ${error instanceof Error ? error.message : "unknown error"}`); }
+    try { await expireUnclaimedUploads(pool, { primary: dataRoot, legacy: legacyDataRoot }); }
+    catch (error) { console.error(`ticket upload cleanup failed: ${error instanceof Error ? error.message : "unknown error"}`); }
     try { await sweepOrphanedManagedWorktrees(); }
     catch (error) { console.error(`worktree sweep failed: ${error instanceof Error ? error.message : "unknown error"}`); }
   }

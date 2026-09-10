@@ -25,6 +25,7 @@ vi.mock("../../../packages/skill-registry/src/index.ts", () => ({
 }));
 
 const { approvalInputsFor } = await import("./server.ts");
+const { checkPlanApprovalGate } = await import("@dcc/domain");
 
 test("preview and approval build the same canonical input hash through their transaction client", async () => {
   const project = {
@@ -89,8 +90,19 @@ test("preview and approval build the same canonical input hash through their tra
   ticket.source_url = "https://example.test/report";
   expect((await approvalInputsFor(ticket, version, client)).inputHash).not.toBe(preview.inputHash);
   skillConfiguration = { validation_commands: ["pnpm test"] };
+  ticket.source_url = null;
   imageEvidence = [{ ...imageEvidence[0], sha256: "c".repeat(64) }];
-  expect((await approvalInputsFor(ticket, version, client)).inputHash).not.toBe(preview.inputHash);
+  const replaced = await approvalInputsFor(ticket, version, client);
+  expect(replaced.inputHash).not.toBe(preview.inputHash);
+  expect(await checkPlanApprovalGate({ query: async () => ({ rows: [{
+    id: ticket.id, status: "Plan Approved", approved_plan_version_id: version.id,
+    approved_input_snapshot_id: "00000000-0000-4000-8000-000000000001",
+    gate_snapshot_id: "00000000-0000-4000-8000-000000000001", snapshot_ticket_id: ticket.id,
+    snapshot_plan_version_id: version.id, snapshot_material_input: preview.materialInput,
+    snapshot_input_hash: preview.inputHash, gate_plan_version_id: version.id, current_version_id: version.id,
+    approved_plan_hash: version.content_hash, current_content_hash: version.content_hash,
+    potentially_stale: true, plan_id: "plan",
+  }] }) } as any, ticket.id)).toMatchObject({ valid: false, code: "plan_potentially_stale" });
   expect(preview.approvedInput.prompts.flatMap((prompt: any) => prompt.provenance.map((source: any) => `${source.scope}.${source.promptType}`))).toEqual([
     "global.base", "global.execution", "project.context", "project.execution", "project.testing",
     "global.base", "global.execution", "global.execution-repair", "project.context", "project.execution", "project.testing",

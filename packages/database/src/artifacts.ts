@@ -70,6 +70,10 @@ async function removeArtifact(root: string, target: string) {
   if (await location(root, target) === "present") await rm(target, { force: true });
 }
 
+export async function removeArtifactFile(root: string, relativePath: string): Promise<void> {
+  await removeArtifact(root, artifactPath(root, relativePath));
+}
+
 export async function readStagedArtifact(root: string, id: string) {
   return readArtifact(root, path.join(".staged", id));
 }

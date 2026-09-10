@@ -72,12 +72,24 @@ describe("upload", () => {
     const attachment = mockClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO attachments"));
     expect(attachment?.[0]).toContain("RETURNING id");
   });
+
+  test("does not register an upload when the form is no longer published", async () => {
+    mockClient.query.mockImplementation(async (sql: string) => sql.includes("FROM forms")
+      ? { rows: [], rowCount: 0 } : { rows: [{ count: 0 }], rowCount: 1 });
+    const result = response();
+
+    await upload(uploadRequest(), result, { id: "draft-form", settings_json: {} });
+
+    expect(result.writeHead).toHaveBeenCalledWith(404, expect.anything());
+    expect(JSON.parse(result.end.mock.calls[0][0])).toEqual({ error: "form not found" });
+    expect(mockClient.query.mock.calls.some(([sql]: [string]) => sql.includes("INSERT INTO uploads"))).toBe(false);
+  });
 });
 
 describe("submitPublicForm upload claim", () => {
   test("atomically claims every finalized upload declared by an image field", async () => {
     pool.query.mockImplementation(async (sql: string) => {
-      if (sql.includes("FROM form_fields")) return { rows: [] };
+      if (sql.includes("FROM form_fields")) return { rows: [{ field_key: "screenshot", field_type: "image_upload", required: false, validation_json: {}, options_json: [] }] };
       if (sql.includes("FROM public_submission_attempts")) return { rows: [{ count: 0 }] };
       if (sql.includes("FROM projects")) return { rows: [{ id: "project-1" }] };
       return { rows: [] };
@@ -101,9 +113,10 @@ describe("submitPublicForm upload claim", () => {
     const claim = mockClient.query.mock.calls.find(([sql]: [string]) => sql.includes("UPDATE attachments"));
     expect(claim).toBeDefined();
     const [sql, params] = claim!;
-    expect(sql).toContain("u.form_id");
-    expect(sql).toContain("interval '1 hour'");
-    expect(params).toContain("form-1");
+    expect(sql).toContain("ticket_id IS NULL");
+    const scopedClaim = mockClient.query.mock.calls.find(([query]: [string]) => query.includes("u.form_id=$2") && query.includes("claim_expires_at"));
+    expect(scopedClaim?.[0]).toContain("interval '1 hour'");
+    expect(scopedClaim?.[1]).toContain("form-1");
     expect(params[2]).toContain(uploadId);
     expect(mockClient.query.mock.calls.some(([sql, params]: [string, unknown[]]) => sql.includes("UPDATE attachments") && params.includes("screenshot"))).toBe(true);
   });

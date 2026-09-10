@@ -1,5 +1,11 @@
-import { expect, test } from "vitest";
-import { cleanupExpiredSessions, runSessionCleanup } from "./security-maintenance.ts";
+import { expect, test, vi } from "vitest";
+import { cleanupAuthenticatedUploadAttempts, cleanupExpiredSessions, runSessionCleanup } from "./security-maintenance.ts";
+
+test("expires authenticated upload quota reservations after 24 hours", async () => {
+  const query = vi.fn().mockResolvedValue({ rows: [{}, {}] });
+  await expect(cleanupAuthenticatedUploadAttempts({ query })).resolves.toBe(2);
+  expect(query.mock.calls[0][0]).toContain("created_at<=now()-interval '24 hours'");
+});
 
 test("removes expired sessions and records their count without an actor", async () => {
   const queries: Array<{ text: string; values: unknown[] | undefined }> = [];
