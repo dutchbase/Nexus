@@ -114,8 +114,8 @@ integration("project-scoped ticket submissions", () => {
       `INSERT INTO tickets(ticket_number,project_id,title,description,status,created_by_user_id)
        VALUES('DCC-RACE',$1,'Race','Race description','Submitted',$2) RETURNING id`, [projectA, reporterAId],
     )).rows[0].id;
-    const results = await Promise.all(["first", "second"].map((title) => callRoute(`/api/tickets/${id}`, {
-      ...reporterA, method: "PATCH", csrf: reporterA.csrf, body: { submission_revision: 1, title },
+    const results = await Promise.all([[reporterA, "first"], [reporterB, "second"]].map(([reporter, title]) => callRoute(`/api/tickets/${id}`, {
+      ...reporter, method: "PATCH", csrf: reporter.csrf, body: { submission_revision: 1, title },
     })));
     expect(results.map((result) => result.status).sort()).toEqual([200, 409]);
     expect((await pool.query("SELECT title,submission_revision FROM tickets WHERE id=$1", [id])).rows[0])
