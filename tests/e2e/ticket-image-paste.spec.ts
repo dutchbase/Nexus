@@ -43,45 +43,83 @@ async function openCreate(page: Page, project = projectOne) {
   await page.getByLabel("Project").nth(1).selectOption({ label: project });
 }
 
-test("clipboard images upload immediately, survive validation, and can be removed on edit", async ({ browser, page: adminPage }) => {
+test("required source-form images survive edits and only detach after validation allows it", async ({ browser, page: adminPage }) => {
   await loginViaUI(adminPage);
-  const username = `image-owner-${Date.now()}`;
-  await addReporter(adminPage, username, projectOne);
-  const reporter = await loginReporter(browser, username);
+  const suffix = Date.now();
+  const ownerName = `image-owner-${suffix}`;
+  const editorName = `image-editor-${suffix}`;
+  await addReporter(adminPage, ownerName, projectOne);
+  await addReporter(adminPage, editorName, projectOne);
+  const reporter = await loginReporter(browser, ownerName);
+  const editor = await loginReporter(browser, editorName);
+  const publicContext = await browser.newContext();
+  await publicContext.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const publicPage = await publicContext.newPage();
   try {
-    await openCreate(reporter.page);
-    await copyPng(reporter.page);
+    const form = await queryOne(`WITH project AS (SELECT id FROM projects WHERE name=$1), created AS (
+      INSERT INTO forms(name,slug,title,status,fixed_project_id,settings_json)
+      SELECT $2,$3,'Required evidence','published',id,'{"notify_on_submission":false}'::jsonb FROM project RETURNING id,slug)
+      INSERT INTO form_fields(form_id,field_key,field_type,label,required,position)
+      SELECT id,'title','short_text','Korte samenvatting',true,1 FROM created UNION ALL
+      SELECT id,'description','long_text','Wat gaat er mis of wat mist er?',true,2 FROM created UNION ALL
+      SELECT id,'evidence','image_upload','Required screenshot',true,3 FROM created RETURNING form_id`,
+      [projectOne, `Required image ${suffix}`, `required-image-${suffix}`]);
+    expect(form).toBeTruthy();
+    await publicPage.goto(`/f/required-image-${suffix}`);
+    await copyPng(publicPage);
     let uploads = 0;
-    reporter.page.on("request", (request) => {
+    publicPage.on("request", (request) => {
       if (request.method() === "POST" && request.url().endsWith("/uploads")) uploads++;
     });
-    const upload = reporter.page.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/uploads"));
-    await reporter.page.getByRole("button", { name: "Paste", exact: true }).click();
+    const upload = publicPage.waitForResponse((response) => response.request().method() === "POST" && response.url().endsWith("/uploads"));
+    await publicPage.getByRole("button", { name: "Paste", exact: true }).click();
     expect((await upload).status()).toBe(201);
-    await expect(reporter.page.getByRole("img", { name: "Screenshot preview" })).toBeVisible();
+    await expect(publicPage.getByRole("img", { name: "Screenshot preview" })).toBeVisible();
     expect(uploads).toBe(1);
 
-    await reporter.page.getByRole("button", { name: "Submit ticket" }).click();
-    await expect(reporter.page.getByLabel("Korte samenvatting", { exact: true })).toBeFocused();
-    await reporter.page.getByLabel("Korte samenvatting", { exact: true }).fill("Clipboard evidence");
-    await reporter.page.getByLabel("Wat gaat er mis of wat mist er?", { exact: true }).fill("The pasted image should be retained.");
-    await reporter.page.getByRole("button", { name: "Submit ticket" }).click();
-    await expect(reporter.page.getByRole("heading", { name: "Clipboard evidence" })).toBeVisible();
+    await publicPage.getByRole("button", { name: "Melding versturen" }).click();
+    await expect(publicPage.getByLabel("Korte samenvatting", { exact: true })).toBeFocused();
+    await publicPage.getByLabel("Korte samenvatting", { exact: true }).fill(`Clipboard evidence ${suffix}`);
+    await publicPage.getByLabel("Wat gaat er mis of wat mist er?", { exact: true }).fill("The pasted image should be retained.");
+    await publicPage.getByRole("button", { name: "Melding versturen" }).click();
+    await publicPage.waitForURL("**/submitted**");
     expect(uploads).toBe(1);
 
-    const ticketNumber = new URL(reporter.page.url()).pathname.split("/").at(-1)!;
+    const ticketNumber = (await queryOne("SELECT ticket_number FROM tickets WHERE title=$1", [`Clipboard evidence ${suffix}`])).ticket_number;
+    await reporter.page.goto(`/tickets/${ticketNumber}`);
     const attachment = await queryOne(`SELECT a.id,a.upload_id FROM attachments a JOIN tickets t ON t.id=a.ticket_id WHERE t.ticket_number=$1`, [ticketNumber]);
     expect(attachment).toBeTruthy();
+    await reporter.page.getByLabel("Wat gaat er mis of wat mist er?", { exact: true }).fill("Unrelated edit keeps required evidence.");
     await reporter.page.getByRole("button", { name: "Save changes" }).click();
-    await expect(reporter.page.getByRole("heading", { name: "Clipboard evidence" })).toBeVisible();
+    await expect(reporter.page.getByRole("heading", { name: `Clipboard evidence ${suffix}` })).toBeVisible();
     expect((await queryOne("SELECT ticket_id FROM attachments WHERE id=$1", [attachment.id])).ticket_id).toBeTruthy();
 
-    await reporter.page.getByRole("button", { name: "Remove", exact: true }).click();
-    await reporter.page.getByRole("button", { name: "Save changes" }).click();
-    await expect(reporter.page.getByText("No images attached.", { exact: true })).toBeVisible();
+    await editor.page.goto(`/tickets/${ticketNumber}`);
+    await editor.page.getByRole("button", { name: "Save changes" }).click();
+    expect((await queryOne("SELECT ticket_id FROM attachments WHERE id=$1", [attachment.id])).ticket_id).toBeTruthy();
+    await editor.page.getByRole("button", { name: "Remove", exact: true }).click();
+    await editor.page.getByRole("button", { name: "Save changes" }).click();
+    await expect(editor.page.getByText("Add at least one image.", { exact: true })).toBeVisible();
+    expect((await queryOne("SELECT ticket_id FROM attachments WHERE id=$1", [attachment.id])).ticket_id).toBeTruthy();
+    const serverValidation = await editor.page.evaluate(async ({ ticketNumber }) => {
+      const csrf = sessionStorage.getItem("dccCsrf") ?? "";
+      const submission_revision = Number((document.querySelector('[name="submission_revision"]') as HTMLInputElement).value);
+      const response = await fetch(`/api/tickets/${encodeURIComponent(ticketNumber)}`, {
+        method: "PATCH", headers: { "content-type": "application/json", "x-csrf-token": csrf },
+        body: JSON.stringify({ submission_revision, attachment_upload_ids: { evidence: [] } }),
+      });
+      return { status: response.status, body: await response.json() };
+    }, { ticketNumber });
+    expect(serverValidation).toEqual({ status: 422, body: { error: "validation failed", fields: { evidence: "required" } } });
+
+    await queryOne("UPDATE form_fields SET required=false WHERE form_id=$1 AND field_key='evidence' RETURNING id", [form.form_id]);
+    await editor.page.getByRole("button", { name: "Save changes" }).click();
+    await expect(editor.page.getByText("No images attached.", { exact: true })).toBeVisible();
     expect((await queryOne("SELECT ticket_id FROM attachments WHERE id=$1", [attachment.id])).ticket_id).toBeNull();
   } finally {
     await reporter.context.close();
+    await editor.context.close();
+    await publicContext.close();
   }
 });
 
