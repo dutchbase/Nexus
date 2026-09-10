@@ -82,6 +82,57 @@ integration("reporter administration", () => {
     expect((await callRoute(`/api/admin/users/${adminId}/password`, { ...adminSession, method: "POST", csrf: adminSession.csrf, body: { password: "a-new-long-password" } })).status).toBe(404);
   });
 
+  test("serializes admin deactivation before reporter mutations", async () => {
+    const originalHash = (await pool.query("SELECT password_hash FROM users WHERE id=$1", [reporterId])).rows[0].password_hash;
+    const cases = [
+      {
+        name: "create",
+        request: (session: typeof adminSession) => callRoute("/api/admin/users", { ...session, method: "POST", csrf: session.csrf,
+          body: { username: "blocked-create", password: "a-long-test-password", project_ids: [] } }),
+        unchanged: async () => !(await pool.query("SELECT 1 FROM users WHERE username='blocked-create'")).rowCount,
+      },
+      {
+        name: "assign",
+        request: (session: typeof adminSession) => callRoute(`/api/admin/users/${reporterId}`, { ...session, method: "PATCH", csrf: session.csrf,
+          body: { project_ids: [projectA] } }),
+        unchanged: async () => !(await pool.query("SELECT 1 FROM project_memberships WHERE user_id=$1", [reporterId])).rowCount,
+      },
+      {
+        name: "password reset",
+        request: (session: typeof adminSession) => callRoute(`/api/admin/users/${reporterId}/password`, { ...session, method: "POST", csrf: session.csrf,
+          body: { password: "a-replacement-password" } }),
+        unchanged: async () => (await pool.query("SELECT password_hash FROM users WHERE id=$1", [reporterId])).rows[0].password_hash === originalHash,
+      },
+    ];
+
+    for (const item of cases) {
+      const actorId = (await pool.query("INSERT INTO users(username,password_hash,role) VALUES($1,'hash','admin') RETURNING id", [`race-${item.name.replace(" ", "-")}`])).rows[0].id;
+      const session = await createTestSession(pool, actorId);
+      const deactivation = await pool.connect();
+      try {
+        await deactivation.query("BEGIN");
+        await deactivation.query("SELECT id FROM users WHERE id=$1 FOR UPDATE", [actorId]);
+        const pending = item.request(session);
+        let waiting = false;
+        for (let attempt = 0; attempt < 100 && !waiting; attempt += 1) {
+          waiting = Boolean((await pool.query(
+            "SELECT 1 FROM pg_stat_activity WHERE wait_event_type='Lock' AND query LIKE $1",
+            ["%SELECT role,is_active FROM users WHERE id=$1 FOR UPDATE%"],
+          )).rowCount);
+          if (!waiting) await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(waiting, `${item.name} did not wait on the actor lock`).toBe(true);
+        await deactivation.query("UPDATE users SET is_active=false WHERE id=$1", [actorId]);
+        await deactivation.query("COMMIT");
+        expect((await pending).status, item.name).toBe(401);
+        expect(await item.unchanged(), item.name).toBe(true);
+      } finally {
+        await deactivation.query("ROLLBACK").catch(() => {});
+        deactivation.release();
+      }
+    }
+  });
+
   test("renders the user controls and empty-assignment explanation", async () => {
     const page = await callRoute("/admin/users", adminSession);
     expect(page.status).toBe(200);

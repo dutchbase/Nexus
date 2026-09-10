@@ -52,8 +52,8 @@ test("admin assigns reporters and ticket access follows membership and ownership
     await expect(second.page.getByLabel("Project").first()).not.toContainText(projectOne);
 
     await reporterPage.getByRole("button", { name: "New ticket" }).click();
-    await reporterPage.getByLabel("Title", { exact: true }).fill("Reporter save bug");
-    await reporterPage.getByLabel("Description", { exact: true }).fill("Save opens a blank page.");
+    await reporterPage.getByLabel("Korte samenvatting", { exact: true }).fill("Reporter save bug");
+    await reporterPage.getByLabel("Wat gaat er mis of wat mist er?", { exact: true }).fill("Save opens a blank page.");
     await reporterPage.getByRole("button", { name: "Submit ticket" }).click();
     await expect(reporterPage.getByRole("heading", { name: "Reporter save bug" })).toBeVisible();
     await expect(reporterPage.getByRole("link", { name: "Runs", exact: true })).toHaveCount(0);
@@ -61,13 +61,13 @@ test("admin assigns reporters and ticket access follows membership and ownership
     expect(forbidden.status()).toBe(403);
 
     const ticketNumber = new URL(reporterPage.url()).pathname.split("/").at(-1)!;
-    await reporterPage.getByLabel("Description", { exact: true }).fill("Save now keeps the current page.");
+    await reporterPage.getByLabel("Wat gaat er mis of wat mist er?", { exact: true }).fill("Save now keeps the current page.");
     await reporterPage.getByRole("button", { name: "Save changes" }).click();
     await expect(reporterPage.getByText("Save now keeps the current page.", { exact: true })).toBeVisible();
 
     expect((await second.page.request.get(`/api/tickets/${ticketNumber}`)).status()).toBe(404);
     await second.page.goto("/tickets/DCC-145");
-    await second.page.getByLabel("Description", { exact: true }).fill("Edited by another assigned reporter.");
+    await second.page.getByLabel("Wat gaat er mis of wat mist er?", { exact: true }).fill("Edited by another assigned reporter.");
     await second.page.getByRole("button", { name: "Save changes" }).click();
     await expect(second.page.getByText("Edited by another assigned reporter.", { exact: true })).toBeVisible();
 

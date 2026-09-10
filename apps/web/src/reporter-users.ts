@@ -1,4 +1,5 @@
 import { inTransaction, pool } from "@dcc/database";
+import { lockTicketActor } from "@dcc/domain";
 import { hashPassword, validatePassword } from "../../../packages/database/src/password.ts";
 import { assertAdmin, type Session } from "./session.ts";
 
@@ -104,6 +105,7 @@ export async function createReporter(session: Session, value: ReporterInput): Pr
   const passwordHash = await hashPassword(input.password);
   try {
     return await inTransaction(async (client) => {
+      await lockTicketActor(client, { userId: session.user_id, role: session.role });
       await validateProjects(client, input.project_ids);
       const user = (await client.query(
         "INSERT INTO users(username,password_hash,role) VALUES($1,$2,'reporter') RETURNING id",
@@ -125,6 +127,7 @@ export async function updateReporter(session: Session, id: string, value: Report
   if (!uuidPattern.test(id)) fail("reporter not found", 404);
   const input = updateInput(value);
   return inTransaction(async (client) => {
+    await lockTicketActor(client, { userId: session.user_id, role: session.role });
     const target = (await client.query("SELECT id,username,is_active FROM users WHERE id=$1 AND role='reporter' FOR UPDATE", [id])).rows[0];
     if (!target) fail("reporter not found", 404);
     if (input.project_ids) await validateProjects(client, input.project_ids);
@@ -145,6 +148,7 @@ export async function resetReporterPassword(session: Session, id: string, value:
   if (!uuidPattern.test(id)) fail("reporter not found", 404);
   const passwordHash = await hashPassword(password(value));
   await inTransaction(async (client) => {
+    await lockTicketActor(client, { userId: session.user_id, role: session.role });
     const target = (await client.query("SELECT id,username,is_active FROM users WHERE id=$1 AND role='reporter' FOR UPDATE", [id])).rows[0];
     if (!target) fail("reporter not found", 404);
     await client.query("UPDATE users SET password_hash=$2,updated_at=now() WHERE id=$1", [id, passwordHash]);
