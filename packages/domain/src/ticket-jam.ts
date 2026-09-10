@@ -4,7 +4,18 @@ import { enqueueJob } from "./index.ts";
 export type JamState = "queued" | "fetching" | "ready" | "partial" | "failed" | "not_configured";
 export type JamErrorCode = "not_configured" | "access_denied" | "not_found" | "rate_limited" | "timeout" | "unavailable" | "unsupported_schema" | "invalid_response";
 export type JamSource = { id: string; url: string };
-export type JamEvidence = { source_url: string; generation: string; state: JamState; data_json: unknown; content_hash: string | null; error_code: JamErrorCode | null; fetched_at: string | null };
+export type JamEvidence = {
+  sourceUrl: string;
+  device: { browser?: string; os?: string; viewport?: string; pageUrl?: string };
+  console: { level: string; message: string; time?: string }[];
+  network: { method: string; url: string; status?: number; durationMs?: number }[];
+  events: { type: string; description: string; time?: string }[];
+  metadata: Record<string, string | number | boolean | null>;
+  transcript?: string;
+  unavailableSections: string[];
+  truncatedSections: string[];
+};
+export type JamContextRecord = { source_url: string; generation: string; state: JamState; data_json: unknown; content_hash: string | null; error_code: JamErrorCode | null; fetched_at: string | null };
 type QueryClient = { query: (sql: string, values?: unknown[]) => Promise<{ rows: any[]; rowCount?: number | null }> };
 
 const invalid = (): never => { throw Object.assign(new Error("invalid Jam link"), { status: 422 }); };
@@ -61,7 +72,7 @@ export async function queueJamRetry(client: QueryClient, ticketId: string): Prom
   await enqueueJob({ type: "ticket.jam_enrich", payload: { ticket_id: ticketId, generation }, idempotencyKey: `ticket-jam:${ticketId}:${generation}`, maxAttempts: 3 }, client as any);
 }
 
-export async function ticketJamEvidence(client: QueryClient, ticketId: string): Promise<JamEvidence | null> {
+export async function ticketJamEvidence(client: QueryClient, ticketId: string): Promise<JamContextRecord | null> {
   return (await client.query(
     "SELECT source_url,generation,state,data_json,content_hash,error_code,fetched_at FROM ticket_jam_contexts WHERE ticket_id=$1",
     [ticketId],

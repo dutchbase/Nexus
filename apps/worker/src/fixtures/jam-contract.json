@@ -1,0 +1,19 @@
+{
+  "synthetic": true,
+  "tools": {
+    "getDetails": { "type": "object", "properties": { "jamId": { "type": "string" } }, "required": ["jamId"] },
+    "getConsoleLogs": { "type": "object", "properties": { "jamId": { "type": "string" }, "limit": { "type": "number" }, "after": { "type": "string" } }, "required": ["jamId"] },
+    "getNetworkRequests": { "type": "object", "properties": { "jamId": { "type": "string" }, "limit": { "type": "number" }, "after": { "type": "string" } }, "required": ["jamId"] },
+    "getUserEvents": { "type": "object", "properties": { "jamId": { "type": "string" } }, "required": ["jamId"] },
+    "getMetadata": { "type": "object", "properties": { "jamId": { "type": "string" } }, "required": ["jamId"] },
+    "getVideoTranscript": { "type": "object", "properties": { "jamId": { "type": "string" } }, "required": ["jamId"] }
+  },
+  "resultShapes": {
+    "details": { "browser": "string", "os": "string", "viewport": "string", "pageUrl": "string" },
+    "console": [{ "level": "string", "message": "string", "time": "string?" }],
+    "network": [{ "method": "string", "url": "origin/path", "status": "number?", "durationMs": "number?" }],
+    "events": [{ "type": "string", "description": "string", "time": "string?" }],
+    "metadata": { "key": "primitive" },
+    "transcript": "string?"
+  }
+}
