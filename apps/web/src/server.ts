@@ -42,6 +42,8 @@ import * as auditPage from "./pages/audit.ts";
 import * as aiUsagePage from "./pages/ai-usage.ts";
 import * as operatePage from "./pages/operate.ts";
 import * as usersPage from "./pages/users.ts";
+import { reporterTicketsPage } from "./pages/reporter-tickets.ts";
+import { reporterPage } from "./reporter-ui.ts";
 import { createReporter, listReporters, resetReporterPassword, updateReporter } from "./reporter-users.ts";
 import { ticketApi } from "./ticket-api.ts";
 import { markLoginAttemptSucceeded, reserveLoginAttempt } from "./login-quota.ts";
@@ -2930,6 +2932,37 @@ export async function route(request: IncomingMessage, response: ServerResponse) 
     const session = await requireSession(request, response);
     if (session) return logout(request, response, session);
     return;
+  }
+  if ((url.pathname === "/tickets" || /^\/tickets\/[^/]+$/.test(url.pathname)) && request.method === "GET") {
+    const session = await sessionFor(request);
+    if (!session) { response.writeHead(302, { location: "/login" }); return response.end(); }
+    const page = await reporterTicketsPage.render(url, session);
+    return page ? html(response, page.status, reporterPage(page.title, page.body, session.username, nonce), {}, nonce) : html(response, 404, "<h1>Not found</h1>", {}, nonce);
+  }
+  const reporterAttachment = url.pathname.match(/^\/attachments\/([0-9a-f-]{36})$/);
+  if (reporterAttachment && request.method === "GET") {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    const membership = session.role === "admin" ? "" : "AND EXISTS(SELECT 1 FROM project_memberships pm WHERE pm.project_id=t.project_id AND pm.user_id=$2)";
+    const values = session.role === "admin" ? [reporterAttachment[1]] : [reporterAttachment[1], session.user_id];
+    const row = (await pool.query(
+      `SELECT ar.id artifact_id,ar.status artifact_status,ar.storage_root,ar.storage_path artifact_storage_path,ar.sha256 artifact_sha256,
+              u.storage_path upload_storage_path,u.original_name,u.media_type
+       FROM attachments a JOIN uploads u ON u.id=a.upload_id JOIN tickets t ON t.id=a.ticket_id
+       LEFT JOIN artifacts ar ON ar.upload_id=u.id
+       WHERE a.id=$1 AND t.submitter_deleted_at IS NULL ${membership}`,
+      values,
+    )).rows[0];
+    if (!row) return json(response, 404, { error: "attachment not found" });
+    try {
+      const content = await readUploadArtifact(row);
+      response.writeHead(200, {
+        "content-type": row.media_type,
+        "content-disposition": `${url.searchParams.has("download") ? "attachment" : "inline"}; filename="${(row.original_name ?? "attachment").replace(/[^\w. -]/g, "_")}"`,
+        ...securityHeaders(),
+      });
+      return response.end(content);
+    } catch { return json(response, 404, { error: "attachment not found" }); }
   }
   if (url.pathname === "/api/projects" || url.pathname === "/api/tickets" || url.pathname.startsWith("/api/tickets/")) {
     const session = await requireSession(request, response);

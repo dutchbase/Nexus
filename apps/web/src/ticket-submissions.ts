@@ -13,7 +13,7 @@ const reserved = new Set([
   "execution_model", "execution_reasoning_level", "repair_model", "repair_reasoning_level", "approved_plan_version_id",
   ...columns,
 ]);
-const standardSubmissionFields = [
+export const standardSubmissionFields = [
   ...standardFields,
   { field_key: "priority", field_type: "dropdown", required: false, options_json: ["critical", "high", "medium", "low"], validation_json: {} },
   { field_key: "expected_behavior", field_type: "long_text", required: false, options_json: [], validation_json: { max_length: 10000 } },
@@ -41,9 +41,32 @@ async function fieldsFor(client: any, formId: string | null) {
   return rows.length ? rows : standardSubmissionFields;
 }
 
+export async function getSubmissionFields(actor: TicketActor, ref?: string) {
+  if (!ref) return standardSubmissionFields.filter((field) => submissionFieldIsEditable(field));
+  const ticket = await ticketForActor(pool, actor, ref);
+  if (!ticket) fail("ticket not found", 404);
+  return (await fieldsFor(pool, ticket.form_id)).filter((field: any) => submissionFieldIsEditable(field));
+}
+
+export async function listSubmissionAttachments(actor: TicketActor, ref: string) {
+  const ticket = await ticketForActor(pool, actor, ref);
+  if (!ticket) fail("ticket not found", 404);
+  return (await pool.query(
+    `SELECT a.id,u.original_name,u.media_type,u.size_bytes FROM attachments a
+     JOIN uploads u ON u.id=a.upload_id WHERE a.ticket_id=$1 ORDER BY a.created_at`,
+    [ticket.id],
+  )).rows;
+}
+
 function editableFields(fields: any[]) {
   return fields.filter((field) => !["hidden", "static", "image_upload"].includes(field.field_type)
     && field.field_key !== "project_id" && field.field_key !== "submitter_email" && !reserved.has(field.field_key));
+}
+
+function submissionFieldIsEditable(field: any) {
+  return !["hidden", "static", "image_upload"].includes(field.field_type)
+    && !["project_id", "submitter_name", "submitter_email"].includes(field.field_key)
+    && (columns.includes(field.field_key) || !reserved.has(field.field_key));
 }
 
 function submissionFields(fields: any[]) {
