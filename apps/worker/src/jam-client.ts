@@ -46,20 +46,32 @@ export function safeJamSchema(value: unknown): unknown {
 }
 
 function asRecord(value: unknown): Record<string, any> { return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, any> : {}; }
-function rows(value: unknown): Record<string, any>[] { const candidate = Array.isArray(value) ? value : asRecord(value).items ?? asRecord(value).data ?? asRecord(value).entries; return Array.isArray(candidate) ? candidate.map(asRecord) : []; }
+function rows(value: unknown): Record<string, any>[] { const candidate = Array.isArray(value) ? value : asRecord(value).items ?? asRecord(value).events ?? asRecord(value).data ?? asRecord(value).entries; return Array.isArray(candidate) ? candidate.map(asRecord) : []; }
 function text(value: unknown) { return typeof value === "string" ? safeUrl(value) : undefined; }
 function number(value: unknown) { return typeof value === "number" && Number.isFinite(value) ? value : undefined; }
+function describeJamEvent(row: Record<string, any>): string {
+  const skip = new Set(["event_index", "ts", "elapsed_ms", "event_type", "type", "time", "description"]);
+  const parts = Object.entries(row).filter(([key, value]) => !skip.has(key) && ["string", "number", "boolean"].includes(typeof value)).map(([key, value]) => `${key}=${value}`);
+  return parts.join(" ").slice(0, 500) || (text(row.event_type) ?? "event");
+}
 
 export function normalizeJamEvidence(source: JamSource, sections: Record<string, unknown>): JamEvidence {
   const clean = redactJamValue(sections) as Record<string, any>;
   const details = asRecord(clean.details);
+  const systemInfo = asRecord(details.systemInfo);
+  const screenDimensions = asRecord(systemInfo.screenDimensions);
   const optional = ["console", "network", "events", "metadata", "transcript"];
   const evidence: JamEvidence = {
     sourceUrl: source.url,
-    device: { browser: text(details.browser), os: text(details.os), viewport: text(details.viewport), pageUrl: text(details.pageUrl ?? details.url) },
-    console: rows(clean.console).slice(0, 500).map((row) => ({ level: text(row.level) ?? "unknown", message: text(row.message) ?? "", ...(text(row.time) ? { time: text(row.time) } : {}) })),
-    network: rows(clean.network).slice(0, 500).flatMap((row) => { const url = text(row.url); if (!url) return []; return [{ method: text(row.method) ?? "GET", url, ...(number(row.status) !== undefined ? { status: number(row.status) } : {}), ...(number(row.durationMs ?? row.duration) !== undefined ? { durationMs: number(row.durationMs ?? row.duration) } : {}) }]; }),
-    events: rows(clean.events).slice(0, 500).map((row) => ({ type: text(row.type) ?? "event", description: text(row.description) ?? "", ...(text(row.time) ? { time: text(row.time) } : {}) })),
+    device: {
+      browser: text(details.browser) ?? text(asRecord(systemInfo.browser).name),
+      os: text(details.os) ?? text(asRecord(systemInfo.os).name),
+      viewport: text(details.viewport) ?? (number(screenDimensions.width) !== undefined && number(screenDimensions.height) !== undefined ? `${screenDimensions.width}x${screenDimensions.height}` : undefined),
+      pageUrl: text(details.pageUrl ?? details.url),
+    },
+    console: rows(clean.console).slice(0, 500).map((row) => ({ level: text(row.level ?? row.console_level) ?? "unknown", message: text(row.message ?? row.console_message) ?? "", ...(text(row.time ?? row.ts) ? { time: text(row.time ?? row.ts) } : {}) })),
+    network: rows(clean.network).slice(0, 500).flatMap((row) => { const url = text(row.url ?? row.network_url); if (!url) return []; return [{ method: text(row.method ?? row.network_method) ?? "GET", url, ...(number(row.status ?? row.network_status) !== undefined ? { status: number(row.status ?? row.network_status) } : {}), ...(number(row.durationMs ?? row.duration ?? row.network_duration_ms) !== undefined ? { durationMs: number(row.durationMs ?? row.duration ?? row.network_duration_ms) } : {}) }]; }),
+    events: rows(clean.events).slice(0, 500).map((row) => ({ type: text(row.type ?? row.event_type) ?? "event", description: text(row.description) ?? describeJamEvent(row), ...(text(row.time ?? row.ts) ? { time: text(row.time ?? row.ts) } : {}) })),
     metadata: Object.fromEntries(Object.entries(asRecord(clean.metadata)).filter(([, value]) => value === null || ["string", "number", "boolean"].includes(typeof value))) as JamEvidence["metadata"],
     ...(typeof clean.transcript === "string" ? { transcript: text(clean.transcript) } : {}),
     unavailableSections: optional.filter((name) => sections[name] === undefined), truncatedSections: [],
@@ -124,7 +136,8 @@ export function parseJamToolResult(result: any): unknown {
   if (result?.structuredContent !== undefined) return result.structuredContent;
   const values = Array.isArray(result?.content) ? result.content.filter((item: any) => item?.type === "text" && typeof item.text === "string").map((item: any) => item.text) : [];
   if (!values.length) throw new JamImportError("invalid_response", false);
-  const joined = values.join("\n"); try { return JSON.parse(joined); } catch { return joined.slice(0, RESPONSE_LIMIT); }
+  for (const value of values) { try { return JSON.parse(value); } catch { /* not this block; try the next or fall back to prose */ } }
+  return values.join("\n").slice(0, RESPONSE_LIMIT);
 }
 
 const toolNames = { details: "getDetails", console: "getConsoleLogs", network: "getNetworkRequests", events: "getUserEvents", metadata: "getMetadata", transcript: "getVideoTranscript" } as const;
@@ -162,7 +175,7 @@ export async function callJamToolPages(client: Pick<Client, "callTool">, tool: T
   const collected: unknown[] = []; let after: string | number | undefined; const seen = new Set<string>(); let truncated = false;
   for (let page = 0; page < 5; page++) {
     const result = parseJamToolResult(await client.callTool({ name: tool.name, arguments: bindJamToolArguments(tool.inputSchema, id, { limit: 100, after }) }, { signal, timeout: CALL_TIMEOUT, maxTotalTimeout: CALL_TIMEOUT, toolDefinition: tool }));
-    const record = asRecord(result), items = Array.isArray(record.items) ? record.items : Array.isArray(record.data) ? record.data : undefined;
+    const record = asRecord(result), items = Array.isArray(record.items) ? record.items : Array.isArray(record.events) ? record.events : Array.isArray(record.data) ? record.data : undefined;
     if (!items) return result; collected.push(...items.slice(0, 500 - collected.length));
     const cursor = pageCursor(record.nextCursor) ?? pageCursor(record.next_cursor);
     if (cursor === undefined) break;

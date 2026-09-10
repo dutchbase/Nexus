@@ -70,6 +70,37 @@ describe("Jam trust boundary", () => {
     expect(() => parseJamToolResult({ content: [{ type: "image", data: "secret" }] })).toThrow("invalid_response");
   });
 
+  it("parses the JSON block even when getDetails also returns a prose investigation guide", () => {
+    expect(parseJamToolResult({ content: [
+      { type: "text", text: '{"jamId":"abc","type":"video"}' },
+      { type: "text", text: "## Investigation Guide\n\n1. Analyze the video." },
+    ] })).toEqual({ jamId: "abc", type: "video" });
+  });
+
+  it("normalizes Jam's real field names: nested systemInfo, network_*/event_type rows, and an events array key", () => {
+    const evidence = normalizeJamEvidence({ id: "x", url: "https://jam.dev/c/x" }, {
+      details: { systemInfo: { browser: { name: "Chromium" }, os: { name: "Linux" }, screenDimensions: { width: 2056, height: 1023 } } },
+      network: { total: 1, returned: 1, hasMore: false, nextCursor: null, events: [
+        { event_index: 1, ts: "2026-09-10 15:35:07.103", network_url: "https://api.test/orders", network_method: "GET", network_status: 200, network_duration_ms: 5.1 },
+      ] },
+      events: { total: 1, returned: 1, hasMore: false, nextCursor: null, events: [
+        { event_index: 6, ts: "2026-09-10 15:35:08.190", event_type: "navigation", navigation_url: "https://app.test/page", navigation_path: "/page" },
+      ] },
+    });
+    expect(evidence.device).toEqual({ browser: "Chromium", os: "Linux", viewport: "2056x1023" });
+    expect(evidence.network).toEqual([{ method: "GET", url: "https://api.test/orders", status: 200, durationMs: 5.1 }]);
+    expect(evidence.events).toHaveLength(1);
+    expect(evidence.events[0].type).toBe("navigation");
+    expect(evidence.events[0].time).toBe("2026-09-10 15:35:08.190");
+    expect(evidence.events[0].description).toContain("navigation_path=/page");
+  });
+
+  it("collects rows from Jam's real 'events' response envelope, not just items/data", async () => {
+    const callTool = vi.fn(async () => ({ content: [{ type: "text", text: JSON.stringify({ total: 1, returned: 1, hasMore: false, nextCursor: null, events: [{ event_type: "network" }] }) }] }));
+    const tool = { name: "getNetworkRequests", inputSchema: { type: "object", properties: { jamId: { type: "string" } }, required: ["jamId"] } } as Tool;
+    expect(await callJamToolPages({ callTool } as unknown as Client, tool, "abc", new AbortController().signal)).toEqual({ items: [{ event_type: "network" }], truncated: false });
+  });
+
   it("stops repeated pagination cursors", async () => {
     const callTool = vi.fn(async () => ({ structuredContent: { items: [{ message: "one" }], nextCursor: "same" } }));
     const tool = { name: "getConsoleLogs", inputSchema: { type: "object", properties: { jamId: { type: "string" }, after: { type: "string" } }, required: ["jamId"] } } as Tool;
