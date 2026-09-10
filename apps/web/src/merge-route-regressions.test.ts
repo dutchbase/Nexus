@@ -42,7 +42,7 @@ beforeEach(() => {
 
 test("merge-branches rejects invalid branch names before enqueueing anything", async () => {
   const response = newResponse();
-  await adminApi(request({ head: "--upload-pack=/bin/sh", base: "staging" }), response, new URL(mergePath), { user_id: "admin" });
+  await adminApi(request({ head: "--upload-pack=/bin/sh", base: "staging" }), response, new URL(mergePath), { user_id: "admin", role: "admin" });
 
   expect(response.writeHead).toHaveBeenCalledWith(400, expect.any(Object));
   expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(false);
@@ -51,14 +51,14 @@ test("merge-branches rejects invalid branch names before enqueueing anything", a
 test("merge-branches into the default branch requires explicit confirmation", async () => {
   const response = newResponse();
 
-  await adminApi(request({ head: "master", base: "main" }), response, new URL(mergePath), { user_id: "admin" });
+  await adminApi(request({ head: "master", base: "main" }), response, new URL(mergePath), { user_id: "admin", role: "admin" });
 
   expect(response.writeHead).toHaveBeenCalledWith(409, expect.any(Object));
   expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(false);
 
   // With confirm_default_branch=true the job is enqueued with a deterministic key.
   const okResponse = newResponse();
-  await adminApi(request({ head: "master", base: "main", confirm_default_branch: true, expected_head_sha: headSha, expected_base_sha: baseSha }), okResponse, new URL(mergePath), { user_id: "admin" });
+  await adminApi(request({ head: "master", base: "main", confirm_default_branch: true, expected_head_sha: headSha, expected_base_sha: baseSha }), okResponse, new URL(mergePath), { user_id: "admin", role: "admin" });
   const enqueue = pool.query.mock.calls.find(([sql]) => sql.includes("INSERT INTO jobs"));
   expect(enqueue).toBeDefined();
   expect(String(enqueue![1]?.find((value: unknown) => typeof value === "string" && value.startsWith("g07:github.merge_branches:")))).toContain(":master:main:");
@@ -72,14 +72,14 @@ test("merge-branches requires both exact preview commit pins", async () => {
   ]) {
     pool.query.mockClear();
     const response = newResponse();
-    await adminApi(request(body), response, new URL(mergePath), { user_id: "admin" });
+    await adminApi(request(body), response, new URL(mergePath), { user_id: "admin", role: "admin" });
     expect(response.writeHead).toHaveBeenCalledWith(400, expect.any(Object));
     expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(false);
   }
 
   pool.query.mockClear();
   const response = newResponse();
-  await adminApi(request({ head: "feature", base: "staging", expected_head_sha: headSha, expected_base_sha: baseSha }), response, new URL(mergePath), { user_id: "admin" });
+  await adminApi(request({ head: "feature", base: "staging", expected_head_sha: headSha, expected_base_sha: baseSha }), response, new URL(mergePath), { user_id: "admin", role: "admin" });
   const enqueue = pool.query.mock.calls.find(([sql]) => sql.includes("INSERT INTO jobs"));
   expect(enqueue?.[1]?.[2]).toMatchObject({ expected_head_sha: headSha, expected_base_sha: baseSha });
 });
@@ -87,7 +87,7 @@ test("merge-branches requires both exact preview commit pins", async () => {
 test("jobs status endpoint returns 404 for a missing job", async () => {
   const response = newResponse();
 
-  await adminApi(request({}, "GET"), response, new URL(`http://test/api/admin/jobs/${jobId}`), { user_id: "admin" });
+  await adminApi(request({}, "GET"), response, new URL(`http://test/api/admin/jobs/${jobId}`), { user_id: "admin", role: "admin" });
 
   expect(response.writeHead).toHaveBeenCalledWith(404, expect.any(Object));
 });
@@ -95,7 +95,7 @@ test("jobs status endpoint returns 404 for a missing job", async () => {
 test("jobs status endpoint rejects malformed ids without touching the database", async () => {
   const response = newResponse();
 
-  await adminApi(request({}, "GET"), response, new URL("http://test/api/admin/jobs/not-a-uuid"), { user_id: "admin" });
+  await adminApi(request({}, "GET"), response, new URL("http://test/api/admin/jobs/not-a-uuid"), { user_id: "admin", role: "admin" });
 
   expect(response.writeHead).toHaveBeenCalledWith(404, expect.any(Object));
   expect(pool.query).not.toHaveBeenCalled();
@@ -108,7 +108,7 @@ test("merge-preview returns 400 with a clear message for a placeholder repositor
       : { rows: [] });
   const response = newResponse();
 
-  await adminApi(request({}), response, new URL(`http://test/api/admin/projects/${projectId}/merge-preview`), { user_id: "admin" });
+  await adminApi(request({}), response, new URL(`http://test/api/admin/projects/${projectId}/merge-preview`), { user_id: "admin", role: "admin" });
 
   expect(response.writeHead).toHaveBeenCalledWith(400, expect.any(Object));
   const body = JSON.parse(String(response.end.mock.calls[0][0]));
@@ -123,7 +123,7 @@ test("merge-preview still enqueues a job for a project with a real repository_pa
       : { rows: [] });
   const response = newResponse();
 
-  await adminApi(request({}), response, new URL(`http://test/api/admin/projects/${projectId}/merge-preview`), { user_id: "admin" });
+  await adminApi(request({}), response, new URL(`http://test/api/admin/projects/${projectId}/merge-preview`), { user_id: "admin", role: "admin" });
 
   expect(response.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
   expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(true);

@@ -32,7 +32,7 @@ export function loginPage(nonce = "") {
         event.preventDefault();const form=new FormData(event.currentTarget);
         const response=await fetch("/api/admin/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(Object.fromEntries(form))});
         const body=await response.json();if(!response.ok){document.querySelector(".error").textContent=body.error;return}
-        sessionStorage.setItem("dccCsrf",body.csrfToken);location.href="/admin";
+        sessionStorage.setItem("dccCsrf",body.csrfToken);location.href=body.user.role==="admin"?"/admin":"/tickets";
       });`, nonce);
 }
 
@@ -69,7 +69,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
     <button class="scrim" type="button" data-scrim hidden aria-label="Close navigation menu"></button>
     <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}${path === "/admin/forms" || path.startsWith("/admin/forms/") ? `<a class="button" href="/f/website-feedback">Public form</a>` : ""}</header><main class="main">${body}</main></div></div>`, `
       const cc=document.cookie.match(/(?:^|;\\s*)dcc_csrf=([^;]*)/);if(cc)sessionStorage.setItem("dccCsrf",cc[1]);
-      document.querySelector("[data-logout]")?.addEventListener("click",async()=>{const response=await fetch("/api/admin/logout",{method:"POST",headers:{"x-csrf-token":sessionStorage.getItem("dccCsrf")||""}});if(response.ok){sessionStorage.clear();location.href="/login"}});
+      document.querySelector("[data-logout]")?.addEventListener("click",async()=>{const response=await fetch("/api/logout",{method:"POST",headers:{"x-csrf-token":sessionStorage.getItem("dccCsrf")||""}});if(response.ok){sessionStorage.clear();location.href="/login"}});
       const choice=localStorage.getItem("dccTheme")||"auto";
       const apply=(value)=>{const dark=value==="dark"||(value==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light";document.querySelectorAll("[data-theme-choice]").forEach(b=>b.classList.toggle("selected",b.dataset.themeChoice===value))};
       apply(choice);matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{if((localStorage.getItem("dccTheme")||"auto")==="auto")apply("auto")});

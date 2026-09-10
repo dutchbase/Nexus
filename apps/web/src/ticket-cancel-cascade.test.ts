@@ -35,7 +35,7 @@ test("cancelling a ticket cancels its queued jobs, queued execution attempt, and
   }) };
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({}), response, new URL("http://test/api/admin/tickets/ticket-1/cancel"), { user_id: "admin" });
+  await adminApi(request({}), response, new URL("http://test/api/admin/tickets/ticket-1/cancel"), { user_id: "admin", role: "admin" });
 
   const calls = transactionClient.query.mock.calls;
   expect(calls.some(([sql, values]: [string, unknown[]]) =>
@@ -55,7 +55,7 @@ test("generic PATCH cancellation uses the same cancellation cascade", async () =
   }) };
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
   await adminApi(request({ status: "Cancelled" }, "PATCH"), response,
-    new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin" });
+    new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin", role: "admin" });
   expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("UPDATE jobs SET status='cancelled'"))).toBe(true);
   expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("UPDATE agent_runs SET status='cancellation_requested'"))).toBe(true);
 });
@@ -70,7 +70,7 @@ test("rejecting or archiving a ticket does not touch jobs/execution_attempts/age
   }) };
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({}), response, new URL("http://test/api/admin/tickets/ticket-2/archive"), { user_id: "admin" });
+  await adminApi(request({}), response, new URL("http://test/api/admin/tickets/ticket-2/archive"), { user_id: "admin", role: "admin" });
 
   const calls = transactionClient.query.mock.calls;
   expect(calls.some(([sql]: [string]) => sql.includes("UPDATE jobs SET status='cancelled'"))).toBe(false);

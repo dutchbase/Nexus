@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { clientIpOf, contentSecurityNonce, csrfMatches, secureCookieAttributes, securityHeaders, validateWebRuntime } from "./security.ts";
+import { clientIpOf, contentSecurityNonce, secureCookieAttributes, securityHeaders, validateWebRuntime } from "./security.ts";
+import { assertAdmin, isSessionRole, requireAdmin, requireSession, sessionFor, type Session } from "./session.ts";
 import { realpath, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
@@ -247,11 +248,6 @@ function effectiveTimestamp(value: unknown): Date {
   return date;
 }
 
-function cookieValue(request: IncomingMessage, name: string) {
-  const part = request.headers.cookie?.split(";").map((item) => item.trim()).find((item) => item.startsWith(`${name}=`));
-  return part?.slice(name.length + 1);
-}
-
 function ipOf(request: IncomingMessage) {
   return clientIpOf(request, trustedProxyHops);
 }
@@ -390,34 +386,6 @@ async function startAiReview(
   });
 }
 
-async function sessionFor(request: IncomingMessage) {
-  const token = cookieValue(request, "dcc_session");
-  if (!token) return null;
-  const result = await pool.query(
-    `SELECT s.*, u.username, u.role FROM admin_sessions s
-     JOIN users u ON u.id = s.user_id
-     WHERE s.token_hash = $1 AND s.invalidated_at IS NULL AND s.expires_at > now() AND u.is_active = true`,
-    [hash(token)],
-  );
-  return result.rows[0] ?? null;
-}
-
-async function requireAdmin(request: IncomingMessage, response: ServerResponse) {
-  const session = await sessionFor(request);
-  if (!session) {
-    json(response, 401, { error: "authentication required" });
-    return null;
-  }
-  if (!["GET", "HEAD", "OPTIONS"].includes(request.method ?? "GET")) {
-    const csrf = request.headers["x-csrf-token"];
-    if (typeof csrf !== "string" || !csrfMatches(csrf, session.csrf_token_hash)) {
-      json(response, 403, { error: "invalid CSRF token" });
-      return null;
-    }
-  }
-  return session;
-}
-
 async function login(request: IncomingMessage, response: ServerResponse) {
   const body = await bodyOf(request);
   const username = typeof body.username === "string" ? body.username : "";
@@ -432,7 +400,7 @@ async function login(request: IncomingMessage, response: ServerResponse) {
   }
   const user = (await pool.query("SELECT * FROM users WHERE username = $1 AND is_active = true", [username])).rows[0];
   const valid = await verifyPassword(user?.password_hash ?? dummyHash, password);
-  if (!user || !valid) {
+  if (!user || !valid || !isSessionRole(user.role)) {
     await audit({ actorType: "anonymous", action: "login.failed", entityType: "user", after: { success: false }, ip });
     return json(response, 401, { error: "invalid credentials" });
   }
@@ -446,11 +414,20 @@ async function login(request: IncomingMessage, response: ServerResponse) {
       [user.id, hash(token), hash(csrf), sessionHours],
     );
     await client.query("UPDATE users SET last_login_at = now(), updated_at = now() WHERE id = $1", [user.id]);
-    await audit({ actorType: "admin", actorId: user.id, action: "login", entityType: "user", entityId: user.id, after: { success: true }, ip }, client);
+    await audit({ actorType: user.role, actorId: user.id, action: "login", entityType: "user", entityId: user.id, after: { success: true }, ip }, client);
   });
   const sessionAttributes = [`dcc_session=${token}`, "HttpOnly", ...secureCookieAttributes(production), `Max-Age=${sessionHours * 3600}`];
   const csrfAttributes = [`dcc_csrf=${csrf}`, ...secureCookieAttributes(production), `Max-Age=${sessionHours * 3600}`];
   json(response, 200, { user: { id: user.id, username: user.username, role: user.role }, csrfToken: csrf }, { "set-cookie": [sessionAttributes.join("; "), csrfAttributes.join("; ")] });
+}
+
+async function logout(request: IncomingMessage, response: ServerResponse, session: Session) {
+  await pool.query("UPDATE admin_sessions SET invalidated_at = now() WHERE id = $1", [session.id]);
+  await audit({ actorType: session.role, actorId: session.user_id, action: "logout", entityType: "user", entityId: session.user_id, ip: ipOf(request) });
+  return json(response, 200, { ok: true }, { "set-cookie": [
+    ["dcc_session=", "HttpOnly", ...secureCookieAttributes(production), "Max-Age=0"].join("; "),
+    ["dcc_csrf=", ...secureCookieAttributes(production), "Max-Age=0"].join("; "),
+  ] });
 }
 
 async function publicForm(slug: string) {
@@ -888,6 +865,7 @@ export async function adminHtml(request: IncomingMessage, response: ServerRespon
     response.writeHead(302, { location: "/login" });
     return response.end();
   }
+  if (session.role !== "admin") return html(response, 403, "<h1>Forbidden</h1>", {}, nonce);
   const attachmentMatch = url.pathname.match(/^\/admin\/attachments\/([0-9a-f-]{36})$/);
   if (attachmentMatch && request.method === "GET") {
     const row = (await pool.query(
@@ -922,15 +900,7 @@ export async function adminHtml(request: IncomingMessage, response: ServerRespon
 }
 
 export async function adminApi(request: IncomingMessage, response: ServerResponse, url: URL, session: any) {
-  if (request.method === "GET" && url.pathname === "/api/admin/session") return json(response, 200, { user: { id: session.user_id, username: session.username, role: session.role } });
-  if (request.method === "POST" && url.pathname === "/api/admin/logout") {
-    await pool.query("UPDATE admin_sessions SET invalidated_at = now() WHERE id = $1", [session.id]);
-    await audit({ actorType: "admin", actorId: session.user_id, action: "logout", entityType: "user", entityId: session.user_id, ip: ipOf(request) });
-    return json(response, 200, { ok: true }, { "set-cookie": [
-      ["dcc_session=", "HttpOnly", ...secureCookieAttributes(production), "Max-Age=0"].join("; "),
-      ["dcc_csrf=", ...secureCookieAttributes(production), "Max-Age=0"].join("; "),
-    ] });
-  }
+  assertAdmin(session);
   if (url.pathname === "/api/admin/pull-requests" && request.method === "GET") {
     const params: any[] = [];
     const where: string[] = [];
@@ -2912,6 +2882,16 @@ export async function route(request: IncomingMessage, response: ServerResponse) 
     return response.end(styles);
   }
   if (request.method === "POST" && url.pathname === "/api/admin/login") return login(request, response);
+  if (request.method === "GET" && ["/api/session", "/api/admin/session"].includes(url.pathname)) {
+    const session = await requireSession(request, response);
+    if (session) return json(response, 200, { user: { id: session.user_id, username: session.username, role: session.role } });
+    return;
+  }
+  if (request.method === "POST" && ["/api/logout", "/api/admin/logout"].includes(url.pathname)) {
+    const session = await requireSession(request, response);
+    if (session) return logout(request, response, session);
+    return;
+  }
   const publicMatch = url.pathname.match(/^\/api\/public\/forms\/([^/]+)$/);
   if (publicMatch && request.method === "GET") {
     const form = await publicForm(decodeURIComponent(publicMatch[1]));

@@ -16,7 +16,7 @@ beforeEach(() => {
 test("bulk Delete archives prompt files and preserves immutable versions", async () => {
   const req: any = { method: "POST", headers: {}, socket: {}, async *[Symbol.asyncIterator]() { yield Buffer.from(JSON.stringify({ action: "delete", ids: ["11111111-1111-4111-8111-111111111111"] })); } };
   const res: any = { writeHead: vi.fn(), end: vi.fn() };
-  await adminApi(req, res, new URL("http://test/api/admin/projects/22222222-2222-4222-8222-222222222222/prompts/bulk"), { user_id: "admin" });
+  await adminApi(req, res, new URL("http://test/api/admin/projects/22222222-2222-4222-8222-222222222222/prompts/bulk"), { user_id: "admin", role: "admin" });
   expect(res.writeHead).toHaveBeenCalledWith(200, expect.anything());
   expect(client.query.mock.calls.some(([sql]: [string]) => sql.includes("active_version_id=NULL"))).toBe(true);
   expect(client.query.mock.calls.every(([sql]: [string]) => !sql.startsWith("DELETE FROM prompt_"))).toBe(true);

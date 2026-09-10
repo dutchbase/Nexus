@@ -58,11 +58,11 @@ integration("Recheck repository re-runs after the first validation completes", (
   test("a second Recheck after the first job completes queues a runnable job", async () => {
     const { adminApi } = await import("./server.ts");
 
-    await adminApi(request(), newResponse(), new URL(validatePath), { user_id: "admin" });
+    await adminApi(request(), newResponse(), new URL(validatePath), { user_id: "admin", role: "admin" });
     // The worker claims and finishes the first validation.
     await withClient((client) => client.query("UPDATE jobs SET status='completed',completed_at=now() WHERE type='project.validate'"));
 
-    await adminApi(request(), newResponse(), new URL(validatePath), { user_id: "admin" });
+    await adminApi(request(), newResponse(), new URL(validatePath), { user_id: "admin", role: "admin" });
 
     const jobs = await withClient(async (client) => (await client.query(
       "SELECT status FROM jobs WHERE type='project.validate' ORDER BY created_at",
