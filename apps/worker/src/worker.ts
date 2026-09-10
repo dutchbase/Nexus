@@ -11,7 +11,7 @@ import {
 } from "@dcc/claude-runner";
 import { artifactDataRoot, finalizeArtifact, inTransaction, legacyArtifactDataRoot, pool, reconcileArtifactRoots, stageArtifact, type StagedArtifact } from "@dcc/database";
 import {
-  assertPrReviewDestination, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
+  assertPrReviewDestination, buildPullRequestBody, materializeExecutionPlan,
   claimJob, completeJob, enqueueNotification, importGithubPullRequests, resumePrReviewPublication,
   claimNotificationDelivery, completeNotificationDelivery, failNotificationDelivery, renewJobLease,
   renewNotificationDeliveryLease, recordWorkerHeartbeat, WORKER_HEARTBEAT_INTERVAL_MS,
@@ -39,7 +39,7 @@ import { formatFollowUpDescription } from "./follow-up-description.ts";
 import { formatPrAiReviewFailureLog } from "./pr-ai-review-failure-log.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
 import {
-  approvedExecutionInput, approvedPhaseSkills, approvedProjectInput, assertApprovedSkillSnapshot, assertExecutionPublicationGate, finalizeAiUsage, prReviewSnapshotInput, shouldRetryPrReview,
+  approvedExecutionInput, approvedPhaseSkills, approvedProjectInput, assertApprovedSkillSnapshot, assertExecutionPublicationGate, finalizeAiUsage, prReviewSnapshotInput, runQueuedExecutionBoundary, shouldRetryPrReview,
 } from "./worker-boundary.ts";
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { expireUnclaimedUploads } from "./ticket-upload-maintenance.ts";
@@ -513,14 +513,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
 
 async function runExecution(job: any, lease: LeaseGuard) {
   const repairing = job.type === "execution.repair";
-  const ticket = (await pool.query("SELECT * FROM tickets WHERE id=$1", [job.payload_json.ticket_id])).rows[0];
-  if (!ticket) throw new Error("ticket not found");
-  if (typeof job.payload_json.approved_input_snapshot_id !== "string") throw new Error("execution job has no approved input snapshot");
-  const gate = await checkPlanApprovalGate(pool, ticket.id, job.payload_json.approved_input_snapshot_id);
-  if ("code" in gate) throw new Error(`execution gate failed: ${gate.code}`);
-  if (gate.planVersion.id !== job.payload_json.plan_version_id) {
-    throw new Error("execution gate approved a different plan version");
-  }
+  return runQueuedExecutionBoundary(pool, job, async ({ ticket, gate }) => {
   const phase = repairing ? "repair" : "execution";
   // Resolve the engine and fail fast (before anything mutates DB state, e.g.
   // creating the worktree and marking the attempt 'executing') if the
@@ -919,6 +912,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
     catch (error) { if (!(error instanceof LeaseLostError)) console.error(`execution log finalization failed: ${error instanceof Error ? error.message : String(error)}`); }
     await rm(temporary, { recursive: true, force: true });
   }
+  });
 }
 
 async function publishExecutionAttempt(input: {

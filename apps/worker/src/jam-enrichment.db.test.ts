@@ -1,4 +1,4 @@
-import { afterAll, beforeAll, describe, expect, test } from "vitest";
+import { afterAll, beforeAll, describe, expect, test, vi } from "vitest";
 import { cp, mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -194,8 +194,8 @@ integration("Jam enrichment publication", () => {
   test("a completed import blocks queued execution before spawn while a started run keeps approved evidence", async () => {
     const row = await seed({ hash: "old-hash" });
     const observer = await connection();
-    const { buildApprovedInputSnapshot, checkPlanApprovalGate } = await import("@dcc/domain");
-    const { approvedExecutionInput } = await import("./worker-boundary.ts");
+    const { buildApprovedInputSnapshot } = await import("@dcc/domain");
+    const { approvedExecutionInput, runQueuedExecutionBoundary } = await import("./worker-boundary.ts");
     const planId = (await observer.query("INSERT INTO plans(ticket_id) VALUES($1) RETURNING id", [row.ticketId])).rows[0].id;
     const planHash = "plan-hash";
     const versionId = (await observer.query("INSERT INTO plan_versions(plan_id,version,content_markdown,content_hash) VALUES($1,1,'plan',$2) RETURNING id", [planId, planHash])).rows[0].id;
@@ -212,10 +212,11 @@ integration("Jam enrichment publication", () => {
     const startedInput = approvedExecutionInput({ id: snapshotId, inputHash: captured.inputHash, materialInput: captured.materialInput }, "execution", { worktreePath: "/tmp/run", branchName: "run", baseCommit: "base" });
     await runSuccess(row, "new-hash", "new live evidence");
 
-    const spawnAgent = async () => { throw new Error("agent must not spawn"); };
-    const gate = await checkPlanApprovalGate(observer as any, row.ticketId, snapshotId);
-    if (gate.valid) await spawnAgent();
-    expect(gate).toMatchObject({ valid: false, code: "plan_potentially_stale" });
+    const spawnAgent = vi.fn();
+    await expect(runQueuedExecutionBoundary(observer, {
+      payload_json: { ticket_id: row.ticketId, plan_version_id: versionId, approved_input_snapshot_id: snapshotId },
+    }, spawnAgent)).rejects.toThrow("execution gate failed: plan_potentially_stale");
+    expect(spawnAgent).not.toHaveBeenCalled();
     expect(startedInput.jamEvidence).toMatchObject({ contentHash: "old-hash", evidence: { console: [{ message: "approved evidence" }] } });
     expect(JSON.stringify(startedInput)).not.toContain("new live evidence");
     await observer.end();

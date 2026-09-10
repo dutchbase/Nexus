@@ -70,24 +70,29 @@ test("delayed Jam imports cannot restore replaced, cleared, or submitter-deleted
     await Promise.all([reporter.waitForURL("**/tickets"), reporter.getByRole("button", { name: "Sign in" }).click()]);
 
     const replaced = await create("Replace delayed Jam", "delayed-old");
+    const replacedOldJob = await queryOne("SELECT j.id FROM jobs j JOIN tickets t ON t.id=(j.payload_json->>'ticket_id')::uuid WHERE t.ticket_number=$1 AND j.type='ticket.jam_enrich' ORDER BY j.created_at LIMIT 1", [replaced]);
     await reporter.getByLabel("Jam link").fill("https://jam.dev/c/replacement");
     await reporter.getByRole("button", { name: "Save changes" }).click();
     await expect(reporter.getByText("Details imported")).toBeVisible({ timeout: 15_000 });
+    await waitFor(async () => ["completed", "failed"].includes((await queryOne("SELECT status FROM jobs WHERE id=$1", [replacedOldJob.id]))?.status));
     await admin.goto(`/admin/tickets/${replaced}`);
     await expect(admin.getByText("replacement save failed", { exact: false })).toBeVisible();
     await expect(admin.getByText("delayed-old save failed", { exact: false })).toHaveCount(0);
 
     const cleared = await create("Clear delayed Jam", "delayed-clear");
+    const clearedOldJob = await queryOne("SELECT j.id FROM jobs j JOIN tickets t ON t.id=(j.payload_json->>'ticket_id')::uuid WHERE t.ticket_number=$1 AND j.type='ticket.jam_enrich' ORDER BY j.created_at LIMIT 1", [cleared]);
     await reporter.getByLabel("Jam link").fill("");
     await reporter.getByRole("button", { name: "Save changes" }).click();
+    await waitFor(async () => ["completed", "failed"].includes((await queryOne("SELECT status FROM jobs WHERE id=$1", [clearedOldJob.id]))?.status));
     await waitFor(async () => !(await queryOne("SELECT c.ticket_id FROM ticket_jam_contexts c JOIN tickets t ON t.id=c.ticket_id WHERE t.ticket_number=$1", [cleared])));
     await admin.goto(`/admin/tickets/${cleared}`);
     await expect(admin.getByText("Jam technical evidence", { exact: true })).toHaveCount(0);
 
     const deleted = await create("Delete delayed Jam", "delayed-delete");
+    const deletedOldJob = await queryOne("SELECT j.id FROM jobs j JOIN tickets t ON t.id=(j.payload_json->>'ticket_id')::uuid WHERE t.ticket_number=$1 AND j.type='ticket.jam_enrich' ORDER BY j.created_at LIMIT 1", [deleted]);
     await reporter.getByRole("button", { name: "Delete" }).click();
     await reporter.getByRole("dialog").getByRole("button", { name: "Delete" }).click();
-    await waitFor(async () => (await queryOne("SELECT c.state,t.submitter_deleted_at FROM ticket_jam_contexts c JOIN tickets t ON t.id=c.ticket_id WHERE t.ticket_number=$1", [deleted]))?.submitter_deleted_at);
+    await waitFor(async () => ["completed", "failed"].includes((await queryOne("SELECT status FROM jobs WHERE id=$1", [deletedOldJob.id]))?.status));
     const row = await queryOne("SELECT c.state,c.data_json FROM ticket_jam_contexts c JOIN tickets t ON t.id=c.ticket_id WHERE t.ticket_number=$1", [deleted]);
     expect(row.data_json).toBeNull(); expect(["queued", "fetching"]).toContain(row.state);
   } finally { await context.close(); }
