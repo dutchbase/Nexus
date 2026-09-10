@@ -40,6 +40,8 @@ import * as queuePage from "./pages/queue.ts";
 import * as auditPage from "./pages/audit.ts";
 import * as aiUsagePage from "./pages/ai-usage.ts";
 import * as operatePage from "./pages/operate.ts";
+import * as usersPage from "./pages/users.ts";
+import { createReporter, listReporters, resetReporterPassword, updateReporter } from "./reporter-users.ts";
 import { markLoginAttemptSucceeded, reserveLoginAttempt } from "./login-quota.ts";
 
 const port = Number(process.env.PORT ?? 3000);
@@ -890,7 +892,7 @@ export async function adminHtml(request: IncomingMessage, response: ServerRespon
   }
   const metrics = await counts();
   const pageModules = [
-    dashboardPage, ticketsPage, runsPage, prsPage, mergePage, projectsPage, formsPage, promptsPage, skillsPage, notificationsPage, queuePage, auditPage, aiUsagePage, operatePage,
+    dashboardPage, ticketsPage, runsPage, prsPage, mergePage, projectsPage, usersPage, formsPage, promptsPage, skillsPage, notificationsPage, queuePage, auditPage, aiUsagePage, operatePage,
   ];
   for (const pageModule of pageModules) {
     const result = await pageModule.render(url, session, metrics);
@@ -901,6 +903,30 @@ export async function adminHtml(request: IncomingMessage, response: ServerRespon
 
 export async function adminApi(request: IncomingMessage, response: ServerResponse, url: URL, session: any) {
   assertAdmin(session);
+  if (url.pathname === "/api/admin/users" && request.method === "GET") {
+    return json(response, 200, { users: await listReporters(session) });
+  }
+  if (url.pathname === "/api/admin/users" && request.method === "POST") {
+    try { return json(response, 201, { user: await createReporter(session, await bodyOf(request)) }); }
+    catch (error: any) { return json(response, Number(error?.status) || 500, errorEnvelope(error)); }
+  }
+  const reporterPasswordMatch = url.pathname.match(/^\/api\/admin\/users\/([0-9a-f-]+)\/password$/i);
+  if (reporterPasswordMatch && request.method === "POST") {
+    try {
+      const body = await bodyOf(request);
+      if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || typeof body.password !== "string") {
+        throw Object.assign(new Error("password is required"), { status: 422 });
+      }
+      await resetReporterPassword(session, reporterPasswordMatch[1], body.password);
+      response.writeHead(204, securityHeaders());
+      return response.end();
+    } catch (error: any) { return json(response, Number(error?.status) || 500, errorEnvelope(error)); }
+  }
+  const reporterMatch = url.pathname.match(/^\/api\/admin\/users\/([0-9a-f-]+)$/i);
+  if (reporterMatch && request.method === "PATCH") {
+    try { return json(response, 200, { user: await updateReporter(session, reporterMatch[1], await bodyOf(request)) }); }
+    catch (error: any) { return json(response, Number(error?.status) || 500, errorEnvelope(error)); }
+  }
   if (url.pathname === "/api/admin/pull-requests" && request.method === "GET") {
     const params: any[] = [];
     const where: string[] = [];

@@ -39,7 +39,7 @@ export function loginPage(nonce = "") {
 const groups = [
   ["Overview", [["Dashboard", "/admin", ""]]],
   ["Work", [["Tickets", "/admin/tickets", "tickets"], ["Runs", "/admin/runs", "runs"], ["Queue", "/admin/queue", "jobs"], ["Pull requests", "/admin/pull-requests", "prs"], ["Merge branches", "/admin/merge", ""]]],
-  ["Configure", [["Projects", "/admin/projects", "projects"], ["Forms", "/admin/forms", "forms"], ["Prompts", "/admin/prompts", ""], ["Skills", "/admin/skills", "skills"]]],
+  ["Configure", [["Projects", "/admin/projects", "projects"], ["Users", "/admin/users", ""], ["Forms", "/admin/forms", "forms"], ["Prompts", "/admin/prompts", ""], ["Skills", "/admin/skills", "skills"]]],
   ["Operate", [["Notifications", "/admin/notifications", "notifications"], ["AI usage", "/admin/ai-usage", ""], ["Audit log", "/admin/audit", ""], ["Settings", "/admin/settings", ""], ["System", "/admin/system", ""]]],
 ] as const;
 
@@ -74,7 +74,21 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
       const apply=(value)=>{const dark=value==="dark"||(value==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light";document.querySelectorAll("[data-theme-choice]").forEach(b=>b.classList.toggle("selected",b.dataset.themeChoice===value))};
       apply(choice);matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{if((localStorage.getItem("dccTheme")||"auto")==="auto")apply("auto")});
        document.querySelectorAll("[data-theme-choice]").forEach(b=>b.addEventListener("click",()=>{localStorage.setItem("dccTheme",b.dataset.themeChoice);apply(b.dataset.themeChoice)}));
-       document.querySelectorAll("[data-auto-submit]").forEach(el=>el.addEventListener("change",()=>el.form?.submit()));
+      document.querySelectorAll("[data-auto-submit]").forEach(el=>el.addEventListener("change",()=>el.form?.submit()));
+      ${path === "/admin/users" ? `
+        const csrf=sessionStorage.getItem("dccCsrf")||"",dialog=document.querySelector("[data-user-dialog]"),createForm=document.querySelector("[data-user-create]");
+        const projectIds=form=>[...form.querySelectorAll('[name="project_ids"]:checked')].map(input=>input.value);
+        const request=async(url,method,body)=>{const response=await fetch(url,{method,headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(body)});if(!response.ok)throw new Error((await response.json()).error||"Request failed");return response.status===204?null:response.json()};
+        document.querySelector("[data-add-user]")?.addEventListener("click",()=>dialog.showModal());
+        document.querySelector("[data-close-user-dialog]")?.addEventListener("click",()=>dialog.close());
+        createForm?.addEventListener("submit",async event=>{event.preventDefault();const button=createForm.querySelector('[type="submit"]'),error=createForm.querySelector("[data-user-error]"),data=new FormData(createForm);button.disabled=true;error.textContent="";try{await request("/api/admin/users","POST",{username:data.get("username"),password:data.get("password"),project_ids:projectIds(createForm)});createForm.reset();location.reload()}catch(failure){error.textContent=failure.message}finally{button.disabled=false}});
+        document.querySelectorAll("[data-user]").forEach(row=>{
+          const id=row.dataset.user,projectForm=row.querySelector("[data-project-form]");
+          projectForm?.addEventListener("submit",async event=>{event.preventDefault();const button=projectForm.querySelector('[type="submit"]'),error=projectForm.querySelector(".error");button.disabled=true;error.textContent="";try{await request("/api/admin/users/"+id,"PATCH",{project_ids:projectIds(projectForm)});location.reload()}catch(failure){error.textContent=failure.message}finally{button.disabled=false}});
+          row.querySelector("[data-reset-password]")?.addEventListener("click",async()=>{let password=prompt("Enter a new password (at least 12 characters)");if(password===null)return;try{await request("/api/admin/users/"+id+"/password","POST",{password});password=""}catch(failure){alert(failure.message)}});
+          row.querySelector("[data-toggle-active]")?.addEventListener("click",async event=>{const active=event.currentTarget.textContent.trim()==="Reactivate";if(!active&&!confirm("Deactivate this user and sign them out?"))return;try{await request("/api/admin/users/"+id,"PATCH",{is_active:active});location.reload()}catch(failure){alert(failure.message)}});
+        });
+      ` : ""}
       const sidebar=document.querySelector(".sidebar"),scrim=document.querySelector("[data-scrim]"),opener=document.querySelector("[data-nav-open]");
       const closeNav=()=>{sidebar.classList.remove("open");scrim.hidden=true;opener?.setAttribute("aria-expanded","false");opener?.focus()};
       opener?.addEventListener("click",()=>{sidebar.classList.add("open");scrim.hidden=false;opener.setAttribute("aria-expanded","true");sidebar.querySelector("a.nav-item")?.focus()});
