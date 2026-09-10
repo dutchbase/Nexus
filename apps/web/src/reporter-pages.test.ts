@@ -69,6 +69,28 @@ test("escapes submission content and renders only declared edit fields", async (
   expect(rendered?.body).toContain("Delete");
 });
 
+test("retains existing attachment upload IDs in reporter edit selections", async () => {
+  getSubmission.mockResolvedValue({
+    id: "t1", ticket_number: "DCC-1", project_id: "p1", project_name: "Project One",
+    title: "Ticket", description: "Body", submission: {}, submission_revision: 1,
+    submission_updated_at: "2026-09-10T10:00:00Z", created_at: "2026-09-10T09:00:00Z", can_delete: true,
+  });
+  getSubmissionFields.mockResolvedValue([
+    { field_key: "title", field_type: "short_text", label: "Title", required: true },
+    { field_key: "description", field_type: "long_text", label: "Description", required: true },
+    { field_key: "screenshots", field_type: "image_upload", label: "Screenshots", required: false },
+  ]);
+  listSubmissionAttachments.mockResolvedValue([{
+    id: "attachment-1", upload_id: "upload-1", field_key: "screenshots", original_name: "saved.png",
+    media_type: "image/png", size_bytes: 8, url: "/attachments/attachment-1",
+  }]);
+
+  const rendered = await reporterTicketsPage.render(new URL("http://test/tickets/DCC-1"), session);
+
+  expect(rendered?.body).toContain('data-image-entry="upload-1"');
+  expect(rendered?.body).toContain('data-upload-id="upload-1"');
+});
+
 test("handles empty assignments, disabled creation projects and ownership", async () => {
   listSubmissionProjects.mockResolvedValue([]);
   let rendered = await reporterTicketsPage.render(new URL("http://test/tickets"), session);

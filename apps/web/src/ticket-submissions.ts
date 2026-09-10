@@ -53,11 +53,7 @@ export async function getSubmissionFields(actor: TicketActor, ref?: string) {
 export async function listSubmissionAttachments(actor: TicketActor, ref: string) {
   const ticket = await ticketForActor(pool, actor, ref);
   if (!ticket) fail("ticket not found", 404);
-  return (await pool.query(
-    `SELECT a.id,u.original_name,u.media_type,u.size_bytes FROM attachments a
-     JOIN uploads u ON u.id=a.upload_id WHERE a.ticket_id=$1 ORDER BY a.created_at`,
-    [ticket.id],
-  )).rows;
+  return attachmentsForActor(pool, actor, ticket.id);
 }
 
 function editableFields(fields: any[]) {

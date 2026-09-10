@@ -1200,11 +1200,12 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         });
         createTicketForm?.addEventListener("submit",async(event)=>{
           event.preventDefault();
+          if(window.nexusImages?.pending(createTicketForm))return createTicketForm.querySelector(".error").textContent="Wait for image uploads to finish.";if(window.nexusImages?.invalid(createTicketForm))return;
           const description=createTicketForm.querySelector("[name=description]"),feedback=createTicketForm.querySelector("[name=feedback]").value.trim(),generate=createTicketForm.querySelector("[name=generate_description]").checked;
           if(!description.value.trim()&&generate&&feedback)description.value=feedback;
           if(!description.value.trim()){createTicketForm.querySelector(".error").textContent="Description is required";return}
           const data=new FormData(createTicketForm);
-          const response=await fetch("/api/admin/tickets",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({project_id:createTicketBtn.dataset.projectId,title:data.get("title"),description:data.get("description")})});
+          const response=await fetch("/api/admin/tickets",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({project_id:createTicketBtn.dataset.projectId,title:data.get("title"),description:data.get("description"),attachment_upload_ids:window.nexusImages?.selections(createTicketForm)||{}})});
           const result=await response.json();
           if(!response.ok){createTicketForm.querySelector(".error").textContent=result.error;return}
           if(generate&&feedback)fetch("/api/admin/pull-requests/"+prId+"/follow-up-description",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({feedback,ticket_id:result.ticket.id,initial_description:description.value}),keepalive:true});

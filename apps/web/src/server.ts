@@ -2018,6 +2018,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (!project) return json(response, 404, { error: "Choose an existing project" });
     const priority = text("priority");
     if (priority && !["critical", "high", "medium", "low"].includes(priority)) return json(response, 400, { error: "Choose a valid priority" });
+    const attachmentSelection = body.attachment_upload_ids === undefined
+      ? {} : checkedAttachmentSelection(body.attachment_upload_ids, ["screenshots"]);
     const ticket = await inTransaction(async (client) => {
       await lockTicketActor(client, { userId: session.user_id, role: "admin" });
       const number = (await client.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
@@ -2026,6 +2028,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'Triage','{}'::jsonb,$11) RETURNING *`,
         [`DCC-${number}`, projectId, title, description, text("category") || null, priority || null, text("environment") || null, text("expected_behavior") || null, text("actual_behavior") || null, text("reproduction_steps") || null, session.user_id],
       )).rows[0];
+      await setTicketAttachments(client, { userId: session.user_id, role: "admin" }, created, attachmentSelection, ["screenshots"]);
       await client.query(
         `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
          VALUES ($1,NULL,'Triage','Created by admin',$2,$3)`,
@@ -2837,7 +2840,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       const assignments = updatedEntries.map(([key], index) => `${key}=$${index + 2}`);
       const updated = (await client.query(`UPDATE tickets SET ${assignments.length ? `${assignments.join(",")},` : ""}updated_at=now()
         ${submissionChanged ? ",submission_revision=submission_revision+1,submission_updated_at=now()" : ""} WHERE id=$1 RETURNING *`, [before.id, ...updatedEntries.map(([, value]) => value)])).rows[0];
-      if (attachmentSelection !== undefined) await setTicketAttachments(client, { userId: session.user_id, role: "admin" }, before, attachmentSelection, imageKeys);
+      if (attachmentSelection !== undefined) await setTicketAttachments(client, { userId: session.user_id, role: "admin" }, updated, attachmentSelection, imageKeys);
       if ((updates.has("source_url") && before.source_url !== updated.source_url) || attachmentChanged) await client.query("SELECT mark_ticket_plan_potentially_stale($1)", [before.id]);
       if (body.status && body.status !== before.status) await client.query(
         `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id) VALUES ($1,$2,$3,'Manual admin update','admin',$4)`,

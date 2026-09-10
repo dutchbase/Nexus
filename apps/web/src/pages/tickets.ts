@@ -423,7 +423,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     const overviewPanel = `${deletionMarker}<div class="grid two"><section class="card"><div class="card-head">Original submission <button class="button" type="button" data-edit-ticket>Edit</button></div><div class="card-body">
       <div data-ticket-view><dl>${submissionDetails}</dl></div>
       <form data-ticket-edit-form data-ticket-id="${ticket.id}" data-project-id="${ticket.project_id}" hidden>
-        ${formControls(sourceFields, projectsResult.rows, submissionValues, "admin", { uploadUrl: `/api/projects/${ticket.project_id}/uploads`, existing: attachmentsResult.rows.map((attachment) => ({ ...attachment, url: `/admin/attachments/${attachment.id}` })) })}
+        ${formControls(sourceFields, projectsResult.rows, submissionValues, "admin", { uploadUrl: "/api/projects/{project_id}/uploads", existing: attachmentsResult.rows.map((attachment) => ({ ...attachment, url: `/admin/attachments/${attachment.id}` })) })}
         <button class="button" type="submit">Save</button> <button class="button" type="button" data-cancel-edit-ticket>Cancel</button><p class="error" role="alert"></p>
       </form>
       </div></section>

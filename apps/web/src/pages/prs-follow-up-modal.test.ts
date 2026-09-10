@@ -8,6 +8,7 @@ describe("pull request follow-up modal", () => {
     expect(html).toContain('name="feedback" rows="4"');
     expect(html).toContain('name="description" rows="4"');
     expect(html).toContain('name="generate_description" type="checkbox" checked');
+    expect(html).toContain('imageUploadControl({ fieldKey: "screenshots"');
     expect(html).not.toContain('data-generate-follow-up-description');
     expect(html).toContain('type="submit">Create</button>');
   });
@@ -17,6 +18,8 @@ describe("pull request follow-up modal", () => {
 
     expect(script).toContain('ticket_id:result.ticket.id,initial_description:description.value');
     expect(script).toContain('keepalive:true');
+    expect(script).toContain('attachment_upload_ids:window.nexusImages?.selections(createTicketForm)||{}');
+    expect(script).toContain('window.nexusImages?.pending(createTicketForm)');
     expect(script).not.toContain('pollFollowUpDescription');
   });
 });
