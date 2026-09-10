@@ -6,9 +6,9 @@ afterEach(() => setJamFetchForTests(fetch));
 
 describe("Jam trust boundary", () => {
   it("recursively redacts secrets and request material", () => {
-    const value = redactJamValue({ authorization: "Bearer secret-one", cookie: "session=secret-two", nested: { password: "secret-three", access_token: "secret-four" }, requestBody: "private form input", safe: "render failed; token=plain-one apiKey: 'plain-two' password:plain-three cookie=plain-four auth:plain-five" });
+    const value = redactJamValue({ authorization: "Bearer secret-one", cookie: "session=secret-two", nested: { password: "secret-three", access_token: "secret-four" }, requestBody: "private form input", safe: "render failed; token=plain-one apiKey: 'plain-two' password:plain-three cookie=plain-four auth:plain-five refresh_token=plain-six client_secret:plain-seven access-token=plain-eight clientSecret:plain-nine REFRESHTOKEN:plain-ten" });
     expect(JSON.stringify(value)).not.toMatch(/secret-one|secret-two|secret-three|secret-four|private form input/);
-    expect(JSON.stringify(value)).not.toMatch(/plain-one|plain-two|plain-three|plain-four|plain-five/);
+    expect(JSON.stringify(value)).not.toMatch(/plain-(?:one|two|three|four|five|six|seven|eight|nine|ten)/);
     expect(JSON.stringify(value)).toContain("render failed");
   });
 
@@ -147,6 +147,16 @@ describe("Jam MCP integration boundary", () => {
     await expect(fetchJamContext(source, { token: "x", signal: new AbortController().signal }, { createClient: () => detailsFailure as never, createTransport: () => ({} as never) })).rejects.toMatchObject({ code: "access_denied" });
     const protocolFailure = fakeClient({ listTools: vi.fn(async () => { throw new Error("provider secret"); }) });
     await expect(fetchJamContext(source, { token: "x", signal: new AbortController().signal }, { createClient: () => protocolFailure as never, createTransport: () => ({} as never) })).rejects.toMatchObject({ code: "invalid_response", retryable: false, message: "invalid_response" });
+  });
+
+  it.each([
+    Object.assign(new Error("provider secret"), { code: "REQUEST_TIMEOUT" }),
+    Object.assign(new Error("provider secret"), { code: "ETIMEDOUT" }),
+    Object.assign(new Error("provider secret"), { name: "TimeoutError" }),
+    new Error("Request timed out with provider secret"),
+  ])("maps an SDK request timeout to a safe retryable timeout", async (timeoutError) => {
+    const client = fakeClient({ callTool: vi.fn(async () => { throw timeoutError; }) });
+    await expect(fetchJamContext(source, { token: "x", signal: new AbortController().signal }, { createClient: () => client as never, createTransport: () => ({} as never) })).rejects.toMatchObject({ code: "timeout", retryable: true, message: "timeout" });
   });
 
   it("closes after partial connect and maps an expired deadline to retryable timeout", async () => {

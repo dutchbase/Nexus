@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Client, StreamableHTTPClientTransport, type AuthProvider, type Tool } from "@modelcontextprotocol/client";
+import { Client, SdkError, SdkErrorCode, StreamableHTTPClientTransport, type AuthProvider, type Tool } from "@modelcontextprotocol/client";
 import type { JamErrorCode, JamEvidence, JamSource } from "../../../packages/domain/src/ticket-jam.ts";
 
 const ENDPOINT = "https://mcp.jam.dev/mcp";
@@ -24,7 +24,7 @@ const secretKey = (key: string) => /password|secret|token|authorization|cookie|a
 export function redactJamValue(value: unknown): unknown {
   if (Array.isArray(value)) return value.map(redactJamValue);
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value).filter(([key]) => !secretKey(key)).map(([key, child]) => [key, redactJamValue(child)]));
-  if (typeof value === "string") return safeUrl(value)?.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/\b(access_token|token|api[-_]?key|secret|password|cookie|auth(?:orization)?)\s*([=:])\s*(?:"[^"]*"|'[^']*'|[^\s,;&#]+)/gi, "$1$2[redacted]");
+  if (typeof value === "string") return safeUrl(value)?.replace(/Bearer\s+\S+/gi, "Bearer [redacted]").replace(/\b((?:access|refresh|client|api|auth)[-_ ]?(?:token|secret|key)|token|secret|password|cookie|auth(?:orization)?)\s*([=:])\s*(?:"[^"]*"|'[^']*'|[^\s,;&#]+)/gi, "$1$2[redacted]");
   return value;
 }
 
@@ -121,6 +121,11 @@ export function parseJamToolResult(result: any): unknown {
 }
 
 const toolNames = { details: "getDetails", console: "getConsoleLogs", network: "getNetworkRequests", events: "getUserEvents", metadata: "getMetadata", transcript: "getVideoTranscript" } as const;
+function sdkTimeout(error: unknown) {
+  if (error instanceof SdkError && error.code === SdkErrorCode.RequestTimeout) return true;
+  const value = asRecord(error);
+  return value.code === "REQUEST_TIMEOUT" || value.code === "ETIMEDOUT" || value.name === "TimeoutError" || (typeof value.message === "string" && /\b(?:timed out|timeout exceeded)\b/i.test(value.message));
+}
 export async function fetchJamContext(source: JamSource, options: { token: string; signal: AbortSignal }, dependencies: JamDependencies = {}): Promise<JamImportResult> {
   if (!options.token) throw new JamImportError("not_configured", false);
   const deadline = AbortSignal.any([options.signal, (dependencies.timeout ?? AbortSignal.timeout)(30_000)]);
@@ -141,7 +146,7 @@ export async function fetchJamContext(source: JamSource, options: { token: strin
     const evidence = normalizeJamEvidence(source, sections);
     if (!Object.keys(evidence.device).length && !evidence.console.length && !evidence.network.length && !evidence.events.length && !Object.keys(evidence.metadata).length && !evidence.transcript) throw new JamImportError("invalid_response", false);
     return { state: evidence.unavailableSections.length ? "partial" : "ready", evidence, contentHash: createHash("sha256").update(canonical(evidence)).digest("hex") };
-  } catch (error) { if (error instanceof JamImportError) throw error; if (deadline.aborted) throw new JamImportError("timeout", true); throw new JamImportError("invalid_response", false); }
+  } catch (error) { if (error instanceof JamImportError) throw error; if (deadline.aborted || sdkTimeout(error)) throw new JamImportError("timeout", true); throw new JamImportError("invalid_response", false); }
   finally { await client.close().catch(() => undefined); }
 }
 
