@@ -3,7 +3,7 @@ import type { PageResult, Session } from "./shared.ts";
 import { imageUploadControl } from "../image-upload-control.ts";
 
 export const fieldTypeLabels: [string, string][] = [
-  ["short_text", "Short text"], ["long_text", "Long text"], ["email", "E-mail"], ["url", "URL"],
+  ["short_text", "Short text"], ["long_text", "Long text"], ["email", "E-mail"], ["url", "URL"], ["jam_link", "Jam link"],
   ["number", "Number"], ["dropdown", "Dropdown"], ["radio", "Radio"], ["checkbox", "Checkbox"],
   ["multi_select", "Multi-select"], ["project_selector", "Project selector"], ["category_selector", "Category selector"],
   ["environment_selector", "Environment selector"], ["image_upload", "Image upload / paste"], ["hidden", "Hidden field"],
@@ -14,7 +14,7 @@ const optionTypes = new Set(["dropdown", "radio", "multi_select", "category_sele
 export const previewField = (field: { field_type: string; label: string; required: boolean }) =>
   field.field_type === "image_upload"
     ? imageUploadControl({ fieldKey: "preview", label: `${field.label}${field.required ? " *" : ""}`, required: field.required, uploadUrl: "", existing: [], disabled: true })
-    : `<label class="field"><span>${escapeHtml(field.label)}${field.required ? " *" : ""}</span><input disabled placeholder="${escapeHtml(fieldTypeLabels.find(([value]) => value === field.field_type)?.[1] ?? field.field_type)}"></label>`;
+    : `<label class="field"><span>${escapeHtml(field.label)}${field.required ? " *" : ""}</span><input disabled${field.field_type === "jam_link" ? ' type="url" placeholder="https://jam.dev/c/..."' : ` placeholder="${escapeHtml(fieldTypeLabels.find(([value]) => value === field.field_type)?.[1] ?? field.field_type)}"`}></label>`;
 
 export async function render(url: URL, _session: Session, _metrics: Record<string, number>): Promise<PageResult> {
   if (url.pathname === "/admin/forms") {

@@ -20,6 +20,7 @@ export * from "./deployment.ts";
 export * from "./production-promotion-allowlist.ts";
 export * from "./production-promotion.ts";
 export * from "./ticket-access.ts";
+export * from "./ticket-jam.ts";
 
 export const aiModels = ["fable", "opus", "sonnet", "haiku", "deepseek-v4-flash", "deepseek-v4-pro"] as const;
 export const reasoningLevels = ["low", "medium", "high", "xhigh", "max", "ultracode"] as const;

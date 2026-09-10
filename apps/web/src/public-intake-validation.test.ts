@@ -65,6 +65,12 @@ describe("validateFields", () => {
 });
 
 describe("normalizeFields", () => {
+  test("reserves one jam_url field for Jam links", () => {
+    expect(normalizeFields([{ field_key: "jam_url", field_type: "jam_link" }])).toHaveLength(1);
+    expect(() => normalizeFields([{ field_key: "other", field_type: "jam_link" }])).toThrow(/unique jam_url/);
+    expect(() => normalizeFields([{ field_key: "jam_url", field_type: "url" }])).toThrow(/unique jam_url/);
+    expect(() => normalizeFields([{ field_key: "jam_url", field_type: "jam_link" }, { field_key: "jam_url", field_type: "jam_link" }])).toThrow(/unique jam_url/);
+  });
   test("rejects option-bearing fields without a non-empty string option list", () => {
     expect(() => normalizeFields([{ field_key: "f", field_type: "dropdown", options_json: [] }])).toThrow();
     expect(() => normalizeFields([{ field_key: "f", field_type: "radio", options_json: [1, 2] }])).toThrow();

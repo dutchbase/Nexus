@@ -1351,7 +1351,7 @@ export function formControls(fields: any[], projects: any[], values: Record<stri
     }).join("");
     let control = `<input name="${name}"${placeholder}${describedBy}${hasValues ? ` value="${value}"` : ""}${required}>`;
     if (type === "long_text") control = `<textarea name="${name}" rows="5"${placeholder}${describedBy}${required}>${value}</textarea>`;
-    if (type === "email" || type === "url" || type === "number") control = `<input name="${name}" type="${type}"${placeholder}${describedBy}${type === "number" && Number.isFinite(field.validation_json?.min) ? ` min="${field.validation_json.min}"` : ""}${type === "number" && Number.isFinite(field.validation_json?.max) ? ` max="${field.validation_json.max}"` : ""}${hasValues ? ` value="${value}"` : ""}${required}>`;
+    if (type === "email" || type === "url" || type === "jam_link" || type === "number") control = `<input name="${name}" type="${type === "jam_link" ? "url" : type}"${placeholder}${describedBy}${type === "number" && Number.isFinite(field.validation_json?.min) ? ` min="${field.validation_json.min}"` : ""}${type === "number" && Number.isFinite(field.validation_json?.max) ? ` max="${field.validation_json.max}"` : ""}${hasValues ? ` value="${value}"` : ""}${required}>`;
     if (type.includes("selector") || ["dropdown", "radio", "multi_select"].includes(type)) {
       const choices = type === "project_selector" ? projects.map((project) => `<option value="${project.id}"${hasValues && String(project.id) === String(values[field.field_key]) ? " selected" : ""}>${escapeHtml(project.name)}</option>`).join("") : options;
       control = `<select name="${name}"${describedBy}${type === "multi_select" ? " multiple" : ""}${required}>${choices}</select>`;

@@ -5,6 +5,7 @@ export type SubmissionFields = {
   title: string; description: string; category?: string | null; priority?: string | null;
   source_url?: string | null; environment?: string | null; expected_behavior?: string | null;
   actual_behavior?: string | null; reproduction_steps?: string | null;
+  jam_url?: string | null;
   submission?: Record<string, string | boolean | string[]>;
 };
 export type TicketAttachment = {
@@ -16,6 +17,7 @@ export type ReporterTicket = {
   title: string; description: string | null; category: string | null; priority: string | null;
   source_url: string | null; environment: string | null; expected_behavior: string | null;
   actual_behavior: string | null; reproduction_steps: string | null;
+  jam_url: string | null; jam_import: { state: import("./ticket-jam.ts").JamState; message: string } | null;
   submission: Record<string, string | boolean | string[]>;
   submission_revision: number; submission_updated_at: string; created_at: string;
   can_delete: boolean; attachments: TicketAttachment[];
@@ -46,7 +48,8 @@ export async function ticketForActor(client: QueryClient, actor: TicketActor, re
   )`;
   const values = actor.role === "admin" ? [ref] : [ref, actor.userId];
   return (await client.query(
-    `SELECT t.*,p.name AS project_name FROM tickets t JOIN projects p ON p.id=t.project_id
+    `SELECT t.*,p.name AS project_name,j.state AS jam_state FROM tickets t JOIN projects p ON p.id=t.project_id
+     LEFT JOIN ticket_jam_contexts j ON j.ticket_id=t.id
      WHERE (t.id::text=$1 OR t.ticket_number=$1) AND t.submitter_deleted_at IS NULL ${access}
      ${lock ? "FOR UPDATE OF t" : ""}`,
     values,
@@ -68,7 +71,8 @@ export function reporterTicket(row: any, actor: TicketActor, fields: any[]): Rep
     title: row.title, description: row.description ?? null, category: row.category ?? null, priority: row.priority ?? null,
     source_url: row.source_url ?? null, environment: row.environment ?? null,
     expected_behavior: row.expected_behavior ?? null, actual_behavior: row.actual_behavior ?? null,
-    reproduction_steps: row.reproduction_steps ?? null, submission,
+    reproduction_steps: row.reproduction_steps ?? null, jam_url: row.jam_url ?? null,
+    jam_import: row.jam_state ? { state: row.jam_state, message: row.jam_state === "ready" ? "Technical details imported" : row.jam_state === "partial" ? "Some technical details imported" : row.jam_state === "failed" ? "Technical details could not be imported" : row.jam_state === "not_configured" ? "Jam import is not configured" : "Technical details import in progress" } : null, submission,
     submission_revision: Number(row.submission_revision), submission_updated_at: timestamp(row.submission_updated_at),
     created_at: timestamp(row.created_at), can_delete: actor.role === "reporter" && row.created_by_user_id === actor.userId,
     attachments: Array.isArray(row.attachments) ? row.attachments : [],

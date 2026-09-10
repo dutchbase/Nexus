@@ -12,7 +12,7 @@ import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
   allowlistMismatches, buildExecutionPrompt, checkPlanApprovalGate, derivePolicyStatus, ensurePolicySnapshot, enqueueJob, findAllowlistEntry, getPullRequestMergeSettings, getSystemAiSettings,
   globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError, ticketImageEvidence,
-  lockTicketActor,
+  lockTicketActor, normalizeJamUrl, queueJamRetry, setTicketJamSource,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
   unionSkills, validateAiSelection, providerForModel, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
@@ -65,7 +65,7 @@ const dummyHash = await hashPassword(randomBytes(32).toString("hex"));
 const systemOnlyStatuses = new Set(["Planning", "Execution Queued", "Executing", "Validating", "PR Ready for Review", "Merged"]);
 const fieldTypes = new Set([
   "short_text", "long_text", "email", "url", "number", "dropdown", "radio", "checkbox", "multi_select",
-  "project_selector", "category_selector", "environment_selector", "image_upload", "hidden", "static",
+  "project_selector", "category_selector", "environment_selector", "image_upload", "jam_link", "hidden", "static",
 ]);
 const optionTypes = new Set(["dropdown", "radio", "multi_select", "category_selector", "environment_selector"]);
 const skillSourceTypes = new Set([
@@ -490,7 +490,7 @@ export function validateFields(fields: any[], body: Record<string, any>) {
       continue;
     }
     if (typeof value === "string") {
-      const limit = Math.min(Number(field.validation_json?.max_length ?? (field.field_type === "long_text" ? 10000 : 500)), 10000);
+      const limit = Math.min(Number(field.validation_json?.max_length ?? (field.field_type === "long_text" ? 10000 : field.field_type === "jam_link" ? 2048 : 500)), 10000);
       if (value.length > limit) errors[field.field_key] = "too long";
       if (field.field_type === "email" && value && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) errors[field.field_key] = "invalid email";
       if (field.field_type === "url" && value) {
@@ -499,6 +499,7 @@ export function validateFields(fields: any[], body: Record<string, any>) {
           if (parsed.protocol !== "http:" && parsed.protocol !== "https:") errors[field.field_key] = "invalid URL";
         } catch { errors[field.field_key] = "invalid URL"; }
       }
+      if (field.field_type === "jam_link" && value) try { normalizeJamUrl(value); } catch { errors[field.field_key] = "invalid Jam link"; }
     }
   }
   return errors;
@@ -533,6 +534,8 @@ export async function consumeSubmissionAttempt(formId: string, ip: string, limit
 
 export async function submitPublicForm(request: IncomingMessage, response: ServerResponse, form: any) {
   const body = await bodyOf(request);
+  const forgedJamKey = ["jam_context", "jam_import", "jam_state", "data_json", "generation", "error_code", "content_hash", "fetched_at"].find((key) => key in body);
+  if (forgedJamKey) return json(response, 400, { error: "validation failed", fields: { [forgedJamKey]: "unknown field" } });
   const retryKey = typeof request.headers["idempotency-key"] === "string" && /^[0-9a-f-]{36}$/i.test(request.headers["idempotency-key"])
     ? request.headers["idempotency-key"] : null;
   const existingSubmissionSql = `SELECT t.id,t.ticket_number FROM audit_events ae JOIN tickets t ON t.id=ae.entity_id
@@ -544,6 +547,8 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
     if (existing) return json(response, 201, { ticket_number: existing.ticket_number, ticket: existing });
   }
   const fields = await fieldsFor(form.id);
+  const jamField = fields.find((field) => field.field_key === "jam_url" && field.field_type === "jam_link");
+  if ("jam_url" in body && !jamField) return json(response, 400, { error: "validation failed", fields: { jam_url: "unknown field" } });
   const honeypot = fields.find((field) => field.field_type === "hidden")?.field_key ?? "website";
   if (typeof body[honeypot] === "string" && body[honeypot].trim()) {
     return json(response, 202, { accepted: true });
@@ -574,6 +579,7 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
   if (typeof body.title !== "string" || !body.title.trim()) errors.title = "required";
   if (typeof body.description !== "string" || !body.description.trim()) errors.description = "required";
   if (Object.keys(errors).length) return json(response, 400, { error: "validation failed", fields: errors });
+  const jam = jamField ? normalizeJamUrl(body.jam_url)?.url ?? null : null;
   const requestedProjectId = form.fixed_project_id ?? body.project_id;
   const requestedProjectSlug = typeof body.project_slug === "string" ? body.project_slug : undefined;
   const project = requestedProjectId
@@ -610,7 +616,7 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
     const ticketNumber = `DCC-${number}`;
     const reservedKeys = [
       "project_id", "title", "description", "category", "priority", "submitter_name", "submitter_email",
-      "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", honeypot,
+      "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", "jam_url", honeypot,
     ];
     const excludedKeys = new Set([...reservedKeys, ...fields.filter((f) => ["static", "hidden", "image_upload"].includes(f.field_type)).map((f) => f.field_key)]);
     const customValues = Object.fromEntries(Object.entries(body).filter(([key]) => !excludedKeys.has(key)));
@@ -623,6 +629,7 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
         body.submitter_name ?? null, body.submitter_email ?? null, body.source_url ?? null, body.environment ?? null,
         body.expected_behavior ?? null, body.actual_behavior ?? null, body.reproduction_steps ?? null, customValues],
     );
+    if (jam) await setTicketJamSource(client, result.rows[0].id, jam);
     await client.query(
       `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type)
        VALUES ($1,NULL,'Submitted','Public form submitted','public')`,
@@ -657,7 +664,7 @@ export async function upload(request: IncomingMessage, response: ServerResponse,
 
 export function normalizeFields(fields: any[]) {
   if (!Array.isArray(fields)) return null;
-  return fields.map((field, index) => {
+  const normalized = fields.map((field, index) => {
     if (!field || typeof field.field_key !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(field.field_key)) throw Object.assign(new Error("invalid field key"), { status: 400 });
     if (!fieldTypes.has(field.field_type)) throw Object.assign(new Error("invalid field type"), { status: 400 });
     if (optionTypes.has(field.field_type) && !(Array.isArray(field.options_json) && field.options_json.length && field.options_json.every((o: any) => typeof o === "string"))) {
@@ -677,6 +684,12 @@ export function normalizeFields(fields: any[]) {
       validation_json: validation, options_json: field.options_json ?? [],
     };
   });
+  const jamFields = normalized.filter((field) => field.field_type === "jam_link");
+  if (jamFields.length > 1 || jamFields.some((field) => field.field_key !== "jam_url")
+    || normalized.some((field) => field.field_key === "jam_url" && field.field_type !== "jam_link")) {
+    throw Object.assign(new Error("Jam link must use the unique jam_url field"), { status: 400 });
+  }
+  return normalized;
 }
 
 function formShapeError(form: any) {
@@ -2012,6 +2025,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (createTicketMatch) {
     const body = await bodyOf(request);
     const text = (key: string) => typeof body[key] === "string" ? body[key].trim() : "";
+    const jam = normalizeJamUrl(body.jam_url)?.url ?? null;
     const projectId = text("project_id"), title = text("title"), description = text("description");
     if (!projectId || !title || !description) return json(response, 400, { error: "Project, title, and description are required" });
     const project = (await pool.query("SELECT id FROM projects WHERE id=$1", [projectId])).rows[0];
@@ -2028,6 +2042,8 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'Triage','{}'::jsonb,$11) RETURNING *`,
         [`DCC-${number}`, projectId, title, description, text("category") || null, priority || null, text("environment") || null, text("expected_behavior") || null, text("actual_behavior") || null, text("reproduction_steps") || null, session.user_id],
       )).rows[0];
+      if (jam) await setTicketJamSource(client, created.id, jam);
+      created.jam_url = jam;
       await setTicketAttachments(client, { userId: session.user_id, role: "admin" }, created, attachmentSelection, ["screenshots"]);
       await client.query(
         `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
@@ -2720,12 +2736,23 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       ...preview,
     });
   }
+  const jamRetryMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/jam\/retry$/);
+  if (jamRetryMatch && request.method === "POST") {
+    const ref = decodeURIComponent(jamRetryMatch[1]);
+    const retried = await inTransaction(async (client) => {
+      const ticket = (await client.query("SELECT id FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE", [ref])).rows[0];
+      if (!ticket) return false;
+      await queueJamRetry(client, ticket.id);
+      return true;
+    });
+    return retried ? json(response, 202, { queued: true }) : json(response, 404, { error: "ticket not found" });
+  }
   const ticketMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)$/);
   if (ticketMatch && request.method === "GET") {
     const ref = decodeURIComponent(ticketMatch[1]);
     let ticket = (await pool.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
     if (!ticket) return json(response, 404, { error: "ticket not found" });
-    const [history, notes, attachments, notifications] = await Promise.all([
+    const [history, notes, attachments, notifications, jamContext] = await Promise.all([
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at", [ticket.id]),
       pool.query("SELECT * FROM ticket_notes WHERE ticket_id=$1 ORDER BY created_at", [ticket.id]),
       pool.query("SELECT a.*,u.media_type,u.size_bytes FROM attachments a JOIN uploads u ON u.id=a.upload_id WHERE a.ticket_id=$1", [ticket.id]),
@@ -2735,15 +2762,18 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
          WHERE nd.ticket_id=$1 ORDER BY nd.created_at`,
         [ticket.id],
       ),
+      pool.query("SELECT source_url,generation,state,data_json,content_hash,error_code,fetched_at,updated_at FROM ticket_jam_contexts WHERE ticket_id=$1", [ticket.id]),
     ]);
     return json(response, 200, {
       ticket, status_history: history.rows, notes: notes.rows, attachments: attachments.rows,
-      notification_history: notifications.rows,
+      notification_history: notifications.rows, jam_context: jamContext.rows[0] ?? null,
     });
   }
   if (ticketMatch && request.method === "PATCH") {
     const ref = decodeURIComponent(ticketMatch[1]);
     const body = await bodyOf(request);
+    const forgedJamKey = ["jam_context", "jam_import", "jam_state", "data_json", "generation", "error_code", "content_hash", "fetched_at"].find((key) => key in body);
+    if (forgedJamKey) return json(response, 422, { error: `unknown field: ${forgedJamKey}` });
     if (body.status === "Cancelled") {
       if (Object.keys(body).some((key) => key !== "status")) return json(response, 422, { error: "cancellation cannot be combined with ticket edits" });
       return transitionTicket(ref, "Cancelled", "Cancelled by administrator", session, request, response);
@@ -2754,7 +2784,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (body.status !== undefined && (!validStatuses.has(body.status) || systemOnlyStatuses.has(body.status))) return json(response, 422, { error: "status cannot be set manually" });
     const allowed = [
       "title", "description", "category", "priority", "status", "project_id", "submitter_name", "submitter_email",
-      "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps",
+      "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", "jam_url",
       "ai_configuration_mode", "default_model", "default_reasoning_level", "planning_model",
       "planning_reasoning_level", "execution_model", "execution_reasoning_level", "repair_model", "repair_reasoning_level",
     ];
@@ -2801,7 +2831,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
           for (const field of fields) if (field.field_key in before) savedValues[field.field_key] = before[field.field_key];
           Object.assign(errors, validateFields(fields, { ...savedValues, ...submission }));
           if (!Object.keys(errors).length) {
-            const ticketColumns = new Set(["project_id", "title", "description", "category", "priority", "submitter_name", "submitter_email", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps"]);
+            const ticketColumns = new Set(["project_id", "title", "description", "category", "priority", "submitter_name", "submitter_email", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", "jam_url"]);
             const customValues = { ...(before.custom_values_json ?? {}) };
             for (const [key, value] of Object.entries(submission)) {
               if (ticketColumns.has(key)) updates.set(key, value);
@@ -2812,7 +2842,10 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         }
         if (Object.keys(errors).length) return { validationErrors: errors };
       }
-      if (!updates.size && !attachmentChanged) return before;
+      const jam = updates.has("jam_url") ? normalizeJamUrl(updates.get("jam_url"))?.url ?? null : before.jam_url ?? null;
+      const jamChanged = jam !== (before.jam_url ?? null);
+      updates.delete("jam_url");
+      if (!updates.size && !attachmentChanged && !jamChanged) return before;
       if (body.ai_configuration_mode !== undefined && !["basic", "advanced"].includes(body.ai_configuration_mode)) {
         throw new AiConfigurationError(`Unsupported AI configuration mode "${body.ai_configuration_mode}"`);
       }
@@ -2835,12 +2868,13 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         resolvedAiFor(candidate, project, phase, systemAi);
       }
       const submissionFields = new Set(["title", "description", "category", "priority", "project_id", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", "custom_values_json"]);
-      const submissionChanged = attachmentChanged || updatedEntries.some(([key, value]) => submissionFields.has(key) && before[key] !== value
+      const submissionChanged = jamChanged || attachmentChanged || updatedEntries.some(([key, value]) => submissionFields.has(key) && before[key] !== value
         && (key !== "custom_values_json" || JSON.stringify(before[key] ?? {}) !== JSON.stringify(value ?? {})));
       const assignments = updatedEntries.map(([key], index) => `${key}=$${index + 2}`);
       const updated = (await client.query(`UPDATE tickets SET ${assignments.length ? `${assignments.join(",")},` : ""}updated_at=now()
         ${submissionChanged ? ",submission_revision=submission_revision+1,submission_updated_at=now()" : ""} WHERE id=$1 RETURNING *`, [before.id, ...updatedEntries.map(([, value]) => value)])).rows[0];
       if (attachmentSelection !== undefined) await setTicketAttachments(client, { userId: session.user_id, role: "admin" }, updated, attachmentSelection, imageKeys);
+      if (jamChanged) { await setTicketJamSource(client, before.id, jam); updated.jam_url = jam; }
       if ((updates.has("source_url") && before.source_url !== updated.source_url) || attachmentChanged) await client.query("SELECT mark_ticket_plan_potentially_stale($1)", [before.id]);
       if (body.status && body.status !== before.status) await client.query(
         `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id) VALUES ($1,$2,$3,'Manual admin update','admin',$4)`,

@@ -12,4 +12,7 @@ describe("form preview attachments", () => {
   it("keeps generic fields as before", () => {
     expect(previewField({ field_type: "short_text", label: "Name", required: true })).toContain("placeholder=");
   });
+  it("renders Jam links as URL inputs", () => {
+    expect(previewField({ field_type: "jam_link", label: "Jam link", required: false })).toContain('type="url" placeholder="https://jam.dev/c/..."');
+  });
 });
