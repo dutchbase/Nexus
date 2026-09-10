@@ -10,7 +10,7 @@ const { migrate } = await import("../../../packages/database/src/migrate.ts");
 const { setPublicTicketAttachments, setTicketAttachments } = await import("./ticket-uploads.ts");
 
 integration("authenticated upload claims", () => {
-  let project = "", otherProject = "", ticketId = "", otherTicket = "", formId = "", otherFormId = "";
+  let project = "", otherProject = "", ticketId = "", otherTicket = "", formId = "";
   let reporter: any, editor: any, outsider: any;
 
   beforeAll(async () => {
@@ -26,7 +26,7 @@ integration("authenticated upload claims", () => {
     [project, otherProject] = projects.map((row: any) => row.id);
     const forms = (await pool.query(`INSERT INTO forms(name,slug,title,status,fixed_project_id) VALUES
       ('Upload Form','upload-form','Upload Form','published',$1),('Other Form','other-form','Other Form','draft',$1) RETURNING id ORDER BY slug`, [project])).rows;
-    [otherFormId, formId] = forms.map((row: any) => row.id);
+    formId = forms[1].id;
     await pool.query("INSERT INTO project_memberships(user_id,project_id) VALUES($1,$3),($2,$3),($4,$5)",
       [reporter.userId, editor.userId, project, outsider.userId, otherProject]);
     ticketId = (await pool.query("INSERT INTO tickets(ticket_number,project_id,title,description,status,created_by_user_id) VALUES('DCC-UPLOAD',$1,'Upload','Upload','Submitted',$2) RETURNING id", [project, reporter.userId])).rows[0].id;
@@ -90,14 +90,15 @@ integration("authenticated upload claims", () => {
     await expect(claim(editor, [claimedElsewhere])).rejects.toMatchObject({ status: 422 });
   });
 
-  test("keeps public and authenticated upload scopes separate", async () => {
+  test("keeps upload scopes separate and refuses the same public form after unpublishing", async () => {
     const publicId = await publicUpload();
     await expect(claim(reporter, [publicId])).rejects.toMatchObject({ status: 422 });
     const authenticatedId = await upload();
     await expect(inTransaction((client) => setPublicTicketAttachments(client, formId, ticketId,
       { screenshots: [authenticatedId] }, ["screenshots"]))).rejects.toMatchObject({ status: 422 });
-    await expect(inTransaction((client) => setPublicTicketAttachments(client, otherFormId, ticketId,
-      { screenshots: [publicId] }, ["screenshots"]))).rejects.toMatchObject({ status: 422 });
+    await pool.query("UPDATE forms SET status='draft' WHERE id=$1", [formId]);
+    await expect(inTransaction((client) => setPublicTicketAttachments(client, formId, ticketId,
+      { screenshots: [publicId] }, ["screenshots"]))).rejects.toMatchObject({ status: 404 });
     expect((await pool.query("SELECT ticket_id FROM attachments WHERE upload_id=ANY($1::uuid[]) ORDER BY upload_id", [[publicId, authenticatedId]])).rows)
       .toEqual([{ ticket_id: null }, { ticket_id: null }]);
   });

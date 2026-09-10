@@ -60,12 +60,13 @@ beforeEach(() => {
   }) };
 });
 
-test.each([{ screenshot: "id" }, null])("PATCH rejects malformed attachment maps before mutation", async (attachment_upload_ids) => {
+test.each([{ screenshot: "id" }, { screenshot: ["-".repeat(36)] }, null])("PATCH rejects malformed attachment maps before mutation", async (attachment_upload_ids) => {
   await expect(adminApi(request({ attachment_upload_ids }), response(),
     new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin", role: "admin" }))
     .rejects.toMatchObject({ status: 422 });
 
   expect(transactionClient.query.mock.calls.some(([sql]: [string]) => /UPDATE tickets|DELETE FROM attachments/.test(sql))).toBe(false);
+  expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("FROM attachments"))).toBe(false);
 });
 
 test("PATCH preserves an omitted required image and rejects explicitly removing it", async () => {

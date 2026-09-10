@@ -11,6 +11,7 @@ export type UploadScope = { kind: "public"; formId: string } | { kind: "authenti
 
 const dataRoot = artifactDataRoot(resolve(dirname(fileURLToPath(import.meta.url)), "..", "..", ".."));
 const maximumBytes = 5 * 1024 * 1024;
+const uuidPattern = /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i;
 
 function fail(message: string, status = 422, extra?: object): never {
   throw Object.assign(new Error(message), { status, ...extra });
@@ -102,7 +103,7 @@ export function checkedAttachmentSelection(selection: unknown, validFieldKeys: s
   const allowed = new Set(validFieldKeys);
   const all: string[] = [];
   for (const [field, ids] of Object.entries(selection as Record<string, unknown>)) {
-    if (!allowed.has(field) || !Array.isArray(ids) || ids.length > 5 || ids.some((id) => typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id))) fail("invalid attachments");
+    if (!allowed.has(field) || !Array.isArray(ids) || ids.length > 5 || ids.some((id) => typeof id !== "string" || !uuidPattern.test(id))) fail("invalid attachments");
     all.push(...ids);
   }
   if (new Set(all).size !== all.length) fail("upload used more than once");
@@ -143,6 +144,7 @@ export async function setPublicTicketAttachments(client: QueryClient, formId: st
   const checked = checkedAttachmentSelection(selection, validFieldKeys);
   const requested = Object.values(checked).flat();
   if (!requested.length) return;
+  if (!(await client.query("SELECT id FROM forms WHERE id=$1 AND status='published' FOR UPDATE", [formId])).rows[0]) fail("form not found", 404);
   await client.query("SELECT id,upload_id FROM attachments WHERE upload_id=ANY($1::uuid[]) AND ticket_id IS NULL FOR UPDATE", [requested]);
   await client.query("SELECT id FROM uploads WHERE id=ANY($1::uuid[]) FOR UPDATE", [requested]);
   await client.query("SELECT id FROM artifacts WHERE upload_id=ANY($1::uuid[]) FOR UPDATE", [requested]);
