@@ -43,11 +43,19 @@ export async function setTicketJamSource(client: QueryClient, ticketId: string, 
 }
 
 export async function queueJamRetry(client: QueryClient, ticketId: string): Promise<void> {
-  const context = (await client.query("SELECT source_url FROM ticket_jam_contexts WHERE ticket_id=$1 FOR UPDATE", [ticketId])).rows[0];
+  const context = (await client.query(
+    `SELECT t.jam_url,t.submitter_deleted_at,c.source_url,c.state
+     FROM tickets t JOIN ticket_jam_contexts c ON c.ticket_id=t.id
+     WHERE t.id=$1 FOR UPDATE OF t,c`, [ticketId],
+  )).rows[0];
   if (!context) throw Object.assign(new Error("Jam link not found"), { status: 404 });
+  if (context.submitter_deleted_at || !context.jam_url || context.jam_url !== context.source_url
+    || !["failed", "not_configured"].includes(context.state)) {
+    throw Object.assign(new Error("Jam import cannot be retried in its current state"), { status: 409 });
+  }
   const generation = randomUUID();
   await client.query(
-    "UPDATE ticket_jam_contexts SET generation=$2,state='queued',data_json=NULL,content_hash=NULL,error_code=NULL,fetched_at=NULL,updated_at=now() WHERE ticket_id=$1",
+    "UPDATE ticket_jam_contexts SET generation=$2,state='queued',error_code=NULL,updated_at=now() WHERE ticket_id=$1",
     [ticketId, generation],
   );
   await enqueueJob({ type: "ticket.jam_enrich", payload: { ticket_id: ticketId, generation }, idempotencyKey: `ticket-jam:${ticketId}:${generation}`, maxAttempts: 3 }, client as any);

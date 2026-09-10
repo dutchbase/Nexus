@@ -6,6 +6,9 @@ import type { TicketAttachment } from "@dcc/domain";
 
 const stylesPath = join(dirname(fileURLToPath(import.meta.url)), "design-tokens.css");
 export const styles = await readFile(stylesPath, "utf8");
+export const formFieldPresets: Record<string, Record<string, unknown>> = {
+  jam_link: { field_key: "jam_url", label: "Jam link", description: "Paste a Jam link to include technical details.", placeholder: "https://jam.dev/c/..." },
+};
 
 export function escapeHtml(value: unknown) {
   return String(value ?? "")
@@ -568,6 +571,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         if(fieldsApp){
           const formId=fieldsApp.dataset.formId;
           const fieldTypes=JSON.parse(document.querySelector("[data-field-types]").textContent);
+          const fieldPresets=${JSON.stringify(formFieldPresets)};
           let fields=JSON.parse(document.querySelector("[data-fields-json]").textContent);
           let selected=null;
           const list=fieldsApp.querySelector("[data-field-list]"),settingsBox=fieldsApp.querySelector("[data-field-settings]"),errorBox=fieldsApp.querySelector("[data-fields-error]");
@@ -601,7 +605,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
               +'<p style="font-size:12px;color:var(--text3)">Every field is validated server-side. Uploads are image-only, renamed randomly and capped at 5 MB; SVG is rejected.</p>';
             settingsBox.querySelector("[data-f-label]").addEventListener("input",e=>{field.label=e.target.value;save();renderList()});
             settingsBox.querySelector("[data-f-key]").addEventListener("change",e=>{field.field_key=e.target.value;save();renderList()});
-            settingsBox.querySelector("[data-f-type]").addEventListener("change",e=>{field.field_type=e.target.value;save();renderSettings();renderList()});
+            settingsBox.querySelector("[data-f-type]").addEventListener("change",e=>{field.field_type=e.target.value;Object.assign(field,fieldPresets[field.field_type]||{});save();renderSettings();renderList()});
             settingsBox.querySelector("[data-f-required]").addEventListener("change",e=>{field.required=e.target.checked;save();renderList()});
             settingsBox.querySelector("[data-f-options]")?.addEventListener("change",e=>{field.options_json=e.target.value.split("\\n").map(v=>v.trim()).filter(Boolean);save()});
           }
