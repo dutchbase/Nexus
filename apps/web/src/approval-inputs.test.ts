@@ -69,7 +69,7 @@ test("preview and approval build the same canonical input hash through their tra
   } };
   const ticket = {
     id: "ticket", project_id: project.id, title: "Fix approvals", description: "Make hashes equal.",
-    category: "bug", priority: "high", environment: "production", custom_values_json: {},
+    category: "bug", priority: "high", environment: "production", source_url: null as string | null, custom_values_json: {},
     default_model: "sonnet", default_reasoning_level: "high",
   };
   const version = { id: "plan-version", version: 2, content_hash: "a".repeat(64), content_markdown: "Do the work." };
@@ -84,6 +84,9 @@ test("preview and approval build the same canonical input hash through their tra
   })]);
   expect((preview.approvedInput.ticket as any).imageEvidence).toEqual(imageEvidence);
   skillConfiguration = { validation_commands: ["pnpm lint"] };
+  expect((await approvalInputsFor(ticket, version, client)).inputHash).not.toBe(preview.inputHash);
+  imageEvidence = [{ ...imageEvidence[0], sha256: "b".repeat(64) }];
+  ticket.source_url = "https://example.test/report";
   expect((await approvalInputsFor(ticket, version, client)).inputHash).not.toBe(preview.inputHash);
   skillConfiguration = { validation_commands: ["pnpm test"] };
   imageEvidence = [{ ...imageEvidence[0], sha256: "c".repeat(64) }];

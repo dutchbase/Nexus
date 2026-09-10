@@ -27,7 +27,7 @@ integration("project prompt archival", () => {
       yield Buffer.from(JSON.stringify({ action: "archive", ids: [promptId] }));
     } };
     const response: any = { writeHead: vi.fn(), end: vi.fn() };
-    await adminApi(request, response, new URL(`http://test/api/admin/projects/${projectId}/prompts/bulk`), {});
+    await adminApi(request, response, new URL(`http://test/api/admin/projects/${projectId}/prompts/bulk`), { role: "admin" });
     expect(response.writeHead).toHaveBeenCalledWith(200, expect.anything());
     expect((await pool.query("SELECT active_version_id FROM prompt_files WHERE id=$1", [promptId])).rows[0].active_version_id).toBeNull();
     expect(Number((await pool.query("SELECT count(*) FROM prompt_versions WHERE prompt_file_id=$1", [promptId])).rows[0].count)).toBe(before);

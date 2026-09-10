@@ -69,7 +69,7 @@ test("promote-force route is rejected for a project not on the production-promot
     request({ commit_sha: masterSha, expected_master_sha: masterSha, confirm_diverged: true }),
     response,
     new URL(`http://test/api/admin/projects/${otherProjectId}/deployment/promote-force`),
-    { user_id: "admin" },
+    { user_id: "admin", role: "admin" },
   );
 
   expect(response.writeHead).toHaveBeenCalledWith(403, expect.any(Object));
@@ -82,7 +82,7 @@ test("promote-force route requires confirm_diverged:true in the body", async () 
     request({ commit_sha: masterSha, expected_master_sha: masterSha }),
     response,
     new URL(`http://test/api/admin/projects/${vaJobsPlatformId}/deployment/promote-force`),
-    { user_id: "admin" },
+    { user_id: "admin", role: "admin" },
   );
 
   expect(response.writeHead).toHaveBeenCalledWith(400, expect.any(Object));
@@ -95,7 +95,7 @@ test("promote-force route enqueues deployment.promote with force:true and maxAtt
     request({ commit_sha: masterSha, expected_master_sha: masterSha, confirm_diverged: true }),
     response,
     new URL(`http://test/api/admin/projects/${vaJobsPlatformId}/deployment/promote-force`),
-    { user_id: "admin" },
+    { user_id: "admin", role: "admin" },
   );
 
   expect(response.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
@@ -114,7 +114,7 @@ test("normal promote route (unchanged) still uses maxAttempts:1 too — 422 must
     request({ commit_sha: masterSha, expected_master_sha: masterSha }),
     response,
     new URL(`http://test/api/admin/projects/${vaJobsPlatformId}/deployment/promote`),
-    { user_id: "admin" },
+    { user_id: "admin", role: "admin" },
   );
 
   expect(response.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
@@ -127,7 +127,7 @@ test("normal promote route (unchanged) still uses maxAttempts:1 too — 422 must
 test("promotion retries dedupe one client request but a deliberate retry gets a fresh job key", async () => {
   const call = async (request_id: string) => adminApi(
     request({ commit_sha: masterSha, expected_master_sha: masterSha, request_id }), newResponse(),
-    new URL(`http://test/api/admin/projects/${vaJobsPlatformId}/deployment/promote`), { user_id: "admin" },
+    new URL(`http://test/api/admin/projects/${vaJobsPlatformId}/deployment/promote`), { user_id: "admin", role: "admin" },
   );
   const sameRequest = "11111111-1111-4111-8111-111111111111";
   await call(sameRequest);
@@ -144,7 +144,7 @@ test("promote-force route refuses an allowlisted slug whose github_repository wa
     request({ commit_sha: masterSha, expected_master_sha: masterSha, confirm_diverged: true }),
     response,
     new URL(`http://test/api/admin/projects/${tamperedProjectId}/deployment/promote-force`),
-    { user_id: "admin" },
+    { user_id: "admin", role: "admin" },
   );
 
   expect(response.writeHead).toHaveBeenCalledWith(403, expect.any(Object));

@@ -41,7 +41,7 @@ test("pull-request approval rejects a browser request without a head and policy 
   }] }).mockResolvedValueOnce({ rows: [{ require_fresh_policy_binding: true }] });
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({}, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin" });
+  await adminApi(request({}, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin", role: "admin" });
 
   expect(response.writeHead).toHaveBeenCalledWith(409, expect.any(Object));
   expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(false);
@@ -54,7 +54,7 @@ test("pull-request approval rejects a stale browser policy binding", async () =>
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
   await adminApi(request({ expected_head_sha: "old-head", policy_snapshot_id: "snapshot-1" }, "POST"),
-    response, new URL(pullRequestApprovalPath), { user_id: "admin" });
+    response, new URL(pullRequestApprovalPath), { user_id: "admin", role: "admin" });
 
   expect(response.writeHead).toHaveBeenCalledWith(409, expect.any(Object));
   expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO jobs"))).toBe(false);
@@ -69,7 +69,7 @@ test("pull-request approval queues a matching head without a policy snapshot whe
   });
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({ expected_head_sha: "head-sha" }, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin" });
+  await adminApi(request({ expected_head_sha: "head-sha" }, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin", role: "admin" });
 
   const queued = pool.query.mock.calls.find(([sql]) => sql.includes("INSERT INTO jobs"));
   expect(queued?.[1]?.[2]).toEqual({ actor_id: "admin", pull_request_id: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", expected_head_sha: "head-sha" });
@@ -79,7 +79,7 @@ test("pull-request approval queues a matching head without a policy snapshot whe
 test("pull-request merge setting rejects non-boolean values", async () => {
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({ require_fresh_policy_binding: "false" }, "POST"), response, new URL("http://test/api/admin/settings/pull-request-merge"), { user_id: "admin" });
+  await adminApi(request({ require_fresh_policy_binding: "false" }, "POST"), response, new URL("http://test/api/admin/settings/pull-request-merge"), { user_id: "admin", role: "admin" });
 
   expect(response.writeHead).toHaveBeenCalledWith(400, expect.any(Object));
   expect(pool.query).not.toHaveBeenCalled();
@@ -89,7 +89,7 @@ test("pull-request merge setting updates the singleton and audits the actor", as
   pool.query.mockResolvedValue({ rows: [], rowCount: 1 });
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({ require_fresh_policy_binding: true }, "POST"), response, new URL("http://test/api/admin/settings/pull-request-merge"), { user_id: "admin" });
+  await adminApi(request({ require_fresh_policy_binding: true }, "POST"), response, new URL("http://test/api/admin/settings/pull-request-merge"), { user_id: "admin", role: "admin" });
 
   const update = pool.query.mock.calls.find(([sql]) => sql.includes("UPDATE pull_request_merge_settings"));
   const audit = pool.query.mock.calls.find(([sql]) => sql.includes("INSERT INTO audit_events"));
@@ -112,7 +112,7 @@ test("pull-request approval queues the exact current head and policy binding", a
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
   await adminApi(request({ expected_head_sha: "head-sha", policy_snapshot_id: "snapshot-1" }, "POST"),
-    response, new URL(pullRequestApprovalPath), { user_id: "admin" });
+    response, new URL(pullRequestApprovalPath), { user_id: "admin", role: "admin" });
 
   const queued = pool.query.mock.calls.find(([sql]) => sql.includes("INSERT INTO jobs"));
   expect(queued?.[1]?.[2]).toEqual({
@@ -139,7 +139,7 @@ test("approves a PR with no policy snapshot when the project has no applicable G
   ensurePolicySnapshot.mockResolvedValue({ outcome: "synced", snapshotId: "fresh-snapshot" });
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({ expected_head_sha: "head-sha" }, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin" });
+  await adminApi(request({ expected_head_sha: "head-sha" }, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin", role: "admin" });
 
   expect(ensurePolicySnapshot).toHaveBeenCalledWith(pool, {
     pullRequestId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa", owner: "acme", repo: "widgets", number: 7,
@@ -164,7 +164,7 @@ test("keeps blocking a PR with no policy snapshot when the project requires enfo
   });
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({ expected_head_sha: "head-sha" }, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin" });
+  await adminApi(request({ expected_head_sha: "head-sha" }, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin", role: "admin" });
 
   expect(ensurePolicySnapshot).not.toHaveBeenCalled();
   expect(response.writeHead).toHaveBeenCalledWith(409, expect.any(Object));
@@ -188,7 +188,7 @@ test.each([
   });
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({ expected_head_sha: "head-sha" }, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin" });
+  await adminApi(request({ expected_head_sha: "head-sha" }, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin", role: "admin" });
 
   expect(ensurePolicySnapshot).not.toHaveBeenCalled();
   expect(response.writeHead).toHaveBeenCalledWith(409, expect.any(Object));
@@ -209,7 +209,7 @@ test("keeps blocking and surfaces the real error when GitHub is unreachable duri
   ensurePolicySnapshot.mockResolvedValue({ outcome: "error", errorCode: "rate_limited", retryAfter: null });
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({ expected_head_sha: "head-sha" }, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin" });
+  await adminApi(request({ expected_head_sha: "head-sha" }, "POST"), response, new URL(pullRequestApprovalPath), { user_id: "admin", role: "admin" });
 
   expect(response.writeHead).toHaveBeenCalledWith(409, expect.any(Object));
   expect(response.end).toHaveBeenCalledWith(expect.stringContaining("rate_limited"));
@@ -218,14 +218,14 @@ test("keeps blocking and surfaces the real error when GitHub is unreachable duri
 
 test.each(["Rejected", "Plan Approved"])("generic ticket PATCH rejects raw %s transitions", async (status) => {
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
-  await adminApi(request({ status }), response, new URL("http://test/api/admin/tickets/ticket"), { user_id: "admin" });
+  await adminApi(request({ status }), response, new URL("http://test/api/admin/tickets/ticket"), { user_id: "admin", role: "admin" });
   expect(response.writeHead).toHaveBeenCalledWith(422, expect.any(Object));
   expect(response.end).toHaveBeenCalledWith(JSON.stringify({ error: "status must use its decision endpoint" }));
 });
 
 test("generic ticket PATCH cannot forge the worker-authorized queued status", async () => {
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
-  await adminApi(request({ status: "Execution Queued" }), response, new URL("http://test/api/admin/tickets/ticket"), { user_id: "admin" });
+  await adminApi(request({ status: "Execution Queued" }), response, new URL("http://test/api/admin/tickets/ticket"), { user_id: "admin", role: "admin" });
   expect(response.writeHead).toHaveBeenCalledWith(422, expect.any(Object));
   expect(response.end).toHaveBeenCalledWith(JSON.stringify({ error: "status cannot be set manually" }));
 });
@@ -258,7 +258,7 @@ test("execution queueing binds the job to the exact approved input snapshot", as
   }) };
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({}, "POST"), response, new URL("http://test/api/admin/tickets/ticket/execute"), { user_id: "admin" });
+  await adminApi(request({}, "POST"), response, new URL("http://test/api/admin/tickets/ticket/execute"), { user_id: "admin", role: "admin" });
 
   const queued = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO jobs"));
   expect(queued[1][2]).toMatchObject({ approved_input_snapshot_id: "approved-input-1" });
@@ -293,7 +293,7 @@ test("execution retries a failed ticket with the approved plan and input snapsho
   }) };
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({}, "POST"), response, new URL("http://test/api/admin/tickets/ticket/execute"), { user_id: "admin" });
+  await adminApi(request({}, "POST"), response, new URL("http://test/api/admin/tickets/ticket/execute"), { user_id: "admin", role: "admin" });
 
   const attempt = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO execution_attempts"));
   const queued = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO jobs"));
@@ -320,7 +320,7 @@ test("revision from execution failure clears approval and queues planning revisi
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
   await adminApi(request({ feedback: "Revise the failed execution plan." }, "POST"), response,
-    new URL("http://test/api/admin/plans/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/request-revision"), { user_id: "admin" });
+    new URL("http://test/api/admin/plans/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/request-revision"), { user_id: "admin", role: "admin" });
 
   const cleared = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("UPDATE tickets t SET status='Plan Revision Requested'"));
   const queued = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO jobs"));
@@ -347,7 +347,7 @@ test("repair queueing keeps the originating execution snapshot binding", async (
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
   await adminApi(request({ feedback: "Repair the failed validation." }, "POST"), response,
-    new URL("http://test/api/admin/runs/a1/repair"), { user_id: "admin" });
+    new URL("http://test/api/admin/runs/a1/repair"), { user_id: "admin", role: "admin" });
 
   const queued = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO jobs"));
   expect(queued[1][2]).toMatchObject({ approved_input_snapshot_id: "approved-input-1" });
@@ -373,7 +373,7 @@ test("repair queueing creates a new attempt linked to immutable source history",
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
   await adminApi(request({ feedback: "Repair the failed validation." }, "POST"), response,
-    new URL("http://test/api/admin/runs/a111/repair"), { user_id: "admin" });
+    new URL("http://test/api/admin/runs/a111/repair"), { user_id: "admin", role: "admin" });
 
   const inserted = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO execution_attempts"));
   expect(inserted[1]).toEqual(["ticket", "plan-version", 2, "source-attempt"]);
@@ -394,7 +394,7 @@ test("repair queueing rejects a source worktree already reclaimed by cleanup", a
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
   await expect(adminApi(request({ feedback: "Repair it." }, "POST"), response,
-    new URL("http://test/api/admin/runs/a111/repair"), { user_id: "admin" })).rejects.toMatchObject({ status: 409 });
+    new URL("http://test/api/admin/runs/a111/repair"), { user_id: "admin", role: "admin" })).rejects.toMatchObject({ status: 409 });
   expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("INSERT INTO execution_attempts"))).toBe(false);
 });
 
@@ -415,7 +415,7 @@ test.each([
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
   await adminApi(request({}, "POST"), response,
-    new URL(`http://test/api/admin/pull-requests/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/${action}`), { user_id: "admin" });
+    new URL(`http://test/api/admin/pull-requests/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/${action}`), { user_id: "admin", role: "admin" });
 
   expect(response.end).toHaveBeenCalledWith(JSON.stringify({ id: attemptId }));
   expect(transactionClient.query).toHaveBeenCalledWith(
@@ -445,7 +445,7 @@ test.each([
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
   await adminApi(request({}, "POST"), response,
-    new URL(`http://test/api/admin/pull-requests/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/${action}`), { user_id: "admin" });
+    new URL(`http://test/api/admin/pull-requests/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/${action}`), { user_id: "admin", role: "admin" });
 
   expect(response.end).toHaveBeenCalledWith(JSON.stringify({ id: activeId }));
   expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes(`INSERT INTO ${table}`))).toBe(false);
@@ -471,7 +471,7 @@ test.each([
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
   await adminApi(request({}, "POST"), response,
-    new URL(`http://test/api/admin/pull-requests/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/${action}`), { user_id: "admin" });
+    new URL(`http://test/api/admin/pull-requests/aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa/${action}`), { user_id: "admin", role: "admin" });
 
   const queued = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO jobs"));
   expect(queued[1][2]).toMatchObject({ [payloadKey]: "new-attempt" });
@@ -504,7 +504,7 @@ test.each([
   }) };
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({ feedback: "Repair it." }, "POST"), response, new URL(`http://test${path}`), { user_id: "admin" });
+  await adminApi(request({ feedback: "Repair it." }, "POST"), response, new URL(`http://test${path}`), { user_id: "admin", role: "admin" });
 
   const queued = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO jobs"));
   expect(queued[1][6]).toBe("source-job");
@@ -531,7 +531,7 @@ test.each([
   }) };
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await expect(adminApi(request({ feedback: "Repair it." }, "POST"), response, new URL(`http://test${path}`), { user_id: "admin" }))
+  await expect(adminApi(request({ feedback: "Repair it." }, "POST"), response, new URL(`http://test${path}`), { user_id: "admin", role: "admin" }))
     .rejects.toMatchObject({ status: 409 });
 });
 
@@ -547,7 +547,7 @@ test("publication retry requires a failed durable publication", async () => {
   }) };
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await expect(adminApi(request({}, "POST"), response, new URL("http://test/api/admin/runs/a1/retry"), { user_id: "admin" }))
+  await expect(adminApi(request({}, "POST"), response, new URL("http://test/api/admin/runs/a1/retry"), { user_id: "admin", role: "admin" }))
     .rejects.toMatchObject({ status: 409 });
   expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("INSERT INTO jobs"))).toBe(false);
 });
@@ -566,7 +566,7 @@ test("publication retry resets the same intent without changing its external key
   }) };
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({}, "POST"), response, new URL("http://test/api/admin/runs/a1/retry"), { user_id: "admin" });
+  await adminApi(request({}, "POST"), response, new URL("http://test/api/admin/runs/a1/retry"), { user_id: "admin", role: "admin" });
 
   const reset = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("UPDATE execution_publications"));
   expect(reset?.[0]).toContain("status='pending'");

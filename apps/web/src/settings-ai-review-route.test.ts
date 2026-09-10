@@ -33,7 +33,7 @@ test("saving a new model and reasoning level returns the persisted row, not an e
   });
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({ default_model: "haiku", default_reasoning_level: "low" }), response, new URL(path), { user_id: "admin" });
+  await adminApi(request({ default_model: "haiku", default_reasoning_level: "low" }), response, new URL(path), { user_id: "admin", role: "admin" });
 
   expect(response.writeHead).toHaveBeenCalledWith(200, expect.any(Object));
   expect(response.end).toHaveBeenCalledWith(JSON.stringify({ ok: true, settings: savedRow }));
@@ -51,7 +51,7 @@ test("toggling auto_review_enabled and auto_merge_on_approve in one request save
   });
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({ default_model: "haiku", default_reasoning_level: "low", auto_review_enabled: false, auto_merge_on_approve: true }), response, new URL(path), { user_id: "admin" });
+  await adminApi(request({ default_model: "haiku", default_reasoning_level: "low", auto_review_enabled: false, auto_merge_on_approve: true }), response, new URL(path), { user_id: "admin", role: "admin" });
 
   expect(response.writeHead).toHaveBeenCalledWith(200, expect.any(Object));
 });
@@ -65,7 +65,7 @@ test("a non-critical audit-log failure after a successful save still reports suc
   });
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({ default_model: "haiku", default_reasoning_level: "low" }), response, new URL(path), { user_id: "admin" });
+  await adminApi(request({ default_model: "haiku", default_reasoning_level: "low" }), response, new URL(path), { user_id: "admin", role: "admin" });
 
   // The bug this regresses: before the fix, the audit exception propagated uncaught
   // out of adminApi and the top-level error handler turned it into a 500 "internal error"
@@ -85,14 +85,14 @@ test("an invalid model is rejected before any write, and is not reported as 'int
   // by the thrown error's own `.status`, which errorEnvelope() (server.ts) reads at the
   // real HTTP layer — that layer isn't exercised by calling adminApi() directly, so this
   // test only needs to confirm the request is rejected before any DB write happens.
-  await expect(adminApi(request({ default_model: "not-a-real-model", default_reasoning_level: "low" }), response, new URL(path), { user_id: "admin" }))
+  await expect(adminApi(request({ default_model: "not-a-real-model", default_reasoning_level: "low" }), response, new URL(path), { user_id: "admin", role: "admin" }))
     .rejects.toMatchObject({ status: 422 });
   expect(pool.query).not.toHaveBeenCalled();
 });
 
 test("an invalid reasoning level is rejected before any write", async () => {
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
-  await expect(adminApi(request({ default_model: "haiku", default_reasoning_level: "not-a-real-level" }), response, new URL(path), { user_id: "admin" }))
+  await expect(adminApi(request({ default_model: "haiku", default_reasoning_level: "not-a-real-level" }), response, new URL(path), { user_id: "admin", role: "admin" }))
     .rejects.toMatchObject({ status: 422 });
   expect(pool.query).not.toHaveBeenCalled();
 });
@@ -104,7 +104,7 @@ test("a genuine persistence failure does not report success", async () => {
   });
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await expect(adminApi(request({ default_model: "haiku", default_reasoning_level: "low" }), response, new URL(path), { user_id: "admin" }))
+  await expect(adminApi(request({ default_model: "haiku", default_reasoning_level: "low" }), response, new URL(path), { user_id: "admin", role: "admin" }))
     .rejects.toThrow("simulated connection failure");
   expect(response.writeHead).not.toHaveBeenCalledWith(200, expect.any(Object));
   expect(pool.query.mock.calls.some(([sql]) => sql.includes("INSERT INTO audit_events"))).toBe(false); // never reached
@@ -112,7 +112,7 @@ test("a genuine persistence failure does not report success", async () => {
 
 test("auto_review_enabled must be a boolean", async () => {
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
-  await adminApi(request({ auto_review_enabled: "yes" }), response, new URL(path), { user_id: "admin" });
+  await adminApi(request({ auto_review_enabled: "yes" }), response, new URL(path), { user_id: "admin", role: "admin" });
   expect(response.writeHead).toHaveBeenCalledWith(400, expect.any(Object));
   expect(pool.query).not.toHaveBeenCalled();
 });

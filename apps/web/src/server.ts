@@ -1,6 +1,7 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { clientIpOf, contentSecurityNonce, csrfMatches, secureCookieAttributes, securityHeaders, validateWebRuntime } from "./security.ts";
+import { clientIpOf, contentSecurityNonce, secureCookieAttributes, securityHeaders, validateWebRuntime } from "./security.ts";
+import { assertAdmin, isSessionRole, requireAdmin, requireSession, sessionFor, type Session } from "./session.ts";
 import { realpath, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
@@ -11,6 +12,7 @@ import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
   allowlistMismatches, buildExecutionPrompt, checkPlanApprovalGate, derivePolicyStatus, ensurePolicySnapshot, enqueueJob, findAllowlistEntry, getPullRequestMergeSettings, getSystemAiSettings,
   globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError, ticketImageEvidence,
+  lockTicketActor,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
   unionSkills, validateAiSelection, providerForModel, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
@@ -39,6 +41,11 @@ import * as queuePage from "./pages/queue.ts";
 import * as auditPage from "./pages/audit.ts";
 import * as aiUsagePage from "./pages/ai-usage.ts";
 import * as operatePage from "./pages/operate.ts";
+import * as usersPage from "./pages/users.ts";
+import { reporterTicketsPage } from "./pages/reporter-tickets.ts";
+import { reporterPage } from "./reporter-ui.ts";
+import { createReporter, listReporters, resetReporterPassword, updateReporter } from "./reporter-users.ts";
+import { ticketApi } from "./ticket-api.ts";
 import { markLoginAttemptSucceeded, reserveLoginAttempt } from "./login-quota.ts";
 
 const port = Number(process.env.PORT ?? 3000);
@@ -144,6 +151,7 @@ export async function approvalInputsFor(ticket: any, version: any, client: any) 
     plan: { versionId: version.id, version: Number(version.version), contentHash: version.content_hash },
     ticket: {
       title: ticket.title, description: ticket.description, category: ticket.category, priority: ticket.priority,
+      sourceUrl: ticket.source_url,
       environment: ticket.environment, expectedBehavior: ticket.expected_behavior, actualBehavior: ticket.actual_behavior,
       reproductionSteps: ticket.reproduction_steps, customValues: ticket.custom_values_json ?? {},
       imageEvidence,
@@ -245,11 +253,6 @@ function effectiveTimestamp(value: unknown): Date {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });
   return date;
-}
-
-function cookieValue(request: IncomingMessage, name: string) {
-  const part = request.headers.cookie?.split(";").map((item) => item.trim()).find((item) => item.startsWith(`${name}=`));
-  return part?.slice(name.length + 1);
 }
 
 function ipOf(request: IncomingMessage) {
@@ -390,34 +393,6 @@ async function startAiReview(
   });
 }
 
-async function sessionFor(request: IncomingMessage) {
-  const token = cookieValue(request, "dcc_session");
-  if (!token) return null;
-  const result = await pool.query(
-    `SELECT s.*, u.username, u.role FROM admin_sessions s
-     JOIN users u ON u.id = s.user_id
-     WHERE s.token_hash = $1 AND s.invalidated_at IS NULL AND s.expires_at > now() AND u.is_active = true`,
-    [hash(token)],
-  );
-  return result.rows[0] ?? null;
-}
-
-async function requireAdmin(request: IncomingMessage, response: ServerResponse) {
-  const session = await sessionFor(request);
-  if (!session) {
-    json(response, 401, { error: "authentication required" });
-    return null;
-  }
-  if (!["GET", "HEAD", "OPTIONS"].includes(request.method ?? "GET")) {
-    const csrf = request.headers["x-csrf-token"];
-    if (typeof csrf !== "string" || !csrfMatches(csrf, session.csrf_token_hash)) {
-      json(response, 403, { error: "invalid CSRF token" });
-      return null;
-    }
-  }
-  return session;
-}
-
 async function login(request: IncomingMessage, response: ServerResponse) {
   const body = await bodyOf(request);
   const username = typeof body.username === "string" ? body.username : "";
@@ -432,7 +407,7 @@ async function login(request: IncomingMessage, response: ServerResponse) {
   }
   const user = (await pool.query("SELECT * FROM users WHERE username = $1 AND is_active = true", [username])).rows[0];
   const valid = await verifyPassword(user?.password_hash ?? dummyHash, password);
-  if (!user || !valid) {
+  if (!user || !valid || !isSessionRole(user.role)) {
     await audit({ actorType: "anonymous", action: "login.failed", entityType: "user", after: { success: false }, ip });
     return json(response, 401, { error: "invalid credentials" });
   }
@@ -446,11 +421,20 @@ async function login(request: IncomingMessage, response: ServerResponse) {
       [user.id, hash(token), hash(csrf), sessionHours],
     );
     await client.query("UPDATE users SET last_login_at = now(), updated_at = now() WHERE id = $1", [user.id]);
-    await audit({ actorType: "admin", actorId: user.id, action: "login", entityType: "user", entityId: user.id, after: { success: true }, ip }, client);
+    await audit({ actorType: user.role, actorId: user.id, action: "login", entityType: "user", entityId: user.id, after: { success: true }, ip }, client);
   });
   const sessionAttributes = [`dcc_session=${token}`, "HttpOnly", ...secureCookieAttributes(production), `Max-Age=${sessionHours * 3600}`];
   const csrfAttributes = [`dcc_csrf=${csrf}`, ...secureCookieAttributes(production), `Max-Age=${sessionHours * 3600}`];
   json(response, 200, { user: { id: user.id, username: user.username, role: user.role }, csrfToken: csrf }, { "set-cookie": [sessionAttributes.join("; "), csrfAttributes.join("; ")] });
+}
+
+async function logout(request: IncomingMessage, response: ServerResponse, session: Session) {
+  await pool.query("UPDATE admin_sessions SET invalidated_at = now() WHERE id = $1", [session.id]);
+  await audit({ actorType: session.role, actorId: session.user_id, action: "logout", entityType: "user", entityId: session.user_id, ip: ipOf(request) });
+  return json(response, 200, { ok: true }, { "set-cookie": [
+    ["dcc_session=", "HttpOnly", ...secureCookieAttributes(production), "Max-Age=0"].join("; "),
+    ["dcc_csrf=", ...secureCookieAttributes(production), "Max-Age=0"].join("; "),
+  ] });
 }
 
 async function publicForm(slug: string) {
@@ -888,6 +872,7 @@ export async function adminHtml(request: IncomingMessage, response: ServerRespon
     response.writeHead(302, { location: "/login" });
     return response.end();
   }
+  if (session.role !== "admin") return html(response, 403, "<h1>Forbidden</h1>", {}, nonce);
   const attachmentMatch = url.pathname.match(/^\/admin\/attachments\/([0-9a-f-]{36})$/);
   if (attachmentMatch && request.method === "GET") {
     const row = (await pool.query(
@@ -912,7 +897,7 @@ export async function adminHtml(request: IncomingMessage, response: ServerRespon
   }
   const metrics = await counts();
   const pageModules = [
-    dashboardPage, ticketsPage, runsPage, prsPage, mergePage, projectsPage, formsPage, promptsPage, skillsPage, notificationsPage, queuePage, auditPage, aiUsagePage, operatePage,
+    dashboardPage, ticketsPage, runsPage, prsPage, mergePage, projectsPage, usersPage, formsPage, promptsPage, skillsPage, notificationsPage, queuePage, auditPage, aiUsagePage, operatePage,
   ];
   for (const pageModule of pageModules) {
     const result = await pageModule.render(url, session, metrics);
@@ -922,14 +907,30 @@ export async function adminHtml(request: IncomingMessage, response: ServerRespon
 }
 
 export async function adminApi(request: IncomingMessage, response: ServerResponse, url: URL, session: any) {
-  if (request.method === "GET" && url.pathname === "/api/admin/session") return json(response, 200, { user: { id: session.user_id, username: session.username, role: session.role } });
-  if (request.method === "POST" && url.pathname === "/api/admin/logout") {
-    await pool.query("UPDATE admin_sessions SET invalidated_at = now() WHERE id = $1", [session.id]);
-    await audit({ actorType: "admin", actorId: session.user_id, action: "logout", entityType: "user", entityId: session.user_id, ip: ipOf(request) });
-    return json(response, 200, { ok: true }, { "set-cookie": [
-      ["dcc_session=", "HttpOnly", ...secureCookieAttributes(production), "Max-Age=0"].join("; "),
-      ["dcc_csrf=", ...secureCookieAttributes(production), "Max-Age=0"].join("; "),
-    ] });
+  assertAdmin(session);
+  if (url.pathname === "/api/admin/users" && request.method === "GET") {
+    return json(response, 200, { users: await listReporters(session) });
+  }
+  if (url.pathname === "/api/admin/users" && request.method === "POST") {
+    try { return json(response, 201, { user: await createReporter(session, await bodyOf(request)) }); }
+    catch (error: any) { return json(response, Number(error?.status) || 500, errorEnvelope(error)); }
+  }
+  const reporterPasswordMatch = url.pathname.match(/^\/api\/admin\/users\/([0-9a-f-]+)\/password$/i);
+  if (reporterPasswordMatch && request.method === "POST") {
+    try {
+      const body = await bodyOf(request);
+      if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || typeof body.password !== "string") {
+        throw Object.assign(new Error("password is required"), { status: 422 });
+      }
+      await resetReporterPassword(session, reporterPasswordMatch[1], body.password);
+      response.writeHead(204, securityHeaders());
+      return response.end();
+    } catch (error: any) { return json(response, Number(error?.status) || 500, errorEnvelope(error)); }
+  }
+  const reporterMatch = url.pathname.match(/^\/api\/admin\/users\/([0-9a-f-]+)$/i);
+  if (reporterMatch && request.method === "PATCH") {
+    try { return json(response, 200, { user: await updateReporter(session, reporterMatch[1], await bodyOf(request)) }); }
+    catch (error: any) { return json(response, Number(error?.status) || 500, errorEnvelope(error)); }
   }
   if (url.pathname === "/api/admin/pull-requests" && request.method === "GET") {
     const params: any[] = [];
@@ -2072,18 +2073,22 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (!project) return json(response, 404, { error: "Choose an existing project" });
     const priority = text("priority");
     if (priority && !["critical", "high", "medium", "low"].includes(priority)) return json(response, 400, { error: "Choose a valid priority" });
-    const number = (await pool.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
-    const ticket = (await pool.query(
-      `INSERT INTO tickets (ticket_number,project_id,title,description,category,priority,environment,expected_behavior,actual_behavior,reproduction_steps,status,custom_values_json)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'Triage','{}'::jsonb) RETURNING *`,
-      [`DCC-${number}`, projectId, title, description, text("category") || null, priority || null, text("environment") || null, text("expected_behavior") || null, text("actual_behavior") || null, text("reproduction_steps") || null],
-    )).rows[0];
-    await pool.query(
-      `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
-       VALUES ($1,NULL,'Triage','Created by admin',$2,$3)`,
-      [ticket.id, "admin", session.user_id],
-    );
-    await audit({ actorType: "admin", actorId: session.user_id, action: "ticket.create", entityType: "ticket", entityId: ticket.id, metadata: { title }, ip: ipOf(request) });
+    const ticket = await inTransaction(async (client) => {
+      await lockTicketActor(client, { userId: session.user_id, role: "admin" });
+      const number = (await client.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
+      const created = (await client.query(
+        `INSERT INTO tickets (ticket_number,project_id,title,description,category,priority,environment,expected_behavior,actual_behavior,reproduction_steps,status,custom_values_json,created_by_user_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'Triage','{}'::jsonb,$11) RETURNING *`,
+        [`DCC-${number}`, projectId, title, description, text("category") || null, priority || null, text("environment") || null, text("expected_behavior") || null, text("actual_behavior") || null, text("reproduction_steps") || null, session.user_id],
+      )).rows[0];
+      await client.query(
+        `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
+         VALUES ($1,NULL,'Triage','Created by admin',$2,$3)`,
+        [created.id, "admin", session.user_id],
+      );
+      await audit({ actorType: "admin", actorId: session.user_id, action: "ticket.create", entityType: "ticket", entityId: created.id, metadata: { title }, ip: ipOf(request) }, client);
+      return created;
+    });
     return json(response, 201, { ticket });
   }
   const notesMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/notes$/);
@@ -2811,6 +2816,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       "planning_reasoning_level", "execution_model", "execution_reasoning_level", "repair_model", "repair_reasoning_level"]);
     const normalized = entries.map(([key, value]) => (aiFields.has(key) && value === "" ? [key, null] : [key, value]) as [string, unknown]);
     const after = await inTransaction(async (client) => {
+      await lockTicketActor(client, { userId: session.user_id, role: "admin" });
       const before = (await client.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE", [ref])).rows[0];
       if (!before) return null;
       const updates = new Map(normalized);
@@ -2863,7 +2869,12 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         ? ["planning", "execution", "repair"] : ["planning"]) as AiPhase[]) {
         resolvedAiFor(candidate, project, phase, systemAi);
       }
-      const updated = (await client.query(`UPDATE tickets SET ${updatedEntries.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now() WHERE id=$1 RETURNING *`, [before.id, ...updatedEntries.map(([, value]) => value)])).rows[0];
+      const submissionFields = new Set(["title", "description", "category", "priority", "project_id", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", "custom_values_json"]);
+      const submissionChanged = updatedEntries.some(([key, value]) => submissionFields.has(key) && before[key] !== value
+        && (key !== "custom_values_json" || JSON.stringify(before[key] ?? {}) !== JSON.stringify(value ?? {})));
+      const updated = (await client.query(`UPDATE tickets SET ${updatedEntries.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now()
+        ${submissionChanged ? ",submission_revision=submission_revision+1,submission_updated_at=now()" : ""} WHERE id=$1 RETURNING *`, [before.id, ...updatedEntries.map(([, value]) => value)])).rows[0];
+      if (updates.has("source_url") && before.source_url !== updated.source_url) await client.query("SELECT mark_ticket_plan_potentially_stale($1)", [before.id]);
       if (body.status && body.status !== before.status) await client.query(
         `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id) VALUES ($1,$2,$3,'Manual admin update','admin',$4)`,
         [before.id, before.status, body.status, session.user_id],
@@ -2949,6 +2960,53 @@ export async function route(request: IncomingMessage, response: ServerResponse) 
     return response.end(styles);
   }
   if (request.method === "POST" && url.pathname === "/api/admin/login") return login(request, response);
+  if (request.method === "GET" && ["/api/session", "/api/admin/session"].includes(url.pathname)) {
+    const session = await requireSession(request, response);
+    if (session) return json(response, 200, { user: { id: session.user_id, username: session.username, role: session.role } });
+    return;
+  }
+  if (request.method === "POST" && ["/api/logout", "/api/admin/logout"].includes(url.pathname)) {
+    const session = await requireSession(request, response);
+    if (session) return logout(request, response, session);
+    return;
+  }
+  if ((url.pathname === "/tickets" || /^\/tickets\/[^/]+$/.test(url.pathname)) && request.method === "GET") {
+    const session = await sessionFor(request);
+    if (!session) { response.writeHead(302, { location: "/login" }); return response.end(); }
+    const page = await reporterTicketsPage.render(url, session);
+    return page ? html(response, page.status, reporterPage(page.title, page.body, session.username, nonce), {}, nonce) : html(response, 404, "<h1>Not found</h1>", {}, nonce);
+  }
+  const reporterAttachment = url.pathname.match(/^\/attachments\/([0-9a-f-]{36})$/);
+  if (reporterAttachment && request.method === "GET") {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    const membership = session.role === "admin" ? "" : "AND EXISTS(SELECT 1 FROM project_memberships pm WHERE pm.project_id=t.project_id AND pm.user_id=$2)";
+    const values = session.role === "admin" ? [reporterAttachment[1]] : [reporterAttachment[1], session.user_id];
+    const row = (await pool.query(
+      `SELECT ar.id artifact_id,ar.status artifact_status,ar.storage_root,ar.storage_path artifact_storage_path,ar.sha256 artifact_sha256,
+              u.storage_path upload_storage_path,u.original_name,u.media_type
+       FROM attachments a JOIN uploads u ON u.id=a.upload_id JOIN tickets t ON t.id=a.ticket_id
+       LEFT JOIN artifacts ar ON ar.upload_id=u.id
+       WHERE a.id=$1 AND t.submitter_deleted_at IS NULL ${membership}`,
+      values,
+    )).rows[0];
+    if (!row) return json(response, 404, { error: "attachment not found" });
+    try {
+      const content = await readUploadArtifact(row);
+      response.writeHead(200, {
+        "content-type": row.media_type,
+        "content-disposition": `${url.searchParams.has("download") ? "attachment" : "inline"}; filename="${(row.original_name ?? "attachment").replace(/[^\w. -]/g, "_")}"`,
+        ...securityHeaders(),
+      });
+      return response.end(content);
+    } catch { return json(response, 404, { error: "attachment not found" }); }
+  }
+  if (url.pathname === "/api/projects" || url.pathname === "/api/tickets" || url.pathname.startsWith("/api/tickets/")) {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    if (await ticketApi(request, response, url, { userId: session.user_id, role: session.role })) return;
+    return json(response, 404, { error: "not found" });
+  }
   const publicMatch = url.pathname.match(/^\/api\/public\/forms\/([^/]+)$/);
   if (publicMatch && request.method === "GET") {
     const form = await publicForm(decodeURIComponent(publicMatch[1]));

@@ -46,6 +46,7 @@ beforeEach(() => {
     { field_key: "screenshot", field_type: "image_upload", required: false, validation_json: {}, options_json: [] },
   ] });
   transactionClient = { query: vi.fn(async (sql: string) => {
+    if (sql.includes("FROM users") && sql.includes("FOR UPDATE")) return { rows: [{ role: "admin", is_active: true }] };
     if (sql.includes("FROM tickets") && sql.includes("FOR UPDATE")) return { rows: [ticket] };
     if (sql.includes("FROM projects")) return { rows: [{ id: "project-1", config_json: {} }] };
     if (sql.includes("FROM system_ai_settings")) return { rows: [{ default_model: "sonnet", default_reasoning_level: "high" }] };
@@ -58,7 +59,7 @@ test("PATCH submission validates a source URL against saved required values", as
   const result = response();
 
   await adminApi(request({ submission: { source_url: "https://example.test/only-url" } }), result,
-    new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin" });
+    new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin", role: "admin" });
 
   expect(result.writeHead).toHaveBeenCalledWith(200, expect.anything());
   const update = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("UPDATE tickets SET"));
@@ -70,7 +71,7 @@ test("PATCH submission saves allowed source values without changing attachments"
   const result = response();
 
   await adminApi(request({ submission: { source_url: "https://example.test/report", details: "Saved detail" } }), result,
-    new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin" });
+    new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin", role: "admin" });
 
   expect(result.writeHead).toHaveBeenCalledWith(200, expect.anything());
   expect(body(result).ticket.custom_values_json).toEqual({ retained: "value", details: "Saved detail" });
@@ -88,7 +89,7 @@ test("PATCH submission rejects invalid source URL and unknown keys", async () =>
   ] as const) {
     const result = response();
 
-    await adminApi(request({ submission }), result, new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin" });
+    await adminApi(request({ submission }), result, new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin", role: "admin" });
 
     expect(result.writeHead).toHaveBeenCalledWith(400, expect.anything());
     expect(body(result)).toEqual({ error: "validation failed", fields });
@@ -102,7 +103,7 @@ test("direct PATCH preserves nonempty bounded ticket title and description", asy
     [{ description: "" }, { description: "required" }],
   ] as const) {
     const result = response();
-    await adminApi(request(patch), result, new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin" });
+    await adminApi(request(patch), result, new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin", role: "admin" });
     expect(result.writeHead).toHaveBeenCalledWith(400, expect.anything());
     expect(body(result)).toEqual({ error: "validation failed", fields });
   }

@@ -42,7 +42,7 @@ test("creates an append-only model price with the derived provider and audit eve
   transactionClient.query.mockResolvedValueOnce({ rows: [price] }).mockResolvedValueOnce({ rows: [] });
   const res = response();
 
-  await adminApi(request(validPrice), res, new URL("http://test/api/admin/ai-model-prices"), { user_id: "admin" });
+  await adminApi(request(validPrice), res, new URL("http://test/api/admin/ai-model-prices"), { user_id: "admin", role: "admin" });
 
   const insert = transactionClient.query.mock.calls.find(([sql]: [unknown, ...unknown[]]) => String(sql).includes("INSERT INTO ai_model_prices"));
   expect(insert?.[1]).toEqual([
@@ -66,7 +66,7 @@ test.each([
 ])("rejects %s without inserting a price", async (body, _label) => {
   const res = response();
 
-  await expect(adminApi(request(body), res, new URL("http://test/api/admin/ai-model-prices"), { user_id: "admin" })).rejects.toMatchObject({ status: 422 });
+  await expect(adminApi(request(body), res, new URL("http://test/api/admin/ai-model-prices"), { user_id: "admin", role: "admin" })).rejects.toMatchObject({ status: 422 });
 
   expect(pool.query.mock.calls.some(([sql]) => String(sql).includes("INSERT INTO ai_model_prices"))).toBe(false);
 });
@@ -75,7 +75,7 @@ test("propagates an audit failure from the price transaction", async () => {
   const price = { id: "price-1", ...validPrice, provider: "deepseek", created_by: "admin" };
   transactionClient.query.mockResolvedValueOnce({ rows: [price] }).mockRejectedValueOnce(new Error("audit unavailable"));
 
-  await expect(adminApi(request(validPrice), response(), new URL("http://test/api/admin/ai-model-prices"), { user_id: "admin" })).rejects.toThrow("audit unavailable");
+  await expect(adminApi(request(validPrice), response(), new URL("http://test/api/admin/ai-model-prices"), { user_id: "admin", role: "admin" })).rejects.toThrow("audit unavailable");
 
   expect(inTransaction).toHaveBeenCalledTimes(1);
 });
@@ -84,7 +84,7 @@ test("does not expose mutation or deletion routes for model prices", async () =>
   const res = response();
 
   await adminApi({ method: "PATCH", headers: {}, socket: { remoteAddress: "127.0.0.1" } } as any, res,
-    new URL("http://test/api/admin/ai-model-prices/price-1"), { user_id: "admin" });
+    new URL("http://test/api/admin/ai-model-prices/price-1"), { user_id: "admin", role: "admin" });
 
   expect(res.writeHead).toHaveBeenCalledWith(404, expect.anything());
   expect(pool.query).not.toHaveBeenCalled();

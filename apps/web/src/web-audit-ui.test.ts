@@ -5,7 +5,7 @@ describe("admin shell", () => {
   it("offers sign out without claiming a worker is healthy", () => {
     const html = adminPage("/admin", "Dashboard", "", {}, "admin");
     expect(html).toContain('data-logout');
-    expect(html).toContain('fetch("/api/admin/logout"');
+    expect(html).toContain('fetch("/api/logout"');
     expect(html).not.toContain("worker-01 healthy");
   });
 });

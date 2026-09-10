@@ -449,7 +449,8 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       ...Object.entries(ticket.custom_values_json ?? {}).map(([key, value]) => [sourceLabels.get(key) ?? key.replaceAll("_", " "), value]),
     ].filter(([, value]) => value !== undefined && value !== null && value !== "" && (!Array.isArray(value) || value.length));
     const submissionDetails = submissionRows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd style="white-space:pre-wrap">${escapeHtml(Array.isArray(value) ? value.join(", ") : typeof value === "boolean" ? value ? "Yes" : "No" : value)}</dd>`).join("");
-    const overviewPanel = `<div class="grid two"><section class="card"><div class="card-head">Original submission <button class="button" type="button" data-edit-ticket>Edit</button></div><div class="card-body">
+    const deletionMarker = ticket.submitter_deleted_at ? `<p class="status warn"><strong>Deleted by submitter</strong> · ${new Date(ticket.submitter_deleted_at).toLocaleString("nl-NL")}</p>` : "";
+    const overviewPanel = `${deletionMarker}<div class="grid two"><section class="card"><div class="card-head">Original submission <button class="button" type="button" data-edit-ticket>Edit</button></div><div class="card-body">
       <div data-ticket-view><dl>${submissionDetails}</dl></div>
       <form data-ticket-edit-form data-ticket-id="${ticket.id}" hidden>
         ${formControls(sourceFields, projectsResult.rows, submissionValues, "admin")}

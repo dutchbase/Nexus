@@ -112,6 +112,19 @@ INSERT INTO tickets (id, ticket_number, form_id, project_id, title, description,
 ('00000000-0000-0000-0000-000000000135','DCC-135','00000000-0000-0000-0005-000000000002','00000000-0000-0000-0000-000000000001','Slow query on the applications overview','N+1 query pattern.','Performance','high','Planning','ops',NULL,NULL,'Production','Page loads under 500ms','Page takes 4s+',NULL,'{}'::jsonb,'basic','opus','xhigh',NULL,NULL,NULL,NULL,NULL,NULL,NULL, now() - interval '6 days', now() - interval '1 minute')
 ON CONFLICT (id) DO NOTHING;
 
+-- ============================================================ reporter access attachment
+INSERT INTO uploads (id, storage_path, original_name, media_type, size_bytes, form_id) VALUES
+('00000000-0000-0000-0008-000000000148','uploads/reporter-access.txt','reporter-access.txt','text/plain',28,'00000000-0000-0000-0005-000000000001')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO artifacts (id, storage_path, artifact_type, status, sha256, finalized_at, upload_id) VALUES
+('00000000-0000-0000-0009-000000000148','uploads/reporter-access.txt','upload','finalized','42a682b7af076bffd798b8bae07f0cdb6ac171def53756bf8cc57f5c69a555ac',now(),'00000000-0000-0000-0008-000000000148')
+ON CONFLICT (id) DO NOTHING;
+
+INSERT INTO attachments (id, ticket_id, upload_id, field_key) VALUES
+('00000000-0000-0000-000a-000000000148','00000000-0000-0000-0000-000000000148','00000000-0000-0000-0008-000000000148','evidence')
+ON CONFLICT (id) DO NOTHING;
+
 -- ============================================================ pull_requests
 INSERT INTO pull_requests (id, project_id, ticket_id, execution_attempt_id, provider, repository, number, url, title, author, state, review_state, check_state, is_draft, head_branch, base_branch, head_sha, merge_commit_sha, created_at_provider, updated_at_provider, merged_at, closed_at, last_synced_at, created_at, updated_at) VALUES
 (gen_random_uuid(),'00000000-0000-0000-0000-000000000002','00000000-0000-0000-0000-000000000140',NULL,'github','example-org/corporate-site',218,'http://127.0.0.1:8991/example-org/corporate-site/pull/218','Raise secondary button contrast to WCAG AA','dcc-worker','open','review_required','success',true,'feedback/DCC-140-button-contrast','main','a1b2c3d',NULL, now() - interval '3 hours', now() - interval '2 hours', NULL, NULL, now(), now(), now()),

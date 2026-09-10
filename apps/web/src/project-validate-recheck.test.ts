@@ -36,7 +36,7 @@ beforeEach(() => {
 
 async function recheck() {
   const response = newResponse();
-  await adminApi(request(), response, new URL(validatePath), { user_id: "admin" });
+  await adminApi(request(), response, new URL(validatePath), { user_id: "admin", role: "admin" });
   expect(response.writeHead).toHaveBeenCalledWith(202, expect.any(Object));
   const enqueue = pool.query.mock.calls.filter(([sql]) => String(sql).includes("INSERT INTO jobs")).at(-1);
   expect(enqueue).toBeDefined();

@@ -250,6 +250,17 @@ Use `printf %s`, not `echo` — the password is read from stdin, never
 accepted as a command-line argument (which would leak it into shell
 history / process listings). Failed logins are rate-limited per account.
 
+Administrators manage reporter accounts from **Users**. Each reporter gets a
+username, an initial password, and access to selected projects. Removing a
+project takes effect on the reporter's next request, including in an already
+open tab. Deactivating an account also invalidates its active sessions.
+
+Reporters land in a ticket-only portal. They can see and create tickets for
+assigned projects, edit the submission fields of any visible ticket, and
+delete tickets they created. Deletion hides the ticket and its attachments
+from reporters while retaining the admin record and workflow history marked
+**Deleted by submitter**.
+
 ## Running locally
 
 ```bash

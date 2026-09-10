@@ -30,7 +30,7 @@ integration("login route", () => {
 
   test("creates a normal session whose CSRF token authorizes logout", async () => {
     await pool.query(
-      "INSERT INTO users (username,password_hash) VALUES ('admin',$1)",
+      "INSERT INTO users (username,password_hash,role) VALUES ('admin',$1,'admin')",
       [await hashPassword("correct horse")],
     );
     const { route } = await import("./server.ts");

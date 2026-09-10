@@ -32,14 +32,14 @@ export function loginPage(nonce = "") {
         event.preventDefault();const form=new FormData(event.currentTarget);
         const response=await fetch("/api/admin/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(Object.fromEntries(form))});
         const body=await response.json();if(!response.ok){document.querySelector(".error").textContent=body.error;return}
-        sessionStorage.setItem("dccCsrf",body.csrfToken);location.href="/admin";
+        sessionStorage.setItem("dccCsrf",body.csrfToken);location.href=body.user.role==="admin"?"/admin":"/tickets";
       });`, nonce);
 }
 
 const groups = [
   ["Overview", [["Dashboard", "/admin", ""]]],
   ["Work", [["Tickets", "/admin/tickets", "tickets"], ["Runs", "/admin/runs", "runs"], ["Queue", "/admin/queue", "jobs"], ["Pull requests", "/admin/pull-requests", "prs"], ["Merge branches", "/admin/merge", ""]]],
-  ["Configure", [["Projects", "/admin/projects", "projects"], ["Forms", "/admin/forms", "forms"], ["Prompts", "/admin/prompts", ""], ["Skills", "/admin/skills", "skills"]]],
+  ["Configure", [["Projects", "/admin/projects", "projects"], ["Users", "/admin/users", ""], ["Forms", "/admin/forms", "forms"], ["Prompts", "/admin/prompts", ""], ["Skills", "/admin/skills", "skills"]]],
   ["Operate", [["Notifications", "/admin/notifications", "notifications"], ["AI usage", "/admin/ai-usage", ""], ["Audit log", "/admin/audit", ""], ["Settings", "/admin/settings", ""], ["System", "/admin/system", ""]]],
 ] as const;
 
@@ -69,12 +69,26 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
     <button class="scrim" type="button" data-scrim hidden aria-label="Close navigation menu"></button>
     <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}${path === "/admin/forms" || path.startsWith("/admin/forms/") ? `<a class="button" href="/f/website-feedback">Public form</a>` : ""}</header><main class="main">${body}</main></div></div>`, `
       const cc=document.cookie.match(/(?:^|;\\s*)dcc_csrf=([^;]*)/);if(cc)sessionStorage.setItem("dccCsrf",cc[1]);
-      document.querySelector("[data-logout]")?.addEventListener("click",async()=>{const response=await fetch("/api/admin/logout",{method:"POST",headers:{"x-csrf-token":sessionStorage.getItem("dccCsrf")||""}});if(response.ok){sessionStorage.clear();location.href="/login"}});
+      document.querySelector("[data-logout]")?.addEventListener("click",async()=>{const response=await fetch("/api/logout",{method:"POST",headers:{"x-csrf-token":sessionStorage.getItem("dccCsrf")||""}});if(response.ok){sessionStorage.clear();location.href="/login"}});
       const choice=localStorage.getItem("dccTheme")||"auto";
       const apply=(value)=>{const dark=value==="dark"||(value==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light";document.querySelectorAll("[data-theme-choice]").forEach(b=>b.classList.toggle("selected",b.dataset.themeChoice===value))};
       apply(choice);matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{if((localStorage.getItem("dccTheme")||"auto")==="auto")apply("auto")});
        document.querySelectorAll("[data-theme-choice]").forEach(b=>b.addEventListener("click",()=>{localStorage.setItem("dccTheme",b.dataset.themeChoice);apply(b.dataset.themeChoice)}));
-       document.querySelectorAll("[data-auto-submit]").forEach(el=>el.addEventListener("change",()=>el.form?.submit()));
+      document.querySelectorAll("[data-auto-submit]").forEach(el=>el.addEventListener("change",()=>el.form?.submit()));
+      ${path === "/admin/users" ? `
+        const csrf=sessionStorage.getItem("dccCsrf")||"",dialog=document.querySelector("[data-user-dialog]"),createForm=document.querySelector("[data-user-create]");
+        const projectIds=form=>[...form.querySelectorAll('[name="project_ids"]:checked')].map(input=>input.value);
+        const request=async(url,method,body)=>{const response=await fetch(url,{method,headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(body)});if(!response.ok)throw new Error((await response.json()).error||"Request failed");return response.status===204?null:response.json()};
+        document.querySelector("[data-add-user]")?.addEventListener("click",()=>dialog.showModal());
+        document.querySelector("[data-close-user-dialog]")?.addEventListener("click",()=>dialog.close());
+        createForm?.addEventListener("submit",async event=>{event.preventDefault();const button=createForm.querySelector('[type="submit"]'),error=createForm.querySelector("[data-user-error]"),data=new FormData(createForm);button.disabled=true;error.textContent="";try{await request("/api/admin/users","POST",{username:data.get("username"),password:data.get("password"),project_ids:projectIds(createForm)});createForm.reset();location.reload()}catch(failure){error.textContent=failure.message}finally{button.disabled=false}});
+        document.querySelectorAll("[data-user]").forEach(row=>{
+          const id=row.dataset.user,projectForm=row.querySelector("[data-project-form]");
+          projectForm?.addEventListener("submit",async event=>{event.preventDefault();const button=projectForm.querySelector('[type="submit"]'),error=projectForm.querySelector(".error");button.disabled=true;error.textContent="";try{await request("/api/admin/users/"+id,"PATCH",{project_ids:projectIds(projectForm)});location.reload()}catch(failure){error.textContent=failure.message}finally{button.disabled=false}});
+          row.querySelector("[data-reset-password]")?.addEventListener("click",async()=>{let password=prompt("Enter a new password (at least 12 characters)");if(password===null)return;try{await request("/api/admin/users/"+id+"/password","POST",{password});password=""}catch(failure){alert(failure.message)}});
+          row.querySelector("[data-toggle-active]")?.addEventListener("click",async event=>{const active=event.currentTarget.textContent.trim()==="Reactivate";if(!active&&!confirm("Deactivate this user and sign them out?"))return;try{await request("/api/admin/users/"+id,"PATCH",{is_active:active});location.reload()}catch(failure){alert(failure.message)}});
+        });
+      ` : ""}
       const sidebar=document.querySelector(".sidebar"),scrim=document.querySelector("[data-scrim]"),opener=document.querySelector("[data-nav-open]");
       const closeNav=()=>{sidebar.classList.remove("open");scrim.hidden=true;opener?.setAttribute("aria-expanded","false");opener?.focus()};
       opener?.addEventListener("click",()=>{sidebar.classList.add("open");scrim.hidden=false;opener.setAttribute("aria-expanded","true");sidebar.querySelector("a.nav-item")?.focus()});
@@ -1351,29 +1365,30 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
      `, nonce);
 }
 
-export function formControls(fields: any[], projects: any[], values: Record<string, any> = {}, mode: "public" | "admin" = "public") {
-  return fields.filter((field) => mode === "public" || !["static", "hidden", "image_upload"].includes(field.field_type)).map((field) => {
+export function formControls(fields: any[], projects: any[], values: Record<string, any> = {}, mode: "public" | "admin" | "reporter" = "public") {
+  return fields.filter((field) => mode === "public" || (!["static", "hidden", "image_upload"].includes(field.field_type) && (mode !== "reporter" || !["project_id", "submitter_name", "submitter_email"].includes(field.field_key)))).map((field) => {
     const name = escapeHtml(field.field_key);
     if (field.field_type === "static") return `<section class="form-help"><strong>${escapeHtml(field.label)}</strong>${field.description ? `<p>${escapeHtml(field.description)}</p>` : ""}</section>`;
     const required = field.required ? " required" : "";
     const type = field.field_type;
-    const value = mode === "admin" ? escapeHtml(values[field.field_key]) : "";
+    const hasValues = mode !== "public";
+    const value = hasValues ? escapeHtml(values[field.field_key]) : "";
     const helpId = `field-${name}-help`;
     const describedBy = field.description ? ` aria-describedby="${helpId}"` : "";
     const placeholder = field.placeholder ? ` placeholder="${escapeHtml(field.placeholder)}"` : "";
     const options = (Array.isArray(field.options_json) ? field.options_json : []).map((option: any) => {
       const optionValue = option.value ?? option;
-      const selected = mode === "admin" && (type === "multi_select" ? Array.isArray(values[field.field_key]) ? values[field.field_key] : values[field.field_key] == null ? [] : [values[field.field_key]] : [values[field.field_key]]).some((value: any) => String(optionValue) === String(value));
+      const selected = hasValues && (type === "multi_select" ? Array.isArray(values[field.field_key]) ? values[field.field_key] : values[field.field_key] == null ? [] : [values[field.field_key]] : [values[field.field_key]]).some((value: any) => String(optionValue) === String(value));
       return `<option value="${escapeHtml(optionValue)}"${selected ? " selected" : ""}>${escapeHtml(option.label ?? option)}</option>`;
     }).join("");
-    let control = `<input name="${name}"${placeholder}${describedBy}${mode === "admin" ? ` value="${value}"` : ""}${required}>`;
+    let control = `<input name="${name}"${placeholder}${describedBy}${hasValues ? ` value="${value}"` : ""}${required}>`;
     if (type === "long_text") control = `<textarea name="${name}" rows="5"${placeholder}${describedBy}${required}>${value}</textarea>`;
-    if (type === "email" || type === "url" || type === "number") control = `<input name="${name}" type="${type}"${placeholder}${describedBy}${type === "number" && Number.isFinite(field.validation_json?.min) ? ` min="${field.validation_json.min}"` : ""}${type === "number" && Number.isFinite(field.validation_json?.max) ? ` max="${field.validation_json.max}"` : ""}${mode === "admin" ? ` value="${value}"` : ""}${required}>`;
+    if (type === "email" || type === "url" || type === "number") control = `<input name="${name}" type="${type}"${placeholder}${describedBy}${type === "number" && Number.isFinite(field.validation_json?.min) ? ` min="${field.validation_json.min}"` : ""}${type === "number" && Number.isFinite(field.validation_json?.max) ? ` max="${field.validation_json.max}"` : ""}${hasValues ? ` value="${value}"` : ""}${required}>`;
     if (type.includes("selector") || ["dropdown", "radio", "multi_select"].includes(type)) {
-      const choices = type === "project_selector" ? projects.map((project) => `<option value="${project.id}"${mode === "admin" && String(project.id) === String(values[field.field_key]) ? " selected" : ""}>${escapeHtml(project.name)}</option>`).join("") : options;
+      const choices = type === "project_selector" ? projects.map((project) => `<option value="${project.id}"${hasValues && String(project.id) === String(values[field.field_key]) ? " selected" : ""}>${escapeHtml(project.name)}</option>`).join("") : options;
       control = `<select name="${name}"${describedBy}${type === "multi_select" ? " multiple" : ""}${required}>${choices}</select>`;
     }
-    if (type === "checkbox") control = `<input name="${name}" type="checkbox" value="true"${describedBy}${required}${mode === "admin" && values[field.field_key] ? " checked" : ""}>`;
+    if (type === "checkbox") control = `<input name="${name}" type="checkbox" value="true"${describedBy}${required}${hasValues && values[field.field_key] ? " checked" : ""}>`;
     if (type === "hidden") return `<label class="honeypot" aria-hidden="true">${escapeHtml(field.label)}<input name="${name}" tabindex="-1" autocomplete="off"></label>`;
     if (type === "image_upload") control = `<input name="${name}" type="file" accept="image/png,image/jpeg" multiple><small>PNG of JPG · max 5 bestanden · max 5 MB per bestand · geen SVG</small>`;
     return `<label class="field"><span>${escapeHtml(field.label)}</span>${control}${field.description ? `<small id="${helpId}">${escapeHtml(field.description)}</small>` : ""}</label>`;
