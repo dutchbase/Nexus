@@ -57,6 +57,15 @@ describe("ticket submission form controls", () => {
     expect(page).toContain('if(type==="checkbox")payload[key]=payload[key]==="true"');
   });
 
+  it("disables public image controls when form attachments are disabled", () => {
+    const page = publicFormPage({ slug: "feedback", title: "Feedback", description: "", settings_json: { allow_image_attachments: false } }, [
+      { field_key: "evidence", field_type: "image_upload", label: "Evidence" },
+    ], []);
+
+    expect(page).toContain("data-image-paste disabled");
+    expect(page).toContain("data-image-picker disabled");
+  });
+
   it("serializes a one-choice multi-select as an array", () => {
     const page = publicFormPage({ slug: "feedback", title: "Feedback", description: "" }, [
       { field_key: "labels", field_type: "multi_select", label: "Labels", options_json: ["alpha"] },

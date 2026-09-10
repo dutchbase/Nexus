@@ -1364,7 +1364,7 @@ export function formControls(fields: any[], projects: any[], values: Record<stri
 }
 
 export function publicFormPage(form: any, fields: any[], projects: any[], nonce = "") {
-  const controls = formControls(fields, projects, {}, "public", { uploadUrl: `/api/public/forms/${form.slug}/uploads` });
+  const controls = formControls(fields, projects, {}, "public", { uploadUrl: `/api/public/forms/${form.slug}/uploads`, disabled: form.settings_json?.allow_image_attachments === false });
   const fieldTypes = JSON.stringify(Object.fromEntries(fields.map((field) => [field.field_key, field.field_type])));
   return document(form.title, `<main class="public"><div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">${logoMark("N", "sm")}<span style="font-size:13px;font-weight:700;color:var(--text2)">Nexus</span></div><div class="url-strip">/f/${escapeHtml(form.slug)}</div><form class="card" id="public-form"><div class="card-body"><div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description)}</p><div class="grid one">${controls}</div><br><button class="button primary" type="submit">Melding versturen</button><p class="error" role="alert"></p></div></form></main>`, `
     ${imageUploadScript()}
