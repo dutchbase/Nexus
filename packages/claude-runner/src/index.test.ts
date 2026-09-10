@@ -630,12 +630,14 @@ for arg in "$@"; do
   if [ "$previous" = "--settings" ]; then settings="$arg"; fi
   previous="$arg"
 done
-node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1], JSON.stringify({ settings: JSON.parse(fs.readFileSync(process.argv[2], "utf8")), settingsFile: process.argv[2], configDir: process.env.CLAUDE_CONFIG_DIR, scrub: process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, autoMemory: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, publicationCredential: process.env.GITHUB_TOKEN }))' ${JSON.stringify(capture)} "$settings"
+node -e 'const fs=require("node:fs"); fs.writeFileSync(process.argv[1], JSON.stringify({ settings: JSON.parse(fs.readFileSync(process.argv[2], "utf8")), settingsFile: process.argv[2], configDir: process.env.CLAUDE_CONFIG_DIR, scrub: process.env.CLAUDE_CODE_SUBPROCESS_ENV_SCRUB, autoMemory: process.env.CLAUDE_CODE_DISABLE_AUTO_MEMORY, publicationCredential: process.env.GITHUB_TOKEN, jamCredential: process.env.DCC_JAM_TOKEN }))' ${JSON.stringify(capture)} "$settings"
 printf '%s' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}'
 `);
   await chmod(executable, 0o755);
   const previousGithubToken = process.env.GITHUB_TOKEN;
+  const previousJamToken = process.env.DCC_JAM_TOKEN;
   process.env.GITHUB_TOKEN = "publication-token";
+  process.env.DCC_JAM_TOKEN = "sentinel-jam-service-token";
   const seen: string[] = [];
   try {
     await expect(invokeExecutionClaude({
@@ -651,6 +653,8 @@ printf '%s' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}'
   } finally {
     if (previousGithubToken === undefined) delete process.env.GITHUB_TOKEN;
     else process.env.GITHUB_TOKEN = previousGithubToken;
+    if (previousJamToken === undefined) delete process.env.DCC_JAM_TOKEN;
+    else process.env.DCC_JAM_TOKEN = previousJamToken;
   }
   const captured = JSON.parse(await (await import("node:fs/promises")).readFile(capture, "utf8"));
   const settings = captured.settings;
@@ -660,6 +664,7 @@ printf '%s' '{"type":"result","usage":{"input_tokens":10,"output_tokens":20}}'
   expect(captured.scrub).toBe("1");
   expect(captured.autoMemory).toBe("1");
   expect(captured.publicationCredential).toBeUndefined();
+  expect(captured.jamCredential).toBeUndefined();
   expect(seen).toEqual(["result"]);
   await expect(access(captured.settingsFile)).rejects.toThrow();
   await expect(access(captured.configDir)).rejects.toThrow();

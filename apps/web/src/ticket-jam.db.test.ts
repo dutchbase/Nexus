@@ -9,6 +9,9 @@ const { pool } = await import("@dcc/database");
 const { migrate } = await import("../../../packages/database/src/migrate.ts");
 const { createSubmission, updateSubmission } = await import("./ticket-submissions.ts");
 const { adminApi, submitPublicForm } = await import("./server.ts");
+const { ticketApi } = await import("./ticket-api.ts");
+const { reporterTicketsPage } = await import("./pages/reporter-tickets.ts");
+const { validateWebRuntime } = await import("./security.ts");
 
 const request = (body: unknown, headers: Record<string, string> = {}) => ({
   method: "POST", headers, socket: { remoteAddress: "127.0.0.22" },
@@ -105,5 +108,39 @@ integration("ticket Jam source transactions", () => {
     expect([first.status, second.status]).toEqual([201, 201]);
     expect(second.body.ticket.id).toBe(first.body.ticket.id);
     expect(Number((await pool.query("SELECT count(*) FROM jobs WHERE type='ticket.jam_enrich' AND payload_json->>'ticket_id'=$1", [first.body.ticket.id])).rows[0].count)).toBe(1);
+  });
+
+  test("keeps the worker Jam token out of web, API, HTML, jobs, and audit records", async () => {
+    const sentinel = "sentinel-jam-service-token";
+    expect(() => validateWebRuntime({
+      NODE_ENV: "production", DCC_PROCESS_ROLE: "web", APP_BASE_URL: "https://nexus.test", DCC_JAM_TOKEN: sentinel,
+    })).toThrow("DCC_JAM_TOKEN");
+
+    const previous = process.env.DCC_JAM_TOKEN;
+    process.env.DCC_JAM_TOKEN = sentinel;
+    try {
+      const created = await createSubmission(actor(), {
+        project_id: projectId, title: "Secret boundary", description: "Capture", jam_url: "https://jam.dev/c/secret-boundary",
+      });
+      const apiResponse = response();
+      const apiRequest = request({}); apiRequest.method = "GET";
+      await ticketApi(apiRequest, apiResponse, new URL(`http://test/api/tickets/${created.ticket_number}`), actor());
+      const page = await reporterTicketsPage.render(new URL(`http://test/tickets/${created.ticket_number}`), { user_id: userId, role: "reporter" } as any);
+      const persisted = await pool.query(
+        `SELECT
+          (SELECT payload_json FROM jobs WHERE type='ticket.jam_enrich' AND payload_json->>'ticket_id'=$1 ORDER BY created_at DESC LIMIT 1) job,
+          (SELECT jsonb_agg(jsonb_build_object('before',before_json,'after',after_json,'metadata',metadata_json))
+             FROM audit_events WHERE entity_id=$1) audit`,
+        [created.id],
+      );
+      expect(apiResponse.status).toBe(200);
+      expect(page?.status).toBe(200);
+      for (const surface of [apiResponse.body, page?.body, persisted.rows[0]]) {
+        expect(JSON.stringify(surface)).not.toContain(sentinel);
+      }
+    } finally {
+      if (previous === undefined) delete process.env.DCC_JAM_TOKEN;
+      else process.env.DCC_JAM_TOKEN = previous;
+    }
   });
 });
