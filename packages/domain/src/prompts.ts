@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type pg from "pg";
 import { pool } from "@dcc/database";
 import type { AiInvocationPhase } from "./index.ts";
+import { renderJamEvidence, type JamEvidence } from "./ticket-jam.ts";
 
 export const globalPromptTypes = [
   "base", "planning", "plan-revision", "execution", "execution-repair", "validation", "pull-request", "pr-review", "pr-conflict-resolution", "follow-up-ticket",
@@ -48,6 +49,8 @@ export type PlanningPromptInputs = {
     reproductionSteps?: string | null;
     customValues?: PromptValue;
     imageEvidence?: PromptValue;
+    jamEvidence?: JamEvidence | null;
+    jamUrl?: string | null;
   };
   requiredPlanStructure: string;
   outputConstraints: string;
@@ -84,6 +87,9 @@ function ticketMarkdown(ticket: PlanningPromptInputs["ticket"]) {
   const evidence = ticket.imageEvidence === undefined || (Array.isArray(ticket.imageEvidence) && ticket.imageEvidence.length === 0)
     ? ""
     : `### Attached image evidence\n\n\`\`\`json\n${stableJson(ticket.imageEvidence)}\n\`\`\`\n\n`;
+  const jamEvidence = ticket.jamEvidence
+    ? `### Jam technical evidence\n\n${renderJamEvidence(ticket.jamEvidence)}\n\n`
+    : ticket.jamUrl ? `### Jam technical evidence\n\nSource: ${ticket.jamUrl}\n\nTechnical evidence is not available yet.\n\n` : "";
   const render = (fields: readonly (readonly [string, unknown])[]) =>
     fields
       .filter(([, value]) => value !== undefined && value !== null && value !== "")
@@ -96,7 +102,7 @@ function ticketMarkdown(ticket: PlanningPromptInputs["ticket"]) {
     "---\nBEGIN TICKET CONTENT\n---",
     primaryBody,
     "---",
-    custom + evidence + secondaryBody,
+    custom + evidence + jamEvidence + secondaryBody,
     "---\nEND TICKET CONTENT\n---",
   ]
     .filter((part) => part && part.trim())

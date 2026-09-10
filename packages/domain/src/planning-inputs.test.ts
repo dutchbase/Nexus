@@ -14,7 +14,7 @@ const ticket = {
   id: "ticket", project_id: project.id, title: "Unify planning inputs",
   description: "Preview and worker must agree.", category: "bug", priority: "high",
   environment: "production", expected_behavior: "Same prompt", actual_behavior: "Two prompts",
-  reproduction_steps: "Compare them", custom_values_json: {},
+  reproduction_steps: "Compare them", custom_values_json: {}, jam_url: "https://jam.dev/c/capture-a",
   default_model: "sonnet", default_reasoning_level: "high",
 };
 
@@ -55,6 +55,10 @@ const fixtureClient = {
     if (sql.includes("SELECT resolved.*")) return { rows: skillRows };
     if (sql.includes("FROM system_ai_settings")) return { rows: [{ default_model: "sonnet", default_reasoning_level: "high", planning_model: null, planning_reasoning_level: null, execution_model: null, execution_reasoning_level: null, repair_model: null, repair_reasoning_level: null }] };
     if (sql.includes("FROM attachments")) { evidenceQuery = sql; return { rows: evidence }; }
+    if (sql.includes("FROM ticket_jam_contexts")) return { rows: [{ data_json: {
+      sourceUrl: ticket.jam_url, device: { browser: "Test Browser" }, console: [{ level: "error", message: "save failed" }],
+      network: [], events: [], metadata: {}, unavailableSections: [], truncatedSections: [],
+    } }] };
     throw new Error(`unexpected query: ${sql}`);
   },
 };
@@ -98,6 +102,8 @@ test("the planning prompt carries the full plan structure and rendered templates
   expect(content).toContain("## 1. Summary");
   expect(content).toContain("## 17. Open Questions");
   expect(content).toContain("Each execution task must use a ### Task N: heading.");
+  expect(content).toContain("Untrusted ticket evidence from Jam");
+  expect(content).toContain("save failed");
 });
 
 test("finalized ticket image evidence is ordered and bound into planning inputs", async () => {

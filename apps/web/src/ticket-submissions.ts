@@ -1,17 +1,19 @@
 import { inTransaction, pool } from "@dcc/database";
 import {
   enqueueNotification, lockTicketActor, reporterTicket, requireProjectAccess, ticketForActor,
+  normalizeJamUrl, setTicketJamSource,
   type ReporterTicket, type SubmissionFields, type TicketActor,
 } from "@dcc/domain";
 import { standardFields } from "./pages/shared.ts";
 import { attachmentsForActor, checkedAttachmentSelection, setTicketAttachments, type AttachmentSelection } from "./ticket-uploads.ts";
 
-const columns = ["title", "description", "category", "priority", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps"] as const;
+const columns = ["title", "description", "category", "priority", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", "jam_url"] as const;
 const reserved = new Set([
   "id", "ticket_number", "form_id", "project_id", "status", "created_by_user_id", "submitter_name", "submitter_email",
   "submission_revision", "submission_updated_at", "submitter_deleted_at", "submitter_deleted_by", "custom_values_json",
   "ai_configuration_mode", "default_model", "default_reasoning_level", "planning_model", "planning_reasoning_level",
   "execution_model", "execution_reasoning_level", "repair_model", "repair_reasoning_level", "approved_plan_version_id",
+  "jam_context", "jam_import", "jam_state", "data_json", "generation", "error_code", "content_hash", "fetched_at",
   ...columns,
 ]);
 export const standardSubmissionFields = [
@@ -85,17 +87,19 @@ function validateField(field: any, value: unknown): string | undefined {
     if (Array.isArray(value) ? value.some((item) => !options.includes(item)) : !options.includes(value)) return "invalid option";
   }
   if (typeof value === "string") {
-    const max = Math.min(Number(field.validation_json?.max_length ?? (field.field_type === "long_text" ? 10000 : 500)), 10000);
+    const max = Math.min(Number(field.validation_json?.max_length ?? (field.field_type === "long_text" ? 10000 : field.field_type === "jam_link" ? 2048 : 500)), 10000);
     if (value.length > max) return "too long";
     if (field.field_type === "url") {
       try { if (!/^https?:$/.test(new URL(value).protocol)) return "invalid URL"; } catch { return "invalid URL"; }
     }
+    if (field.field_type === "jam_link") try { normalizeJamUrl(value); } catch { return "invalid Jam link"; }
   }
 }
 
 function validated(inputValue: unknown, fields: any[], partial: boolean) {
   const input = object(inputValue);
-  allowOnly(input, [...columns, "submission", "attachment_upload_ids", ...(partial ? ["submission_revision"] : ["project_id"])]);
+  const acceptedColumns = columns.filter((key) => key !== "jam_url" || fields.some((field) => field.field_key === "jam_url" && field.field_type === "jam_link"));
+  allowOnly(input, [...acceptedColumns, "submission", "attachment_upload_ids", ...(partial ? ["submission_revision"] : ["project_id"])]);
   const submission = input.submission === undefined ? {} : object(input.submission);
   const declared = new Map(editableFields(fields).map((field) => [field.field_key, field]));
   const errors: Record<string, string> = {};
@@ -152,7 +156,7 @@ export async function listSubmissions(actor: TicketActor, filter: { project_id?:
   if (filter.search) { params.push(`%${filter.search}%`); where.push(`(t.ticket_number ILIKE $${params.length} OR t.title ILIKE $${params.length} OR COALESCE(t.description,'') ILIKE $${params.length})`); }
   params.push(Math.max(0, Number.isInteger(filter.offset) ? Number(filter.offset) : 0));
   const rows = (await pool.query(
-    `SELECT t.*,p.name project_name FROM tickets t JOIN projects p ON p.id=t.project_id
+    `SELECT t.*,p.name project_name,j.state jam_state FROM tickets t JOIN projects p ON p.id=t.project_id LEFT JOIN ticket_jam_contexts j ON j.ticket_id=t.id
      WHERE ${where.join(" AND ")} ORDER BY t.submission_updated_at DESC,t.id DESC LIMIT 50 OFFSET $${params.length}`,
     params,
   )).rows;
@@ -179,12 +183,15 @@ export async function createSubmission(actor: TicketActor, inputValue: Submissio
     const number = (await client.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
     const ticket = (await client.query(
       `INSERT INTO tickets(ticket_number,project_id,title,description,category,priority,source_url,environment,
-       expected_behavior,actual_behavior,reproduction_steps,status,created_by_user_id,custom_values_json)
+      expected_behavior,actual_behavior,reproduction_steps,status,created_by_user_id,custom_values_json)
        VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) RETURNING *`,
       [`DCC-${number}`, input.project_id, String(input.title).trim(), String(input.description).trim(), input.category || null,
         input.priority || null, input.source_url || null, input.environment || null, input.expected_behavior || null,
         input.actual_behavior || null, input.reproduction_steps || null, actor.role === "reporter" ? "Submitted" : "Triage", actor.userId, submission],
     )).rows[0];
+    ticket.jam_url = normalizeJamUrl(input.jam_url)?.url ?? null;
+    if (ticket.jam_url) await setTicketJamSource(client, ticket.id, ticket.jam_url);
+    ticket.jam_state = ticket.jam_url ? "queued" : null;
     await setTicketAttachments(client, actor, ticket, selection, imageKeys);
     await client.query(
       `INSERT INTO ticket_status_history(ticket_id,previous_status,new_status,reason,actor_type,actor_id)
@@ -221,6 +228,8 @@ export async function updateSubmission(actor: TicketActor, ref: string, inputVal
       if (error && !(error === "invalid option" && JSON.stringify(value) === JSON.stringify(previous))) fullErrors[field.field_key] = error;
     }
     if (Object.keys(fullErrors).length) fail("validation failed", 422, fullErrors);
+    const canonicalJam = "jam_url" in input ? normalizeJamUrl(input.jam_url)?.url ?? null : before.jam_url ?? null;
+    candidate.jam_url = canonicalJam;
     const contentChanged = columns.some((key) => key in input && candidate[key] !== before[key]) || JSON.stringify(custom) !== JSON.stringify(before.custom_values_json ?? {});
     const currentAttachments = selection === undefined && !fields.some((field: any) => field.field_type === "image_upload" && field.required)
       ? [] : await attachmentsForActor(client, actor, before.id);
@@ -233,7 +242,7 @@ export async function updateSubmission(actor: TicketActor, ref: string, inputVal
     const attachmentChanged = selection !== undefined && Object.entries(selection).some(([key, ids]) =>
       JSON.stringify([...ids].sort()) !== JSON.stringify(currentAttachments.filter((a) => a.field_key === key).map((a) => a.upload_id).sort()));
     if (!contentChanged && !attachmentChanged) return reporterTicket({ ...before, attachments: await attachmentsForActor(client, actor, before.id) }, actor, fields);
-    const entries: [string, unknown][] = columns.filter((key) => key in input).map((key) => [key, candidate[key]]);
+    const entries: [string, unknown][] = columns.filter((key) => key in input && key !== "jam_url").map((key) => [key, candidate[key]]);
     entries.push(["custom_values_json", custom]);
     const updated = (await client.query(
       `UPDATE tickets SET ${entries.map(([key], index) => `${key}=$${index + 2}`).join(",")},
@@ -242,6 +251,7 @@ export async function updateSubmission(actor: TicketActor, ref: string, inputVal
       [before.id, ...entries.map(([, value]) => value), input.submission_revision],
     )).rows[0];
     if (!updated) fail("ticket changed since it was loaded", 409);
+    if ("jam_url" in input) { await setTicketJamSource(client, before.id, input.jam_url); updated.jam_url = canonicalJam; updated.jam_state = canonicalJam ? "queued" : null; }
     if (selection !== undefined) await setTicketAttachments(client, actor, before, selection, imageKeys);
     if (("source_url" in input && input.source_url !== before.source_url) || attachmentChanged) await client.query("SELECT mark_ticket_plan_potentially_stale($1)", [before.id]);
     await audit(client, actor, "ticket.submission.update", before.id, before, updated);

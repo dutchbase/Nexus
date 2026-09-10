@@ -238,7 +238,7 @@ function sessionAgents(input: PlanningInvocation, guardPath = input.guardPath ??
 
 const defaultSensitiveEnvironmentVariables = [
   "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN",
-  "GITHUB_TOKEN", "GH_TOKEN", "DATABASE_URL", "PGPASSWORD", "NPM_TOKEN",
+  "GITHUB_TOKEN", "GH_TOKEN", "DCC_JAM_TOKEN", "DATABASE_URL", "PGPASSWORD", "NPM_TOKEN",
   "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
 ];
 const sensitiveHomePaths = [

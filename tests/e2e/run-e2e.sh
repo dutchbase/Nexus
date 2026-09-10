@@ -39,6 +39,7 @@ STACK_MARKER="$(head -c16 /dev/urandom | od -An -tx1 | tr -d ' \n')"
 PG_CONTAINER="nexus-e2e-pg-${UID}-$$-${RANDOM}"
 PG_PORT="${E2E_PG_PORT:-$(free_port)}"
 export MOCK_GITHUB_PORT="${E2E_MOCK_GITHUB_PORT:-$(free_port)}"
+export MOCK_JAM_PORT="${E2E_MOCK_JAM_PORT:-$(free_port)}"
 export PORT="${E2E_WEB_PORT:-$(free_port)}"
 export APP_BASE_URL="http://127.0.0.1:${PORT}"
 export E2E_RUN_ROOT="$RUN_ROOT"
@@ -55,9 +56,11 @@ cp "$REPO_ROOT/config/projects.yaml" "$PROJECTS_CONFIG_PATH"
 
 PG_OWNED=false
 MOCK_GITHUB_PID=""
+MOCK_JAM_PID=""
 WEB_PID=""
 WORKER_PID=""
 MOCK_GITHUB_START=""
+MOCK_JAM_START=""
 WEB_START=""
 WORKER_START=""
 STACK_READY=false
@@ -65,7 +68,7 @@ STACK_READY=false
 write_keep_files() {
   local env_file="$RUN_ROOT/stack.env" cleanup_file="$RUN_ROOT/cleanup.sh"
   : > "$env_file"
-  for name in APP_BASE_URL DATABASE_URL E2E_ADMIN_USER E2E_ADMIN_PASSWORD MOCK_GITHUB_BASE_URL MOCK_GITHUB_LOG MOCK_CLAUDE_LOG MOCK_CLAUDE_SCENARIO_DIR E2E_RUN_ROOT E2E_ARTIFACT_DIR E2E_RESULTS_DIR DCC_DATA_DIR DCC_DATA_ROOT DCC_CONFIG_DIR PROJECTS_CONFIG_PATH DCC_PR_SYNC_MIN_AGE_SECONDS; do
+  for name in APP_BASE_URL DATABASE_URL E2E_ADMIN_USER E2E_ADMIN_PASSWORD MOCK_GITHUB_BASE_URL MOCK_GITHUB_LOG MOCK_CLAUDE_LOG MOCK_CLAUDE_SCENARIO_DIR E2E_RUN_ROOT E2E_ARTIFACT_DIR E2E_RESULTS_DIR DCC_DATA_DIR DCC_DATA_ROOT DCC_CONFIG_DIR PROJECTS_CONFIG_PATH DCC_PR_SYNC_MIN_AGE_SECONDS MOCK_JAM_PORT; do
     printf '%s=%q\n' "$name" "${!name}" >> "$env_file"
   done
   cat "$RUN_ROOT/fixtures.env" >> "$env_file"
@@ -82,6 +85,7 @@ stop_owned() {
   kill -KILL -- "-\$pid" 2>/dev/null || true
 }
 stop_owned "$MOCK_GITHUB_PID" "$MOCK_GITHUB_START"
+stop_owned "$MOCK_JAM_PID" "$MOCK_JAM_START"
 stop_owned "$WEB_PID" "$WEB_START"
 stop_owned "$WORKER_PID" "$WORKER_START"
 [ "\$(docker inspect --format '{{ index .Config.Labels "nexus.e2e.run" }}' "$PG_CONTAINER" 2>/dev/null)" = "$STACK_MARKER" ] && docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true
@@ -102,6 +106,7 @@ cleanup() {
   stop_group "$WORKER_PID"
   stop_group "$WEB_PID"
   stop_group "$MOCK_GITHUB_PID"
+  stop_group "$MOCK_JAM_PID"
   if [ "$PG_OWNED" = true ]; then docker rm -f "$PG_CONTAINER" >/dev/null 2>&1 || true; fi
   rm -rf -- "$RUN_ROOT"
   log "logs and Playwright artifacts: $ARTIFACT_ROOT"
@@ -155,6 +160,10 @@ setsid node "$SCRIPT_DIR/mock-github/server.js" > "$ARTIFACT_ROOT/mock-github.st
 MOCK_GITHUB_PID=$!
 MOCK_GITHUB_START="$(proc_start "$MOCK_GITHUB_PID")"
 
+setsid node "$SCRIPT_DIR/mock-jam/server.js" > "$ARTIFACT_ROOT/mock-jam.log" 2>&1 &
+MOCK_JAM_PID=$!
+MOCK_JAM_START="$(proc_start "$MOCK_JAM_PID")"
+
 chmod +x "$SCRIPT_DIR/mock-claude/claude"
 export PATH="$SCRIPT_DIR/mock-claude:$PATH"
 export MOCK_CLAUDE_LOG="$ARTIFACT_ROOT/mock-claude.log"
@@ -165,13 +174,13 @@ for name in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_USE_BEDROCK CLAUD
 while IFS= read -r name; do unset "$name"; done < <(compgen -A variable | grep '^DCC_NOTIFICATION_SECRET_' || true)
 export GITHUB_API_BASE_URL="$MOCK_GITHUB_BASE_URL"
 export GITHUB_TOKEN=mock-github-token
-unset NODE_ENV
+unset NODE_ENV DCC_JAM_TOKEN DCC_JAM_TEST_ENDPOINT
 
 log "starting web :$PORT and worker in owned process groups"
 DCC_PROCESS_ROLE=web setsid "${PNPM[@]}" --dir "$REPO_ROOT" --filter web exec tsx src/server.ts > "$ARTIFACT_ROOT/web.log" 2>&1 &
 WEB_PID=$!
 WEB_START="$(proc_start "$WEB_PID")"
-DCC_PROCESS_ROLE=worker setsid "${PNPM[@]}" --dir "$REPO_ROOT" --filter worker exec tsx src/worker.ts > "$ARTIFACT_ROOT/worker.log" 2>&1 &
+DCC_JAM_TOKEN=mock-worker-token DCC_JAM_TEST_ENDPOINT="http://127.0.0.1:${MOCK_JAM_PORT}/mcp" DCC_PROCESS_ROLE=worker setsid "${PNPM[@]}" --dir "$REPO_ROOT" --filter worker exec tsx src/worker.ts > "$ARTIFACT_ROOT/worker.log" 2>&1 &
 WORKER_PID=$!
 WORKER_START="$(proc_start "$WORKER_PID")"
 

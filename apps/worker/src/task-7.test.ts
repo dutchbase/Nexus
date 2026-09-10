@@ -73,7 +73,9 @@ describe("worker orchestration boundary", () => {
         attachment_id: "attachment-1", upload_id: "upload-1", artifact_id: "artifact-1",
         storage_root: "primary", storage_path: "uploads/artifact-1.png", original_name: "bug.png",
         media_type: "image/png", size_bytes: 12, sha256: "b".repeat(64),
-      }] },
+      }], jamUrl: "https://jam.dev/c/approved", jamEvidence: {
+        contentHash: "c".repeat(64), evidence: { sourceUrl: "https://jam.dev/c/approved", device: {}, console: [], network: [], events: [], metadata: {}, unavailableSections: [], truncatedSections: [] },
+      } },
       skills: [], policySources: [],
       project: { configVersion: 7, config: {
         enabled: true, slug: "approved-project", repositoryPath: "/approved/repo",
@@ -101,6 +103,7 @@ describe("worker orchestration boundary", () => {
       ai: { model: "approved-model", reasoning_level: "xhigh" },
       promptVersionIds: { "global.execution-repair": "prompt-v1" },
       imageEvidence: [{ artifact_id: "artifact-1", storage_path: "uploads/artifact-1.png", sha256: "b".repeat(64) }],
+      jamEvidence: { contentHash: "c".repeat(64) },
     });
     expect(result.content).toContain("Approved immutable repair prompt.");
     expect(result.content).toContain('"path": "."');

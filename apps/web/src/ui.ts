@@ -6,6 +6,9 @@ import type { TicketAttachment } from "@dcc/domain";
 
 const stylesPath = join(dirname(fileURLToPath(import.meta.url)), "design-tokens.css");
 export const styles = await readFile(stylesPath, "utf8");
+export const formFieldPresets: Record<string, Record<string, unknown>> = {
+  jam_link: { field_key: "jam_url", label: "Jam link", description: "Paste a Jam link to include technical details.", placeholder: "https://jam.dev/c/..." },
+};
 
 export function escapeHtml(value: unknown) {
   return String(value ?? "")
@@ -267,6 +270,11 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         document.querySelector("[data-reject-ticket]")?.addEventListener("click",()=>{if(confirm("Reject this ticket?"))ticketAction("reject")});
         document.querySelector("[data-cancel-ticket]")?.addEventListener("click",()=>{if(confirm("Cancel this ticket? In-flight work stops."))ticketAction("cancel")});
         document.querySelector("[data-archive-ticket]")?.addEventListener("click",()=>{if(confirm("Archive this ticket?"))ticketAction("archive")});
+        document.querySelector("[data-jam-retry]")?.addEventListener("click",async event=>{
+          const button=event.currentTarget;button.disabled=true;
+          const response=await fetch("/api/admin/tickets/"+encodeURIComponent(button.dataset.ticketId)+"/jam/retry",{method:"POST",headers:{"x-csrf-token":csrf}});
+          if(response.ok)location.reload();else{button.disabled=false;alert((await response.json()).error||"Jam import retry failed")}
+        });
         document.querySelector("[data-reopen-ticket]")?.addEventListener("click",()=>{if(confirm("Reopen this ticket? It will move to \\"Needs Information\\" so you can update the details before a new plan is generated."))ticketAction("reopen")});
         const notesForm=document.querySelector("[data-notes-form]");
         if(notesForm){notesForm.addEventListener("submit",async(event)=>{
@@ -604,6 +612,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         if(fieldsApp){
           const formId=fieldsApp.dataset.formId;
           const fieldTypes=JSON.parse(document.querySelector("[data-field-types]").textContent);
+          const fieldPresets=${JSON.stringify(formFieldPresets)};
           let fields=JSON.parse(document.querySelector("[data-fields-json]").textContent);
           let selected=null;
           const list=fieldsApp.querySelector("[data-field-list]"),settingsBox=fieldsApp.querySelector("[data-field-settings]"),errorBox=fieldsApp.querySelector("[data-fields-error]");
@@ -637,7 +646,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
               +'<p style="font-size:12px;color:var(--text3)">Every field is validated server-side. Uploads are image-only, renamed randomly and capped at 5 MB; SVG is rejected.</p>';
             settingsBox.querySelector("[data-f-label]").addEventListener("input",e=>{field.label=e.target.value;save();renderList()});
             settingsBox.querySelector("[data-f-key]").addEventListener("change",e=>{field.field_key=e.target.value;save();renderList()});
-            settingsBox.querySelector("[data-f-type]").addEventListener("change",e=>{field.field_type=e.target.value;save();renderSettings();renderList()});
+            settingsBox.querySelector("[data-f-type]").addEventListener("change",e=>{field.field_type=e.target.value;Object.assign(field,fieldPresets[field.field_type]||{});save();renderSettings();renderList()});
             settingsBox.querySelector("[data-f-required]").addEventListener("change",e=>{field.required=e.target.checked;save();renderList()});
             settingsBox.querySelector("[data-f-options]")?.addEventListener("change",e=>{field.options_json=e.target.value.split("\\n").map(v=>v.trim()).filter(Boolean);save()});
           }
@@ -1387,7 +1396,7 @@ export function formControls(fields: any[], projects: any[], values: Record<stri
     }).join("");
     let control = `<input name="${name}"${placeholder}${describedBy}${hasValues ? ` value="${value}"` : ""}${required}>`;
     if (type === "long_text") control = `<textarea name="${name}" rows="5"${placeholder}${describedBy}${required}>${value}</textarea>`;
-    if (type === "email" || type === "url" || type === "number") control = `<input name="${name}" type="${type}"${placeholder}${describedBy}${type === "number" && Number.isFinite(field.validation_json?.min) ? ` min="${field.validation_json.min}"` : ""}${type === "number" && Number.isFinite(field.validation_json?.max) ? ` max="${field.validation_json.max}"` : ""}${hasValues ? ` value="${value}"` : ""}${required}>`;
+    if (type === "email" || type === "url" || type === "jam_link" || type === "number") control = `<input name="${name}" type="${type === "jam_link" ? "url" : type}"${placeholder}${describedBy}${type === "number" && Number.isFinite(field.validation_json?.min) ? ` min="${field.validation_json.min}"` : ""}${type === "number" && Number.isFinite(field.validation_json?.max) ? ` max="${field.validation_json.max}"` : ""}${hasValues ? ` value="${value}"` : ""}${required}>`;
     if (type.includes("selector") || ["dropdown", "radio", "multi_select"].includes(type)) {
       const choices = type === "project_selector" ? projects.map((project) => `<option value="${project.id}"${hasValues && String(project.id) === String(values[field.field_key]) ? " selected" : ""}>${escapeHtml(project.name)}</option>`).join("") : options;
       control = `<select name="${name}"${describedBy}${type === "multi_select" ? " multiple" : ""}${required}>${choices}</select>`;

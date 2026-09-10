@@ -11,7 +11,7 @@ import {
 } from "@dcc/claude-runner";
 import { artifactDataRoot, finalizeArtifact, inTransaction, legacyArtifactDataRoot, pool, reconcileArtifactRoots, stageArtifact, type StagedArtifact } from "@dcc/database";
 import {
-  assertPrReviewDestination, buildPullRequestBody, checkPlanApprovalGate, materializeExecutionPlan,
+  assertPrReviewDestination, buildPullRequestBody, materializeExecutionPlan,
   claimJob, completeJob, enqueueNotification, importGithubPullRequests, resumePrReviewPublication,
   claimNotificationDelivery, completeNotificationDelivery, failNotificationDelivery, renewJobLease,
   renewNotificationDeliveryLease, recordWorkerHeartbeat, WORKER_HEARTBEAT_INTERVAL_MS,
@@ -39,12 +39,14 @@ import { formatFollowUpDescription } from "./follow-up-description.ts";
 import { formatPrAiReviewFailureLog } from "./pr-ai-review-failure-log.ts";
 import { persistConflictResolutionSuccess } from "./conflict-resolution-success.ts";
 import {
-  approvedExecutionInput, approvedPhaseSkills, approvedProjectInput, assertApprovedSkillSnapshot, assertExecutionPublicationGate, finalizeAiUsage, prReviewSnapshotInput, shouldRetryPrReview,
+  approvedExecutionInput, approvedPhaseSkills, approvedProjectInput, assertApprovedSkillSnapshot, assertExecutionPublicationGate, finalizeAiUsage, prReviewSnapshotInput, runQueuedExecutionBoundary, shouldRetryPrReview,
 } from "./worker-boundary.ts";
 import { runSessionCleanup } from "./security-maintenance.ts";
 import { expireUnclaimedUploads } from "./ticket-upload-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
 import { runProjectValidateJob } from "./project-validate-job.ts";
+import { failJamEnrichment, runJamEnrichment } from "./jam-enrichment.ts";
+import { JamImportError } from "./jam-client.ts";
 import { runWorkerTick, startWorkerServices } from "./worker-loop.ts";
 import {
   blockClaimedClaudeJob, failClaimedWorkflowJob, finalizeCancellableRun, finalizeExecutionInvocation, finalizePlanningCancellation, finalizePlanningFailure, finalizePlanningSuccess, initializeExecutionAttempt, initializePlanningAttempt, isPlanningCancellation, isWorkflowCancellation, LeaseLostError, observeRunCancellation, recoverExpiredWorkflowState, runLeaseFencedBatch, terminalizePrReview,
@@ -79,6 +81,7 @@ const RUN_HEARTBEAT_INTERVAL_MS = 15_000;
 // UI can show what a healthy worker is actually able to do.
 const workerCapabilities = [
   "project.validate",
+  "ticket.jam_enrich",
   ...planningJobTypes, ...executionJobTypes, ...publicationJobTypes,
   ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes,
   ...providerJobTypes,
@@ -510,14 +513,7 @@ async function runPlanning(job: any, lease: LeaseGuard) {
 
 async function runExecution(job: any, lease: LeaseGuard) {
   const repairing = job.type === "execution.repair";
-  const ticket = (await pool.query("SELECT * FROM tickets WHERE id=$1", [job.payload_json.ticket_id])).rows[0];
-  if (!ticket) throw new Error("ticket not found");
-  if (typeof job.payload_json.approved_input_snapshot_id !== "string") throw new Error("execution job has no approved input snapshot");
-  const gate = await checkPlanApprovalGate(pool, ticket.id, job.payload_json.approved_input_snapshot_id);
-  if ("code" in gate) throw new Error(`execution gate failed: ${gate.code}`);
-  if (gate.planVersion.id !== job.payload_json.plan_version_id) {
-    throw new Error("execution gate approved a different plan version");
-  }
+  return runQueuedExecutionBoundary(pool, job, async ({ ticket, gate }) => {
   const phase = repairing ? "repair" : "execution";
   // Resolve the engine and fail fast (before anything mutates DB state, e.g.
   // creating the worktree and marking the attempt 'executing') if the
@@ -928,6 +924,7 @@ async function runExecution(job: any, lease: LeaseGuard) {
     catch (error) { if (!(error instanceof LeaseLostError)) console.error(`execution log finalization failed: ${error instanceof Error ? error.message : String(error)}`); }
     await rm(temporary, { recursive: true, force: true });
   }
+  });
 }
 
 async function publishExecutionAttempt(input: {
@@ -1924,6 +1921,8 @@ async function handleClaimedJob(job: any) {
     try {
       if (job.type === "project.validate") {
         await runProjectValidateJob(job, pool, lease.assertOwned);
+      } else if (job.type === "ticket.jam_enrich") {
+        await runJamEnrichment(job, lease);
       } else if (providerJobTypes.includes(job.type as typeof providerJobTypes[number])) {
         await runProviderJob(job as Parameters<typeof runProviderJob>[0], pool, lease.assertOwned);
       } else if (publicationJobTypes.includes(job.type)) {
@@ -1944,7 +1943,10 @@ async function handleClaimedJob(job: any) {
       if (error instanceof LeaseLostError) return;
       if (error instanceof ClaudeAuthError) console.error(`${error.code}: ${error.message}`);
       else console.error(error instanceof Error ? error.message : "job failed");
-      if (isWorkflowCancellation((error as any)?.code, { stopping, leaseAborted: lease.signal.aborted })) {
+      if (job.type === "ticket.jam_enrich") {
+        const jamError = error instanceof JamImportError ? error : new JamImportError("unavailable", true);
+        await failJamEnrichment(job, workerId, jamError, lease);
+      } else if (isWorkflowCancellation((error as any)?.code, { stopping, leaseAborted: lease.signal.aborted })) {
         await lease.run(() => pool.query(
           `UPDATE jobs SET status='cancelled',completed_at=now(),claimed_by=NULL,lease_expires_at=NULL,updated_at=now()
            WHERE id=$1 AND status='running' AND claimed_by=$2 AND lease_expires_at > now()`,

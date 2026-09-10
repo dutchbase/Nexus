@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 
 const children = [
-  spawn("pnpm", ["--filter", "web", "dev"], { stdio: "inherit", env: { ...process.env, DCC_PROCESS_ROLE: "web" } }),
+  spawn("pnpm", ["--filter", "web", "dev"], { stdio: "inherit", env: { ...process.env, DCC_PROCESS_ROLE: "web", DCC_JAM_TOKEN: undefined } }),
   spawn("pnpm", ["--filter", "worker", "dev"], { stdio: "inherit", env: { ...process.env, DCC_PROCESS_ROLE: "worker" } }),
 ];
 
