@@ -67,7 +67,7 @@ integration("project reporters migration", () => {
       "INSERT INTO projects(slug,name,repository_path) VALUES ('legacy-project','Legacy project','/tmp/legacy-project') RETURNING id",
     )).rows[0];
     const ticket = (await pool.query(
-      "INSERT INTO tickets(ticket_number,project_id,title,status,created_at) VALUES ('DCC-legacy',$1,'Legacy ticket','Submitted','2020-01-02T03:04:05Z') RETURNING id,created_at",
+      "INSERT INTO tickets(ticket_number,project_id,title,status,created_at,updated_at) VALUES ('DCC-legacy',$1,'Legacy ticket','Submitted','2020-01-02T03:04:05Z','2020-01-03T04:05:06Z') RETURNING id,title,project_id,status,created_at,updated_at",
       [project.id],
     )).rows[0];
 
@@ -76,9 +76,14 @@ integration("project reporters migration", () => {
     expect((await pool.query("SELECT username,password_hash,role,is_active FROM users WHERE id=$1", [admin.id])).rows)
       .toEqual([{ username: "legacy-admin", password_hash: "hash", role: "admin", is_active: true }]);
     expect((await pool.query(
-      "SELECT created_by_user_id,submission_revision,submission_updated_at,submitter_deleted_at,submitter_deleted_by FROM tickets WHERE id=$1",
+      "SELECT title,project_id,status,created_at,updated_at,created_by_user_id,submission_revision,submission_updated_at,submitter_deleted_at,submitter_deleted_by FROM tickets WHERE id=$1",
       [ticket.id],
     )).rows).toEqual([{
+      title: ticket.title,
+      project_id: ticket.project_id,
+      status: ticket.status,
+      created_at: ticket.created_at,
+      updated_at: ticket.updated_at,
       created_by_user_id: null,
       submission_revision: 1,
       submission_updated_at: ticket.created_at,
