@@ -89,7 +89,7 @@ describe("upload", () => {
 describe("submitPublicForm upload claim", () => {
   test("atomically claims every finalized upload declared by an image field", async () => {
     pool.query.mockImplementation(async (sql: string) => {
-      if (sql.includes("FROM form_fields")) return { rows: [] };
+      if (sql.includes("FROM form_fields")) return { rows: [{ field_key: "screenshot", field_type: "image_upload", required: false, validation_json: {}, options_json: [] }] };
       if (sql.includes("FROM public_submission_attempts")) return { rows: [{ count: 0 }] };
       if (sql.includes("FROM projects")) return { rows: [{ id: "project-1" }] };
       return { rows: [] };
