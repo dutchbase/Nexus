@@ -51,7 +51,12 @@ describe("Jam trust boundary", () => {
     expect(() => bindJamToolArguments({ type: "object", properties: { jamId: { type: "string" }, id: { type: "number" } }, required: ["jamId"] }, "abc")).toThrow("unsupported_schema");
     expect(() => bindJamToolArguments({ type: "object", properties: { jamId: { type: "string" }, after: { type: "string" } }, required: ["jamId", "after"] }, "abc")).toThrow("unsupported_schema");
     expect(() => bindJamToolArguments({ type: "object", properties: { jamId: { type: "string" }, limit: { type: "string" } }, required: ["jamId"] }, "abc")).toThrow("unsupported_schema");
-    expect(() => bindJamToolArguments({ type: "object", properties: { jamId: { type: "string" }, after: { type: "number" } }, required: ["jamId"] }, "abc")).toThrow("unsupported_schema");
+    expect(() => bindJamToolArguments({ type: "object", properties: { jamId: { type: "string" }, after: { type: "boolean" } }, required: ["jamId"] }, "abc")).toThrow("unsupported_schema");
+  });
+
+  it("accepts a numeric pagination cursor, matching Jam's console/network/events tools", () => {
+    expect(bindJamToolArguments({ type: "object", properties: { jamId: { type: "string" }, after: { type: "number" } }, required: ["jamId"] }, "abc", { after: 42 }))
+      .toEqual({ jamId: "abc", after: 42 });
   });
 
   it("reduces recorded schemas to structural fields recursively", () => {
@@ -70,6 +75,20 @@ describe("Jam trust boundary", () => {
     const tool = { name: "getConsoleLogs", inputSchema: { type: "object", properties: { jamId: { type: "string" }, after: { type: "string" } }, required: ["jamId"] } } as Tool;
     expect(await callJamToolPages({ callTool } as unknown as Client, tool, "abc", new AbortController().signal)).toEqual({ items: [{ message: "one" }, { message: "one" }], truncated: true });
     expect(callTool).toHaveBeenCalledTimes(2);
+  });
+
+  it("pages through a numeric cursor, matching Jam's real console/network/events schema", async () => {
+    let call = 0;
+    const callTool = vi.fn(async (_request: unknown) => {
+      call += 1;
+      return call === 1
+        ? { structuredContent: { items: [{ message: "first" }], nextCursor: 5 } }
+        : { structuredContent: { items: [{ message: "second" }] } };
+    });
+    const tool = { name: "getConsoleLogs", inputSchema: { type: "object", properties: { jamId: { type: "string" }, limit: { type: "number" }, after: { type: "number" } }, required: ["jamId"] } } as Tool;
+    expect(await callJamToolPages({ callTool } as unknown as Client, tool, "abc", new AbortController().signal)).toEqual({ items: [{ message: "first" }, { message: "second" }], truncated: false });
+    expect(callTool).toHaveBeenCalledTimes(2);
+    expect((callTool.mock.calls[1][0] as any).arguments).toEqual({ jamId: "abc", limit: 100, after: 5 });
   });
 
   it("allows only the fixed endpoint and rejects redirects", async () => {

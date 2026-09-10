@@ -87,10 +87,10 @@ function capEvidence(evidence: JamEvidence): JamEvidence {
   return result;
 }
 
-export function bindJamToolArguments(schema: unknown, id: string, options: { limit?: number; after?: string } = {}): Record<string, unknown> {
+export function bindJamToolArguments(schema: unknown, id: string, options: { limit?: number; after?: string | number } = {}): Record<string, unknown> {
   const shape = asRecord(schema), properties = asRecord(shape.properties), required = Array.isArray(shape.required) ? shape.required : [];
   const selectors = ["jamId", "id", "jam_id"].filter((name) => properties[name] !== undefined);
-  if (selectors.length !== 1 || asRecord(properties[selectors[0]]).type !== "string" || required.some((name) => name !== selectors[0]) || (properties.limit && !["number", "integer"].includes(asRecord(properties.limit).type)) || (properties.after && asRecord(properties.after).type !== "string")) throw new JamImportError("unsupported_schema", false);
+  if (selectors.length !== 1 || asRecord(properties[selectors[0]]).type !== "string" || required.some((name) => name !== selectors[0]) || (properties.limit && !["number", "integer"].includes(asRecord(properties.limit).type)) || (properties.after && !["string", "number", "integer"].includes(asRecord(properties.after).type))) throw new JamImportError("unsupported_schema", false);
   const selector = selectors[0];
   return { [selector]: id, ...(options.limit !== undefined && properties.limit ? { limit: options.limit } : {}), ...(options.after !== undefined && properties.after ? { after: options.after } : {}) };
 }
@@ -155,16 +155,20 @@ export async function fetchJamContext(source: JamSource, options: { token: strin
   finally { await client.close().catch(() => undefined); }
 }
 
+function pageCursor(value: unknown): string | number | undefined {
+  return typeof value === "string" || typeof value === "number" ? value : undefined;
+}
 export async function callJamToolPages(client: Pick<Client, "callTool">, tool: Tool, id: string, signal: AbortSignal): Promise<unknown> {
-  const collected: unknown[] = []; let after: string | undefined; const seen = new Set<string>(); let truncated = false;
+  const collected: unknown[] = []; let after: string | number | undefined; const seen = new Set<string>(); let truncated = false;
   for (let page = 0; page < 5; page++) {
     const result = parseJamToolResult(await client.callTool({ name: tool.name, arguments: bindJamToolArguments(tool.inputSchema, id, { limit: 100, after }) }, { signal, timeout: CALL_TIMEOUT, maxTotalTimeout: CALL_TIMEOUT, toolDefinition: tool }));
     const record = asRecord(result), items = Array.isArray(record.items) ? record.items : Array.isArray(record.data) ? record.data : undefined;
     if (!items) return result; collected.push(...items.slice(0, 500 - collected.length));
-    const cursor = typeof record.nextCursor === "string" ? record.nextCursor : typeof record.next_cursor === "string" ? record.next_cursor : undefined;
-    if (!cursor) break;
-    if (seen.has(cursor) || collected.length >= 500 || page === 4) { truncated = true; break; }
-    seen.add(cursor); after = cursor;
+    const cursor = pageCursor(record.nextCursor) ?? pageCursor(record.next_cursor);
+    if (cursor === undefined) break;
+    const cursorKey = String(cursor);
+    if (seen.has(cursorKey) || collected.length >= 500 || page === 4) { truncated = true; break; }
+    seen.add(cursorKey); after = cursor;
   }
   return { items: collected, truncated };
 }
