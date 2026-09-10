@@ -50,6 +50,10 @@ test("preview and approval build the same canonical input hash through their tra
     storage_root: "legacy", storage_path: "uploads/form/upload/screenshot.png", original_name: "screenshot.png",
     media_type: "image/png", size_bytes: 123, sha256: "b".repeat(64),
   }];
+  let jamContext: any = {
+    source_url: "https://jam.dev/c/approved", state: "ready", content_hash: "d".repeat(64), fetched_at: "2026-01-01T00:00:00Z",
+    data_json: { sourceUrl: "https://jam.dev/c/approved", device: {}, console: [], network: [], events: [], metadata: {}, unavailableSections: [], truncatedSections: [] },
+  };
   const client = { query: async (sql: string) => {
     if (sql.includes("FROM projects")) return { rows: [project] };
     if (sql.includes("FROM prompt_files")) return { rows: prompts };
@@ -60,6 +64,7 @@ test("preview and approval build the same canonical input hash through their tra
     }] };
     if (sql.includes("FROM project_skills ps")) return { rows: [] };
     if (sql.includes("FROM attachments")) return { rows: imageEvidence };
+    if (sql.includes("FROM ticket_jam_contexts")) return { rows: jamContext ? [jamContext] : [] };
     if (sql.includes("FROM system_ai_settings")) return { rows: [{
       default_model: null, default_reasoning_level: null,
       planning_model: null, planning_reasoning_level: null,
@@ -70,7 +75,8 @@ test("preview and approval build the same canonical input hash through their tra
   } };
   const ticket = {
     id: "ticket", project_id: project.id, title: "Fix approvals", description: "Make hashes equal.",
-    category: "bug", priority: "high", environment: "production", source_url: null as string | null, custom_values_json: {},
+    category: "bug", priority: "high", environment: "production", source_url: null as string | null,
+    jam_url: "https://jam.dev/c/approved", custom_values_json: {},
     default_model: "sonnet", default_reasoning_level: "high",
   };
   const version = { id: "plan-version", version: 2, content_hash: "a".repeat(64), content_markdown: "Do the work." };
@@ -84,6 +90,12 @@ test("preview and approval build the same canonical input hash through their tra
     slug: "validator", configuration: { validation_commands: ["pnpm test"] },
   })]);
   expect((preview.approvedInput.ticket as any).imageEvidence).toEqual(imageEvidence);
+  expect((preview.approvedInput.ticket as any).jamEvidence).toEqual({ contentHash: "d".repeat(64), evidence: jamContext.data_json });
+  jamContext = { ...jamContext, fetched_at: "2026-02-01T00:00:00Z" };
+  expect((await approvalInputsFor(ticket, version, client)).inputHash).toBe(preview.inputHash);
+  jamContext = { ...jamContext, content_hash: "e".repeat(64), data_json: { ...jamContext.data_json, console: [{ level: "error", message: "changed" }] } };
+  expect((await approvalInputsFor(ticket, version, client)).inputHash).not.toBe(preview.inputHash);
+  jamContext = { ...jamContext, content_hash: "d".repeat(64), data_json: (preview.approvedInput.ticket as any).jamEvidence.evidence };
   skillConfiguration = { validation_commands: ["pnpm lint"] };
   expect((await approvalInputsFor(ticket, version, client)).inputHash).not.toBe(preview.inputHash);
   imageEvidence = [{ ...imageEvidence[0], sha256: "b".repeat(64) }];

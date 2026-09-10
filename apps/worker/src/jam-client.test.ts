@@ -1,10 +1,15 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SdkError, SdkErrorCode, type Client, type Tool } from "@modelcontextprotocol/client";
-import { JamImportError, bindJamToolArguments, boundedJamFetch, callJamToolPages, fetchJamContext, normalizeJamEvidence, parseJamToolResult, redactJamValue, safeJamSchema, setJamFetchForTests } from "./jam-client.ts";
+import { JamImportError, bindJamToolArguments, boundedJamFetch, callJamToolPages, fetchJamContext, jamEndpoint, normalizeJamEvidence, parseJamToolResult, redactJamValue, safeJamSchema, setJamFetchForTests } from "./jam-client.ts";
 
 afterEach(() => setJamFetchForTests(fetch));
 
 describe("Jam trust boundary", () => {
+  it("allows only a non-production loopback test endpoint", () => {
+    expect(jamEndpoint({ NODE_ENV: "test", DCC_JAM_TEST_ENDPOINT: "http://127.0.0.1:4321/mcp" } as any)).toBe("http://127.0.0.1:4321/mcp");
+    expect(jamEndpoint({ NODE_ENV: "production", DCC_JAM_TEST_ENDPOINT: "http://127.0.0.1:4321/mcp" } as any)).toBe("https://mcp.jam.dev/mcp");
+    expect(() => jamEndpoint({ NODE_ENV: "test", DCC_JAM_TEST_ENDPOINT: "https://evil.test/mcp" } as any)).toThrow("access_denied");
+  });
   it("recursively redacts secrets and request material", () => {
     const value = redactJamValue({ authorization: "Bearer secret-one", cookie: "session=secret-two", nested: { password: "secret-three", access_token: "secret-four" }, requestBody: "private form input", safe: "render failed; token=plain-one apiKey: 'plain-two' password:plain-three cookie=plain-four auth:plain-five refresh_token=plain-six client_secret:plain-seven access-token=plain-eight clientSecret:plain-nine REFRESHTOKEN:plain-ten" });
     expect(JSON.stringify(value)).not.toMatch(/secret-one|secret-two|secret-three|secret-four|private form input/);

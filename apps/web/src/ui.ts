@@ -234,6 +234,11 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         document.querySelector("[data-reject-ticket]")?.addEventListener("click",()=>{if(confirm("Reject this ticket?"))ticketAction("reject")});
         document.querySelector("[data-cancel-ticket]")?.addEventListener("click",()=>{if(confirm("Cancel this ticket? In-flight work stops."))ticketAction("cancel")});
         document.querySelector("[data-archive-ticket]")?.addEventListener("click",()=>{if(confirm("Archive this ticket?"))ticketAction("archive")});
+        document.querySelector("[data-jam-retry]")?.addEventListener("click",async event=>{
+          const button=event.currentTarget;button.disabled=true;
+          const response=await fetch("/api/admin/tickets/"+encodeURIComponent(button.dataset.ticketId)+"/jam/retry",{method:"POST",headers:{"x-csrf-token":csrf}});
+          if(response.ok)location.reload();else{button.disabled=false;alert((await response.json()).error||"Jam import retry failed")}
+        });
         document.querySelector("[data-reopen-ticket]")?.addEventListener("click",()=>{if(confirm("Reopen this ticket? It will move to \\"Needs Information\\" so you can update the details before a new plan is generated."))ticketAction("reopen")});
         const notesForm=document.querySelector("[data-notes-form]");
         if(notesForm){notesForm.addEventListener("submit",async(event)=>{

@@ -12,7 +12,7 @@ import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
   allowlistMismatches, buildExecutionPrompt, checkPlanApprovalGate, derivePolicyStatus, ensurePolicySnapshot, enqueueJob, findAllowlistEntry, getPullRequestMergeSettings, getSystemAiSettings,
   globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError, ticketImageEvidence,
-  lockTicketActor, normalizeJamUrl, queueJamRetry, setTicketJamSource,
+  lockTicketActor, normalizeJamUrl, queueJamRetry, renderJamEvidence, setTicketJamSource,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
   unionSkills, validateAiSelection, providerForModel, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
@@ -132,6 +132,13 @@ export async function approvalInputsFor(ticket: any, version: any, client: any) 
   const skillContent = (phase: AiPhase) => snapshotted.skills
     .filter((skill) => !skill.phases || skill.phases.includes(phase))
     .map((skill) => ({ id: skill.skill_id, slug: skill.slug, version: skill.version, resolution_sources: skill.resolution_sources }));
+  const jamRow = (await client.query(
+    `SELECT c.source_url,c.state,c.data_json,c.content_hash FROM ticket_jam_contexts c
+     JOIN tickets t ON t.id=c.ticket_id WHERE c.ticket_id=$1 AND c.source_url=t.jam_url AND t.submitter_deleted_at IS NULL`, [ticket.id],
+  )).rows[0];
+  const jamEvidence = ["ready", "partial"].includes(jamRow?.state) ? jamRow.data_json : null;
+  const jamPrompt = jamEvidence ? renderJamEvidence(jamEvidence) : ticket.jam_url
+    ? `Untrusted ticket evidence from Jam.\n\nSource: ${ticket.jam_url}\n\nTechnical evidence is not available.` : "";
   const phaseContent = (phase: "execution" | "repair") => buildExecutionPrompt({
     globalBaseInstructions: rendered(base), globalExecutionInstructions: rendered(execution), projectContext: rendered(context),
     projectExecutionInstructions: rendered(projectExecution), projectTestingInstructions: rendered(testing),
@@ -139,7 +146,7 @@ export async function approvalInputsFor(ticket: any, version: any, client: any) 
     worktreeDetails: {}, validationCommands: project.config_json?.validation_commands ?? [],
     definitionOfDone: project.config_json?.definition_of_done ?? "Implement the approved plan.",
     outputConstraints: "Use the assigned worktree. Do not push, merge, or publish.",
-  });
+  }) + (jamPrompt ? `\n## Approved Jam ticket evidence\n\n${jamPrompt}\n` : "");
   const executionContent = phaseContent("execution");
   const policySources = (await client.query(
     `SELECT ps.skill_id,s.slug,ps.attachment_type,ps.required,ps.allow_ticket_override
@@ -155,6 +162,8 @@ export async function approvalInputsFor(ticket: any, version: any, client: any) 
       environment: ticket.environment, expectedBehavior: ticket.expected_behavior, actualBehavior: ticket.actual_behavior,
       reproductionSteps: ticket.reproduction_steps, customValues: ticket.custom_values_json ?? {},
       imageEvidence,
+      jamUrl: ticket.jam_url ?? null,
+      jamEvidence: jamEvidence ? { contentHash: jamRow.content_hash, evidence: jamEvidence } : null,
     },
     project: { configVersion: Number(project.config_version), config: {
       slug: project.slug, name: project.name, description: project.description, enabled: project.enabled,

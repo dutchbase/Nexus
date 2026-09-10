@@ -145,6 +145,7 @@ export function approvedExecutionInput(snapshot: {
     project,
     ai: { model: ai.model, reasoning_level: ai.reasoningLevel },
     imageEvidence: Array.isArray(material.ticket?.imageEvidence) ? material.ticket.imageEvidence : [],
+    jamEvidence: material.ticket?.jamEvidence ?? null,
     promptVersionIds: Object.fromEntries(prompt.provenance.map((source: any) => [`${source.scope}.${source.promptType}`, source.versionId])),
     content: `${prompt.content.trimEnd()}\n\n${runtime.join("\n\n")}\n`,
   };

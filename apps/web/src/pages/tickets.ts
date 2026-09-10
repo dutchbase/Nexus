@@ -348,7 +348,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       [decodeURIComponent(ticketMatch[1])],
     )).rows[0];
     if (!ticket) return { status: 404, title: "Ticket not found", body: "<h1>Ticket not found</h1>" };
-    const [notesResult, historyResult, skillsResult, notificationsResult, runsResult, prsResult, planVersionsResult, attachmentsResult, projectsResult, sourceFields] = await Promise.all([
+    const [notesResult, historyResult, skillsResult, notificationsResult, runsResult, prsResult, planVersionsResult, attachmentsResult, projectsResult, sourceFields, jamResult] = await Promise.all([
       pool.query("SELECT n.*,u.username FROM ticket_notes n LEFT JOIN users u ON u.id=n.author_id WHERE ticket_id=$1 ORDER BY n.created_at DESC", [ticket.id]),
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at DESC", [ticket.id]),
       pool.query(
@@ -384,6 +384,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       pool.query("SELECT a.id,a.upload_id,coalesce(a.field_key,'screenshots') field_key,u.original_name,u.media_type,u.size_bytes FROM attachments a JOIN uploads u ON u.id=a.upload_id WHERE a.ticket_id=$1 ORDER BY a.created_at", [ticket.id]),
       pool.query("SELECT id, slug, name FROM projects ORDER BY name"),
       ticket.form_id ? fieldsFor(ticket.form_id) : Promise.resolve(standardFields),
+      pool.query("SELECT source_url,state,data_json,error_code FROM ticket_jam_contexts WHERE ticket_id=$1", [ticket.id]),
     ]);
     const notes = notesResult.rows;
     const history = historyResult.rows;
@@ -420,6 +421,18 @@ export async function render(url: URL, session: Session, _metrics: Record<string
     ].filter(([, value]) => value !== undefined && value !== null && value !== "" && (!Array.isArray(value) || value.length));
     const submissionDetails = submissionRows.map(([label, value]) => `<dt>${escapeHtml(label)}</dt><dd style="white-space:pre-wrap">${escapeHtml(Array.isArray(value) ? value.join(", ") : typeof value === "boolean" ? value ? "Yes" : "No" : value)}</dd>`).join("");
     const deletionMarker = ticket.submitter_deleted_at ? `<p class="status warn"><strong>Deleted by submitter</strong> · ${new Date(ticket.submitter_deleted_at).toLocaleString("nl-NL")}</p>` : "";
+    const jam = jamResult.rows[0];
+    const jamStatus = ticket.submitter_deleted_at && jam && ["queued", "fetching"].includes(jam.state)
+      ? "Import skipped: ticket deleted from portal"
+      : jam?.state === "ready" ? "Details imported" : jam?.state === "partial" ? "Some details imported"
+      : jam && ["queued", "fetching"].includes(jam.state) ? "Import pending" : jam ? "Details could not be imported" : "No Jam link";
+    const jamSections = jam?.data_json && ["ready", "partial"].includes(jam.state) ? [
+      ["Device", jam.data_json.device], ["Console", jam.data_json.console], ["Network", jam.data_json.network],
+      ["Events", jam.data_json.events], ["Metadata", jam.data_json.metadata], ["Transcript", jam.data_json.transcript],
+    ].filter(([, value]) => value !== undefined).map(([label, value]) => `<h3>${label}</h3><pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre>`).join("") : "";
+    const jamRetry = jam && ["failed", "not_configured"].includes(jam.state) && !ticket.submitter_deleted_at
+      ? `<button class="button" type="button" data-jam-retry data-ticket-id="${ticket.id}">Retry import</button>` : "";
+    const jamPanel = ticket.jam_url ? `<section class="card"><div class="card-head">Jam technical evidence</div><div class="card-body"><p><a href="${escapeHtml(ticket.jam_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(ticket.jam_url)}</a></p><p class="status">${jamStatus}</p>${jamSections}${jamRetry}</div></section>` : "";
     const overviewPanel = `${deletionMarker}<div class="grid two"><section class="card"><div class="card-head">Original submission <button class="button" type="button" data-edit-ticket>Edit</button></div><div class="card-body">
       <div data-ticket-view><dl>${submissionDetails}</dl></div>
       <form data-ticket-edit-form data-ticket-id="${ticket.id}" data-project-id="${ticket.project_id}" hidden>
@@ -434,7 +447,7 @@ export async function render(url: URL, session: Session, _metrics: Record<string
         const href = `/admin/attachments/${a.id}`;
         return `<figure><a href="${href}" target="_blank" rel="noopener"><img loading="lazy" src="${href}" alt="${escapeHtml(name)}" style="display:block;max-width:100%;max-height:420px;object-fit:contain"></a><figcaption>${escapeHtml(name)} · <span class="mono">${escapeHtml(a.media_type)} · ${Math.round(a.size_bytes / 1024)} kB</span> · <a href="${href}?download=1">Download original</a></figcaption></figure>`;
       }).join("") || "<p>No attachments.</p>"}</div></section>
-      ${approvalGatesCard(ticket)}
+      ${jamPanel}${approvalGatesCard(ticket)}
       <section class="card"><div class="card-head">Danger zone</div><div class="card-body"><p>Destructive actions are hard to undo — archiving lives outside this zone.</p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-reject-ticket${["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : " disabled"} title="${
         ["Submitted", "Triage", "Needs Information"].includes(ticket.status) ? "" : "Can only reject early-stage tickets"}">Reject</button></p><p><button class="button" style="color:var(--t-danger);border-color:var(--t-danger)" type="button" data-cancel-ticket${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : " disabled"} title="${["Planning Queued", "Planning", "Planning Failed", "Execution Queued", "Executing"].includes(ticket.status) ? "" : "Can only cancel in-progress tickets"}">Cancel</button></p></div></section></div>`;
     const aiPanel = `<section class="card"><div class="card-head">AI configuration</div><div class="card-body">

@@ -24,6 +24,21 @@ beforeEach(() => {
 });
 
 describe("ticket detail GET", () => {
+  it("escapes imported Jam evidence and offers retry only for safe terminal states", async () => {
+    query.mockImplementation(async (sql: string) => {
+      if (sql.includes("FROM tickets t JOIN projects p")) return { rows: [{ ...ticket, jam_url: "https://jam.dev/c/safe" }] };
+      if (sql.includes("FROM ticket_jam_contexts")) return { rows: [{ state: "partial", data_json: {
+        device: {}, console: [{ level: "error", message: "<script>steal()</script>" }], network: [], events: [], metadata: {}, unavailableSections: ["transcript"], truncatedSections: [],
+      } }] };
+      return { rows: [] };
+    });
+    const body = (await tickets.render(new URL("http://test/admin/tickets/T-1"), session, {}))?.body ?? "";
+    expect(body).toContain("Jam technical evidence");
+    expect(body).toContain("&lt;script&gt;steal()&lt;/script&gt;");
+    expect(body).not.toContain("<script>steal()</script>");
+    expect(body).not.toContain("data-jam-retry");
+  });
+
   it("renders a Submitted ticket as-is without mutating it as a side effect of viewing", async () => {
     const page = await tickets.render(new URL("http://test/admin/tickets/T-1"), session, {});
 

@@ -15,6 +15,13 @@ export class JamImportError extends Error {
   constructor(public code: JamErrorCode, public retryable: boolean, public retryAfterSeconds?: number) { super(code); this.name = "JamImportError"; }
 }
 export function setJamFetchForTests(value: typeof fetch) { jamFetch = value; }
+export function jamEndpoint(env = process.env): string {
+  const override = env.DCC_JAM_TEST_ENDPOINT;
+  if (!override || env.NODE_ENV === "production") return ENDPOINT;
+  const url = new URL(override);
+  if (url.protocol !== "http:" || !["127.0.0.1", "::1", "localhost"].includes(url.hostname)) throw new JamImportError("access_denied", false);
+  return url.href;
+}
 
 const safeUrl = (value: unknown) => {
   if (typeof value !== "string") return undefined;
@@ -103,7 +110,7 @@ async function limitedResponse(response: Response): Promise<Response> {
 
 export async function boundedJamFetch(input: RequestInfo | URL, init: RequestInit = {}): Promise<Response> {
   const url = new URL(input instanceof Request ? input.url : input.toString());
-  if (url.href !== ENDPOINT) throw new JamImportError("access_denied", false);
+  if (url.href !== jamEndpoint()) throw new JamImportError("access_denied", false);
   const controller = new AbortController(); const timer = setTimeout(() => controller.abort(), CALL_TIMEOUT);
   const abort = () => controller.abort(); init.signal?.addEventListener("abort", abort, { once: true });
   if (init.signal?.aborted) controller.abort();
@@ -129,7 +136,7 @@ export async function fetchJamContext(source: JamSource, options: { token: strin
   const deadline = AbortSignal.any([options.signal, (dependencies.timeout ?? AbortSignal.timeout)(30_000)]);
   const authProvider: AuthProvider = { token: async () => options.token };
   const client = dependencies.createClient?.() ?? new Client({ name: "nexus-jam-ingestion", version: "1.0.0" });
-  const transport = dependencies.createTransport?.(options.token) ?? new StreamableHTTPClientTransport(new URL(ENDPOINT), { authProvider, fetch: boundedJamFetch, onInsufficientScope: "throw" });
+  const transport = dependencies.createTransport?.(options.token) ?? new StreamableHTTPClientTransport(new URL(jamEndpoint()), { authProvider, fetch: boundedJamFetch, onInsufficientScope: "throw" });
   try {
     await client.connect(transport, { signal: deadline, timeout: CALL_TIMEOUT, maxTotalTimeout: 30_000 });
     const { tools } = await client.listTools(undefined, { signal: deadline, timeout: CALL_TIMEOUT, maxTotalTimeout: 30_000 });
