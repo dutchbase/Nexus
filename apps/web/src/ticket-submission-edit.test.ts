@@ -46,6 +46,7 @@ beforeEach(() => {
     { field_key: "screenshot", field_type: "image_upload", required: false, validation_json: {}, options_json: [] },
   ] });
   transactionClient = { query: vi.fn(async (sql: string) => {
+    if (sql.includes("FROM users") && sql.includes("FOR UPDATE")) return { rows: [{ role: "admin", is_active: true }] };
     if (sql.includes("FROM tickets") && sql.includes("FOR UPDATE")) return { rows: [ticket] };
     if (sql.includes("FROM projects")) return { rows: [{ id: "project-1", config_json: {} }] };
     if (sql.includes("FROM system_ai_settings")) return { rows: [{ default_model: "sonnet", default_reasoning_level: "high" }] };

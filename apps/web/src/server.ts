@@ -12,6 +12,7 @@ import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
   allowlistMismatches, buildExecutionPrompt, checkPlanApprovalGate, derivePolicyStatus, ensurePolicySnapshot, enqueueJob, findAllowlistEntry, getPullRequestMergeSettings, getSystemAiSettings,
   globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError, ticketImageEvidence,
+  lockTicketActor,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
   unionSkills, validateAiSelection, providerForModel, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
@@ -42,6 +43,7 @@ import * as aiUsagePage from "./pages/ai-usage.ts";
 import * as operatePage from "./pages/operate.ts";
 import * as usersPage from "./pages/users.ts";
 import { createReporter, listReporters, resetReporterPassword, updateReporter } from "./reporter-users.ts";
+import { ticketApi } from "./ticket-api.ts";
 import { markLoginAttemptSucceeded, reserveLoginAttempt } from "./login-quota.ts";
 
 const port = Number(process.env.PORT ?? 3000);
@@ -147,6 +149,7 @@ export async function approvalInputsFor(ticket: any, version: any, client: any) 
     plan: { versionId: version.id, version: Number(version.version), contentHash: version.content_hash },
     ticket: {
       title: ticket.title, description: ticket.description, category: ticket.category, priority: ticket.priority,
+      sourceUrl: ticket.source_url,
       environment: ticket.environment, expectedBehavior: ticket.expected_behavior, actualBehavior: ticket.actual_behavior,
       reproductionSteps: ticket.reproduction_steps, customValues: ticket.custom_values_json ?? {},
       imageEvidence,
@@ -2068,18 +2071,22 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (!project) return json(response, 404, { error: "Choose an existing project" });
     const priority = text("priority");
     if (priority && !["critical", "high", "medium", "low"].includes(priority)) return json(response, 400, { error: "Choose a valid priority" });
-    const number = (await pool.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
-    const ticket = (await pool.query(
-      `INSERT INTO tickets (ticket_number,project_id,title,description,category,priority,environment,expected_behavior,actual_behavior,reproduction_steps,status,custom_values_json)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'Triage','{}'::jsonb) RETURNING *`,
-      [`DCC-${number}`, projectId, title, description, text("category") || null, priority || null, text("environment") || null, text("expected_behavior") || null, text("actual_behavior") || null, text("reproduction_steps") || null],
-    )).rows[0];
-    await pool.query(
-      `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
-       VALUES ($1,NULL,'Triage','Created by admin',$2,$3)`,
-      [ticket.id, "admin", session.user_id],
-    );
-    await audit({ actorType: "admin", actorId: session.user_id, action: "ticket.create", entityType: "ticket", entityId: ticket.id, metadata: { title }, ip: ipOf(request) });
+    const ticket = await inTransaction(async (client) => {
+      await lockTicketActor(client, { userId: session.user_id, role: "admin" });
+      const number = (await client.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
+      const created = (await client.query(
+        `INSERT INTO tickets (ticket_number,project_id,title,description,category,priority,environment,expected_behavior,actual_behavior,reproduction_steps,status,custom_values_json,created_by_user_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'Triage','{}'::jsonb,$11) RETURNING *`,
+        [`DCC-${number}`, projectId, title, description, text("category") || null, priority || null, text("environment") || null, text("expected_behavior") || null, text("actual_behavior") || null, text("reproduction_steps") || null, session.user_id],
+      )).rows[0];
+      await client.query(
+        `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
+         VALUES ($1,NULL,'Triage','Created by admin',$2,$3)`,
+        [created.id, "admin", session.user_id],
+      );
+      await audit({ actorType: "admin", actorId: session.user_id, action: "ticket.create", entityType: "ticket", entityId: created.id, metadata: { title }, ip: ipOf(request) }, client);
+      return created;
+    });
     return json(response, 201, { ticket });
   }
   const notesMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/notes$/);
@@ -2807,6 +2814,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       "planning_reasoning_level", "execution_model", "execution_reasoning_level", "repair_model", "repair_reasoning_level"]);
     const normalized = entries.map(([key, value]) => (aiFields.has(key) && value === "" ? [key, null] : [key, value]) as [string, unknown]);
     const after = await inTransaction(async (client) => {
+      await lockTicketActor(client, { userId: session.user_id, role: "admin" });
       const before = (await client.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE", [ref])).rows[0];
       if (!before) return null;
       const updates = new Map(normalized);
@@ -2859,7 +2867,12 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         ? ["planning", "execution", "repair"] : ["planning"]) as AiPhase[]) {
         resolvedAiFor(candidate, project, phase, systemAi);
       }
-      const updated = (await client.query(`UPDATE tickets SET ${updatedEntries.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now() WHERE id=$1 RETURNING *`, [before.id, ...updatedEntries.map(([, value]) => value)])).rows[0];
+      const submissionFields = new Set(["title", "description", "category", "priority", "project_id", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", "custom_values_json"]);
+      const submissionChanged = updatedEntries.some(([key, value]) => submissionFields.has(key) && before[key] !== value
+        && (key !== "custom_values_json" || JSON.stringify(before[key] ?? {}) !== JSON.stringify(value ?? {})));
+      const updated = (await client.query(`UPDATE tickets SET ${updatedEntries.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now()
+        ${submissionChanged ? ",submission_revision=submission_revision+1,submission_updated_at=now()" : ""} WHERE id=$1 RETURNING *`, [before.id, ...updatedEntries.map(([, value]) => value)])).rows[0];
+      if (updates.has("source_url") && before.source_url !== updated.source_url) await client.query("SELECT mark_ticket_plan_potentially_stale($1)", [before.id]);
       if (body.status && body.status !== before.status) await client.query(
         `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id) VALUES ($1,$2,$3,'Manual admin update','admin',$4)`,
         [before.id, before.status, body.status, session.user_id],
@@ -2917,6 +2930,12 @@ export async function route(request: IncomingMessage, response: ServerResponse) 
     const session = await requireSession(request, response);
     if (session) return logout(request, response, session);
     return;
+  }
+  if (url.pathname === "/api/projects" || url.pathname === "/api/tickets" || url.pathname.startsWith("/api/tickets/")) {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    if (await ticketApi(request, response, url, { userId: session.user_id, role: session.role })) return;
+    return json(response, 404, { error: "not found" });
   }
   const publicMatch = url.pathname.match(/^\/api\/public\/forms\/([^/]+)$/);
   if (publicMatch && request.method === "GET") {
