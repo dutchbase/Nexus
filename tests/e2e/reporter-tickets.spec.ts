@@ -4,6 +4,7 @@ import { loginViaUI, queryOne } from "./helpers";
 const password = "reporter-test-password";
 const projectOne = "VA Jobs Platform";
 const projectTwo = "Corporate Site";
+const reporterAttachment = "/attachments/00000000-0000-0000-000a-000000000148";
 
 async function addReporter(page: Page, username: string, project: string) {
   await page.goto("/admin/users");
@@ -84,6 +85,9 @@ test("admin assigns reporters and ticket access follows membership and ownership
     await reporterPage.getByLabel("Password").fill(password);
     await Promise.all([reporterPage.waitForURL("**/tickets"), reporterPage.getByRole("button", { name: "Sign in" }).click()]);
 
+    expect((await reporterPage.request.get("/api/tickets/DCC-148")).status()).toBe(200);
+    expect((await reporterPage.request.get(reporterAttachment)).status()).toBe(200);
+
     await adminPage.goto("/admin/users");
     const row = userRow(adminPage, reporterOne);
     await row.getByText("Edit projects", { exact: true }).click();
@@ -92,7 +96,7 @@ test("admin assigns reporters and ticket access follows membership and ownership
     await expect(userRow(adminPage, reporterOne).getByText("No assigned projects", { exact: true })).toBeVisible();
 
     expect((await reporterPage.request.get("/api/tickets/DCC-148")).status()).toBe(404);
-    expect((await reporterPage.request.get("/attachments/00000000-0000-0000-0000-000000000148")).status()).toBe(404);
+    expect((await reporterPage.request.get(reporterAttachment)).status()).toBe(404);
     await reporterPage.reload();
     await expect(reporterPage.getByText("No projects assigned.", { exact: false })).toBeVisible();
   } finally {

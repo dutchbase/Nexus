@@ -25,6 +25,7 @@ if (!DATABASE_URL) {
 }
 
 const REQUIRED_PATH_VARS = [
+  "DCC_DATA_DIR",
   "FIXTURE_REPO_VA_JOBS_PLATFORM",
   "FIXTURE_REPO_CORPORATE_SITE",
   "FIXTURE_REPO_CUSTOMER_PORTAL",
@@ -45,6 +46,10 @@ sql = sql
   .replaceAll("__REPO_PATH_CORPORATE_SITE__", process.env.FIXTURE_REPO_CORPORATE_SITE)
   .replaceAll("__REPO_PATH_CUSTOMER_PORTAL__", process.env.FIXTURE_REPO_CUSTOMER_PORTAL)
   .replaceAll("__REPO_PATH_BILLING_API__", process.env.FIXTURE_REPO_BILLING_API);
+
+const uploadPath = path.join(process.env.DCC_DATA_DIR, "uploads", "reporter-access.txt");
+fs.mkdirSync(path.dirname(uploadPath), { recursive: true });
+fs.writeFileSync(uploadPath, "reporter attachment fixture\n");
 
 const tmpPath = path.join(require("os").tmpdir(), `dcc-seed-${Date.now()}.sql`);
 fs.writeFileSync(tmpPath, sql);
