@@ -23,7 +23,8 @@ describe("ticket submission form controls", () => {
     expect(html).toContain('<option value="High" selected>High</option>');
     expect(html).toContain('<option value="project-2" selected>Saved project</option>');
     expect(html).toContain('name="follow_up" type="checkbox" value="true" checked');
-    expect(html).not.toContain('type="file"');
+    expect(html).toContain('type="file"');
+    expect(html).toContain('data-image-control="evidence"');
   });
 
   it("renders an optional admin multi-select without a saved value", () => {
@@ -43,6 +44,8 @@ describe("ticket submission form controls", () => {
 
     expect(page).not.toContain("publicSubmissionPayload(values)");
     expect(page).toContain('payload[key]=key in payload?[].concat(payload[key],value):value');
+    expect(page).toContain("window.nexusImages.selections(form)");
+    expect(page).not.toContain("retainedUploads");
   });
 
   it("serializes a checked checkbox as a boolean", () => {

@@ -1,6 +1,8 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { imageUploadControl, imageUploadScript } from "./image-upload-control.ts";
+import type { TicketAttachment } from "@dcc/domain";
 
 const stylesPath = join(dirname(fileURLToPath(import.meta.url)), "design-tokens.css");
 export const styles = await readFile(stylesPath, "utf8");
@@ -109,6 +111,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(next===null)return;event.preventDefault();tabs[next].focus();activate(tabs[next]);
         });
       });
+      ${imageUploadScript()}
       ${path === "/admin/tickets" ? `
         (function(){
           const params=new URLSearchParams(location.search);
@@ -138,7 +141,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             const first=focusables[0],last=focusables[focusables.length-1];if(event.shiftKey&&(document.activeElement===first||!modal.contains(document.activeElement))){event.preventDefault();last.focus()}else if(!event.shiftKey&&(document.activeElement===last||!modal.contains(document.activeElement))){event.preventDefault();first.focus()}
           });
           form?.addEventListener("submit",async(event)=>{
-            event.preventDefault();const response=await fetch("/api/admin/tickets",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(Object.fromEntries(new FormData(form)))});const result=await response.json();
+            event.preventDefault();if(window.nexusImages?.pending(form))return form.querySelector(".error").textContent="Wait for image uploads to finish.";if(window.nexusImages?.invalid(form))return;const payload=Object.fromEntries(new FormData(form));payload.attachment_upload_ids=window.nexusImages?.selections(form)||{};const response=await fetch("/api/admin/tickets",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});const result=await response.json();
             if(response.ok)location.href="/admin/tickets/"+result.ticket.ticket_number;else form.querySelector(".error").textContent=result.error;
           });
         ` : ""}
@@ -242,13 +245,13 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         document.querySelector("[data-edit-ticket]")?.addEventListener("click",()=>{ticketView.hidden=true;ticketEditForm.hidden=false});
         document.querySelector("[data-cancel-edit-ticket]")?.addEventListener("click",()=>{ticketEditForm.hidden=true;ticketView.hidden=false});
         if(ticketEditForm){ticketEditForm.addEventListener("submit",async(event)=>{
-          event.preventDefault();
+          event.preventDefault();if(window.nexusImages?.pending(ticketEditForm))return ticketEditForm.querySelector(".error").textContent="Wait for image uploads to finish.";if(window.nexusImages?.invalid(ticketEditForm))return;
           const submission={};
           for(const input of ticketEditForm.elements){
             if(!input.name)continue;
             submission[input.name]=input.type==="checkbox"?input.checked:input.multiple?[...input.selectedOptions].map(option=>option.value):input.value;
           }
-          const response=await fetch("/api/admin/tickets/"+ticketEditForm.dataset.ticketId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({submission})});
+          const response=await fetch("/api/admin/tickets/"+ticketEditForm.dataset.ticketId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({submission,attachment_upload_ids:window.nexusImages?.selections(ticketEditForm)||{}})});
           const result=await response.json();
           if(response.ok){location.reload()}else{ticketEditForm.querySelector(".error").textContent=result.error}
         })}
@@ -1329,8 +1332,8 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
      `, nonce);
 }
 
-export function formControls(fields: any[], projects: any[], values: Record<string, any> = {}, mode: "public" | "admin" | "reporter" = "public") {
-  return fields.filter((field) => mode === "public" || (!["static", "hidden", "image_upload"].includes(field.field_type) && (mode !== "reporter" || !["project_id", "submitter_name", "submitter_email"].includes(field.field_key)))).map((field) => {
+export function formControls(fields: any[], projects: any[], values: Record<string, any> = {}, mode: "public" | "admin" | "reporter" = "public", upload: { uploadUrl: string; existing?: TicketAttachment[]; disabled?: boolean } = { uploadUrl: "/api/projects/{project_id}/uploads" }) {
+  return fields.filter((field) => mode === "public" || (!["static", "hidden"].includes(field.field_type) && (mode !== "reporter" || !["project_id", "submitter_name", "submitter_email"].includes(field.field_key)))).map((field) => {
     const name = escapeHtml(field.field_key);
     if (field.field_type === "static") return `<section class="form-help"><strong>${escapeHtml(field.label)}</strong>${field.description ? `<p>${escapeHtml(field.description)}</p>` : ""}</section>`;
     const required = field.required ? " required" : "";
@@ -1354,33 +1357,23 @@ export function formControls(fields: any[], projects: any[], values: Record<stri
     }
     if (type === "checkbox") control = `<input name="${name}" type="checkbox" value="true"${describedBy}${required}${hasValues && values[field.field_key] ? " checked" : ""}>`;
     if (type === "hidden") return `<label class="honeypot" aria-hidden="true">${escapeHtml(field.label)}<input name="${name}" tabindex="-1" autocomplete="off"></label>`;
-    if (type === "image_upload") control = `<input name="${name}" type="file" accept="image/png,image/jpeg" multiple><small>PNG of JPG · max 5 bestanden · max 5 MB per bestand · geen SVG</small>`;
+    if (type === "image_upload") return imageUploadControl({ fieldKey: field.field_key, label: field.label, required: Boolean(field.required), uploadUrl: upload.uploadUrl, existing: (upload.existing ?? []).filter((item) => item.field_key === field.field_key), disabled: upload.disabled });
     return `<label class="field"><span>${escapeHtml(field.label)}</span>${control}${field.description ? `<small id="${helpId}">${escapeHtml(field.description)}</small>` : ""}</label>`;
   }).join("");
 }
 
 export function publicFormPage(form: any, fields: any[], projects: any[], nonce = "") {
-  const controls = formControls(fields, projects, {}, "public");
+  const controls = formControls(fields, projects, {}, "public", { uploadUrl: `/api/public/forms/${form.slug}/uploads` });
   const fieldTypes = JSON.stringify(Object.fromEntries(fields.map((field) => [field.field_key, field.field_type])));
   return document(form.title, `<main class="public"><div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">${logoMark("N", "sm")}<span style="font-size:13px;font-weight:700;color:var(--text2)">Nexus</span></div><div class="url-strip">/f/${escapeHtml(form.slug)}</div><form class="card" id="public-form"><div class="card-body"><div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description)}</p><div class="grid one">${controls}</div><br><button class="button primary" type="submit">Melding versturen</button><p class="error" role="alert"></p></div></form></main>`, `
-    let submitting=false,idempotencyKey=crypto.randomUUID();const retainedUploads=new Map();
+    ${imageUploadScript()}
+    let submitting=false,idempotencyKey=crypto.randomUUID();
     document.querySelector("#public-form").addEventListener("submit",async(event)=>{
-      event.preventDefault();if(submitting)return;submitting=true;const submit=event.currentTarget.querySelector('button[type="submit"]');submit.disabled=true;const error=event.currentTarget.querySelector(".error");error.textContent="";const data=new FormData(event.currentTarget);const payload={};const files={};
+      event.preventDefault();if(submitting)return;const form=event.currentTarget,submit=form.querySelector('button[type="submit"]'),error=form.querySelector(".error");error.textContent="";if(window.nexusImages.pending(form)){error.textContent="Wacht tot de uploads klaar zijn.";return}if(window.nexusImages.invalid(form))return;submitting=true;submit.disabled=true;const data=new FormData(form);const payload={};
       try{
-      for(const [key,value] of data){if(value instanceof File&&value.size){(files[key]=files[key]||[]).push(value)}else if(!(value instanceof File))payload[key]=key in payload?[].concat(payload[key],value):value}
+      for(const [key,value] of data){if(!(value instanceof File))payload[key]=key in payload?[].concat(payload[key],value):value}
       for(const [key,type] of Object.entries(${fieldTypes})){if(type==="checkbox")payload[key]=payload[key]==="true";else if(type==="multi_select")payload[key]=Array.isArray(payload[key])?payload[key]:key in payload?[payload[key]]:[]}
-      for(const [key,list] of Object.entries(files)){
-        if(list.length>5){document.querySelector(".error").textContent="Max 5 bestanden per veld";return}
-        const signatures=list.map(file=>file.name+":"+file.size+":"+file.lastModified);let ids=retainedUploads.get(key)?.signatures.join("|")===signatures.join("|")?retainedUploads.get(key).ids:[];
-        for(const file of list.slice(ids.length)){
-          const upload=new FormData();upload.append("file",file);
-          const result=await fetch("/api/public/forms/${escapeHtml(form.slug)}/uploads",{method:"POST",body:upload});
-          if(!result.ok){error.textContent="Upload geweigerd";return}
-          ids.push((await result.json()).upload_id);
-        }
-        retainedUploads.set(key,{signatures,ids});
-        payload[key]=ids;
-      }
+      Object.assign(payload,window.nexusImages.selections(form));
       const response=await fetch("/api/public/forms/${escapeHtml(form.slug)}/submissions",{method:"POST",headers:{"content-type":"application/json","idempotency-key":idempotencyKey},body:JSON.stringify(payload)});
       const result=await response.json();if(!response.ok){if(response.status===400||response.status===422)idempotencyKey=crypto.randomUUID();error.textContent=result.fields?Object.entries(result.fields).map(([key,message])=>key+": "+message).join(" · "):result.error;return}
       sessionStorage.setItem("submittedTicket",result.ticket_number);location.href="/f/${escapeHtml(form.slug)}/submitted";
