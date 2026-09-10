@@ -191,6 +191,36 @@ integration("Jam enrichment publication", () => {
     await observer.end();
   });
 
+  test("a completed import blocks queued execution before spawn while a started run keeps approved evidence", async () => {
+    const row = await seed({ hash: "old-hash" });
+    const observer = await connection();
+    const { buildApprovedInputSnapshot, checkPlanApprovalGate } = await import("@dcc/domain");
+    const { approvedExecutionInput } = await import("./worker-boundary.ts");
+    const planId = (await observer.query("INSERT INTO plans(ticket_id) VALUES($1) RETURNING id", [row.ticketId])).rows[0].id;
+    const planHash = "plan-hash";
+    const versionId = (await observer.query("INSERT INTO plan_versions(plan_id,version,content_markdown,content_hash) VALUES($1,1,'plan',$2) RETURNING id", [planId, planHash])).rows[0].id;
+    await observer.query("UPDATE plans SET current_version_id=$2 WHERE id=$1", [planId, versionId]);
+    const captured = buildApprovedInputSnapshot({
+      plan: { versionId, version: 1, contentHash: planHash },
+      ticket: { title: "Jam ticket", jamEvidence: { contentHash: "old-hash", evidence: evidence("https://jam.dev/c/old", "approved evidence") } },
+      project: { configVersion: 1, config: { enabled: true, slug: "jam", repositoryPath: "/tmp/jam", defaultBranch: "main" } },
+      models: { execution: { model: "sonnet", reasoningLevel: "high" } },
+      prompts: [{ phase: "execution", content: "Approved execution prompt", provenance: [] }], skills: [], policySources: [],
+    } as any);
+    const snapshotId = (await observer.query("INSERT INTO approved_input_snapshots(ticket_id,plan_version_id,material_input_json,input_hash,created_by) VALUES($1,$2,$3,$4,$5) RETURNING id", [row.ticketId, versionId, captured.materialInput, captured.inputHash, row.userId])).rows[0].id;
+    await observer.query("UPDATE tickets SET status='Execution Queued',approved_plan_version_id=$2,approved_plan_hash=$3,approved_input_snapshot_id=$4 WHERE id=$1", [row.ticketId, versionId, planHash, snapshotId]);
+    const startedInput = approvedExecutionInput({ id: snapshotId, inputHash: captured.inputHash, materialInput: captured.materialInput }, "execution", { worktreePath: "/tmp/run", branchName: "run", baseCommit: "base" });
+    await runSuccess(row, "new-hash", "new live evidence");
+
+    const spawnAgent = async () => { throw new Error("agent must not spawn"); };
+    const gate = await checkPlanApprovalGate(observer as any, row.ticketId, snapshotId);
+    if (gate.valid) await spawnAgent();
+    expect(gate).toMatchObject({ valid: false, code: "plan_potentially_stale" });
+    expect(startedInput.jamEvidence).toMatchObject({ contentHash: "old-hash", evidence: { console: [{ message: "approved evidence" }] } });
+    expect(JSON.stringify(startedInput)).not.toContain("new live evidence");
+    await observer.end();
+  });
+
   test("honors Retry-After, succeeds on the next claim, and exhausts timeout retries", async () => {
     const { failJamEnrichment } = await import("./jam-enrichment.ts");
     const { JamImportError } = await import("./jam-client.ts");

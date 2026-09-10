@@ -16,6 +16,12 @@ describe("Jam evidence boundaries", () => {
     expect(Buffer.byteLength(rendered, "utf8")).toBeLessThanOrEqual(32768);
   });
 
+  test.each([0, 1, 8, 20, 21, 22, 23, 64])("honors a %i-byte limit at multibyte boundaries", (maxBytes) => {
+    const rendered = renderJamEvidence({ ...evidence, transcript: "😀".repeat(100) }, maxBytes);
+    expect(Buffer.byteLength(rendered, "utf8")).toBeLessThanOrEqual(maxBytes);
+    expect(rendered).not.toContain("�");
+  });
+
   test("only returns current evidence for a visible ticket", async () => {
     const query = async (sql: string) => {
       expect(sql).toContain("t.submitter_deleted_at IS NULL");

@@ -83,10 +83,13 @@ export async function ticketJamEvidence(client: QueryClient, ticketId: string): 
 }
 
 function byteLimited(value: string, maxBytes: number) {
+  maxBytes = Math.max(0, Math.floor(maxBytes));
   const bytes = Buffer.from(value);
   if (bytes.length <= maxBytes) return value;
   const suffix = "\n[Evidence truncated]";
-  return bytes.subarray(0, Math.max(0, maxBytes - Buffer.byteLength(suffix))).toString("utf8").replace(/\uFFFD$/, "") + suffix;
+  const suffixBytes = Buffer.from(suffix);
+  if (maxBytes <= suffixBytes.length) return suffixBytes.subarray(0, maxBytes).toString("utf8");
+  return bytes.subarray(0, maxBytes - suffixBytes.length).toString("utf8").replace(/\uFFFD+$/, "") + suffix;
 }
 
 export function renderJamEvidence(evidence: JamEvidence, maxBytes = 32768): string {

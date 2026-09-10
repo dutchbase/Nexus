@@ -68,7 +68,7 @@ STACK_READY=false
 write_keep_files() {
   local env_file="$RUN_ROOT/stack.env" cleanup_file="$RUN_ROOT/cleanup.sh"
   : > "$env_file"
-  for name in APP_BASE_URL DATABASE_URL E2E_ADMIN_USER E2E_ADMIN_PASSWORD MOCK_GITHUB_BASE_URL MOCK_GITHUB_LOG MOCK_CLAUDE_LOG MOCK_CLAUDE_SCENARIO_DIR E2E_RUN_ROOT E2E_ARTIFACT_DIR E2E_RESULTS_DIR DCC_DATA_DIR DCC_DATA_ROOT DCC_CONFIG_DIR PROJECTS_CONFIG_PATH DCC_PR_SYNC_MIN_AGE_SECONDS; do
+  for name in APP_BASE_URL DATABASE_URL E2E_ADMIN_USER E2E_ADMIN_PASSWORD MOCK_GITHUB_BASE_URL MOCK_GITHUB_LOG MOCK_CLAUDE_LOG MOCK_CLAUDE_SCENARIO_DIR E2E_RUN_ROOT E2E_ARTIFACT_DIR E2E_RESULTS_DIR DCC_DATA_DIR DCC_DATA_ROOT DCC_CONFIG_DIR PROJECTS_CONFIG_PATH DCC_PR_SYNC_MIN_AGE_SECONDS MOCK_JAM_PORT; do
     printf '%s=%q\n' "$name" "${!name}" >> "$env_file"
   done
   cat "$RUN_ROOT/fixtures.env" >> "$env_file"
@@ -174,7 +174,7 @@ for name in ANTHROPIC_API_KEY ANTHROPIC_AUTH_TOKEN CLAUDE_CODE_USE_BEDROCK CLAUD
 while IFS= read -r name; do unset "$name"; done < <(compgen -A variable | grep '^DCC_NOTIFICATION_SECRET_' || true)
 export GITHUB_API_BASE_URL="$MOCK_GITHUB_BASE_URL"
 export GITHUB_TOKEN=mock-github-token
-unset NODE_ENV
+unset NODE_ENV DCC_JAM_TOKEN DCC_JAM_TEST_ENDPOINT
 
 log "starting web :$PORT and worker in owned process groups"
 DCC_PROCESS_ROLE=web setsid "${PNPM[@]}" --dir "$REPO_ROOT" --filter web exec tsx src/server.ts > "$ARTIFACT_ROOT/web.log" 2>&1 &

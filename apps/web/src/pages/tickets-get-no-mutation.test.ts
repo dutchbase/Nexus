@@ -28,7 +28,7 @@ describe("ticket detail GET", () => {
     query.mockImplementation(async (sql: string) => {
       if (sql.includes("FROM tickets t JOIN projects p")) return { rows: [{ ...ticket, jam_url: "https://jam.dev/c/safe" }] };
       if (sql.includes("FROM ticket_jam_contexts")) return { rows: [{ state: "partial", data_json: {
-        device: {}, console: [{ level: "error", message: "<script>steal()</script>" }], network: [], events: [], metadata: {}, unavailableSections: ["transcript"], truncatedSections: [],
+        device: {}, console: [{ level: "error", message: "<script>steal()</script>" }], network: [], events: [], metadata: {}, unavailableSections: ["<missing>"], truncatedSections: ["network<script>"],
       } }] };
       return { rows: [] };
     });
@@ -36,6 +36,10 @@ describe("ticket detail GET", () => {
     expect(body).toContain("Jam technical evidence");
     expect(body).toContain("&lt;script&gt;steal()&lt;/script&gt;");
     expect(body).not.toContain("<script>steal()</script>");
+    expect(body).toContain("Unavailable sections");
+    expect(body).toContain("&lt;missing&gt;");
+    expect(body).toContain("Truncated sections");
+    expect(body).toContain("network&lt;script&gt;");
     expect(body).not.toContain("data-jam-retry");
   });
 

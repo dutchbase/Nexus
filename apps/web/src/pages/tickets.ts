@@ -430,9 +430,10 @@ export async function render(url: URL, session: Session, _metrics: Record<string
       ["Device", jam.data_json.device], ["Console", jam.data_json.console], ["Network", jam.data_json.network],
       ["Events", jam.data_json.events], ["Metadata", jam.data_json.metadata], ["Transcript", jam.data_json.transcript],
     ].filter(([, value]) => value !== undefined).map(([label, value]) => `<h3>${label}</h3><pre>${escapeHtml(JSON.stringify(value, null, 2))}</pre>`).join("") : "";
+    const jamLimits = jam?.data_json ? `<h3>Unavailable sections</h3><pre>${escapeHtml(JSON.stringify(jam.data_json.unavailableSections ?? [], null, 2))}</pre><h3>Truncated sections</h3><pre>${escapeHtml(JSON.stringify(jam.data_json.truncatedSections ?? [], null, 2))}</pre>` : "";
     const jamRetry = jam && ["failed", "not_configured"].includes(jam.state) && !ticket.submitter_deleted_at
       ? `<button class="button" type="button" data-jam-retry data-ticket-id="${ticket.id}">Retry import</button>` : "";
-    const jamPanel = ticket.jam_url ? `<section class="card"><div class="card-head">Jam technical evidence</div><div class="card-body"><p><a href="${escapeHtml(ticket.jam_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(ticket.jam_url)}</a></p><p class="status">${jamStatus}</p>${jamSections}${jamRetry}</div></section>` : "";
+    const jamPanel = ticket.jam_url ? `<section class="card"><div class="card-head">Jam technical evidence</div><div class="card-body"><p><a href="${escapeHtml(ticket.jam_url)}" target="_blank" rel="noopener noreferrer">${escapeHtml(ticket.jam_url)}</a></p><p class="status">${jamStatus}</p>${jamSections}${jamLimits}${jamRetry}</div></section>` : "";
     const overviewPanel = `${deletionMarker}<div class="grid two"><section class="card"><div class="card-head">Original submission <button class="button" type="button" data-edit-ticket>Edit</button></div><div class="card-body">
       <div data-ticket-view><dl>${submissionDetails}</dl></div>
       <form data-ticket-edit-form data-ticket-id="${ticket.id}" data-project-id="${ticket.project_id}" hidden>
