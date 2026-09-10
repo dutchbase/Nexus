@@ -83,6 +83,113 @@ integration("project-scoped ticket submissions", () => {
     expect((await pool.query("SELECT description FROM tickets WHERE id=$1", [ticketB])).rows[0].description).toBe("B description");
   });
 
+  test("allows unrelated edits when saved form options have since been removed", async () => {
+    const form = (await pool.query(
+      "INSERT INTO forms(slug,name,title,status,fixed_project_id) VALUES('legacy-options','Legacy options','Legacy options','published',$1) RETURNING id", [projectA],
+    )).rows[0];
+    await pool.query(
+      `INSERT INTO form_fields(form_id,field_key,field_type,label,required,position,options_json)
+       VALUES($1,'title','short_text','Title',true,0,'[]'),
+             ($1,'description','long_text','Description',true,1,'[]'),
+             ($1,'priority','dropdown','Priority',false,2,'["high"]'),
+             ($1,'browser','dropdown','Browser',false,3,'["Firefox"]')`, [form.id],
+    );
+    const id = (await pool.query(
+      `INSERT INTO tickets(ticket_number,project_id,form_id,title,description,priority,status,created_by_user_id,custom_values_json)
+       VALUES('DCC-LEGACY-OPTIONS',$1,$2,'Old title','Description','retired','Submitted',$3,'{"browser":"Netscape"}') RETURNING id`,
+      [projectA, form.id, reporterAId],
+    )).rows[0].id;
+
+    const edited = await callRoute(`/api/tickets/${id}`, { ...reporterA, method: "PATCH", csrf: reporterA.csrf,
+      body: { submission_revision: 1, title: "New title" } });
+    expect(edited.status).toBe(200);
+    expect(edited.body.ticket).toMatchObject({ title: "New title", priority: "retired", submission: { browser: "Netscape" } });
+    const invalid = await callRoute(`/api/tickets/${id}`, { ...reporterA, method: "PATCH", csrf: reporterA.csrf,
+      body: { submission_revision: 2, submission: { browser: "Internet Explorer" } } });
+    expect(invalid.status).toBe(422);
+  });
+
+  test("permits exactly one of two concurrent edits at the same revision", async () => {
+    const id = (await pool.query(
+      `INSERT INTO tickets(ticket_number,project_id,title,description,status,created_by_user_id)
+       VALUES('DCC-RACE',$1,'Race','Race description','Submitted',$2) RETURNING id`, [projectA, reporterAId],
+    )).rows[0].id;
+    const results = await Promise.all(["first", "second"].map((title) => callRoute(`/api/tickets/${id}`, {
+      ...reporterA, method: "PATCH", csrf: reporterA.csrf, body: { submission_revision: 1, title },
+    })));
+    expect(results.map((result) => result.status).sort()).toEqual([200, 409]);
+    expect((await pool.query("SELECT title,submission_revision FROM tickets WHERE id=$1", [id])).rows[0])
+      .toMatchObject({ title: results.find((result) => result.status === 200)!.body.ticket.title, submission_revision: 2 });
+  });
+
+  test("serializes admin project reassignment before a waiting reporter edit", async () => {
+    const id = (await pool.query(
+      `INSERT INTO tickets(ticket_number,project_id,title,description,status,created_by_user_id)
+       VALUES('DCC-REASSIGN',$1,'Reassign','Description','Submitted',$2) RETURNING id`, [projectA, reporterAId],
+    )).rows[0].id;
+    const admin = await pool.connect();
+    try {
+      await admin.query("BEGIN");
+      await admin.query("SELECT id FROM tickets WHERE id=$1 FOR UPDATE", [id]);
+      const pending = callRoute(`/api/tickets/${id}`, { ...reporterA, method: "PATCH", csrf: reporterA.csrf,
+        body: { submission_revision: 1, title: "Must not move with ticket" } });
+      await new Promise((resolve) => setTimeout(resolve, 25));
+      await admin.query("UPDATE tickets SET project_id=$2 WHERE id=$1", [id, projectB]);
+      await admin.query("COMMIT");
+      expect((await pending).status).toBe(404);
+      expect((await pool.query("SELECT project_id,title,submission_revision FROM tickets WHERE id=$1", [id])).rows[0])
+        .toMatchObject({ project_id: projectB, title: "Reassign", submission_revision: 1 });
+    } finally {
+      await admin.query("ROLLBACK").catch(() => {});
+      admin.release();
+    }
+  });
+
+  test("rejects each workflow and identity field injection without partial writes", async () => {
+    const id = (await pool.query(
+      `INSERT INTO tickets(ticket_number,project_id,title,description,status,created_by_user_id)
+       VALUES('DCC-FORGERY',$1,'Untouched','Description','Submitted',$2) RETURNING id`, [projectA, reporterAId],
+    )).rows[0].id;
+    const forged = {
+      role: "admin", status: "Executing", project_id: projectB, created_by_user_id: null,
+      ai_configuration_mode: "advanced",
+    };
+    for (const [key, value] of Object.entries(forged)) {
+      for (const body of [
+        { submission_revision: 1, title: `top-level ${key}`, [key]: value },
+        { submission_revision: 1, title: `nested ${key}`, submission: { [key]: value } },
+      ]) {
+        expect((await callRoute(`/api/tickets/${id}`, { ...reporterA, method: "PATCH", csrf: reporterA.csrf, body })).status).toBe(422);
+        expect((await pool.query(
+          `SELECT title,status,project_id,created_by_user_id,ai_configuration_mode,submission_revision,custom_values_json
+           FROM tickets WHERE id=$1`, [id],
+        )).rows[0]).toMatchObject({
+          title: "Untouched", status: "Submitted", project_id: projectA, created_by_user_id: reporterAId,
+          ai_configuration_mode: null, submission_revision: 1, custom_values_json: {},
+        });
+      }
+    }
+  });
+
+  test("worker-only updates preserve submission revision and reporter ordering", async () => {
+    const rows = (await pool.query(
+      `INSERT INTO tickets(ticket_number,project_id,title,description,status,created_by_user_id,submission_updated_at)
+       VALUES('DCC-ORDER-OLD',$1,'Older','Description','Submitted',$2,now()-interval '1 hour'),
+             ('DCC-ORDER-NEW',$1,'Newer','Description','Submitted',$2,now())
+       RETURNING id,ticket_number,submission_revision,submission_updated_at`, [projectA, reporterAId],
+    )).rows;
+    const old = rows.find((row: any) => row.ticket_number === "DCC-ORDER-OLD");
+    const beforeOrder = (await callRoute("/api/tickets", reporterA)).body.tickets
+      .filter((ticket: any) => rows.some((row: any) => row.id === ticket.id)).map((ticket: any) => ticket.id);
+    await pool.query("UPDATE tickets SET status='Planning',updated_at=now() WHERE id=$1", [old.id]);
+    const after = (await pool.query("SELECT submission_revision,submission_updated_at FROM tickets WHERE id=$1", [old.id])).rows[0];
+    const afterOrder = (await callRoute("/api/tickets", reporterA)).body.tickets
+      .filter((ticket: any) => rows.some((row: any) => row.id === ticket.id)).map((ticket: any) => ticket.id);
+    expect(after.submission_revision).toBe(old.submission_revision);
+    expect(new Date(after.submission_updated_at).getTime()).toBe(new Date(old.submission_updated_at).getTime());
+    expect(afterOrder).toEqual(beforeOrder);
+  });
+
   test("serializes assignment revocation before a waiting reporter edit", async () => {
     const admin = await pool.connect();
     try {

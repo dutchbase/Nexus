@@ -190,7 +190,8 @@ export async function updateSubmission(actor: TicketActor, ref: string, inputVal
     for (const field of submissionFields(fields)) {
       const value = columns.includes(field.field_key as any) ? candidate[field.field_key] : custom[field.field_key];
       const error = validateField(field, value);
-      if (error) fullErrors[field.field_key] = error;
+      const previous = columns.includes(field.field_key as any) ? before[field.field_key] : (before.custom_values_json ?? {})[field.field_key];
+      if (error && !(error === "invalid option" && JSON.stringify(value) === JSON.stringify(previous))) fullErrors[field.field_key] = error;
     }
     if (Object.keys(fullErrors).length) fail("validation failed", 422, fullErrors);
     const changed = columns.some((key) => key in input && candidate[key] !== before[key]) || JSON.stringify(custom) !== JSON.stringify(before.custom_values_json ?? {});
