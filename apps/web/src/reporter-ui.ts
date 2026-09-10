@@ -4,7 +4,7 @@ export function reporterPage(title: string, body: string, username: string, nonc
   return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · Nexus</title><link rel="stylesheet" href="/assets/design-tokens.css"></head><body><header class="header"><a href="/tickets"><strong>Nexus</strong></a><nav aria-label="Main navigation"><a href="/tickets">Tickets</a> <button class="button" type="button" data-logout>Log out</button></nav><span class="worker">${escapeHtml(username)}</span></header><main class="main">${body}</main><script nonce="${escapeHtml(nonce)}">${reporterScript()}</script></body></html>`;
 }
 
-function reporterScript() {
+export function reporterScript() {
   return `
     const csrfCookie=document.cookie.match(/(?:^|;\\s*)dcc_csrf=([^;]*)/);let csrf=sessionStorage.getItem("dccCsrf")||(csrfCookie?decodeURIComponent(csrfCookie[1]):"");
     fetch("/api/session").then(async response=>{if(response.status===401)return location.assign("/login");const value=response.headers.get("x-csrf-token");if(value){csrf=value;sessionStorage.setItem("dccCsrf",value)}}).catch(()=>{});
@@ -17,6 +17,6 @@ function reporterScript() {
     open?.addEventListener("click",()=>{dialog.showModal();dialog.querySelector("[data-cancel-delete]").focus()});
     dialog?.querySelector("[data-cancel-delete]")?.addEventListener("click",()=>dialog.close());
     dialog?.addEventListener("keydown",event=>{if(event.key!=="Tab")return;const items=[...dialog.querySelectorAll("button")].filter(item=>!item.disabled),first=items[0],last=items.at(-1);if(event.shiftKey&&document.activeElement===first){event.preventDefault();last.focus()}else if(!event.shiftKey&&document.activeElement===last){event.preventDefault();first.focus()}});
-    dialog?.querySelector("[data-confirm-delete]")?.addEventListener("click",async event=>{event.currentTarget.disabled=true;const response=await fetch("/api/tickets/"+encodeURIComponent(dialog.dataset.ticketId),{method:"DELETE",headers:{"x-csrf-token":csrf}});if(response.status===401)return location.assign("/login");if(response.ok)return location.assign("/tickets");dialog.querySelector(".error").textContent="You no longer have access to delete this ticket.";event.currentTarget.disabled=false});
+    dialog?.querySelector("[data-confirm-delete]")?.addEventListener("click",async event=>{const button=event.currentTarget,error=dialog.querySelector(".error");let navigating=false;button.disabled=true;error.textContent="";try{const response=await fetch("/api/tickets/"+encodeURIComponent(dialog.dataset.ticketId),{method:"DELETE",headers:{"x-csrf-token":csrf}});if(response.status===401){navigating=true;return location.assign("/login")}if(response.ok){navigating=true;return location.assign("/tickets")}error.textContent=response.status===403||response.status===404?"You no longer have access to delete this ticket.":"Deleting failed. Try again."}catch{error.textContent="Deleting failed. Try again."}finally{if(!navigating)button.disabled=false}});
   `;
 }

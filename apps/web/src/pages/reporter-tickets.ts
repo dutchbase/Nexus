@@ -19,14 +19,19 @@ async function list(url: URL, session: Session) {
   const createOptions = enabled.map((project) => `<option value="${escapeHtml(project.id)}">${escapeHtml(project.name)}</option>`).join("");
   const rows = tickets.map((ticket) => `<a class="ticket-row" href="/tickets/${encodeURIComponent(ticket.ticket_number)}"><span class="mono">${escapeHtml(ticket.ticket_number)}</span><strong>${escapeHtml(ticket.title)}</strong><span>${escapeHtml(ticket.project_name)}</span><time datetime="${escapeHtml(ticket.submission_updated_at)}">${date(ticket.submission_updated_at)}</time></a>`).join("") || "<p>No tickets found.</p>";
   const noProjects = projects.length ? "" : '<p class="status warn">No projects assigned. Ask your Nexus administrator for access.</p>';
-  const create = enabled.length ? `<details class="card"><summary class="card-head">Add ticket</summary><form class="card-body" data-ticket-form data-create data-fields="${fieldData(fields)}"><label class="field"><span>Project</span><select name="project_id" required>${createOptions}</select></label>${formControls(fields, [], {}, "reporter")}<button class="button primary" type="submit">Add ticket</button><p class="error" role="alert"></p></form></details>` : "";
+  const create = enabled.length ? `<details class="card"><summary class="card-head">New ticket</summary><form class="card-body" data-ticket-form data-create data-fields="${fieldData(fields)}"><label class="field"><span>Project</span><select name="project_id" required>${createOptions}</select></label>${formControls(fields, [], {}, "reporter")}<button class="button primary" type="submit">Submit ticket</button><p class="error" role="alert"></p></form></details>` : "";
   return { status: 200, title: "Tickets", body: `<div class="page-head"><div><h1><a href="/tickets">Tickets</a></h1><p>Tickets in your assigned projects.</p></div></div>${noProjects}<form method="get" class="filters"><label class="field"><span>Project</span><select name="project_id"><option value="">All assigned projects</option>${projectOptions}</select></label><label class="field"><span>Search</span><input name="search" value="${escapeHtml(search)}"></label><button class="button" type="submit">Filter</button></form>${create}<section class="card"><div class="card-head">Tickets</div>${rows}</section>` };
 }
 
 async function detail(ref: string, session: Session) {
   const ticket = await getSubmission(actor(session), ref);
   if (!ticket) return { status: 404, title: "Ticket not found", body: "<h1>Ticket not found</h1>" };
-  const [fields, attachments] = await Promise.all([getSubmissionFields(actor(session), ref), listSubmissionAttachments(actor(session), ref)]);
+  let fields: any[], attachments: any[];
+  try { [fields, attachments] = await Promise.all([getSubmissionFields(actor(session), ref), listSubmissionAttachments(actor(session), ref)]); }
+  catch (error: any) {
+    if (error?.status === 404) return { status: 404, title: "Ticket not found", body: "<h1>Ticket not found</h1>" };
+    throw error;
+  }
   const filtered = safeFields(fields);
   const values = { ...ticket.submission, ...ticket };
   const labels = new Map(filtered.map((field) => [field.field_key, field.label]));
