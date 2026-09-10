@@ -47,7 +47,7 @@ import { reporterPage } from "./reporter-ui.ts";
 import { createReporter, listReporters, resetReporterPassword, updateReporter } from "./reporter-users.ts";
 import { ticketApi } from "./ticket-api.ts";
 import { markLoginAttemptSucceeded, reserveLoginAttempt } from "./login-quota.ts";
-import { setPublicTicketAttachments, setTicketAttachments, storeTicketUpload } from "./ticket-uploads.ts";
+import { checkedAttachmentSelection, setPublicTicketAttachments, setTicketAttachments, storeTicketUpload } from "./ticket-uploads.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const { production, trustedProxyHops } = validateWebRuntime();
@@ -2765,18 +2765,23 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       const before = (await client.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE", [ref])).rows[0];
       if (!before) return null;
       const updates = new Map(normalized);
-      const attachmentSelection = body.attachment_upload_ids;
-      if (attachmentSelection !== undefined && (!attachmentSelection || typeof attachmentSelection !== "object" || Array.isArray(attachmentSelection))) {
-        return { validationErrors: { attachment_upload_ids: "invalid value" } };
-      }
-      const imageKeys = before.form_id
-        ? (await fieldsFor(before.form_id)).filter((field) => field.field_type === "image_upload").map((field) => field.field_key)
-        : ["screenshots"];
-      const currentAttachments = attachmentSelection === undefined ? [] : (await client.query(
+      const imageFields = before.form_id
+        ? (await fieldsFor(before.form_id)).filter((field) => field.field_type === "image_upload")
+        : [{ field_key: "screenshots", required: false }];
+      const imageKeys = imageFields.map((field) => field.field_key);
+      const attachmentSelection = body.attachment_upload_ids === undefined
+        ? undefined : checkedAttachmentSelection(body.attachment_upload_ids, imageKeys);
+      const currentAttachments = attachmentSelection === undefined && !imageFields.some((field) => field.required) ? [] : (await client.query(
         "SELECT upload_id,field_key FROM attachments WHERE ticket_id=$1", [before.id],
       )).rows;
-      const attachmentChanged = attachmentSelection !== undefined && Object.entries(attachmentSelection as Record<string, string[]>).some(([key, ids]) =>
-        !Array.isArray(ids) || JSON.stringify([...ids].sort()) !== JSON.stringify(currentAttachments.filter((row: any) => row.field_key === key).map((row: any) => row.upload_id).sort()));
+      for (const field of imageFields.filter((field) => field.required)) {
+        const ids = attachmentSelection && field.field_key in attachmentSelection
+          ? attachmentSelection[field.field_key]
+          : currentAttachments.filter((row: any) => row.field_key === field.field_key).map((row: any) => row.upload_id);
+        if (!ids.length) return { validationErrors: { [field.field_key]: "required" } };
+      }
+      const attachmentChanged = attachmentSelection !== undefined && Object.entries(attachmentSelection).some(([key, ids]) =>
+        JSON.stringify([...ids].sort()) !== JSON.stringify(currentAttachments.filter((row: any) => row.field_key === key).map((row: any) => row.upload_id).sort()));
       if (body.submission !== undefined) {
         const submission = body.submission;
         const errors: Record<string, string> = {};

@@ -4,7 +4,7 @@ import {
   type ReporterTicket, type SubmissionFields, type TicketActor,
 } from "@dcc/domain";
 import { standardFields } from "./pages/shared.ts";
-import { attachmentsForActor, setTicketAttachments, type AttachmentSelection } from "./ticket-uploads.ts";
+import { attachmentsForActor, checkedAttachmentSelection, setTicketAttachments, type AttachmentSelection } from "./ticket-uploads.ts";
 
 const columns = ["title", "description", "category", "priority", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps"] as const;
 const reserved = new Set([
@@ -178,7 +178,8 @@ export async function createSubmission(actor: TicketActor, inputValue: Submissio
     if (!project?.enabled) fail("project is disabled", 422);
     const fields = await fieldsFor(client, null);
     const { input, submission } = validated(inputValue, fields, false);
-    const selection = input.attachment_upload_ids === undefined ? {} : object(input.attachment_upload_ids) as AttachmentSelection;
+    const imageKeys = fields.filter((field: any) => field.field_type === "image_upload").map((field: any) => field.field_key);
+    const selection = input.attachment_upload_ids === undefined ? {} : checkedAttachmentSelection(input.attachment_upload_ids, imageKeys);
     const number = (await client.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
     const ticket = (await client.query(
       `INSERT INTO tickets(ticket_number,project_id,title,description,category,priority,source_url,environment,
@@ -188,7 +189,7 @@ export async function createSubmission(actor: TicketActor, inputValue: Submissio
         input.priority || null, input.source_url || null, input.environment || null, input.expected_behavior || null,
         input.actual_behavior || null, input.reproduction_steps || null, actor.role === "reporter" ? "Submitted" : "Triage", actor.userId, submission],
     )).rows[0];
-    await setTicketAttachments(client, actor, ticket, selection, fields.filter((field: any) => field.field_type === "image_upload").map((field: any) => field.field_key));
+    await setTicketAttachments(client, actor, ticket, selection, imageKeys);
     await client.query(
       `INSERT INTO ticket_status_history(ticket_id,previous_status,new_status,reason,actor_type,actor_id)
        VALUES($1,NULL,$2,$3,$4,$5)`,
@@ -208,7 +209,8 @@ export async function updateSubmission(actor: TicketActor, ref: string, inputVal
     if (!before) fail("ticket not found", 404);
     const fields = await fieldsFor(client, before.form_id);
     const { input, submission } = validated(inputValue, fields, true);
-    const selection = input.attachment_upload_ids === undefined ? undefined : object(input.attachment_upload_ids) as AttachmentSelection;
+    const imageKeys = fields.filter((field: any) => field.field_type === "image_upload").map((field: any) => field.field_key);
+    const selection = input.attachment_upload_ids === undefined ? undefined : checkedAttachmentSelection(input.attachment_upload_ids, imageKeys);
     if (!Number.isInteger(input.submission_revision) || Number(input.submission_revision) < 1) fail("submission_revision is required");
     if (Number(input.submission_revision) !== Number(before.submission_revision)) fail("ticket changed since it was loaded", 409);
     const custom = { ...(before.custom_values_json ?? {}), ...submission };
@@ -224,7 +226,6 @@ export async function updateSubmission(actor: TicketActor, ref: string, inputVal
     }
     if (Object.keys(fullErrors).length) fail("validation failed", 422, fullErrors);
     const contentChanged = columns.some((key) => key in input && candidate[key] !== before[key]) || JSON.stringify(custom) !== JSON.stringify(before.custom_values_json ?? {});
-    const imageKeys = fields.filter((field: any) => field.field_type === "image_upload").map((field: any) => field.field_key);
     const currentAttachments = selection === undefined && !fields.some((field: any) => field.field_type === "image_upload" && field.required)
       ? [] : await attachmentsForActor(client, actor, before.id);
     for (const field of fields.filter((item: any) => item.field_type === "image_upload" && item.required)) {

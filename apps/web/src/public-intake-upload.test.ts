@@ -72,6 +72,18 @@ describe("upload", () => {
     const attachment = mockClient.query.mock.calls.find(([sql]: [string]) => sql.includes("INSERT INTO attachments"));
     expect(attachment?.[0]).toContain("RETURNING id");
   });
+
+  test("does not register an upload when the form is no longer published", async () => {
+    mockClient.query.mockImplementation(async (sql: string) => sql.includes("FROM forms")
+      ? { rows: [], rowCount: 0 } : { rows: [{ count: 0 }], rowCount: 1 });
+    const result = response();
+
+    await upload(uploadRequest(), result, { id: "draft-form", settings_json: {} });
+
+    expect(result.writeHead).toHaveBeenCalledWith(404, expect.anything());
+    expect(JSON.parse(result.end.mock.calls[0][0])).toEqual({ error: "form not found" });
+    expect(mockClient.query.mock.calls.some(([sql]: [string]) => sql.includes("INSERT INTO uploads"))).toBe(false);
+  });
 });
 
 describe("submitPublicForm upload claim", () => {

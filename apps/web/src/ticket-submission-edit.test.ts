@@ -4,6 +4,8 @@ process.env.DCC_PROCESS_ROLE = "web";
 
 const pool = { query: vi.fn() };
 let transactionClient: any;
+let formFields: any[];
+let existingAttachments: any[];
 const inTransaction = vi.fn(async (callback: (client: any) => unknown) => callback(transactionClient));
 vi.mock("@dcc/database", () => ({
   artifactDataRoot: () => "/primary", legacyArtifactDataRoot: () => "/legacy",
@@ -38,21 +40,73 @@ function body(result: any) {
 
 beforeEach(() => {
   pool.query.mockReset();
-  pool.query.mockResolvedValue({ rows: [
+  formFields = [
     { field_key: "title", field_type: "short_text", required: true, validation_json: {}, options_json: [] },
     { field_key: "description", field_type: "long_text", required: true, validation_json: {}, options_json: [] },
     { field_key: "source_url", field_type: "url", required: false, validation_json: {}, options_json: [] },
     { field_key: "details", field_type: "long_text", required: false, validation_json: {}, options_json: [] },
     { field_key: "screenshot", field_type: "image_upload", required: false, validation_json: {}, options_json: [] },
-  ] });
+  ];
+  existingAttachments = [];
+  pool.query.mockImplementation(async () => ({ rows: formFields }));
   transactionClient = { query: vi.fn(async (sql: string) => {
     if (sql.includes("FROM users") && sql.includes("FOR UPDATE")) return { rows: [{ role: "admin", is_active: true }] };
     if (sql.includes("FROM tickets") && sql.includes("FOR UPDATE")) return { rows: [ticket] };
     if (sql.includes("FROM projects")) return { rows: [{ id: "project-1", config_json: {} }] };
     if (sql.includes("FROM system_ai_settings")) return { rows: [{ default_model: "sonnet", default_reasoning_level: "high" }] };
+    if (sql.includes("SELECT upload_id,field_key FROM attachments")) return { rows: existingAttachments };
     if (sql.includes("UPDATE tickets SET")) return { rows: [{ ...ticket, source_url: "https://example.test/report", custom_values_json: { retained: "value", details: "Saved detail" } }] };
     return { rows: [], rowCount: 1 };
   }) };
+});
+
+test.each([{ screenshot: "id" }, null])("PATCH rejects malformed attachment maps before mutation", async (attachment_upload_ids) => {
+  await expect(adminApi(request({ attachment_upload_ids }), response(),
+    new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin", role: "admin" }))
+    .rejects.toMatchObject({ status: 422 });
+
+  expect(transactionClient.query.mock.calls.some(([sql]: [string]) => /UPDATE tickets|DELETE FROM attachments/.test(sql))).toBe(false);
+});
+
+test("PATCH preserves an omitted required image and rejects explicitly removing it", async () => {
+  formFields = formFields.map((field) => field.field_key === "screenshot" ? { ...field, required: true } : field);
+  existingAttachments = [{ upload_id: "11111111-1111-4111-8111-111111111111", field_key: "screenshot" }];
+  const preserved = response();
+
+  await adminApi(request({ title: "Changed" }), preserved,
+    new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin", role: "admin" });
+
+  expect(preserved.writeHead).toHaveBeenCalledWith(200, expect.anything());
+  expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("DELETE FROM attachments"))).toBe(false);
+
+  transactionClient.query.mockClear();
+  const removed = response();
+  await adminApi(request({ attachment_upload_ids: { screenshot: [] } }), removed,
+    new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin", role: "admin" });
+
+  expect(removed.writeHead).toHaveBeenCalledWith(400, expect.anything());
+  expect(body(removed)).toEqual({ error: "validation failed", fields: { screenshot: "required" } });
+  expect(transactionClient.query.mock.calls.some(([sql]: [string]) => /UPDATE tickets|DELETE FROM attachments/.test(sql))).toBe(false);
+});
+
+test("PATCH marks an approved plan stale when image evidence changes", async () => {
+  const oldId = "11111111-1111-4111-8111-111111111111";
+  const newId = "22222222-2222-4222-8222-222222222222";
+  existingAttachments = [{ upload_id: oldId, field_key: "screenshot" }];
+  const fallback = transactionClient.query.getMockImplementation();
+  transactionClient.query.mockImplementation(async (sql: string, params?: unknown[]) => {
+    if (sql.includes("SELECT id,upload_id,field_key FROM attachments")) return { rows: [{ id: "attachment-old", upload_id: oldId, field_key: "screenshot" }] };
+    if (sql.includes("ticket_id IS NULL FOR UPDATE")) return { rows: [{ id: "attachment-new", upload_id: newId }] };
+    if (sql.includes("SELECT a.upload_id FROM attachments")) return { rows: [{ upload_id: newId }] };
+    return fallback!(sql, params);
+  });
+  const result = response();
+
+  await adminApi(request({ attachment_upload_ids: { screenshot: [newId] } }), result,
+    new URL("http://test/api/admin/tickets/ticket-1"), { user_id: "admin", role: "admin" });
+
+  expect(result.writeHead).toHaveBeenCalledWith(200, expect.anything());
+  expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("mark_ticket_plan_potentially_stale"))).toBe(true);
 });
 
 test("PATCH submission validates a source URL against saved required values", async () => {

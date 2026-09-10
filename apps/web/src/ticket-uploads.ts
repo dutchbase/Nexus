@@ -97,25 +97,26 @@ export async function storeTicketUpload(request: IncomingMessage, scope: UploadS
   }
 }
 
-function checkedSelection(selection: AttachmentSelection, validFieldKeys: string[]) {
+export function checkedAttachmentSelection(selection: unknown, validFieldKeys: string[]): AttachmentSelection {
   if (!selection || typeof selection !== "object" || Array.isArray(selection)) fail("invalid attachments");
   const allowed = new Set(validFieldKeys);
   const all: string[] = [];
-  for (const [field, ids] of Object.entries(selection)) {
+  for (const [field, ids] of Object.entries(selection as Record<string, unknown>)) {
     if (!allowed.has(field) || !Array.isArray(ids) || ids.length > 5 || ids.some((id) => typeof id !== "string" || !/^[0-9a-f-]{36}$/i.test(id))) fail("invalid attachments");
     all.push(...ids);
   }
   if (new Set(all).size !== all.length) fail("upload used more than once");
-  return all;
+  return selection as AttachmentSelection;
 }
 
 export async function setTicketAttachments(client: QueryClient, actor: TicketActor, ticket: any, selection: AttachmentSelection, validFieldKeys: string[]): Promise<void> {
-  const requested = checkedSelection(selection, validFieldKeys);
+  const checked = checkedAttachmentSelection(selection, validFieldKeys);
+  const requested = Object.values(checked).flat();
   const existing = (await client.query("SELECT id,upload_id,field_key FROM attachments WHERE ticket_id=$1 FOR UPDATE", [ticket.id])).rows;
   const retained = new Set(existing.filter((row: any) => requested.includes(row.upload_id)).map((row: any) => row.upload_id));
   const claims = requested.filter((id) => !retained.has(id));
   if (claims.length) {
-    const attachments = (await client.query("SELECT id,upload_id FROM attachments WHERE upload_id=ANY($1::uuid[]) AND ticket_id IS NULL FOR UPDATE", [claims])).rows;
+    await client.query("SELECT id,upload_id FROM attachments WHERE upload_id=ANY($1::uuid[]) AND ticket_id IS NULL FOR UPDATE", [claims]);
     await client.query("SELECT id FROM uploads WHERE id=ANY($1::uuid[]) FOR UPDATE", [claims]);
     await client.query("SELECT id FROM artifacts WHERE upload_id=ANY($1::uuid[]) FOR UPDATE", [claims]);
     const allowed = (await client.query(
@@ -127,7 +128,7 @@ export async function setTicketAttachments(client: QueryClient, actor: TicketAct
     )).rows.map((row: any) => row.upload_id);
     if (allowed.length !== claims.length || claims.some((id) => !allowed.includes(id))) fail("upload unavailable");
   }
-  for (const [field, ids] of Object.entries(selection)) {
+  for (const [field, ids] of Object.entries(checked)) {
     await client.query("DELETE FROM attachments WHERE ticket_id=$1 AND field_key=$2 AND NOT (upload_id=ANY($3::uuid[]))", [ticket.id, field, ids]);
     for (const id of ids.filter((uploadId) => !retained.has(uploadId))) {
       const claimed = await client.query("UPDATE attachments SET ticket_id=$1,field_key=$2 WHERE upload_id=$3 AND ticket_id IS NULL", [ticket.id, field, id]);
@@ -139,9 +140,10 @@ export async function setTicketAttachments(client: QueryClient, actor: TicketAct
 }
 
 export async function setPublicTicketAttachments(client: QueryClient, formId: string, ticketId: string, selection: AttachmentSelection, validFieldKeys: string[]): Promise<void> {
-  const requested = checkedSelection(selection, validFieldKeys);
+  const checked = checkedAttachmentSelection(selection, validFieldKeys);
+  const requested = Object.values(checked).flat();
   if (!requested.length) return;
-  const attachments = (await client.query("SELECT id,upload_id FROM attachments WHERE upload_id=ANY($1::uuid[]) AND ticket_id IS NULL FOR UPDATE", [requested])).rows;
+  await client.query("SELECT id,upload_id FROM attachments WHERE upload_id=ANY($1::uuid[]) AND ticket_id IS NULL FOR UPDATE", [requested]);
   await client.query("SELECT id FROM uploads WHERE id=ANY($1::uuid[]) FOR UPDATE", [requested]);
   await client.query("SELECT id FROM artifacts WHERE upload_id=ANY($1::uuid[]) FOR UPDATE", [requested]);
   const allowed = (await client.query(
@@ -152,7 +154,7 @@ export async function setPublicTicketAttachments(client: QueryClient, formId: st
     [requested, formId],
   )).rows.map((row: any) => row.upload_id);
   if (allowed.length !== requested.length || requested.some((id) => !allowed.includes(id))) fail("upload unavailable");
-  for (const [field, ids] of Object.entries(selection)) for (const id of ids) {
+  for (const [field, ids] of Object.entries(checked)) for (const id of ids) {
     if ((await client.query("UPDATE attachments SET ticket_id=$1,field_key=$2 WHERE upload_id=$3 AND ticket_id IS NULL", [ticketId, field, id]) as any).rowCount !== 1) throw new Error("upload claim changed while locked");
     await client.query("UPDATE uploads SET claim_expires_at=NULL WHERE id=$1", [id]);
   }
