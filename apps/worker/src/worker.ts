@@ -45,6 +45,8 @@ import { runSessionCleanup } from "./security-maintenance.ts";
 import { expireUnclaimedUploads } from "./ticket-upload-maintenance.ts";
 import { providerJobTypes, runProviderJob } from "./provider-jobs.ts";
 import { runProjectValidateJob } from "./project-validate-job.ts";
+import { failJamEnrichment, runJamEnrichment } from "./jam-enrichment.ts";
+import { JamImportError } from "./jam-client.ts";
 import { runWorkerTick, startWorkerServices } from "./worker-loop.ts";
 import {
   blockClaimedClaudeJob, failClaimedWorkflowJob, finalizeCancellableRun, finalizeExecutionInvocation, finalizePlanningCancellation, finalizePlanningFailure, finalizePlanningSuccess, initializeExecutionAttempt, initializePlanningAttempt, isPlanningCancellation, isWorkflowCancellation, LeaseLostError, observeRunCancellation, recoverExpiredWorkflowState, runLeaseFencedBatch, terminalizePrReview,
@@ -79,6 +81,7 @@ const RUN_HEARTBEAT_INTERVAL_MS = 15_000;
 // UI can show what a healthy worker is actually able to do.
 const workerCapabilities = [
   "project.validate",
+  "ticket.jam_enrich",
   ...planningJobTypes, ...executionJobTypes, ...publicationJobTypes,
   ...aiReviewJobTypes, ...followUpDescriptionJobTypes, ...conflictResolutionJobTypes,
   ...providerJobTypes,
@@ -1912,6 +1915,8 @@ async function handleClaimedJob(job: any) {
     try {
       if (job.type === "project.validate") {
         await runProjectValidateJob(job, pool, lease.assertOwned);
+      } else if (job.type === "ticket.jam_enrich") {
+        await runJamEnrichment(job, lease);
       } else if (providerJobTypes.includes(job.type as typeof providerJobTypes[number])) {
         await runProviderJob(job as Parameters<typeof runProviderJob>[0], pool, lease.assertOwned);
       } else if (publicationJobTypes.includes(job.type)) {
@@ -1932,7 +1937,10 @@ async function handleClaimedJob(job: any) {
       if (error instanceof LeaseLostError) return;
       if (error instanceof ClaudeAuthError) console.error(`${error.code}: ${error.message}`);
       else console.error(error instanceof Error ? error.message : "job failed");
-      if (isWorkflowCancellation((error as any)?.code, { stopping, leaseAborted: lease.signal.aborted })) {
+      if (job.type === "ticket.jam_enrich") {
+        const jamError = error instanceof JamImportError ? error : new JamImportError("unavailable", true);
+        await failJamEnrichment(job, workerId, jamError, lease);
+      } else if (isWorkflowCancellation((error as any)?.code, { stopping, leaseAborted: lease.signal.aborted })) {
         await lease.run(() => pool.query(
           `UPDATE jobs SET status='cancelled',completed_at=now(),claimed_by=NULL,lease_expires_at=NULL,updated_at=now()
            WHERE id=$1 AND status='running' AND claimed_by=$2 AND lease_expires_at > now()`,

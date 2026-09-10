@@ -267,8 +267,8 @@ export async function renewJobLease(id: string, workerId: string): Promise<boole
   return result.rowCount === 1;
 }
 
-export async function completeJob(id: string, workerId: string): Promise<boolean> {
-  const result = await pool.query(
+export async function completeJob(id: string, workerId: string, client?: pg.PoolClient): Promise<boolean> {
+  const result = await (client ?? pool).query(
     `UPDATE jobs SET status = 'completed', completed_at = now(), claimed_by = NULL,
        lease_expires_at = NULL, updated_at = now()
      WHERE id = $1 AND status = 'running' AND claimed_by = $2 AND lease_expires_at > now()`,

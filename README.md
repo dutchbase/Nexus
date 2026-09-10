@@ -137,7 +137,7 @@ app reads, with comments. The two most important, always required:
 | `PORT` | Port `apps/web` listens on |
 
 In production, keep worker-only credentials (`GITHUB_TOKEN`,
-`CLAUDE_CODE_OAUTH_TOKEN`, etc.) in a **separate** `.env.worker` file — the
+`CLAUDE_CODE_OAUTH_TOKEN`, `DCC_JAM_TOKEN`, etc.) in a **separate** `.env.worker` file — the
 web process is deliberately never given these (see
 `apps/web/src/security.ts`'s `workerOnlyCredentials` list, enforced at
 process-start via `env -u ...` stripping in `ecosystem.config.cjs`).

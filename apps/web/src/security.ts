@@ -5,7 +5,7 @@ import { forbiddenClaudeAuthVariables } from "../../../packages/claude-runner/sr
 type Environment = Record<string, string | undefined>;
 type RequestIdentity = { socket: { remoteAddress?: string | undefined }; headers: { [name: string]: string | string[] | undefined } };
 
-const workerOnlyCredentials = ["GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", ...forbiddenClaudeAuthVariables];
+const workerOnlyCredentials = ["GITHUB_TOKEN", "GH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN", "DCC_JAM_TOKEN", ...forbiddenClaudeAuthVariables];
 
 export function validateWebRuntime(env: Environment = process.env) {
   const trustedProxyHops = Number(env.DCC_TRUST_PROXY_HOPS ?? "0");
