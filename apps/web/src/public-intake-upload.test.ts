@@ -101,9 +101,10 @@ describe("submitPublicForm upload claim", () => {
     const claim = mockClient.query.mock.calls.find(([sql]: [string]) => sql.includes("UPDATE attachments"));
     expect(claim).toBeDefined();
     const [sql, params] = claim!;
-    expect(sql).toContain("u.form_id");
-    expect(sql).toContain("interval '1 hour'");
-    expect(params).toContain("form-1");
+    expect(sql).toContain("ticket_id IS NULL");
+    const scopedClaim = mockClient.query.mock.calls.find(([query]: [string]) => query.includes("u.form_id=$2") && query.includes("claim_expires_at"));
+    expect(scopedClaim?.[0]).toContain("interval '1 hour'");
+    expect(scopedClaim?.[1]).toContain("form-1");
     expect(params[2]).toContain(uploadId);
     expect(mockClient.query.mock.calls.some(([sql, params]: [string, unknown[]]) => sql.includes("UPDATE attachments") && params.includes("screenshot"))).toBe(true);
   });

@@ -7,6 +7,10 @@ export type SubmissionFields = {
   actual_behavior?: string | null; reproduction_steps?: string | null;
   submission?: Record<string, string | boolean | string[]>;
 };
+export type TicketAttachment = {
+  id: string; upload_id: string; field_key: string; original_name: string | null;
+  media_type: string; size_bytes: number; url: string;
+};
 export type ReporterTicket = {
   id: string; ticket_number: string; project_id: string; project_name: string;
   title: string; description: string | null; category: string | null; priority: string | null;
@@ -14,7 +18,7 @@ export type ReporterTicket = {
   actual_behavior: string | null; reproduction_steps: string | null;
   submission: Record<string, string | boolean | string[]>;
   submission_revision: number; submission_updated_at: string; created_at: string;
-  can_delete: boolean;
+  can_delete: boolean; attachments: TicketAttachment[];
 };
 
 function fail(message: string, status: number): never {
@@ -67,5 +71,6 @@ export function reporterTicket(row: any, actor: TicketActor, fields: any[]): Rep
     reproduction_steps: row.reproduction_steps ?? null, submission,
     submission_revision: Number(row.submission_revision), submission_updated_at: timestamp(row.submission_updated_at),
     created_at: timestamp(row.created_at), can_delete: actor.role === "reporter" && row.created_by_user_id === actor.userId,
+    attachments: Array.isArray(row.attachments) ? row.attachments : [],
   };
 }

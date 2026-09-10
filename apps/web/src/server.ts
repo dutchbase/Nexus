@@ -7,7 +7,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
+import { artifactDataRoot, legacyArtifactDataRoot, inTransaction, pool, readArtifact, readStagedArtifact } from "@dcc/database";
 import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
   allowlistMismatches, buildExecutionPrompt, checkPlanApprovalGate, derivePolicyStatus, ensurePolicySnapshot, enqueueJob, findAllowlistEntry, getPullRequestMergeSettings, getSystemAiSettings,
@@ -47,6 +47,7 @@ import { reporterPage } from "./reporter-ui.ts";
 import { createReporter, listReporters, resetReporterPassword, updateReporter } from "./reporter-users.ts";
 import { ticketApi } from "./ticket-api.ts";
 import { markLoginAttemptSucceeded, reserveLoginAttempt } from "./login-quota.ts";
+import { setPublicTicketAttachments, setTicketAttachments, storeTicketUpload } from "./ticket-uploads.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const { production, trustedProxyHops } = validateWebRuntime();
@@ -58,7 +59,6 @@ const lockoutThreshold = 5;
 const lockoutWindowMinutes = 15;
 const sessionHours = 8;
 const maxJsonBytes = 1024 * 1024;
-const maxUploadBytes = 5 * 1024 * 1024;
 const exec = promisify(execFile);
 const defaultRateLimit = 15;
 const dummyHash = await hashPassword(randomBytes(32).toString("hex"));
@@ -597,7 +597,9 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
          JOIN uploads u ON u.id=a.upload_id
          JOIN artifacts ar ON ar.upload_id=u.id
          WHERE a.upload_id=ANY($1::uuid[]) AND a.ticket_id IS NULL AND u.form_id=$2
-           AND u.created_at > now() - interval '1 hour' AND ar.status='finalized'
+           AND u.owner_user_id IS NULL AND u.project_id IS NULL
+           AND u.created_at > now() - interval '1 hour'
+           AND (u.claim_expires_at IS NULL OR u.claim_expires_at>now()) AND ar.status='finalized'
          FOR UPDATE OF a`,
         [uploadIds, form.id],
       )).rows.map((row: any) => row.upload_id);
@@ -626,16 +628,8 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
        VALUES ($1,NULL,'Submitted','Public form submitted','public')`,
       [result.rows[0].id],
     );
-    for (const { fieldKey, ids } of imageUploads) {
-      if (!ids.length) continue;
-      const claim = await client.query(
-        `UPDATE attachments a SET ticket_id=$1,field_key=$2 FROM uploads u
-         WHERE a.upload_id=u.id AND a.ticket_id IS NULL AND u.form_id=$4
-           AND u.created_at > now() - interval '1 hour' AND a.upload_id=ANY($3::uuid[])`,
-        [result.rows[0].id, fieldKey, ids, form.id],
-      );
-      if (claim.rowCount !== ids.length) throw new Error("upload claim changed while locked");
-    }
+    await setPublicTicketAttachments(client, form.id, result.rows[0].id,
+      Object.fromEntries(imageUploads.map(({ fieldKey, ids }) => [fieldKey, ids])), imageUploads.map(({ fieldKey }) => fieldKey));
     await audit({ actorType: "public", action: "ticket.create", entityType: "ticket", entityId: result.rows[0].id, after: result.rows[0], metadata: { form_id: form.id, ...(retryKey ? { idempotency_key: retryKey } : {}) }, ip }, client);
     if (form.settings_json?.notify_on_submission !== false) await enqueueNotification(client, "ticket.created", result.rows[0].id, result.rows[0].id);
     return { ticket: result.rows[0] };
@@ -643,12 +637,6 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
   if ("validationErrors" in result) return json(response, 400, { error: "validation failed", fields: result.validationErrors });
   const ticket = result.ticket;
   json(response, 201, { ticket_number: ticket.ticket_number, ticket: { id: ticket.id, ticket_number: ticket.ticket_number } });
-}
-
-function sniffImage(buffer: Buffer) {
-  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return { mediaType: "image/png", extension: ".png" };
-  if (buffer.length >= 3 && buffer[0] === 255 && buffer[1] === 216 && buffer[2] === 255) return { mediaType: "image/jpeg", extension: ".jpg" };
-  return null;
 }
 
 export async function upload(request: IncomingMessage, response: ServerResponse, form: any) {
@@ -660,53 +648,10 @@ export async function upload(request: IncomingMessage, response: ServerResponse,
   if (!attempt.allowed) {
     return json(response, 429, { error: "upload rate limit exceeded", code: "rate_limited", retry_after_seconds: attempt.resetSeconds }, { "retry-after": String(attempt.resetSeconds) });
   }
-  const contentType = request.headers["content-type"] ?? "";
-  const boundary = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType)?.slice(1).find(Boolean);
-  if (!boundary) return json(response, 400, { error: "multipart form data required" });
-  const raw = await bodyBuffer(request, maxUploadBytes + 64 * 1024);
-  const separator = Buffer.from(`\r\n--${boundary}`);
-  const headerEnd = raw.indexOf(Buffer.from("\r\n\r\n"));
-  if (headerEnd < 0) return json(response, 400, { error: "invalid upload" });
-  const end = raw.indexOf(separator, headerEnd + 4);
-  if (end < 0) return json(response, 400, { error: "invalid upload" });
-  const bytes = raw.subarray(headerEnd + 4, end);
-  if (!bytes.length || bytes.length > maxUploadBytes) return json(response, 413, { error: "upload too large" });
-  const sniffed = sniffImage(bytes);
-  if (!sniffed) return json(response, 415, { error: "only PNG and JPEG images are accepted" });
-  const artifactId = randomUUID();
-  const staged = await stageArtifact({
-    root: dataRoot, id: artifactId, storagePath: `uploads/${artifactId}${sniffed.extension}`, content: bytes,
-  });
-  let registered = false;
   try {
-    const originalName = /filename="([^"]*)"/i.exec(raw.subarray(0, headerEnd).toString("utf8"))?.[1] ?? null;
-    const row = await inTransaction(async (client) => {
-      const upload = (await client.query(
-        `INSERT INTO uploads (storage_path,original_name,media_type,size_bytes,form_id) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-        [staged.relativePath, originalName ? originalName.slice(0, 255) : null, sniffed.mediaType, bytes.length, form.id],
-      )).rows[0];
-      await client.query(
-        `INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,upload_id)
-         VALUES ($1,$2,'upload','staged',now() + interval '1 hour',$3)`,
-        [artifactId, staged.relativePath, upload.id],
-      );
-      const attachment = (await client.query("INSERT INTO attachments (upload_id) VALUES ($1) RETURNING id", [upload.id])).rows[0];
-      return { ...upload, attachment_id: attachment.id };
-    });
-    registered = true;
-    await inTransaction(async (client) => {
-        if (!(await client.query("SELECT id FROM artifacts WHERE id=$1 AND status='staged' FOR UPDATE", [artifactId])).rowCount) throw new Error("artifact is no longer staged");
-        const finalized = await finalizeArtifact(staged);
-        if (!(await client.query(
-          `UPDATE artifacts SET status='finalized',sha256=$2,finalized_at=now(),expires_at=NULL
-           WHERE id=$1 AND status='staged'`,
-          [artifactId, finalized.sha256],
-        )).rowCount) throw new Error("artifact is no longer staged");
-    });
-    json(response, 201, { upload_id: row.id, reference: `/admin/attachments/${row.attachment_id}` });
-  } catch (error) {
-    if (!registered) await rm(staged.stagedPath, { force: true });
-    throw error;
+    return json(response, 201, await storeTicketUpload(request, { kind: "public", formId: form.id }));
+  } catch (error: any) {
+    return json(response, Number(error?.status) || 500, { error: Number(error?.status) ? error.message : "internal server error" });
   }
 }
 
@@ -2811,7 +2756,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       "planning_reasoning_level", "execution_model", "execution_reasoning_level", "repair_model", "repair_reasoning_level",
     ];
     const entries = Object.entries(body).filter(([key]) => allowed.includes(key));
-    if (!entries.length && body.submission === undefined) return json(response, 400, { error: "no supported fields" });
+    if (!entries.length && body.submission === undefined && body.attachment_upload_ids === undefined) return json(response, 400, { error: "no supported fields" });
     const aiFields = new Set(["default_model", "default_reasoning_level", "planning_model",
       "planning_reasoning_level", "execution_model", "execution_reasoning_level", "repair_model", "repair_reasoning_level"]);
     const normalized = entries.map(([key, value]) => (aiFields.has(key) && value === "" ? [key, null] : [key, value]) as [string, unknown]);
@@ -2820,6 +2765,18 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       const before = (await client.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE", [ref])).rows[0];
       if (!before) return null;
       const updates = new Map(normalized);
+      const attachmentSelection = body.attachment_upload_ids;
+      if (attachmentSelection !== undefined && (!attachmentSelection || typeof attachmentSelection !== "object" || Array.isArray(attachmentSelection))) {
+        return { validationErrors: { attachment_upload_ids: "invalid value" } };
+      }
+      const imageKeys = before.form_id
+        ? (await fieldsFor(before.form_id)).filter((field) => field.field_type === "image_upload").map((field) => field.field_key)
+        : ["screenshots"];
+      const currentAttachments = attachmentSelection === undefined ? [] : (await client.query(
+        "SELECT upload_id,field_key FROM attachments WHERE ticket_id=$1", [before.id],
+      )).rows;
+      const attachmentChanged = attachmentSelection !== undefined && Object.entries(attachmentSelection as Record<string, string[]>).some(([key, ids]) =>
+        !Array.isArray(ids) || JSON.stringify([...ids].sort()) !== JSON.stringify(currentAttachments.filter((row: any) => row.field_key === key).map((row: any) => row.upload_id).sort()));
       if (body.submission !== undefined) {
         const submission = body.submission;
         const errors: Record<string, string> = {};
@@ -2847,7 +2804,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         }
         if (Object.keys(errors).length) return { validationErrors: errors };
       }
-      if (!updates.size) return { noSupportedFields: true };
+      if (!updates.size && !attachmentChanged) return before;
       if (body.ai_configuration_mode !== undefined && !["basic", "advanced"].includes(body.ai_configuration_mode)) {
         throw new AiConfigurationError(`Unsupported AI configuration mode "${body.ai_configuration_mode}"`);
       }
@@ -2870,11 +2827,13 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         resolvedAiFor(candidate, project, phase, systemAi);
       }
       const submissionFields = new Set(["title", "description", "category", "priority", "project_id", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", "custom_values_json"]);
-      const submissionChanged = updatedEntries.some(([key, value]) => submissionFields.has(key) && before[key] !== value
+      const submissionChanged = attachmentChanged || updatedEntries.some(([key, value]) => submissionFields.has(key) && before[key] !== value
         && (key !== "custom_values_json" || JSON.stringify(before[key] ?? {}) !== JSON.stringify(value ?? {})));
-      const updated = (await client.query(`UPDATE tickets SET ${updatedEntries.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now()
+      const assignments = updatedEntries.map(([key], index) => `${key}=$${index + 2}`);
+      const updated = (await client.query(`UPDATE tickets SET ${assignments.length ? `${assignments.join(",")},` : ""}updated_at=now()
         ${submissionChanged ? ",submission_revision=submission_revision+1,submission_updated_at=now()" : ""} WHERE id=$1 RETURNING *`, [before.id, ...updatedEntries.map(([, value]) => value)])).rows[0];
-      if (updates.has("source_url") && before.source_url !== updated.source_url) await client.query("SELECT mark_ticket_plan_potentially_stale($1)", [before.id]);
+      if (attachmentSelection !== undefined) await setTicketAttachments(client, { userId: session.user_id, role: "admin" }, before, attachmentSelection, imageKeys);
+      if ((updates.has("source_url") && before.source_url !== updated.source_url) || attachmentChanged) await client.query("SELECT mark_ticket_plan_potentially_stale($1)", [before.id]);
       if (body.status && body.status !== before.status) await client.query(
         `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id) VALUES ($1,$2,$3,'Manual admin update','admin',$4)`,
         [before.id, before.status, body.status, session.user_id],
@@ -2963,6 +2922,21 @@ export async function route(request: IncomingMessage, response: ServerResponse) 
       });
       return response.end(content);
     } catch { return json(response, 404, { error: "attachment not found" }); }
+  }
+  const authenticatedUpload = url.pathname.match(/^\/api\/projects\/([0-9a-f-]{36})\/uploads$/);
+  if (authenticatedUpload && request.method === "POST") {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    try {
+      return json(response, 201, await storeTicketUpload(request, {
+        kind: "authenticated", actor: { userId: session.user_id, role: session.role }, projectId: authenticatedUpload[1],
+      }));
+    } catch (error: any) {
+      const retry = error?.retryAfterSeconds;
+      return json(response, Number(error?.status) || 500, {
+        error: Number(error?.status) ? error.message : "internal server error", ...(retry ? { retry_after_seconds: retry } : {}),
+      }, retry ? { "retry-after": String(retry) } : {});
+    }
   }
   if (url.pathname === "/api/projects" || url.pathname === "/api/tickets" || url.pathname.startsWith("/api/tickets/")) {
     const session = await requireSession(request, response);

@@ -17,9 +17,15 @@ export async function cleanupExpiredSessions(db: Queryable): Promise<{ deletedCo
   return { deletedCount: result.rows[0]?.deleted_count ?? 0 };
 }
 
+export async function cleanupAuthenticatedUploadAttempts(db: Queryable): Promise<number> {
+  return (await db.query("DELETE FROM authenticated_upload_attempts WHERE created_at<=now()-interval '24 hours' RETURNING 1")).rows.length;
+}
+
 export async function runSessionCleanup(db: Queryable, report: (message: string) => void = console.error) {
   try {
-    return await cleanupExpiredSessions(db);
+    const result = await cleanupExpiredSessions(db);
+    await cleanupAuthenticatedUploadAttempts(db);
+    return result;
   } catch (error) {
     report(`Session cleanup failed: ${error instanceof Error ? error.message : "unknown error"}`);
     return null;

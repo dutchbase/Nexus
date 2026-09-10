@@ -4,6 +4,7 @@ import {
   type ReporterTicket, type SubmissionFields, type TicketActor,
 } from "@dcc/domain";
 import { standardFields } from "./pages/shared.ts";
+import { attachmentsForActor, setTicketAttachments, type AttachmentSelection } from "./ticket-uploads.ts";
 
 const columns = ["title", "description", "category", "priority", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps"] as const;
 const reserved = new Set([
@@ -19,6 +20,7 @@ export const standardSubmissionFields = [
   { field_key: "expected_behavior", field_type: "long_text", required: false, options_json: [], validation_json: { max_length: 10000 } },
   { field_key: "actual_behavior", field_type: "long_text", required: false, options_json: [], validation_json: { max_length: 10000 } },
   { field_key: "reproduction_steps", field_type: "long_text", required: false, options_json: [], validation_json: { max_length: 10000 } },
+  { field_key: "screenshots", field_type: "image_upload", required: false, options_json: [], validation_json: {} },
 ];
 
 function fail(message: string, status = 422, fields?: Record<string, string>): never {
@@ -97,7 +99,7 @@ function validateField(field: any, value: unknown): string | undefined {
 
 function validated(inputValue: unknown, fields: any[], partial: boolean) {
   const input = object(inputValue);
-  allowOnly(input, [...columns, "submission", ...(partial ? ["submission_revision"] : ["project_id"])]);
+  allowOnly(input, [...columns, "submission", "attachment_upload_ids", ...(partial ? ["submission_revision"] : ["project_id"])]);
   const submission = input.submission === undefined ? {} : object(input.submission);
   const declared = new Map(editableFields(fields).map((field) => [field.field_key, field]));
   const errors: Record<string, string> = {};
@@ -163,10 +165,10 @@ export async function listSubmissions(actor: TicketActor, filter: { project_id?:
 
 export async function getSubmission(actor: TicketActor, ref: string): Promise<ReporterTicket | null> {
   const row = await ticketForActor(pool, actor, ref);
-  return row ? reporterTicket(row, actor, await fieldsFor(pool, row.form_id)) : null;
+  return row ? reporterTicket({ ...row, attachments: await attachmentsForActor(pool, actor, ref) }, actor, await fieldsFor(pool, row.form_id)) : null;
 }
 
-export async function createSubmission(actor: TicketActor, inputValue: SubmissionFields & { project_id: string }): Promise<ReporterTicket> {
+export async function createSubmission(actor: TicketActor, inputValue: SubmissionFields & { project_id: string; attachment_upload_ids?: AttachmentSelection }): Promise<ReporterTicket> {
   return inTransaction(async (client) => {
     await lockTicketActor(client, actor);
     const preliminary = object(inputValue);
@@ -176,6 +178,7 @@ export async function createSubmission(actor: TicketActor, inputValue: Submissio
     if (!project?.enabled) fail("project is disabled", 422);
     const fields = await fieldsFor(client, null);
     const { input, submission } = validated(inputValue, fields, false);
+    const selection = input.attachment_upload_ids === undefined ? {} : object(input.attachment_upload_ids) as AttachmentSelection;
     const number = (await client.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
     const ticket = (await client.query(
       `INSERT INTO tickets(ticket_number,project_id,title,description,category,priority,source_url,environment,
@@ -185,6 +188,7 @@ export async function createSubmission(actor: TicketActor, inputValue: Submissio
         input.priority || null, input.source_url || null, input.environment || null, input.expected_behavior || null,
         input.actual_behavior || null, input.reproduction_steps || null, actor.role === "reporter" ? "Submitted" : "Triage", actor.userId, submission],
     )).rows[0];
+    await setTicketAttachments(client, actor, ticket, selection, fields.filter((field: any) => field.field_type === "image_upload").map((field: any) => field.field_key));
     await client.query(
       `INSERT INTO ticket_status_history(ticket_id,previous_status,new_status,reason,actor_type,actor_id)
        VALUES($1,NULL,$2,$3,$4,$5)`,
@@ -192,17 +196,19 @@ export async function createSubmission(actor: TicketActor, inputValue: Submissio
     );
     await audit(client, actor, "ticket.create", ticket.id, null, ticket);
     await enqueueNotification(client, "ticket.created", ticket.id, ticket.id);
-    return reporterTicket({ ...ticket, project_name: (await client.query("SELECT name FROM projects WHERE id=$1", [ticket.project_id])).rows[0].name }, actor, fields);
+    return reporterTicket({ ...ticket, project_name: (await client.query("SELECT name FROM projects WHERE id=$1", [ticket.project_id])).rows[0].name,
+      attachments: await attachmentsForActor(client, actor, ticket.id) }, actor, fields);
   });
 }
 
-export async function updateSubmission(actor: TicketActor, ref: string, inputValue: Partial<SubmissionFields> & { submission_revision: number }): Promise<ReporterTicket> {
+export async function updateSubmission(actor: TicketActor, ref: string, inputValue: Partial<SubmissionFields> & { submission_revision: number; attachment_upload_ids?: AttachmentSelection }): Promise<ReporterTicket> {
   return inTransaction(async (client) => {
     await lockTicketActor(client, actor);
     const before = await ticketForActor(client, actor, ref, true);
     if (!before) fail("ticket not found", 404);
     const fields = await fieldsFor(client, before.form_id);
     const { input, submission } = validated(inputValue, fields, true);
+    const selection = input.attachment_upload_ids === undefined ? undefined : object(input.attachment_upload_ids) as AttachmentSelection;
     if (!Number.isInteger(input.submission_revision) || Number(input.submission_revision) < 1) fail("submission_revision is required");
     if (Number(input.submission_revision) !== Number(before.submission_revision)) fail("ticket changed since it was loaded", 409);
     const custom = { ...(before.custom_values_json ?? {}), ...submission };
@@ -217,8 +223,19 @@ export async function updateSubmission(actor: TicketActor, ref: string, inputVal
       if (error && !(error === "invalid option" && JSON.stringify(value) === JSON.stringify(previous))) fullErrors[field.field_key] = error;
     }
     if (Object.keys(fullErrors).length) fail("validation failed", 422, fullErrors);
-    const changed = columns.some((key) => key in input && candidate[key] !== before[key]) || JSON.stringify(custom) !== JSON.stringify(before.custom_values_json ?? {});
-    if (!changed) return reporterTicket(before, actor, fields);
+    const contentChanged = columns.some((key) => key in input && candidate[key] !== before[key]) || JSON.stringify(custom) !== JSON.stringify(before.custom_values_json ?? {});
+    const imageKeys = fields.filter((field: any) => field.field_type === "image_upload").map((field: any) => field.field_key);
+    const currentAttachments = selection === undefined && !fields.some((field: any) => field.field_type === "image_upload" && field.required)
+      ? [] : await attachmentsForActor(client, actor, before.id);
+    for (const field of fields.filter((item: any) => item.field_type === "image_upload" && item.required)) {
+      const ids = selection && field.field_key in selection
+        ? selection[field.field_key]
+        : currentAttachments.filter((attachment) => attachment.field_key === field.field_key).map((attachment) => attachment.upload_id);
+      if (!ids?.length) fail("validation failed", 422, { [field.field_key]: "required" });
+    }
+    const attachmentChanged = selection !== undefined && Object.entries(selection).some(([key, ids]) =>
+      JSON.stringify([...ids].sort()) !== JSON.stringify(currentAttachments.filter((a) => a.field_key === key).map((a) => a.upload_id).sort()));
+    if (!contentChanged && !attachmentChanged) return reporterTicket({ ...before, attachments: await attachmentsForActor(client, actor, before.id) }, actor, fields);
     const entries: [string, unknown][] = columns.filter((key) => key in input).map((key) => [key, candidate[key]]);
     entries.push(["custom_values_json", custom]);
     const updated = (await client.query(
@@ -228,9 +245,10 @@ export async function updateSubmission(actor: TicketActor, ref: string, inputVal
       [before.id, ...entries.map(([, value]) => value), input.submission_revision],
     )).rows[0];
     if (!updated) fail("ticket changed since it was loaded", 409);
-    if ("source_url" in input && input.source_url !== before.source_url) await client.query("SELECT mark_ticket_plan_potentially_stale($1)", [before.id]);
+    if (selection !== undefined) await setTicketAttachments(client, actor, before, selection, imageKeys);
+    if (("source_url" in input && input.source_url !== before.source_url) || attachmentChanged) await client.query("SELECT mark_ticket_plan_potentially_stale($1)", [before.id]);
     await audit(client, actor, "ticket.submission.update", before.id, before, updated);
-    return reporterTicket({ ...updated, project_name: before.project_name }, actor, fields);
+    return reporterTicket({ ...updated, project_name: before.project_name, attachments: await attachmentsForActor(client, actor, before.id) }, actor, fields);
   });
 }
 
