@@ -166,7 +166,7 @@ restarting it after a routine OS security patch). `deploy.sh`'s
 `reload_app()` and `scripts/webhook-reload.sh` now call `pm2 save` after
 every successful cutover specifically to keep that snapshot current — if
 this incident recurs, first check whether that call started failing
-silently (`grep "pm2 save" /home/deploy/.pm2/pm2.log` or the `warning:
+silently (`grep "pm2 save" ~/.pm2/pm2.log` or the `warning:
 pm2 save failed` line `reload_app`/`webhook-reload.sh` emit to stderr on
 failure) before assuming a new root cause.
 
