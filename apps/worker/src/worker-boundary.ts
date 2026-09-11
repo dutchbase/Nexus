@@ -1,6 +1,6 @@
 import { skillsForPhase, type SkillPhase, type SnapshottedSkill } from "@dcc/skill-registry";
 import { GitHubProviderError } from "@dcc/github-provider";
-import { PrReviewDestinationError, recordAiUnavailable, recordAiUsage } from "@dcc/domain";
+import { checkPlanApprovalGate, PrReviewDestinationError, recordAiUnavailable, recordAiUsage } from "@dcc/domain";
 import type { AiQueryClient, AiUsage } from "@dcc/domain";
 import { createHash } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
@@ -145,6 +145,7 @@ export function approvedExecutionInput(snapshot: {
     project,
     ai: { model: ai.model, reasoning_level: ai.reasoningLevel },
     imageEvidence: Array.isArray(material.ticket?.imageEvidence) ? material.ticket.imageEvidence : [],
+    jamEvidence: material.ticket?.jamEvidence ?? null,
     promptVersionIds: Object.fromEntries(prompt.provenance.map((source: any) => [`${source.scope}.${source.promptType}`, source.versionId])),
     content: `${prompt.content.trimEnd()}\n\n${runtime.join("\n\n")}\n`,
   };
@@ -152,6 +153,16 @@ export function approvedExecutionInput(snapshot: {
 
 export function assertExecutionPublicationGate(repairing: boolean, usedAgent: boolean) {
   if (!repairing && !usedAgent) throw new Error("execution did not invoke Agent tool");
+}
+
+export async function runQueuedExecutionBoundary<T>(client: any, job: any, launch: (input: { ticket: any; gate: any }) => Promise<T>) {
+  const ticket = (await client.query("SELECT * FROM tickets WHERE id=$1", [job.payload_json.ticket_id])).rows[0];
+  if (!ticket) throw new Error("ticket not found");
+  if (typeof job.payload_json.approved_input_snapshot_id !== "string") throw new Error("execution job has no approved input snapshot");
+  const gate = await checkPlanApprovalGate(client, ticket.id, job.payload_json.approved_input_snapshot_id);
+  if ("code" in gate) throw new Error(`execution gate failed: ${gate.code}`);
+  if (gate.planVersion.id !== job.payload_json.plan_version_id) throw new Error("execution gate approved a different plan version");
+  return launch({ ticket, gate });
 }
 
 export async function finalizeAiUsage(runId: string, result: { usage?: AiUsage }, client?: AiQueryClient) {

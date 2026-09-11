@@ -1,5 +1,5 @@
 import pg from "pg";
-export { artifactDataRoot, artifactPath, legacyArtifactDataRoot, finalizeArtifact, readArtifact, readStagedArtifact, reconcileArtifactRoots, reconcileArtifacts, stageArtifact, type ArtifactRecord, type RootedArtifactRecord, type StagedArtifact } from "./artifacts.ts";
+export { artifactDataRoot, artifactPath, legacyArtifactDataRoot, finalizeArtifact, readArtifact, readStagedArtifact, reconcileArtifactRoots, reconcileArtifacts, removeArtifactFile, stageArtifact, type ArtifactRecord, type RootedArtifactRecord, type StagedArtifact } from "./artifacts.ts";
 
 const { Pool } = pg;
 

@@ -17,7 +17,7 @@ beforeEach(() => { pool.query.mockReset(); inTransaction.mockReset(); });
 test("form creation rejects an unroutable slug before writing", async () => {
   const result = response();
   await adminApi(request({ name: "Broken", slug: "broken/form", title: "Broken" }), result,
-    new URL("http://test/api/admin/forms"), { user_id: "admin" });
+    new URL("http://test/api/admin/forms"), { user_id: "admin", role: "admin" });
   expect(result.writeHead).toHaveBeenCalledWith(400, expect.anything());
   expect(inTransaction).not.toHaveBeenCalled();
 });
@@ -32,7 +32,7 @@ test("publishing rejects forms without required public core controls", async () 
   pool.query.mockImplementation(client.query);
   const result = response();
   await adminApi(request({}), result,
-    new URL("http://test/api/admin/forms/11111111-1111-4111-8111-111111111111/publish"), { user_id: "admin" });
+    new URL("http://test/api/admin/forms/11111111-1111-4111-8111-111111111111/publish"), { user_id: "admin", role: "admin" });
   expect(result.writeHead).toHaveBeenCalledWith(422, expect.anything());
   expect(inTransaction).toHaveBeenCalledTimes(1);
   expect(client.query.mock.calls.some(([sql]: [string]) => sql.includes("UPDATE forms SET status"))).toBe(false);
@@ -52,7 +52,7 @@ test("editing a published form cannot disable its required image field", async (
   pool.query.mockResolvedValue({ rows: [] });
   const result = response();
   await adminApi({ ...request({ settings_json: { allow_image_attachments: false } }), method: "PATCH" }, result,
-    new URL("http://test/api/admin/forms/11111111-1111-4111-8111-111111111111"), { user_id: "admin" });
+    new URL("http://test/api/admin/forms/11111111-1111-4111-8111-111111111111"), { user_id: "admin", role: "admin" });
   expect(result.writeHead).toHaveBeenCalledWith(422, expect.anything());
   expect(client.query.mock.calls.some(([sql]: [string]) => sql.includes("UPDATE forms SET"))).toBe(false);
 });

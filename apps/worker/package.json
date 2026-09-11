@@ -14,6 +14,7 @@
     "@dcc/github-provider": "workspace:*",
     "@dcc/notification-provider": "workspace:*",
     "@dcc/project-config": "workspace:*",
-    "@dcc/skill-registry": "workspace:*"
+    "@dcc/skill-registry": "workspace:*",
+    "@modelcontextprotocol/client": "2.0.0"
   }
 }

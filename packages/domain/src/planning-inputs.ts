@@ -6,6 +6,7 @@ import {
 // evaluating), so the ESM live binding is resolved by the time it is used.
 import { resolveAiConfiguration, type AiPhase } from "./index.ts";
 import { buildPlanningPrompt } from "./prompts.ts";
+import { ticketJamEvidence } from "./ticket-jam.ts";
 
 // Minimal surface both `pool` and a transaction client satisfy — the same
 // duck-typed `client` convention the rest of the domain package uses.
@@ -174,13 +175,14 @@ export function unionSkills(...sets: ResolvedSkill[][]) {
 export async function planningPromptInputs(client: QueryClient, ticket: any) {
   const project = (await client.query("SELECT * FROM projects WHERE id=$1", [ticket.project_id])).rows[0];
   if (!project?.enabled) throw Object.assign(new Error("project is missing or disabled"), { status: 404 });
-  const [base, planning, skills, executionSkills, repairSkills, imageEvidence] = await Promise.all([
+  const [base, planning, skills, executionSkills, repairSkills, imageEvidence, jamEvidence] = await Promise.all([
     resolvedPromptFor(client, "base", project.id),
     resolvedPromptFor(client, "planning", project.id),
     resolvedSkillsFor(client, ticket, "planning"),
     resolvedSkillsFor(client, ticket, "execution"),
     resolvedSkillsFor(client, ticket, "repair"),
     ticketImageEvidence(client, ticket.id),
+    ticketJamEvidence(client, ticket.id),
   ]);
   const systemAi = await getSystemAiSettings(client);
   const ai = resolvedAiFor(ticket, project, "planning", systemAi);
@@ -210,9 +212,11 @@ export async function planningPromptInputs(client: QueryClient, ticket: any) {
       actualBehavior: ticket.actual_behavior, reproductionSteps: ticket.reproduction_steps,
       customValues: ticket.custom_values_json,
       imageEvidence,
+      jamEvidence,
+      jamUrl: ticket.jam_url,
     },
     requiredPlanStructure,
     outputConstraints: planningOutputConstraints,
   });
-  return { project, ai, skills, skillUnion: unionSkills(skills, executionSkills, repairSkills), imageEvidence, promptVersionIds, content };
+  return { project, ai, skills, skillUnion: unionSkills(skills, executionSkills, repairSkills), imageEvidence, jamEvidence, promptVersionIds, content };
 }

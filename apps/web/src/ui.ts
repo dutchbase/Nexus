@@ -1,9 +1,14 @@
 import { readFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { imageUploadControl, imageUploadScript } from "./image-upload-control.ts";
+import type { TicketAttachment } from "@dcc/domain";
 
 const stylesPath = join(dirname(fileURLToPath(import.meta.url)), "design-tokens.css");
 export const styles = await readFile(stylesPath, "utf8");
+export const formFieldPresets: Record<string, Record<string, unknown>> = {
+  jam_link: { field_key: "jam_url", label: "Jam link", description: "Paste a Jam link to include technical details.", placeholder: "https://jam.dev/c/..." },
+};
 
 export function escapeHtml(value: unknown) {
   return String(value ?? "")
@@ -32,14 +37,14 @@ export function loginPage(nonce = "") {
         event.preventDefault();const form=new FormData(event.currentTarget);
         const response=await fetch("/api/admin/login",{method:"POST",headers:{"content-type":"application/json"},body:JSON.stringify(Object.fromEntries(form))});
         const body=await response.json();if(!response.ok){document.querySelector(".error").textContent=body.error;return}
-        sessionStorage.setItem("dccCsrf",body.csrfToken);location.href="/admin";
+        sessionStorage.setItem("dccCsrf",body.csrfToken);location.href=body.user.role==="admin"?"/admin":"/tickets";
       });`, nonce);
 }
 
 const groups = [
   ["Overview", [["Dashboard", "/admin", ""]]],
   ["Work", [["Tickets", "/admin/tickets", "tickets"], ["Runs", "/admin/runs", "runs"], ["Queue", "/admin/queue", "jobs"], ["Pull requests", "/admin/pull-requests", "prs"], ["Merge branches", "/admin/merge", ""]]],
-  ["Configure", [["Projects", "/admin/projects", "projects"], ["Forms", "/admin/forms", "forms"], ["Prompts", "/admin/prompts", ""], ["Skills", "/admin/skills", "skills"]]],
+  ["Configure", [["Projects", "/admin/projects", "projects"], ["Users", "/admin/users", ""], ["Forms", "/admin/forms", "forms"], ["Prompts", "/admin/prompts", ""], ["Skills", "/admin/skills", "skills"]]],
   ["Operate", [["Notifications", "/admin/notifications", "notifications"], ["AI usage", "/admin/ai-usage", ""], ["Audit log", "/admin/audit", ""], ["Settings", "/admin/settings", ""], ["System", "/admin/system", ""]]],
 ] as const;
 
@@ -69,12 +74,26 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
     <button class="scrim" type="button" data-scrim hidden aria-label="Close navigation menu"></button>
     <div class="content"><header class="header"><button class="hamburger" type="button" data-nav-open aria-expanded="false" aria-controls="sidebar" aria-label="Open navigation menu"><span></span><span></span><span></span></button>${breadcrumb}${path === "/admin/forms" || path.startsWith("/admin/forms/") ? `<a class="button" href="/f/website-feedback">Public form</a>` : ""}</header><main class="main">${body}</main></div></div>`, `
       const cc=document.cookie.match(/(?:^|;\\s*)dcc_csrf=([^;]*)/);if(cc)sessionStorage.setItem("dccCsrf",cc[1]);
-      document.querySelector("[data-logout]")?.addEventListener("click",async()=>{const response=await fetch("/api/admin/logout",{method:"POST",headers:{"x-csrf-token":sessionStorage.getItem("dccCsrf")||""}});if(response.ok){sessionStorage.clear();location.href="/login"}});
+      document.querySelector("[data-logout]")?.addEventListener("click",async()=>{const response=await fetch("/api/logout",{method:"POST",headers:{"x-csrf-token":sessionStorage.getItem("dccCsrf")||""}});if(response.ok){sessionStorage.clear();location.href="/login"}});
       const choice=localStorage.getItem("dccTheme")||"auto";
       const apply=(value)=>{const dark=value==="dark"||(value==="auto"&&matchMedia("(prefers-color-scheme: dark)").matches);document.documentElement.dataset.theme=dark?"dark":"light";document.querySelectorAll("[data-theme-choice]").forEach(b=>b.classList.toggle("selected",b.dataset.themeChoice===value))};
       apply(choice);matchMedia("(prefers-color-scheme: dark)").addEventListener("change",()=>{if((localStorage.getItem("dccTheme")||"auto")==="auto")apply("auto")});
        document.querySelectorAll("[data-theme-choice]").forEach(b=>b.addEventListener("click",()=>{localStorage.setItem("dccTheme",b.dataset.themeChoice);apply(b.dataset.themeChoice)}));
-       document.querySelectorAll("[data-auto-submit]").forEach(el=>el.addEventListener("change",()=>el.form?.submit()));
+      document.querySelectorAll("[data-auto-submit]").forEach(el=>el.addEventListener("change",()=>el.form?.submit()));
+      ${path === "/admin/users" ? `
+        const csrf=sessionStorage.getItem("dccCsrf")||"",dialog=document.querySelector("[data-user-dialog]"),createForm=document.querySelector("[data-user-create]");
+        const projectIds=form=>[...form.querySelectorAll('[name="project_ids"]:checked')].map(input=>input.value);
+        const request=async(url,method,body)=>{const response=await fetch(url,{method,headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(body)});if(!response.ok)throw new Error((await response.json()).error||"Request failed");return response.status===204?null:response.json()};
+        document.querySelector("[data-add-user]")?.addEventListener("click",()=>dialog.showModal());
+        document.querySelector("[data-close-user-dialog]")?.addEventListener("click",()=>dialog.close());
+        createForm?.addEventListener("submit",async event=>{event.preventDefault();const button=createForm.querySelector('[type="submit"]'),error=createForm.querySelector("[data-user-error]"),data=new FormData(createForm);button.disabled=true;error.textContent="";try{await request("/api/admin/users","POST",{username:data.get("username"),password:data.get("password"),project_ids:projectIds(createForm)});createForm.reset();location.reload()}catch(failure){error.textContent=failure.message}finally{button.disabled=false}});
+        document.querySelectorAll("[data-user]").forEach(row=>{
+          const id=row.dataset.user,projectForm=row.querySelector("[data-project-form]");
+          projectForm?.addEventListener("submit",async event=>{event.preventDefault();const button=projectForm.querySelector('[type="submit"]'),error=projectForm.querySelector(".error");button.disabled=true;error.textContent="";try{await request("/api/admin/users/"+id,"PATCH",{project_ids:projectIds(projectForm)});location.reload()}catch(failure){error.textContent=failure.message}finally{button.disabled=false}});
+          row.querySelector("[data-reset-password]")?.addEventListener("click",async()=>{let password=prompt("Enter a new password (at least 12 characters)");if(password===null)return;try{await request("/api/admin/users/"+id+"/password","POST",{password});password=""}catch(failure){alert(failure.message)}});
+          row.querySelector("[data-toggle-active]")?.addEventListener("click",async event=>{const active=event.currentTarget.textContent.trim()==="Reactivate";if(!active&&!confirm("Deactivate this user and sign them out?"))return;try{await request("/api/admin/users/"+id,"PATCH",{is_active:active});location.reload()}catch(failure){alert(failure.message)}});
+        });
+      ` : ""}
       const sidebar=document.querySelector(".sidebar"),scrim=document.querySelector("[data-scrim]"),opener=document.querySelector("[data-nav-open]");
       const closeNav=()=>{sidebar.classList.remove("open");scrim.hidden=true;opener?.setAttribute("aria-expanded","false");opener?.focus()};
       opener?.addEventListener("click",()=>{sidebar.classList.add("open");scrim.hidden=false;opener.setAttribute("aria-expanded","true");sidebar.querySelector("a.nav-item")?.focus()});
@@ -95,6 +114,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           if(next===null)return;event.preventDefault();tabs[next].focus();activate(tabs[next]);
         });
       });
+      ${imageUploadScript()}
       ${path === "/admin/tickets" ? `
         (function(){
           const params=new URLSearchParams(location.search);
@@ -124,7 +144,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
             const first=focusables[0],last=focusables[focusables.length-1];if(event.shiftKey&&(document.activeElement===first||!modal.contains(document.activeElement))){event.preventDefault();last.focus()}else if(!event.shiftKey&&(document.activeElement===last||!modal.contains(document.activeElement))){event.preventDefault();first.focus()}
           });
           form?.addEventListener("submit",async(event)=>{
-            event.preventDefault();const response=await fetch("/api/admin/tickets",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(Object.fromEntries(new FormData(form)))});const result=await response.json();
+            event.preventDefault();if(window.nexusImages?.pending(form))return form.querySelector(".error").textContent="Wait for image uploads to finish.";if(window.nexusImages?.invalid(form))return;const payload=Object.fromEntries(new FormData(form));payload.attachment_upload_ids=window.nexusImages?.selections(form)||{};const response=await fetch("/api/admin/tickets",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify(payload)});const result=await response.json();
             if(response.ok)location.href="/admin/tickets/"+result.ticket.ticket_number;else form.querySelector(".error").textContent=result.error;
           });
           const actionDialog=document.querySelector("[data-ticket-action-dialog]");
@@ -250,6 +270,11 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         document.querySelector("[data-reject-ticket]")?.addEventListener("click",()=>{if(confirm("Reject this ticket?"))ticketAction("reject")});
         document.querySelector("[data-cancel-ticket]")?.addEventListener("click",()=>{if(confirm("Cancel this ticket? In-flight work stops."))ticketAction("cancel")});
         document.querySelector("[data-archive-ticket]")?.addEventListener("click",()=>{if(confirm("Archive this ticket?"))ticketAction("archive")});
+        document.querySelector("[data-jam-retry]")?.addEventListener("click",async event=>{
+          const button=event.currentTarget;button.disabled=true;
+          const response=await fetch("/api/admin/tickets/"+encodeURIComponent(button.dataset.ticketId)+"/jam/retry",{method:"POST",headers:{"x-csrf-token":csrf}});
+          if(response.ok)location.reload();else{button.disabled=false;alert((await response.json()).error||"Jam import retry failed")}
+        });
         document.querySelector("[data-reopen-ticket]")?.addEventListener("click",()=>{if(confirm("Reopen this ticket? It will move to \\"Needs Information\\" so you can update the details before a new plan is generated."))ticketAction("reopen")});
         const notesForm=document.querySelector("[data-notes-form]");
         if(notesForm){notesForm.addEventListener("submit",async(event)=>{
@@ -264,13 +289,13 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         document.querySelector("[data-edit-ticket]")?.addEventListener("click",()=>{ticketView.hidden=true;ticketEditForm.hidden=false});
         document.querySelector("[data-cancel-edit-ticket]")?.addEventListener("click",()=>{ticketEditForm.hidden=true;ticketView.hidden=false});
         if(ticketEditForm){ticketEditForm.addEventListener("submit",async(event)=>{
-          event.preventDefault();
+          event.preventDefault();if(window.nexusImages?.pending(ticketEditForm))return ticketEditForm.querySelector(".error").textContent="Wait for image uploads to finish.";if(window.nexusImages?.invalid(ticketEditForm))return;
           const submission={};
           for(const input of ticketEditForm.elements){
             if(!input.name)continue;
             submission[input.name]=input.type==="checkbox"?input.checked:input.multiple?[...input.selectedOptions].map(option=>option.value):input.value;
           }
-          const response=await fetch("/api/admin/tickets/"+ticketEditForm.dataset.ticketId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({submission})});
+          const response=await fetch("/api/admin/tickets/"+ticketEditForm.dataset.ticketId,{method:"PATCH",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({submission,attachment_upload_ids:window.nexusImages?.selections(ticketEditForm)||{}})});
           const result=await response.json();
           if(response.ok){location.reload()}else{ticketEditForm.querySelector(".error").textContent=result.error}
         })}
@@ -587,6 +612,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         if(fieldsApp){
           const formId=fieldsApp.dataset.formId;
           const fieldTypes=JSON.parse(document.querySelector("[data-field-types]").textContent);
+          const fieldPresets=${JSON.stringify(formFieldPresets)};
           let fields=JSON.parse(document.querySelector("[data-fields-json]").textContent);
           let selected=null;
           const list=fieldsApp.querySelector("[data-field-list]"),settingsBox=fieldsApp.querySelector("[data-field-settings]"),errorBox=fieldsApp.querySelector("[data-fields-error]");
@@ -620,7 +646,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
               +'<p style="font-size:12px;color:var(--text3)">Every field is validated server-side. Uploads are image-only, renamed randomly and capped at 5 MB; SVG is rejected.</p>';
             settingsBox.querySelector("[data-f-label]").addEventListener("input",e=>{field.label=e.target.value;save();renderList()});
             settingsBox.querySelector("[data-f-key]").addEventListener("change",e=>{field.field_key=e.target.value;save();renderList()});
-            settingsBox.querySelector("[data-f-type]").addEventListener("change",e=>{field.field_type=e.target.value;save();renderSettings();renderList()});
+            settingsBox.querySelector("[data-f-type]").addEventListener("change",e=>{field.field_type=e.target.value;Object.assign(field,fieldPresets[field.field_type]||{});save();renderSettings();renderList()});
             settingsBox.querySelector("[data-f-required]").addEventListener("change",e=>{field.required=e.target.checked;save();renderList()});
             settingsBox.querySelector("[data-f-options]")?.addEventListener("change",e=>{field.options_json=e.target.value.split("\\n").map(v=>v.trim()).filter(Boolean);save()});
           }
@@ -1219,11 +1245,12 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         });
         createTicketForm?.addEventListener("submit",async(event)=>{
           event.preventDefault();
+          if(window.nexusImages?.pending(createTicketForm))return createTicketForm.querySelector(".error").textContent="Wait for image uploads to finish.";if(window.nexusImages?.invalid(createTicketForm))return;
           const description=createTicketForm.querySelector("[name=description]"),feedback=createTicketForm.querySelector("[name=feedback]").value.trim(),generate=createTicketForm.querySelector("[name=generate_description]").checked;
           if(!description.value.trim()&&generate&&feedback)description.value=feedback;
           if(!description.value.trim()){createTicketForm.querySelector(".error").textContent="Description is required";return}
           const data=new FormData(createTicketForm);
-          const response=await fetch("/api/admin/tickets",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({project_id:createTicketBtn.dataset.projectId,title:data.get("title"),description:data.get("description")})});
+          const response=await fetch("/api/admin/tickets",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({project_id:createTicketBtn.dataset.projectId,title:data.get("title"),description:data.get("description"),attachment_upload_ids:window.nexusImages?.selections(createTicketForm)||{}})});
           const result=await response.json();
           if(!response.ok){createTicketForm.querySelector(".error").textContent=result.error;return}
           if(generate&&feedback)fetch("/api/admin/pull-requests/"+prId+"/follow-up-description",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({feedback,ticket_id:result.ticket.id,initial_description:description.value}),keepalive:true});
@@ -1351,57 +1378,48 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
      `, nonce);
 }
 
-export function formControls(fields: any[], projects: any[], values: Record<string, any> = {}, mode: "public" | "admin" = "public") {
-  return fields.filter((field) => mode === "public" || !["static", "hidden", "image_upload"].includes(field.field_type)).map((field) => {
+export function formControls(fields: any[], projects: any[], values: Record<string, any> = {}, mode: "public" | "admin" | "reporter" = "public", upload: { uploadUrl: string; existing?: TicketAttachment[]; disabled?: boolean } = { uploadUrl: "/api/projects/{project_id}/uploads" }) {
+  return fields.filter((field) => mode === "public" || (!["static", "hidden"].includes(field.field_type) && (mode !== "reporter" || !["project_id", "submitter_name", "submitter_email"].includes(field.field_key)))).map((field) => {
     const name = escapeHtml(field.field_key);
     if (field.field_type === "static") return `<section class="form-help"><strong>${escapeHtml(field.label)}</strong>${field.description ? `<p>${escapeHtml(field.description)}</p>` : ""}</section>`;
     const required = field.required ? " required" : "";
     const type = field.field_type;
-    const value = mode === "admin" ? escapeHtml(values[field.field_key]) : "";
+    const hasValues = mode !== "public";
+    const value = hasValues ? escapeHtml(values[field.field_key]) : "";
     const helpId = `field-${name}-help`;
     const describedBy = field.description ? ` aria-describedby="${helpId}"` : "";
     const placeholder = field.placeholder ? ` placeholder="${escapeHtml(field.placeholder)}"` : "";
     const options = (Array.isArray(field.options_json) ? field.options_json : []).map((option: any) => {
       const optionValue = option.value ?? option;
-      const selected = mode === "admin" && (type === "multi_select" ? Array.isArray(values[field.field_key]) ? values[field.field_key] : values[field.field_key] == null ? [] : [values[field.field_key]] : [values[field.field_key]]).some((value: any) => String(optionValue) === String(value));
+      const selected = hasValues && (type === "multi_select" ? Array.isArray(values[field.field_key]) ? values[field.field_key] : values[field.field_key] == null ? [] : [values[field.field_key]] : [values[field.field_key]]).some((value: any) => String(optionValue) === String(value));
       return `<option value="${escapeHtml(optionValue)}"${selected ? " selected" : ""}>${escapeHtml(option.label ?? option)}</option>`;
     }).join("");
-    let control = `<input name="${name}"${placeholder}${describedBy}${mode === "admin" ? ` value="${value}"` : ""}${required}>`;
+    let control = `<input name="${name}"${placeholder}${describedBy}${hasValues ? ` value="${value}"` : ""}${required}>`;
     if (type === "long_text") control = `<textarea name="${name}" rows="5"${placeholder}${describedBy}${required}>${value}</textarea>`;
-    if (type === "email" || type === "url" || type === "number") control = `<input name="${name}" type="${type}"${placeholder}${describedBy}${type === "number" && Number.isFinite(field.validation_json?.min) ? ` min="${field.validation_json.min}"` : ""}${type === "number" && Number.isFinite(field.validation_json?.max) ? ` max="${field.validation_json.max}"` : ""}${mode === "admin" ? ` value="${value}"` : ""}${required}>`;
+    if (type === "email" || type === "url" || type === "jam_link" || type === "number") control = `<input name="${name}" type="${type === "jam_link" ? "url" : type}"${placeholder}${describedBy}${type === "number" && Number.isFinite(field.validation_json?.min) ? ` min="${field.validation_json.min}"` : ""}${type === "number" && Number.isFinite(field.validation_json?.max) ? ` max="${field.validation_json.max}"` : ""}${hasValues ? ` value="${value}"` : ""}${required}>`;
     if (type.includes("selector") || ["dropdown", "radio", "multi_select"].includes(type)) {
-      const choices = type === "project_selector" ? projects.map((project) => `<option value="${project.id}"${mode === "admin" && String(project.id) === String(values[field.field_key]) ? " selected" : ""}>${escapeHtml(project.name)}</option>`).join("") : options;
+      const choices = type === "project_selector" ? projects.map((project) => `<option value="${project.id}"${hasValues && String(project.id) === String(values[field.field_key]) ? " selected" : ""}>${escapeHtml(project.name)}</option>`).join("") : options;
       control = `<select name="${name}"${describedBy}${type === "multi_select" ? " multiple" : ""}${required}>${choices}</select>`;
     }
-    if (type === "checkbox") control = `<input name="${name}" type="checkbox" value="true"${describedBy}${required}${mode === "admin" && values[field.field_key] ? " checked" : ""}>`;
+    if (type === "checkbox") control = `<input name="${name}" type="checkbox" value="true"${describedBy}${required}${hasValues && values[field.field_key] ? " checked" : ""}>`;
     if (type === "hidden") return `<label class="honeypot" aria-hidden="true">${escapeHtml(field.label)}<input name="${name}" tabindex="-1" autocomplete="off"></label>`;
-    if (type === "image_upload") control = `<input name="${name}" type="file" accept="image/png,image/jpeg" multiple><small>PNG of JPG · max 5 bestanden · max 5 MB per bestand · geen SVG</small>`;
+    if (type === "image_upload") return imageUploadControl({ fieldKey: field.field_key, label: field.label, required: Boolean(field.required), uploadUrl: upload.uploadUrl, existing: (upload.existing ?? []).filter((item) => item.field_key === field.field_key), disabled: upload.disabled });
     return `<label class="field"><span>${escapeHtml(field.label)}</span>${control}${field.description ? `<small id="${helpId}">${escapeHtml(field.description)}</small>` : ""}</label>`;
   }).join("");
 }
 
 export function publicFormPage(form: any, fields: any[], projects: any[], nonce = "") {
-  const controls = formControls(fields, projects, {}, "public");
+  const controls = formControls(fields, projects, {}, "public", { uploadUrl: `/api/public/forms/${form.slug}/uploads`, disabled: form.settings_json?.allow_image_attachments === false });
   const fieldTypes = JSON.stringify(Object.fromEntries(fields.map((field) => [field.field_key, field.field_type])));
   return document(form.title, `<main class="public"><div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">${logoMark("N", "sm")}<span style="font-size:13px;font-weight:700;color:var(--text2)">Nexus</span></div><div class="url-strip">/f/${escapeHtml(form.slug)}</div><form class="card" id="public-form"><div class="card-body"><div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description)}</p><div class="grid one">${controls}</div><br><button class="button primary" type="submit">Melding versturen</button><p class="error" role="alert"></p></div></form></main>`, `
-    let submitting=false,idempotencyKey=crypto.randomUUID();const retainedUploads=new Map();
+    ${imageUploadScript()}
+    let submitting=false,idempotencyKey=crypto.randomUUID();
     document.querySelector("#public-form").addEventListener("submit",async(event)=>{
-      event.preventDefault();if(submitting)return;submitting=true;const submit=event.currentTarget.querySelector('button[type="submit"]');submit.disabled=true;const error=event.currentTarget.querySelector(".error");error.textContent="";const data=new FormData(event.currentTarget);const payload={};const files={};
+      event.preventDefault();if(submitting)return;const form=event.currentTarget,submit=form.querySelector('button[type="submit"]'),error=form.querySelector(".error");error.textContent="";if(window.nexusImages.pending(form)){error.textContent="Wacht tot de uploads klaar zijn.";return}if(window.nexusImages.invalid(form))return;submitting=true;submit.disabled=true;const data=new FormData(form);const payload={};
       try{
-      for(const [key,value] of data){if(value instanceof File&&value.size){(files[key]=files[key]||[]).push(value)}else if(!(value instanceof File))payload[key]=key in payload?[].concat(payload[key],value):value}
+      for(const [key,value] of data){if(!(value instanceof File))payload[key]=key in payload?[].concat(payload[key],value):value}
       for(const [key,type] of Object.entries(${fieldTypes})){if(type==="checkbox")payload[key]=payload[key]==="true";else if(type==="multi_select")payload[key]=Array.isArray(payload[key])?payload[key]:key in payload?[payload[key]]:[]}
-      for(const [key,list] of Object.entries(files)){
-        if(list.length>5){document.querySelector(".error").textContent="Max 5 bestanden per veld";return}
-        const signatures=list.map(file=>file.name+":"+file.size+":"+file.lastModified);let ids=retainedUploads.get(key)?.signatures.join("|")===signatures.join("|")?retainedUploads.get(key).ids:[];
-        for(const file of list.slice(ids.length)){
-          const upload=new FormData();upload.append("file",file);
-          const result=await fetch("/api/public/forms/${escapeHtml(form.slug)}/uploads",{method:"POST",body:upload});
-          if(!result.ok){error.textContent="Upload geweigerd";return}
-          ids.push((await result.json()).upload_id);
-        }
-        retainedUploads.set(key,{signatures,ids});
-        payload[key]=ids;
-      }
+      Object.assign(payload,window.nexusImages.selections(form));
       const response=await fetch("/api/public/forms/${escapeHtml(form.slug)}/submissions",{method:"POST",headers:{"content-type":"application/json","idempotency-key":idempotencyKey},body:JSON.stringify(payload)});
       const result=await response.json();if(!response.ok){if(response.status===400||response.status===422)idempotencyKey=crypto.randomUUID();error.textContent=result.fields?Object.entries(result.fields).map(([key,message])=>key+": "+message).join(" · "):result.error;return}
       sessionStorage.setItem("submittedTicket",result.ticket_number);location.href="/f/${escapeHtml(form.slug)}/submitted";

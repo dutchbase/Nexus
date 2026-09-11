@@ -19,6 +19,10 @@ under nvm's shim — prefix commands with
 
 ## 1. Diagnose: what state is the deployment in?
 
+Keep `DCC_JAM_TOKEN` only in `.env.worker`. The web service must load `.env`
+without `.env.worker`; production startup rejects the Jam token if it reaches
+the web process.
+
 ```bash
 cd "$DCC_ROOT"
 set -a; source .env; set +a

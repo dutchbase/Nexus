@@ -1,16 +1,18 @@
 import { execFile } from "node:child_process";
 import { createHash, randomBytes, randomUUID, timingSafeEqual } from "node:crypto";
-import { clientIpOf, contentSecurityNonce, csrfMatches, secureCookieAttributes, securityHeaders, validateWebRuntime } from "./security.ts";
+import { clientIpOf, contentSecurityNonce, secureCookieAttributes, securityHeaders, validateWebRuntime } from "./security.ts";
+import { assertAdmin, isSessionRole, requireAdmin, requireSession, sessionFor, type Session } from "./session.ts";
 import { realpath, rm, writeFile } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
-import { artifactDataRoot, legacyArtifactDataRoot, finalizeArtifact, inTransaction, pool, readArtifact, readStagedArtifact, stageArtifact } from "@dcc/database";
+import { artifactDataRoot, legacyArtifactDataRoot, inTransaction, pool, readArtifact, readStagedArtifact } from "@dcc/database";
 import {
   AiConfigurationError, ApprovalConflictError, ApprovalPolicyError, approvePlanDecision, buildApprovedInputSnapshot,
   allowlistMismatches, buildExecutionPrompt, checkPlanApprovalGate, derivePolicyStatus, ensurePolicySnapshot, enqueueJob, findAllowlistEntry, getPullRequestMergeSettings, getSystemAiSettings,
   globalPromptTypes, enqueueNotification, NOTIFICATION_EVENTS, planningPromptInputs, promptContentHash, promptTemplateValues, PullRequestMergeError, ticketImageEvidence,
+  lockTicketActor, normalizeJamUrl, queueJamRetry, renderJamEvidence, setTicketJamSource,
   rejectPlanDecision, renderPromptTemplate, requestPlanRevisionDecision, requireApprovalPrompt, resolvedAiFor, resolvedSkillsFor, retryNotificationDelivery, setPullRequestTicketStatus,
   unionSkills, validateAiSelection, providerForModel, type AiPhase, type ApprovedInputSnapshot, type ApprovalInputValue,
 } from "@dcc/domain";
@@ -39,7 +41,13 @@ import * as queuePage from "./pages/queue.ts";
 import * as auditPage from "./pages/audit.ts";
 import * as aiUsagePage from "./pages/ai-usage.ts";
 import * as operatePage from "./pages/operate.ts";
+import * as usersPage from "./pages/users.ts";
+import { reporterTicketsPage } from "./pages/reporter-tickets.ts";
+import { reporterPage } from "./reporter-ui.ts";
+import { createReporter, listReporters, resetReporterPassword, updateReporter } from "./reporter-users.ts";
+import { ticketApi } from "./ticket-api.ts";
 import { markLoginAttemptSucceeded, reserveLoginAttempt } from "./login-quota.ts";
+import { checkedAttachmentSelection, setPublicTicketAttachments, setTicketAttachments, storeTicketUpload } from "./ticket-uploads.ts";
 
 const port = Number(process.env.PORT ?? 3000);
 const { production, trustedProxyHops } = validateWebRuntime();
@@ -51,14 +59,13 @@ const lockoutThreshold = 5;
 const lockoutWindowMinutes = 15;
 const sessionHours = 8;
 const maxJsonBytes = 1024 * 1024;
-const maxUploadBytes = 5 * 1024 * 1024;
 const exec = promisify(execFile);
 const defaultRateLimit = 15;
 const dummyHash = await hashPassword(randomBytes(32).toString("hex"));
 const systemOnlyStatuses = new Set(["Planning", "Execution Queued", "Executing", "Validating", "PR Ready for Review", "Merged"]);
 const fieldTypes = new Set([
   "short_text", "long_text", "email", "url", "number", "dropdown", "radio", "checkbox", "multi_select",
-  "project_selector", "category_selector", "environment_selector", "image_upload", "hidden", "static",
+  "project_selector", "category_selector", "environment_selector", "image_upload", "jam_link", "hidden", "static",
 ]);
 const optionTypes = new Set(["dropdown", "radio", "multi_select", "category_selector", "environment_selector"]);
 const skillSourceTypes = new Set([
@@ -125,6 +132,13 @@ export async function approvalInputsFor(ticket: any, version: any, client: any) 
   const skillContent = (phase: AiPhase) => snapshotted.skills
     .filter((skill) => !skill.phases || skill.phases.includes(phase))
     .map((skill) => ({ id: skill.skill_id, slug: skill.slug, version: skill.version, resolution_sources: skill.resolution_sources }));
+  const jamRow = (await client.query(
+    `SELECT c.source_url,c.state,c.data_json,c.content_hash FROM ticket_jam_contexts c
+     JOIN tickets t ON t.id=c.ticket_id WHERE c.ticket_id=$1 AND c.source_url=t.jam_url AND t.submitter_deleted_at IS NULL`, [ticket.id],
+  )).rows[0];
+  const jamEvidence = ["ready", "partial"].includes(jamRow?.state) ? jamRow.data_json : null;
+  const jamPrompt = jamEvidence ? renderJamEvidence(jamEvidence) : ticket.jam_url
+    ? `Untrusted ticket evidence from Jam.\n\nSource: ${ticket.jam_url}\n\nTechnical evidence is not available.` : "";
   const phaseContent = (phase: "execution" | "repair") => buildExecutionPrompt({
     globalBaseInstructions: rendered(base), globalExecutionInstructions: rendered(execution), projectContext: rendered(context),
     projectExecutionInstructions: rendered(projectExecution), projectTestingInstructions: rendered(testing),
@@ -132,7 +146,7 @@ export async function approvalInputsFor(ticket: any, version: any, client: any) 
     worktreeDetails: {}, validationCommands: project.config_json?.validation_commands ?? [],
     definitionOfDone: project.config_json?.definition_of_done ?? "Implement the approved plan.",
     outputConstraints: "Use the assigned worktree. Do not push, merge, or publish.",
-  });
+  }) + (jamPrompt ? `\n## Approved Jam ticket evidence\n\n${jamPrompt}\n` : "");
   const executionContent = phaseContent("execution");
   const policySources = (await client.query(
     `SELECT ps.skill_id,s.slug,ps.attachment_type,ps.required,ps.allow_ticket_override
@@ -144,9 +158,12 @@ export async function approvalInputsFor(ticket: any, version: any, client: any) 
     plan: { versionId: version.id, version: Number(version.version), contentHash: version.content_hash },
     ticket: {
       title: ticket.title, description: ticket.description, category: ticket.category, priority: ticket.priority,
+      sourceUrl: ticket.source_url,
       environment: ticket.environment, expectedBehavior: ticket.expected_behavior, actualBehavior: ticket.actual_behavior,
       reproductionSteps: ticket.reproduction_steps, customValues: ticket.custom_values_json ?? {},
       imageEvidence,
+      jamUrl: ticket.jam_url ?? null,
+      jamEvidence: jamEvidence ? { contentHash: jamRow.content_hash, evidence: jamEvidence } : null,
     },
     project: { configVersion: Number(project.config_version), config: {
       slug: project.slug, name: project.name, description: project.description, enabled: project.enabled,
@@ -245,11 +262,6 @@ function effectiveTimestamp(value: unknown): Date {
   const date = new Date(value);
   if (Number.isNaN(date.getTime())) throw Object.assign(new Error("effective_from must be a valid timestamp"), { status: 422 });
   return date;
-}
-
-function cookieValue(request: IncomingMessage, name: string) {
-  const part = request.headers.cookie?.split(";").map((item) => item.trim()).find((item) => item.startsWith(`${name}=`));
-  return part?.slice(name.length + 1);
 }
 
 function ipOf(request: IncomingMessage) {
@@ -390,34 +402,6 @@ async function startAiReview(
   });
 }
 
-async function sessionFor(request: IncomingMessage) {
-  const token = cookieValue(request, "dcc_session");
-  if (!token) return null;
-  const result = await pool.query(
-    `SELECT s.*, u.username, u.role FROM admin_sessions s
-     JOIN users u ON u.id = s.user_id
-     WHERE s.token_hash = $1 AND s.invalidated_at IS NULL AND s.expires_at > now() AND u.is_active = true`,
-    [hash(token)],
-  );
-  return result.rows[0] ?? null;
-}
-
-async function requireAdmin(request: IncomingMessage, response: ServerResponse) {
-  const session = await sessionFor(request);
-  if (!session) {
-    json(response, 401, { error: "authentication required" });
-    return null;
-  }
-  if (!["GET", "HEAD", "OPTIONS"].includes(request.method ?? "GET")) {
-    const csrf = request.headers["x-csrf-token"];
-    if (typeof csrf !== "string" || !csrfMatches(csrf, session.csrf_token_hash)) {
-      json(response, 403, { error: "invalid CSRF token" });
-      return null;
-    }
-  }
-  return session;
-}
-
 async function login(request: IncomingMessage, response: ServerResponse) {
   const body = await bodyOf(request);
   const username = typeof body.username === "string" ? body.username : "";
@@ -432,7 +416,7 @@ async function login(request: IncomingMessage, response: ServerResponse) {
   }
   const user = (await pool.query("SELECT * FROM users WHERE username = $1 AND is_active = true", [username])).rows[0];
   const valid = await verifyPassword(user?.password_hash ?? dummyHash, password);
-  if (!user || !valid) {
+  if (!user || !valid || !isSessionRole(user.role)) {
     await audit({ actorType: "anonymous", action: "login.failed", entityType: "user", after: { success: false }, ip });
     return json(response, 401, { error: "invalid credentials" });
   }
@@ -446,11 +430,20 @@ async function login(request: IncomingMessage, response: ServerResponse) {
       [user.id, hash(token), hash(csrf), sessionHours],
     );
     await client.query("UPDATE users SET last_login_at = now(), updated_at = now() WHERE id = $1", [user.id]);
-    await audit({ actorType: "admin", actorId: user.id, action: "login", entityType: "user", entityId: user.id, after: { success: true }, ip }, client);
+    await audit({ actorType: user.role, actorId: user.id, action: "login", entityType: "user", entityId: user.id, after: { success: true }, ip }, client);
   });
   const sessionAttributes = [`dcc_session=${token}`, "HttpOnly", ...secureCookieAttributes(production), `Max-Age=${sessionHours * 3600}`];
   const csrfAttributes = [`dcc_csrf=${csrf}`, ...secureCookieAttributes(production), `Max-Age=${sessionHours * 3600}`];
   json(response, 200, { user: { id: user.id, username: user.username, role: user.role }, csrfToken: csrf }, { "set-cookie": [sessionAttributes.join("; "), csrfAttributes.join("; ")] });
+}
+
+async function logout(request: IncomingMessage, response: ServerResponse, session: Session) {
+  await pool.query("UPDATE admin_sessions SET invalidated_at = now() WHERE id = $1", [session.id]);
+  await audit({ actorType: session.role, actorId: session.user_id, action: "logout", entityType: "user", entityId: session.user_id, ip: ipOf(request) });
+  return json(response, 200, { ok: true }, { "set-cookie": [
+    ["dcc_session=", "HttpOnly", ...secureCookieAttributes(production), "Max-Age=0"].join("; "),
+    ["dcc_csrf=", ...secureCookieAttributes(production), "Max-Age=0"].join("; "),
+  ] });
 }
 
 async function publicForm(slug: string) {
@@ -506,7 +499,7 @@ export function validateFields(fields: any[], body: Record<string, any>) {
       continue;
     }
     if (typeof value === "string") {
-      const limit = Math.min(Number(field.validation_json?.max_length ?? (field.field_type === "long_text" ? 10000 : 500)), 10000);
+      const limit = Math.min(Number(field.validation_json?.max_length ?? (field.field_type === "long_text" ? 10000 : field.field_type === "jam_link" ? 2048 : 500)), 10000);
       if (value.length > limit) errors[field.field_key] = "too long";
       if (field.field_type === "email" && value && !/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(value)) errors[field.field_key] = "invalid email";
       if (field.field_type === "url" && value) {
@@ -515,6 +508,7 @@ export function validateFields(fields: any[], body: Record<string, any>) {
           if (parsed.protocol !== "http:" && parsed.protocol !== "https:") errors[field.field_key] = "invalid URL";
         } catch { errors[field.field_key] = "invalid URL"; }
       }
+      if (field.field_type === "jam_link" && value) try { normalizeJamUrl(value); } catch { errors[field.field_key] = "invalid Jam link"; }
     }
   }
   return errors;
@@ -549,6 +543,8 @@ export async function consumeSubmissionAttempt(formId: string, ip: string, limit
 
 export async function submitPublicForm(request: IncomingMessage, response: ServerResponse, form: any) {
   const body = await bodyOf(request);
+  const forgedJamKey = ["jam_context", "jam_import", "jam_state", "data_json", "generation", "error_code", "content_hash", "fetched_at"].find((key) => key in body);
+  if (forgedJamKey) return json(response, 400, { error: "validation failed", fields: { [forgedJamKey]: "unknown field" } });
   const retryKey = typeof request.headers["idempotency-key"] === "string" && /^[0-9a-f-]{36}$/i.test(request.headers["idempotency-key"])
     ? request.headers["idempotency-key"] : null;
   const existingSubmissionSql = `SELECT t.id,t.ticket_number FROM audit_events ae JOIN tickets t ON t.id=ae.entity_id
@@ -560,6 +556,8 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
     if (existing) return json(response, 201, { ticket_number: existing.ticket_number, ticket: existing });
   }
   const fields = await fieldsFor(form.id);
+  const jamField = fields.find((field) => field.field_key === "jam_url" && field.field_type === "jam_link");
+  if ("jam_url" in body && !jamField) return json(response, 400, { error: "validation failed", fields: { jam_url: "unknown field" } });
   const honeypot = fields.find((field) => field.field_type === "hidden")?.field_key ?? "website";
   if (typeof body[honeypot] === "string" && body[honeypot].trim()) {
     return json(response, 202, { accepted: true });
@@ -590,6 +588,7 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
   if (typeof body.title !== "string" || !body.title.trim()) errors.title = "required";
   if (typeof body.description !== "string" || !body.description.trim()) errors.description = "required";
   if (Object.keys(errors).length) return json(response, 400, { error: "validation failed", fields: errors });
+  const jam = jamField ? normalizeJamUrl(body.jam_url)?.url ?? null : null;
   const requestedProjectId = form.fixed_project_id ?? body.project_id;
   const requestedProjectSlug = typeof body.project_slug === "string" ? body.project_slug : undefined;
   const project = requestedProjectId
@@ -613,7 +612,9 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
          JOIN uploads u ON u.id=a.upload_id
          JOIN artifacts ar ON ar.upload_id=u.id
          WHERE a.upload_id=ANY($1::uuid[]) AND a.ticket_id IS NULL AND u.form_id=$2
-           AND u.created_at > now() - interval '1 hour' AND ar.status='finalized'
+           AND u.owner_user_id IS NULL AND u.project_id IS NULL
+           AND u.created_at > now() - interval '1 hour'
+           AND (u.claim_expires_at IS NULL OR u.claim_expires_at>now()) AND ar.status='finalized'
          FOR UPDATE OF a`,
         [uploadIds, form.id],
       )).rows.map((row: any) => row.upload_id);
@@ -624,7 +625,7 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
     const ticketNumber = `DCC-${number}`;
     const reservedKeys = [
       "project_id", "title", "description", "category", "priority", "submitter_name", "submitter_email",
-      "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", honeypot,
+      "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", "jam_url", honeypot,
     ];
     const excludedKeys = new Set([...reservedKeys, ...fields.filter((f) => ["static", "hidden", "image_upload"].includes(f.field_type)).map((f) => f.field_key)]);
     const customValues = Object.fromEntries(Object.entries(body).filter(([key]) => !excludedKeys.has(key)));
@@ -637,21 +638,14 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
         body.submitter_name ?? null, body.submitter_email ?? null, body.source_url ?? null, body.environment ?? null,
         body.expected_behavior ?? null, body.actual_behavior ?? null, body.reproduction_steps ?? null, customValues],
     );
+    if (jam) await setTicketJamSource(client, result.rows[0].id, jam);
     await client.query(
       `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type)
        VALUES ($1,NULL,'Submitted','Public form submitted','public')`,
       [result.rows[0].id],
     );
-    for (const { fieldKey, ids } of imageUploads) {
-      if (!ids.length) continue;
-      const claim = await client.query(
-        `UPDATE attachments a SET ticket_id=$1,field_key=$2 FROM uploads u
-         WHERE a.upload_id=u.id AND a.ticket_id IS NULL AND u.form_id=$4
-           AND u.created_at > now() - interval '1 hour' AND a.upload_id=ANY($3::uuid[])`,
-        [result.rows[0].id, fieldKey, ids, form.id],
-      );
-      if (claim.rowCount !== ids.length) throw new Error("upload claim changed while locked");
-    }
+    await setPublicTicketAttachments(client, form.id, result.rows[0].id,
+      Object.fromEntries(imageUploads.map(({ fieldKey, ids }) => [fieldKey, ids])), imageUploads.map(({ fieldKey }) => fieldKey));
     await audit({ actorType: "public", action: "ticket.create", entityType: "ticket", entityId: result.rows[0].id, after: result.rows[0], metadata: { form_id: form.id, ...(retryKey ? { idempotency_key: retryKey } : {}) }, ip }, client);
     if (form.settings_json?.notify_on_submission !== false) await enqueueNotification(client, "ticket.created", result.rows[0].id, result.rows[0].id);
     return { ticket: result.rows[0] };
@@ -659,12 +653,6 @@ export async function submitPublicForm(request: IncomingMessage, response: Serve
   if ("validationErrors" in result) return json(response, 400, { error: "validation failed", fields: result.validationErrors });
   const ticket = result.ticket;
   json(response, 201, { ticket_number: ticket.ticket_number, ticket: { id: ticket.id, ticket_number: ticket.ticket_number } });
-}
-
-function sniffImage(buffer: Buffer) {
-  if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return { mediaType: "image/png", extension: ".png" };
-  if (buffer.length >= 3 && buffer[0] === 255 && buffer[1] === 216 && buffer[2] === 255) return { mediaType: "image/jpeg", extension: ".jpg" };
-  return null;
 }
 
 export async function upload(request: IncomingMessage, response: ServerResponse, form: any) {
@@ -676,59 +664,16 @@ export async function upload(request: IncomingMessage, response: ServerResponse,
   if (!attempt.allowed) {
     return json(response, 429, { error: "upload rate limit exceeded", code: "rate_limited", retry_after_seconds: attempt.resetSeconds }, { "retry-after": String(attempt.resetSeconds) });
   }
-  const contentType = request.headers["content-type"] ?? "";
-  const boundary = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(contentType)?.slice(1).find(Boolean);
-  if (!boundary) return json(response, 400, { error: "multipart form data required" });
-  const raw = await bodyBuffer(request, maxUploadBytes + 64 * 1024);
-  const separator = Buffer.from(`\r\n--${boundary}`);
-  const headerEnd = raw.indexOf(Buffer.from("\r\n\r\n"));
-  if (headerEnd < 0) return json(response, 400, { error: "invalid upload" });
-  const end = raw.indexOf(separator, headerEnd + 4);
-  if (end < 0) return json(response, 400, { error: "invalid upload" });
-  const bytes = raw.subarray(headerEnd + 4, end);
-  if (!bytes.length || bytes.length > maxUploadBytes) return json(response, 413, { error: "upload too large" });
-  const sniffed = sniffImage(bytes);
-  if (!sniffed) return json(response, 415, { error: "only PNG and JPEG images are accepted" });
-  const artifactId = randomUUID();
-  const staged = await stageArtifact({
-    root: dataRoot, id: artifactId, storagePath: `uploads/${artifactId}${sniffed.extension}`, content: bytes,
-  });
-  let registered = false;
   try {
-    const originalName = /filename="([^"]*)"/i.exec(raw.subarray(0, headerEnd).toString("utf8"))?.[1] ?? null;
-    const row = await inTransaction(async (client) => {
-      const upload = (await client.query(
-        `INSERT INTO uploads (storage_path,original_name,media_type,size_bytes,form_id) VALUES ($1,$2,$3,$4,$5) RETURNING *`,
-        [staged.relativePath, originalName ? originalName.slice(0, 255) : null, sniffed.mediaType, bytes.length, form.id],
-      )).rows[0];
-      await client.query(
-        `INSERT INTO artifacts (id,storage_path,artifact_type,status,expires_at,upload_id)
-         VALUES ($1,$2,'upload','staged',now() + interval '1 hour',$3)`,
-        [artifactId, staged.relativePath, upload.id],
-      );
-      const attachment = (await client.query("INSERT INTO attachments (upload_id) VALUES ($1) RETURNING id", [upload.id])).rows[0];
-      return { ...upload, attachment_id: attachment.id };
-    });
-    registered = true;
-    await inTransaction(async (client) => {
-        if (!(await client.query("SELECT id FROM artifacts WHERE id=$1 AND status='staged' FOR UPDATE", [artifactId])).rowCount) throw new Error("artifact is no longer staged");
-        const finalized = await finalizeArtifact(staged);
-        if (!(await client.query(
-          `UPDATE artifacts SET status='finalized',sha256=$2,finalized_at=now(),expires_at=NULL
-           WHERE id=$1 AND status='staged'`,
-          [artifactId, finalized.sha256],
-        )).rowCount) throw new Error("artifact is no longer staged");
-    });
-    json(response, 201, { upload_id: row.id, reference: `/admin/attachments/${row.attachment_id}` });
-  } catch (error) {
-    if (!registered) await rm(staged.stagedPath, { force: true });
-    throw error;
+    return json(response, 201, await storeTicketUpload(request, { kind: "public", formId: form.id }));
+  } catch (error: any) {
+    return json(response, Number(error?.status) || 500, { error: Number(error?.status) ? error.message : "internal server error" });
   }
 }
 
 export function normalizeFields(fields: any[]) {
   if (!Array.isArray(fields)) return null;
-  return fields.map((field, index) => {
+  const normalized = fields.map((field, index) => {
     if (!field || typeof field.field_key !== "string" || !/^[a-z][a-z0-9_]{0,63}$/.test(field.field_key)) throw Object.assign(new Error("invalid field key"), { status: 400 });
     if (!fieldTypes.has(field.field_type)) throw Object.assign(new Error("invalid field type"), { status: 400 });
     if (optionTypes.has(field.field_type) && !(Array.isArray(field.options_json) && field.options_json.length && field.options_json.every((o: any) => typeof o === "string"))) {
@@ -748,6 +693,12 @@ export function normalizeFields(fields: any[]) {
       validation_json: validation, options_json: field.options_json ?? [],
     };
   });
+  const jamFields = normalized.filter((field) => field.field_type === "jam_link");
+  if (jamFields.length > 1 || jamFields.some((field) => field.field_key !== "jam_url")
+    || normalized.some((field) => field.field_key === "jam_url" && field.field_type !== "jam_link")) {
+    throw Object.assign(new Error("Jam link must use the unique jam_url field"), { status: 400 });
+  }
+  return normalized;
 }
 
 function formShapeError(form: any) {
@@ -888,6 +839,7 @@ export async function adminHtml(request: IncomingMessage, response: ServerRespon
     response.writeHead(302, { location: "/login" });
     return response.end();
   }
+  if (session.role !== "admin") return html(response, 403, "<h1>Forbidden</h1>", {}, nonce);
   const attachmentMatch = url.pathname.match(/^\/admin\/attachments\/([0-9a-f-]{36})$/);
   if (attachmentMatch && request.method === "GET") {
     const row = (await pool.query(
@@ -912,7 +864,7 @@ export async function adminHtml(request: IncomingMessage, response: ServerRespon
   }
   const metrics = await counts();
   const pageModules = [
-    dashboardPage, ticketsPage, runsPage, prsPage, mergePage, projectsPage, formsPage, promptsPage, skillsPage, notificationsPage, queuePage, auditPage, aiUsagePage, operatePage,
+    dashboardPage, ticketsPage, runsPage, prsPage, mergePage, projectsPage, usersPage, formsPage, promptsPage, skillsPage, notificationsPage, queuePage, auditPage, aiUsagePage, operatePage,
   ];
   for (const pageModule of pageModules) {
     const result = await pageModule.render(url, session, metrics);
@@ -922,14 +874,30 @@ export async function adminHtml(request: IncomingMessage, response: ServerRespon
 }
 
 export async function adminApi(request: IncomingMessage, response: ServerResponse, url: URL, session: any) {
-  if (request.method === "GET" && url.pathname === "/api/admin/session") return json(response, 200, { user: { id: session.user_id, username: session.username, role: session.role } });
-  if (request.method === "POST" && url.pathname === "/api/admin/logout") {
-    await pool.query("UPDATE admin_sessions SET invalidated_at = now() WHERE id = $1", [session.id]);
-    await audit({ actorType: "admin", actorId: session.user_id, action: "logout", entityType: "user", entityId: session.user_id, ip: ipOf(request) });
-    return json(response, 200, { ok: true }, { "set-cookie": [
-      ["dcc_session=", "HttpOnly", ...secureCookieAttributes(production), "Max-Age=0"].join("; "),
-      ["dcc_csrf=", ...secureCookieAttributes(production), "Max-Age=0"].join("; "),
-    ] });
+  assertAdmin(session);
+  if (url.pathname === "/api/admin/users" && request.method === "GET") {
+    return json(response, 200, { users: await listReporters(session) });
+  }
+  if (url.pathname === "/api/admin/users" && request.method === "POST") {
+    try { return json(response, 201, { user: await createReporter(session, await bodyOf(request)) }); }
+    catch (error: any) { return json(response, Number(error?.status) || 500, errorEnvelope(error)); }
+  }
+  const reporterPasswordMatch = url.pathname.match(/^\/api\/admin\/users\/([0-9a-f-]+)\/password$/i);
+  if (reporterPasswordMatch && request.method === "POST") {
+    try {
+      const body = await bodyOf(request);
+      if (!body || typeof body !== "object" || Array.isArray(body) || Object.keys(body).length !== 1 || typeof body.password !== "string") {
+        throw Object.assign(new Error("password is required"), { status: 422 });
+      }
+      await resetReporterPassword(session, reporterPasswordMatch[1], body.password);
+      response.writeHead(204, securityHeaders());
+      return response.end();
+    } catch (error: any) { return json(response, Number(error?.status) || 500, errorEnvelope(error)); }
+  }
+  const reporterMatch = url.pathname.match(/^\/api\/admin\/users\/([0-9a-f-]+)$/i);
+  if (reporterMatch && request.method === "PATCH") {
+    try { return json(response, 200, { user: await updateReporter(session, reporterMatch[1], await bodyOf(request)) }); }
+    catch (error: any) { return json(response, Number(error?.status) || 500, errorEnvelope(error)); }
   }
   if (url.pathname === "/api/admin/pull-requests" && request.method === "GET") {
     const params: any[] = [];
@@ -2066,24 +2034,34 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
   if (createTicketMatch) {
     const body = await bodyOf(request);
     const text = (key: string) => typeof body[key] === "string" ? body[key].trim() : "";
+    const jam = normalizeJamUrl(body.jam_url)?.url ?? null;
     const projectId = text("project_id"), title = text("title"), description = text("description");
     if (!projectId || !title || !description) return json(response, 400, { error: "Project, title, and description are required" });
     const project = (await pool.query("SELECT id FROM projects WHERE id=$1", [projectId])).rows[0];
     if (!project) return json(response, 404, { error: "Choose an existing project" });
     const priority = text("priority");
     if (priority && !["critical", "high", "medium", "low"].includes(priority)) return json(response, 400, { error: "Choose a valid priority" });
-    const number = (await pool.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
-    const ticket = (await pool.query(
-      `INSERT INTO tickets (ticket_number,project_id,title,description,category,priority,environment,expected_behavior,actual_behavior,reproduction_steps,status,custom_values_json)
-       VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'Triage','{}'::jsonb) RETURNING *`,
-      [`DCC-${number}`, projectId, title, description, text("category") || null, priority || null, text("environment") || null, text("expected_behavior") || null, text("actual_behavior") || null, text("reproduction_steps") || null],
-    )).rows[0];
-    await pool.query(
-      `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
-       VALUES ($1,NULL,'Triage','Created by admin',$2,$3)`,
-      [ticket.id, "admin", session.user_id],
-    );
-    await audit({ actorType: "admin", actorId: session.user_id, action: "ticket.create", entityType: "ticket", entityId: ticket.id, metadata: { title }, ip: ipOf(request) });
+    const attachmentSelection = body.attachment_upload_ids === undefined
+      ? {} : checkedAttachmentSelection(body.attachment_upload_ids, ["screenshots"]);
+    const ticket = await inTransaction(async (client) => {
+      await lockTicketActor(client, { userId: session.user_id, role: "admin" });
+      const number = (await client.query("SELECT nextval('ticket_number_sequence') AS number")).rows[0].number;
+      const created = (await client.query(
+        `INSERT INTO tickets (ticket_number,project_id,title,description,category,priority,environment,expected_behavior,actual_behavior,reproduction_steps,status,custom_values_json,created_by_user_id)
+         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'Triage','{}'::jsonb,$11) RETURNING *`,
+        [`DCC-${number}`, projectId, title, description, text("category") || null, priority || null, text("environment") || null, text("expected_behavior") || null, text("actual_behavior") || null, text("reproduction_steps") || null, session.user_id],
+      )).rows[0];
+      if (jam) await setTicketJamSource(client, created.id, jam);
+      created.jam_url = jam;
+      await setTicketAttachments(client, { userId: session.user_id, role: "admin" }, created, attachmentSelection, ["screenshots"]);
+      await client.query(
+        `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id)
+         VALUES ($1,NULL,'Triage','Created by admin',$2,$3)`,
+        [created.id, "admin", session.user_id],
+      );
+      await audit({ actorType: "admin", actorId: session.user_id, action: "ticket.create", entityType: "ticket", entityId: created.id, metadata: { title }, ip: ipOf(request) }, client);
+      return created;
+    });
     return json(response, 201, { ticket });
   }
   const notesMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/notes$/);
@@ -2767,12 +2745,23 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
       ...preview,
     });
   }
+  const jamRetryMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)\/jam\/retry$/);
+  if (jamRetryMatch && request.method === "POST") {
+    const ref = decodeURIComponent(jamRetryMatch[1]);
+    const retried = await inTransaction(async (client) => {
+      const ticket = (await client.query("SELECT id FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE", [ref])).rows[0];
+      if (!ticket) return false;
+      await queueJamRetry(client, ticket.id);
+      return true;
+    });
+    return retried ? json(response, 202, { queued: true }) : json(response, 404, { error: "ticket not found" });
+  }
   const ticketMatch = url.pathname.match(/^\/api\/admin\/tickets\/([^/]+)$/);
   if (ticketMatch && request.method === "GET") {
     const ref = decodeURIComponent(ticketMatch[1]);
     let ticket = (await pool.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1", [ref])).rows[0];
     if (!ticket) return json(response, 404, { error: "ticket not found" });
-    const [history, notes, attachments, notifications] = await Promise.all([
+    const [history, notes, attachments, notifications, jamContext] = await Promise.all([
       pool.query("SELECT * FROM ticket_status_history WHERE ticket_id=$1 ORDER BY created_at", [ticket.id]),
       pool.query("SELECT * FROM ticket_notes WHERE ticket_id=$1 ORDER BY created_at", [ticket.id]),
       pool.query("SELECT a.*,u.media_type,u.size_bytes FROM attachments a JOIN uploads u ON u.id=a.upload_id WHERE a.ticket_id=$1", [ticket.id]),
@@ -2782,15 +2771,18 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
          WHERE nd.ticket_id=$1 ORDER BY nd.created_at`,
         [ticket.id],
       ),
+      pool.query("SELECT source_url,generation,state,data_json,content_hash,error_code,fetched_at,updated_at FROM ticket_jam_contexts WHERE ticket_id=$1", [ticket.id]),
     ]);
     return json(response, 200, {
       ticket, status_history: history.rows, notes: notes.rows, attachments: attachments.rows,
-      notification_history: notifications.rows,
+      notification_history: notifications.rows, jam_context: jamContext.rows[0] ?? null,
     });
   }
   if (ticketMatch && request.method === "PATCH") {
     const ref = decodeURIComponent(ticketMatch[1]);
     const body = await bodyOf(request);
+    const forgedJamKey = ["jam_context", "jam_import", "jam_state", "data_json", "generation", "error_code", "content_hash", "fetched_at"].find((key) => key in body);
+    if (forgedJamKey) return json(response, 422, { error: `unknown field: ${forgedJamKey}` });
     if (body.status === "Cancelled") {
       if (Object.keys(body).some((key) => key !== "status")) return json(response, 422, { error: "cancellation cannot be combined with ticket edits" });
       return transitionTicket(ref, "Cancelled", "Cancelled by administrator", session, request, response);
@@ -2801,19 +2793,37 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
     if (body.status !== undefined && (!validStatuses.has(body.status) || systemOnlyStatuses.has(body.status))) return json(response, 422, { error: "status cannot be set manually" });
     const allowed = [
       "title", "description", "category", "priority", "status", "project_id", "submitter_name", "submitter_email",
-      "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps",
+      "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", "jam_url",
       "ai_configuration_mode", "default_model", "default_reasoning_level", "planning_model",
       "planning_reasoning_level", "execution_model", "execution_reasoning_level", "repair_model", "repair_reasoning_level",
     ];
     const entries = Object.entries(body).filter(([key]) => allowed.includes(key));
-    if (!entries.length && body.submission === undefined) return json(response, 400, { error: "no supported fields" });
+    if (!entries.length && body.submission === undefined && body.attachment_upload_ids === undefined) return json(response, 400, { error: "no supported fields" });
     const aiFields = new Set(["default_model", "default_reasoning_level", "planning_model",
       "planning_reasoning_level", "execution_model", "execution_reasoning_level", "repair_model", "repair_reasoning_level"]);
     const normalized = entries.map(([key, value]) => (aiFields.has(key) && value === "" ? [key, null] : [key, value]) as [string, unknown]);
     const after = await inTransaction(async (client) => {
+      await lockTicketActor(client, { userId: session.user_id, role: "admin" });
       const before = (await client.query("SELECT * FROM tickets WHERE id::text=$1 OR ticket_number=$1 FOR UPDATE", [ref])).rows[0];
       if (!before) return null;
       const updates = new Map(normalized);
+      const imageFields = before.form_id
+        ? (await fieldsFor(before.form_id)).filter((field) => field.field_type === "image_upload")
+        : [{ field_key: "screenshots", required: false }];
+      const imageKeys = imageFields.map((field) => field.field_key);
+      const attachmentSelection = body.attachment_upload_ids === undefined
+        ? undefined : checkedAttachmentSelection(body.attachment_upload_ids, imageKeys);
+      const currentAttachments = attachmentSelection === undefined && !imageFields.some((field) => field.required) ? [] : (await client.query(
+        "SELECT upload_id,field_key FROM attachments WHERE ticket_id=$1", [before.id],
+      )).rows;
+      for (const field of imageFields.filter((field) => field.required)) {
+        const ids = attachmentSelection && field.field_key in attachmentSelection
+          ? attachmentSelection[field.field_key]
+          : currentAttachments.filter((row: any) => row.field_key === field.field_key).map((row: any) => row.upload_id);
+        if (!ids.length) return { validationErrors: { [field.field_key]: "required" } };
+      }
+      const attachmentChanged = attachmentSelection !== undefined && Object.entries(attachmentSelection).some(([key, ids]) =>
+        JSON.stringify([...ids].sort()) !== JSON.stringify(currentAttachments.filter((row: any) => row.field_key === key).map((row: any) => row.upload_id).sort()));
       if (body.submission !== undefined) {
         const submission = body.submission;
         const errors: Record<string, string> = {};
@@ -2830,7 +2840,7 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
           for (const field of fields) if (field.field_key in before) savedValues[field.field_key] = before[field.field_key];
           Object.assign(errors, validateFields(fields, { ...savedValues, ...submission }));
           if (!Object.keys(errors).length) {
-            const ticketColumns = new Set(["project_id", "title", "description", "category", "priority", "submitter_name", "submitter_email", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps"]);
+            const ticketColumns = new Set(["project_id", "title", "description", "category", "priority", "submitter_name", "submitter_email", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", "jam_url"]);
             const customValues = { ...(before.custom_values_json ?? {}) };
             for (const [key, value] of Object.entries(submission)) {
               if (ticketColumns.has(key)) updates.set(key, value);
@@ -2841,7 +2851,10 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         }
         if (Object.keys(errors).length) return { validationErrors: errors };
       }
-      if (!updates.size) return { noSupportedFields: true };
+      const jam = updates.has("jam_url") ? normalizeJamUrl(updates.get("jam_url"))?.url ?? null : before.jam_url ?? null;
+      const jamChanged = jam !== (before.jam_url ?? null);
+      updates.delete("jam_url");
+      if (!updates.size && !attachmentChanged && !jamChanged) return before;
       if (body.ai_configuration_mode !== undefined && !["basic", "advanced"].includes(body.ai_configuration_mode)) {
         throw new AiConfigurationError(`Unsupported AI configuration mode "${body.ai_configuration_mode}"`);
       }
@@ -2863,7 +2876,15 @@ export async function adminApi(request: IncomingMessage, response: ServerRespons
         ? ["planning", "execution", "repair"] : ["planning"]) as AiPhase[]) {
         resolvedAiFor(candidate, project, phase, systemAi);
       }
-      const updated = (await client.query(`UPDATE tickets SET ${updatedEntries.map(([key], index) => `${key}=$${index + 2}`).join(",")},updated_at=now() WHERE id=$1 RETURNING *`, [before.id, ...updatedEntries.map(([, value]) => value)])).rows[0];
+      const submissionFields = new Set(["title", "description", "category", "priority", "project_id", "source_url", "environment", "expected_behavior", "actual_behavior", "reproduction_steps", "custom_values_json"]);
+      const submissionChanged = jamChanged || attachmentChanged || updatedEntries.some(([key, value]) => submissionFields.has(key) && before[key] !== value
+        && (key !== "custom_values_json" || JSON.stringify(before[key] ?? {}) !== JSON.stringify(value ?? {})));
+      const assignments = updatedEntries.map(([key], index) => `${key}=$${index + 2}`);
+      const updated = (await client.query(`UPDATE tickets SET ${assignments.length ? `${assignments.join(",")},` : ""}updated_at=now()
+        ${submissionChanged ? ",submission_revision=submission_revision+1,submission_updated_at=now()" : ""} WHERE id=$1 RETURNING *`, [before.id, ...updatedEntries.map(([, value]) => value)])).rows[0];
+      if (attachmentSelection !== undefined) await setTicketAttachments(client, { userId: session.user_id, role: "admin" }, updated, attachmentSelection, imageKeys);
+      if (jamChanged) { await setTicketJamSource(client, before.id, jam); updated.jam_url = jam; }
+      if ((updates.has("source_url") && before.source_url !== updated.source_url) || attachmentChanged) await client.query("SELECT mark_ticket_plan_potentially_stale($1)", [before.id]);
       if (body.status && body.status !== before.status) await client.query(
         `INSERT INTO ticket_status_history (ticket_id,previous_status,new_status,reason,actor_type,actor_id) VALUES ($1,$2,$3,'Manual admin update','admin',$4)`,
         [before.id, before.status, body.status, session.user_id],
@@ -2949,6 +2970,68 @@ export async function route(request: IncomingMessage, response: ServerResponse) 
     return response.end(styles);
   }
   if (request.method === "POST" && url.pathname === "/api/admin/login") return login(request, response);
+  if (request.method === "GET" && ["/api/session", "/api/admin/session"].includes(url.pathname)) {
+    const session = await requireSession(request, response);
+    if (session) return json(response, 200, { user: { id: session.user_id, username: session.username, role: session.role } });
+    return;
+  }
+  if (request.method === "POST" && ["/api/logout", "/api/admin/logout"].includes(url.pathname)) {
+    const session = await requireSession(request, response);
+    if (session) return logout(request, response, session);
+    return;
+  }
+  if ((url.pathname === "/tickets" || /^\/tickets\/[^/]+$/.test(url.pathname)) && request.method === "GET") {
+    const session = await sessionFor(request);
+    if (!session) { response.writeHead(302, { location: "/login" }); return response.end(); }
+    const page = await reporterTicketsPage.render(url, session);
+    return page ? html(response, page.status, reporterPage(page.title, page.body, session.username, nonce), {}, nonce) : html(response, 404, "<h1>Not found</h1>", {}, nonce);
+  }
+  const reporterAttachment = url.pathname.match(/^\/attachments\/([0-9a-f-]{36})$/);
+  if (reporterAttachment && request.method === "GET") {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    const membership = session.role === "admin" ? "" : "AND EXISTS(SELECT 1 FROM project_memberships pm WHERE pm.project_id=t.project_id AND pm.user_id=$2)";
+    const values = session.role === "admin" ? [reporterAttachment[1]] : [reporterAttachment[1], session.user_id];
+    const row = (await pool.query(
+      `SELECT ar.id artifact_id,ar.status artifact_status,ar.storage_root,ar.storage_path artifact_storage_path,ar.sha256 artifact_sha256,
+              u.storage_path upload_storage_path,u.original_name,u.media_type
+       FROM attachments a JOIN uploads u ON u.id=a.upload_id JOIN tickets t ON t.id=a.ticket_id
+       LEFT JOIN artifacts ar ON ar.upload_id=u.id
+       WHERE a.id=$1 AND t.submitter_deleted_at IS NULL ${membership}`,
+      values,
+    )).rows[0];
+    if (!row) return json(response, 404, { error: "attachment not found" });
+    try {
+      const content = await readUploadArtifact(row);
+      response.writeHead(200, {
+        "content-type": row.media_type,
+        "content-disposition": `${url.searchParams.has("download") ? "attachment" : "inline"}; filename="${(row.original_name ?? "attachment").replace(/[^\w. -]/g, "_")}"`,
+        ...securityHeaders(),
+      });
+      return response.end(content);
+    } catch { return json(response, 404, { error: "attachment not found" }); }
+  }
+  const authenticatedUpload = url.pathname.match(/^\/api\/projects\/([0-9a-f-]{36})\/uploads$/);
+  if (authenticatedUpload && request.method === "POST") {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    try {
+      return json(response, 201, await storeTicketUpload(request, {
+        kind: "authenticated", actor: { userId: session.user_id, role: session.role }, projectId: authenticatedUpload[1],
+      }));
+    } catch (error: any) {
+      const retry = error?.retryAfterSeconds;
+      return json(response, Number(error?.status) || 500, {
+        error: Number(error?.status) ? error.message : "internal server error", ...(retry ? { retry_after_seconds: retry } : {}),
+      }, retry ? { "retry-after": String(retry) } : {});
+    }
+  }
+  if (url.pathname === "/api/projects" || url.pathname === "/api/tickets" || url.pathname.startsWith("/api/tickets/")) {
+    const session = await requireSession(request, response);
+    if (!session) return;
+    if (await ticketApi(request, response, url, { userId: session.user_id, role: session.role })) return;
+    return json(response, 404, { error: "not found" });
+  }
   const publicMatch = url.pathname.match(/^\/api\/public\/forms\/([^/]+)$/);
   if (publicMatch && request.method === "GET") {
     const form = await publicForm(decodeURIComponent(publicMatch[1]));

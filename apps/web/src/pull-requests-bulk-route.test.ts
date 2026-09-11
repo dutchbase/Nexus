@@ -59,7 +59,7 @@ test("merge-preflight classifies a mix of ready/blocked PRs and includes a reaso
   });
   const res = response();
 
-  await adminApi(request({ ids: [ready.id, blocked.id] }), res, new URL(preflightUrl), { user_id: "admin" });
+  await adminApi(request({ ids: [ready.id, blocked.id] }), res, new URL(preflightUrl), { user_id: "admin", role: "admin" });
 
   expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object));
   const body = jsonOf(res);
@@ -71,12 +71,12 @@ test("merge-preflight classifies a mix of ready/blocked PRs and includes a reaso
 
 test("merge-preflight rejects a non-array/empty ids", async () => {
   const res = response();
-  await adminApi(request({ ids: [] }), res, new URL(preflightUrl), { user_id: "admin" });
+  await adminApi(request({ ids: [] }), res, new URL(preflightUrl), { user_id: "admin", role: "admin" });
   expect(res.writeHead).toHaveBeenCalledWith(400, expect.any(Object));
   expect(pool.query).not.toHaveBeenCalled();
 
   const res2 = response();
-  await adminApi(request({ ids: "not-an-array" }), res2, new URL(preflightUrl), { user_id: "admin" });
+  await adminApi(request({ ids: "not-an-array" }), res2, new URL(preflightUrl), { user_id: "admin", role: "admin" });
   expect(res2.writeHead).toHaveBeenCalledWith(400, expect.any(Object));
 });
 
@@ -105,7 +105,7 @@ test("bulk ai-review queues eligible open PRs and skips a PR with an already-run
   }) };
   const res = response();
 
-  await adminApi(request({ action: "ai-review", ids: [fresh.id, running.id] }), res, new URL(bulkUrl), { user_id: "admin" });
+  await adminApi(request({ action: "ai-review", ids: [fresh.id, running.id] }), res, new URL(bulkUrl), { user_id: "admin", role: "admin" });
 
   expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object));
   const body = jsonOf(res);
@@ -139,7 +139,7 @@ test("bulk ai-review continues processing the rest of the batch after one PR's l
   }) };
   const res = response();
 
-  await adminApi(request({ action: "ai-review", ids: [bad.id, good.id] }), res, new URL(bulkUrl), { user_id: "admin" });
+  await adminApi(request({ action: "ai-review", ids: [bad.id, good.id] }), res, new URL(bulkUrl), { user_id: "admin", role: "admin" });
 
   expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object));
   const body = jsonOf(res);
@@ -162,7 +162,7 @@ test("bulk close skips a non-open PR and queues an open one, enqueuing github.cl
   });
   const res = response();
 
-  await adminApi(request({ action: "close", ids: [openPr.id, mergedPr.id] }), res, new URL(bulkUrl), { user_id: "admin" });
+  await adminApi(request({ action: "close", ids: [openPr.id, mergedPr.id] }), res, new URL(bulkUrl), { user_id: "admin", role: "admin" });
 
   expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object));
   const body = jsonOf(res);
@@ -194,7 +194,7 @@ test("bulk merge re-evaluates eligibility server-side from the freshly-queried r
   await adminApi(request({
     action: "merge", ids: [pr.id],
     expected_head_sha: "attacker-supplied-sha",
-  }), res, new URL(bulkUrl), { user_id: "admin" });
+  }), res, new URL(bulkUrl), { user_id: "admin", role: "admin" });
 
   expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object));
   expect(jobInserts).toHaveLength(1);
@@ -217,7 +217,7 @@ test("bulk merge skips a draft PR with the correct reason and does not enqueue a
   });
   const res = response();
 
-  await adminApi(request({ action: "merge", ids: [draft.id] }), res, new URL(bulkUrl), { user_id: "admin" });
+  await adminApi(request({ action: "merge", ids: [draft.id] }), res, new URL(bulkUrl), { user_id: "admin", role: "admin" });
 
   const body = jsonOf(res);
   expect(body.results).toEqual([{ id: draft.id, outcome: "skipped", reason: expect.stringMatching(/draft/i) }]);
@@ -239,7 +239,7 @@ test("bulk merge skips a PR with merge conflicts with the correct reason and doe
   });
   const res = response();
 
-  await adminApi(request({ action: "merge", ids: [conflicted.id] }), res, new URL(bulkUrl), { user_id: "admin" });
+  await adminApi(request({ action: "merge", ids: [conflicted.id] }), res, new URL(bulkUrl), { user_id: "admin", role: "admin" });
 
   const body = jsonOf(res);
   expect(body.results).toEqual([{ id: conflicted.id, outcome: "skipped", reason: expect.stringMatching(/conflict/i) }]);
@@ -254,7 +254,7 @@ test("an id that doesn't exist in pull_requests is reported not_found, not a 500
   });
   const res = response();
 
-  await adminApi(request({ action: "close", ids: [missing] }), res, new URL(bulkUrl), { user_id: "admin" });
+  await adminApi(request({ action: "close", ids: [missing] }), res, new URL(bulkUrl), { user_id: "admin", role: "admin" });
 
   expect(res.writeHead).toHaveBeenCalledWith(200, expect.any(Object));
   const body = jsonOf(res);
@@ -265,7 +265,7 @@ test("more than 100 ids is rejected with 400 before any query runs", async () =>
   const ids = Array.from({ length: 101 }, (_, i) => uuid(1000 + i));
   const res = response();
 
-  await adminApi(request({ action: "close", ids }), res, new URL(bulkUrl), { user_id: "admin" });
+  await adminApi(request({ action: "close", ids }), res, new URL(bulkUrl), { user_id: "admin", role: "admin" });
 
   expect(res.writeHead).toHaveBeenCalledWith(400, expect.any(Object));
   expect(pool.query).not.toHaveBeenCalled();
@@ -286,7 +286,7 @@ test("every successful action writes an audit_events row tagged with the same ba
   });
   const res = response();
 
-  await adminApi(request({ action: "close", ids: [openPr.id], batch_id: "batch-42" }), res, new URL(bulkUrl), { user_id: "admin" });
+  await adminApi(request({ action: "close", ids: [openPr.id], batch_id: "batch-42" }), res, new URL(bulkUrl), { user_id: "admin", role: "admin" });
 
   const body = jsonOf(res);
   expect(body.batch_id).toBe("batch-42");
@@ -309,7 +309,7 @@ test("a failing audit insert does not duplicate or downgrade the result entry fo
   });
   const res = response();
 
-  await adminApi(request({ action: "close", ids: [openPr.id, other.id] }), res, new URL(bulkUrl), { user_id: "admin" });
+  await adminApi(request({ action: "close", ids: [openPr.id, other.id] }), res, new URL(bulkUrl), { user_id: "admin", role: "admin" });
 
   // Both close jobs were really enqueued, so both must be reported exactly once as queued —
   // the audit failure must not push a second, contradictory "skipped" entry for the same id.

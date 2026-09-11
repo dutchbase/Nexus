@@ -11,7 +11,7 @@ vi.mock("@dcc/database", () => ({
   finalizeArtifact: vi.fn(), inTransaction: vi.fn(), pool: { query }, readArtifact, readStagedArtifact: vi.fn(), stageArtifact: vi.fn(),
 }));
 
-const { adminHtml, readUploadArtifact } = await import("./server.ts");
+const { adminHtml, readUploadArtifact, route } = await import("./server.ts");
 
 beforeEach(() => { query.mockReset(); readArtifact.mockReset(); });
 
@@ -44,5 +44,22 @@ it("does not revive an abandoned registered upload through its legacy path", asy
     artifact_id: "artifact-1", artifact_status: "abandoned", storage_root: "primary",
     artifact_storage_path: "uploads/a.png", artifact_sha256: null, upload_storage_path: "/primary/uploads/a.png",
   })).rejects.toThrow(/unavailable/);
+  expect(readArtifact).not.toHaveBeenCalled();
+});
+
+it("scopes reporter attachment reads to membership and excludes submitter-deleted tickets before reading bytes", async () => {
+  query
+    .mockResolvedValueOnce({ rows: [{ id: "s", user_id: "u", username: "reporter", role: "reporter", csrf_token_hash: "hash" }] })
+    .mockResolvedValueOnce({ rows: [] });
+  const response: any = { writeHead: vi.fn(), end: vi.fn() };
+  await route({
+    method: "GET", url: "/attachments/11111111-1111-4111-8111-111111111111", headers: { host: "test", cookie: "dcc_session=token" }, socket: {},
+  } as any, response);
+
+  const [sql, values] = query.mock.calls[1];
+  expect(sql).toContain("t.submitter_deleted_at IS NULL");
+  expect(sql).toContain("project_memberships");
+  expect(values).toEqual(["11111111-1111-4111-8111-111111111111", "u"]);
+  expect(response.writeHead).toHaveBeenCalledWith(404, expect.any(Object));
   expect(readArtifact).not.toHaveBeenCalled();
 });

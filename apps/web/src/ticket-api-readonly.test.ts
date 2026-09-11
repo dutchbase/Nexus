@@ -20,7 +20,7 @@ beforeEach(() => {
 test("GET ticket API is read-only", async () => {
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
   await adminApi({ method: "GET", headers: {} } as any, response,
-    new URL("http://test/api/admin/tickets/T-1"), { user_id: "admin" });
+    new URL("http://test/api/admin/tickets/T-1"), { user_id: "admin", role: "admin" });
   expect(response.writeHead).toHaveBeenCalledWith(200, expect.anything());
   expect(pool.query.mock.calls.every(([sql]) => !/UPDATE tickets|INSERT INTO ticket_status_history/i.test(sql))).toBe(true);
 });

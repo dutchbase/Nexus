@@ -320,4 +320,19 @@ describe("health-gated release deployment", () => {
     expect(readme).toContain("GitHub Actions are not a deployment prerequisite");
     expect(readme).toContain("A fetched SHA mismatch fails before staging, writes a nonzero marker, and the webhook finalizes the attempt as failed.");
   });
+
+  it("persists the pm2 snapshot after every reload so a future resurrect lands on the current release", async () => {
+    const result = await deploy();
+
+    const webReload = result.commands.indexOf("pm2 start ");
+    const firstSave = result.commands.indexOf("pm2 save", webReload);
+    expect(firstSave).toBeGreaterThan(webReload);
+  });
+
+  it("still persists the snapshot after a rollback restarts the prior release", async () => {
+    const result = await deploy({ failHealth: true });
+
+    const saveCalls = (result.commands.match(/pm2 save/g) ?? []).length;
+    expect(saveCalls).toBeGreaterThanOrEqual(2); // once per reload_app call in the rollback path
+  });
 });

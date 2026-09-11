@@ -30,6 +30,7 @@ integration("E2E seed", () => {
   test("loads unchanged fixtures twice after all migrations", () => {
     const env = {
       ...process.env, DATABASE_URL: databaseUrl,
+      DCC_DATA_DIR: join(root, "data"),
       FIXTURE_REPO_VA_JOBS_PLATFORM: join(root, "va-jobs-platform"),
       FIXTURE_REPO_CORPORATE_SITE: join(root, "corporate-site"),
       FIXTURE_REPO_CUSTOMER_PORTAL: join(root, "customer-portal"),

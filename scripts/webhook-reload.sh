@@ -39,6 +39,10 @@ cd "$DCC_SWAP_CURRENT" || exit 1
 
 pm2 delete dcc-webhook >/dev/null 2>&1         # tolerate already-absent app
 if pm2 start ecosystem.config.cjs --only dcc-webhook --update-env; then
+  # Keep the on-disk snapshot in sync with what's running — see deploy.sh's
+  # reload_app() for why (2026-09-11 incident: a stale snapshot let an
+  # unrelated pm2 resurrect roll this process back weeks with no deploy).
+  pm2 save >/dev/null 2>&1 || echo "webhook-reload.sh: warning: pm2 save failed" >&2
   touch "$DCC_SWAP_MARKER.swap-done"
   exit 0                                       # boot recovery finalizes marker
 fi

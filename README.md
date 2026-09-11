@@ -137,7 +137,7 @@ app reads, with comments. The two most important, always required:
 | `PORT` | Port `apps/web` listens on |
 
 In production, keep worker-only credentials (`GITHUB_TOKEN`,
-`CLAUDE_CODE_OAUTH_TOKEN`, etc.) in a **separate** `.env.worker` file — the
+`CLAUDE_CODE_OAUTH_TOKEN`, `DCC_JAM_TOKEN`, etc.) in a **separate** `.env.worker` file — the
 web process is deliberately never given these (see
 `apps/web/src/security.ts`'s `workerOnlyCredentials` list, enforced at
 process-start via `env -u ...` stripping in `ecosystem.config.cjs`).
@@ -249,6 +249,17 @@ Passwords are UTF-8 input of 1–4096 bytes; NUL, CR, and LF are rejected.
 Use `printf %s`, not `echo` — the password is read from stdin, never
 accepted as a command-line argument (which would leak it into shell
 history / process listings). Failed logins are rate-limited per account.
+
+Administrators manage reporter accounts from **Users**. Each reporter gets a
+username, an initial password, and access to selected projects. Removing a
+project takes effect on the reporter's next request, including in an already
+open tab. Deactivating an account also invalidates its active sessions.
+
+Reporters land in a ticket-only portal. They can see and create tickets for
+assigned projects, edit the submission fields of any visible ticket, and
+delete tickets they created. Deletion hides the ticket and its attachments
+from reporters while retaining the admin record and workflow history marked
+**Deleted by submitter**.
 
 ## Running locally
 

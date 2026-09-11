@@ -56,7 +56,7 @@ integration("POST /api/admin/projects rejects a duplicate GitHub repo", () => {
     const response = newResponse();
     const projectsBefore = await withClient((client) => client.query("SELECT count(*) FROM projects"));
 
-    await adminApi(postRequest(body), response, new URL("http://test/api/admin/projects"), { user_id: "admin" });
+    await adminApi(postRequest(body), response, new URL("http://test/api/admin/projects"), { user_id: "admin", role: "admin" });
 
     expect(response.writeHead).toHaveBeenCalledWith(400, expect.anything());
     const projectsAfter = await withClient((client) => client.query("SELECT count(*) FROM projects"));

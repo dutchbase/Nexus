@@ -225,9 +225,10 @@ export const standardFields = [
   { field_key: "description", field_type: "long_text", label: "Wat gaat er mis of wat mist er?", required: true, position: 40, validation_json: { max_length: 10000 } },
   { field_key: "source_url", field_type: "url", label: "Op welke pagina gebeurt dit?", required: false, position: 50 },
   { field_key: "environment", field_type: "environment_selector", label: "Omgeving", required: false, position: 60, options_json: ["Productie", "Staging", "Lokaal"] },
-  { field_key: "screenshot", field_type: "image_upload", label: "Schermafbeelding", required: false, position: 70 },
-  { field_key: "submitter_email", field_type: "email", label: "E-mailadres (optioneel)", required: false, position: 80 },
-  { field_key: "website", field_type: "hidden", label: "Website", required: false, position: 90 },
+  { field_key: "screenshots", field_type: "image_upload", label: "Screenshots", required: false, position: 70 },
+  { field_key: "jam_url", field_type: "jam_link", label: "Jam link", description: "Paste a Jam link to include technical details.", placeholder: "https://jam.dev/c/...", required: false, position: 80 },
+  { field_key: "submitter_email", field_type: "email", label: "E-mailadres (optioneel)", required: false, position: 90 },
+  { field_key: "website", field_type: "hidden", label: "Website", required: false, position: 100 },
 ];
 
 export async function fieldsFor(formId: string) {

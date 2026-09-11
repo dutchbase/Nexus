@@ -48,6 +48,7 @@ const systemAiRow = {
 function makeTransactionClient() {
   return {
     query: vi.fn(async (sql: string) => {
+      if (sql.includes("FROM users") && sql.includes("FOR UPDATE")) return { rows: [{ role: "admin", is_active: true }] };
       if (sql.includes("FROM tickets") && sql.includes("FOR UPDATE")) return { rows: [ticketRow] };
       if (sql.includes("FROM projects")) return { rows: [projectRow] };
       if (sql.includes("FROM system_ai_settings")) return { rows: [systemAiRow] };
@@ -61,7 +62,7 @@ test("PATCHing an empty-string AI field stores SQL NULL, not the empty string", 
   transactionClient = makeTransactionClient();
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi(request({ default_model: "" }), response, new URL(ticketPatchPath), { user_id: "admin" });
+  await adminApi(request({ default_model: "" }), response, new URL(ticketPatchPath), { user_id: "admin", role: "admin" });
 
   const updated = transactionClient.query.mock.calls.find(([sql]: [string]) => sql.includes("UPDATE tickets SET"));
   expect(updated).toBeTruthy();
@@ -77,6 +78,7 @@ test("PATCHing an empty-string AI field stores SQL NULL, not the empty string", 
 test("PATCHing an empty-string AI field that would leave planning unresolvable still 422s", async () => {
   transactionClient = {
     query: vi.fn(async (sql: string) => {
+      if (sql.includes("FROM users") && sql.includes("FOR UPDATE")) return { rows: [{ role: "admin", is_active: true }] };
       if (sql.includes("FROM tickets") && sql.includes("FOR UPDATE")) return { rows: [ticketRow] };
       if (sql.includes("FROM projects")) return { rows: [projectRow] };
       if (sql.includes("FROM system_ai_settings")) return { rows: [{
@@ -91,7 +93,7 @@ test("PATCHing an empty-string AI field that would leave planning unresolvable s
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
   await expect(adminApi(request({ default_model: "", default_reasoning_level: "" }), response,
-    new URL(ticketPatchPath), { user_id: "admin" })).rejects.toMatchObject({ status: 422 });
+    new URL(ticketPatchPath), { user_id: "admin", role: "admin" })).rejects.toMatchObject({ status: 422 });
 
   expect(transactionClient.query.mock.calls.some(([sql]: [string]) => sql.includes("UPDATE tickets SET"))).toBe(false);
 });

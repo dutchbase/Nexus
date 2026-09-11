@@ -56,7 +56,7 @@ test("jobs API returns the observed running count with jobs", async () => {
   });
   const response: any = { writeHead: vi.fn(), end: vi.fn() };
 
-  await adminApi({ method: "GET" } as any, response, new URL("http://test/api/admin/jobs"), { user_id: "admin" });
+  await adminApi({ method: "GET" } as any, response, new URL("http://test/api/admin/jobs"), { user_id: "admin", role: "admin" });
 
   expect(JSON.parse(response.end.mock.calls[0][0])).toMatchObject({
     jobs: [{ ...job, attempt_id: job.id }], capacity: { configured: 1, observed_running: 1 },
