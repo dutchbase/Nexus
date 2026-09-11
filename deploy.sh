@@ -38,11 +38,19 @@ write_marker() {
 # pm2 bakes exec cwd to the resolved release directory on start; restart
 # ("startOrReload") keeps the OLD cwd, silently running a stale release after
 # every cutover. Delete + start from $CURRENT so each deploy actually moves.
+# `pm2 save` afterward keeps the on-disk snapshot (~/.pm2/dump.pm2) equal to
+# what's actually running — without it, any future `pm2 resurrect` (a
+# reboot, an OS-patch-triggered service bounce, anything) silently rolls
+# back to whenever save was last called, not the current release. See the
+# 2026-09-11 incident: dump.pm2 was frozen since 2026-08-27, so an
+# unrelated glibc security patch that bounced pm2-deploy.service that
+# morning rolled dcc-web/dcc-worker back ~15 days with no deploy involved.
 reload_app() {
   # Delete may legitimately hit an already-absent app (pm2 exits 1); under
   # set -e that would kill the deploy between marker-write and restart.
   pm2 delete "$1" >/dev/null 2>&1 || true
   pm2 start "$CURRENT/ecosystem.config.cjs" --only "$1" --update-env
+  pm2 save >/dev/null 2>&1 || echo "deploy.sh: warning: pm2 save failed after reloading $1" >&2
 }
 
 record_event() {
