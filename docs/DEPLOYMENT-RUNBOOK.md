@@ -151,6 +151,40 @@ UPDATE deployment_attempts SET state='succeeded', completed_at=now()
 
 (Or simply let the next real push create a fresh attempt.)
 
+### E. Live app reverted to old code with no failed deploy in sight
+
+Symptom: the running app shows stale branding/features/behavior, but
+`deployment_attempts` shows nothing recent failed or is even running —
+the last recorded attempt for this branch `succeeded`. This is **not** a
+deploy failure; it's PM2 itself reverting.
+
+Root cause (first seen 2026-09-11): PM2 persists its process table to
+`~/.pm2/dump.pm2` only when `pm2 save` is called, and replays that exact
+snapshot on `pm2 resurrect` (which fires on host reboot, and on this box
+also on an unrelated `pm2-deploy.service` bounce — e.g. `needrestart`
+restarting it after a routine OS security patch). `deploy.sh`'s
+`reload_app()` and `scripts/webhook-reload.sh` now call `pm2 save` after
+every successful cutover specifically to keep that snapshot current — if
+this incident recurs, first check whether that call started failing
+silently (`grep "pm2 save" /home/deploy/.pm2/pm2.log` or the `warning:
+pm2 save failed` line `reload_app`/`webhook-reload.sh` emit to stderr on
+failure) before assuming a new root cause.
+
+Diagnose:
+```bash
+readlink -f "$DCC_ROOT/.deploy-current"          # should match the intended release
+pm2 describe dcc-web | grep "exec cwd"            # compare against the above — a mismatch is the bug
+stat ~/.pm2/dump.pm2                              # an old mtime relative to the last deploy is the tell
+```
+
+Fix (safe to run any time; matches what `reload_app()` does per-app):
+```bash
+cd "$DCC_ROOT"
+pm2 delete dcc-web dcc-worker dcc-webhook
+pm2 start "$(readlink -f .deploy-current)/ecosystem.config.cjs" --only dcc-web,dcc-worker,dcc-webhook --update-env
+pm2 save
+```
+
 ## 4. Hard rules
 
 - **Never** reset or rewind the database; migrations are forward-only.
