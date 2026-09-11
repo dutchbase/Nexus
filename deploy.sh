@@ -185,7 +185,11 @@ cd "$RELEASE"
 pnpm install --frozen-lockfile
 record_event "dependencies_installed"
 env -u DCC_TEST_DATABASE_URL -u DCC_TEST_RESTORE_DATABASE_URL pnpm exec tsc --noEmit
-env -u DCC_TEST_DATABASE_URL -u DCC_TEST_RESTORE_DATABASE_URL pnpm exec vitest run --config vitest.config.ts --reporter=verbose --no-file-parallelism --testTimeout=15000
+# --no-file-parallelism runs the whole suite (1000+ tests) in one process, so
+# V8's default old-space ceiling (~4GB) can OOM it outright as the suite
+# grows — seen 2026-09-11 blocking every deploy attempt. Raise the ceiling for
+# just this invocation; system RAM here is >20GB, so this is comfortably safe.
+env -u DCC_TEST_DATABASE_URL -u DCC_TEST_RESTORE_DATABASE_URL NODE_OPTIONS='--max-old-space-size=8192' pnpm exec vitest run --config vitest.config.ts --reporter=verbose --no-file-parallelism --testTimeout=15000
 record_event "local_verification_passed"
 pnpm --filter database migrate
 record_event "migrated"
