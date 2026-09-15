@@ -115,6 +115,7 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
         });
       });
       ${imageUploadScript()}
+      ${characterCounterScript()}
       ${path === "/admin/tickets" ? `
         (function(){
           const params=new URLSearchParams(location.search);
@@ -1384,6 +1385,10 @@ export function formControls(fields: any[], projects: any[], values: Record<stri
     if (field.field_type === "static") return `<section class="form-help"><strong>${escapeHtml(field.label)}</strong>${field.description ? `<p>${escapeHtml(field.description)}</p>` : ""}</section>`;
     const required = field.required ? " required" : "";
     const type = field.field_type;
+    const maxLength = field.field_key === "title" ? 200
+      : type === "long_text" ? Math.min(Number(field.validation_json?.max_length ?? 10000), 10000)
+      : undefined;
+    const maxAttr = maxLength !== undefined ? ` maxlength="${maxLength}"` : "";
     const hasValues = mode !== "public";
     const value = hasValues ? escapeHtml(values[field.field_key]) : "";
     const helpId = `field-${name}-help`;
@@ -1394,8 +1399,8 @@ export function formControls(fields: any[], projects: any[], values: Record<stri
       const selected = hasValues && (type === "multi_select" ? Array.isArray(values[field.field_key]) ? values[field.field_key] : values[field.field_key] == null ? [] : [values[field.field_key]] : [values[field.field_key]]).some((value: any) => String(optionValue) === String(value));
       return `<option value="${escapeHtml(optionValue)}"${selected ? " selected" : ""}>${escapeHtml(option.label ?? option)}</option>`;
     }).join("");
-    let control = `<input name="${name}"${placeholder}${describedBy}${hasValues ? ` value="${value}"` : ""}${required}>`;
-    if (type === "long_text") control = `<textarea name="${name}" rows="5"${placeholder}${describedBy}${required}>${value}</textarea>`;
+    let control = `<input name="${name}"${placeholder}${describedBy}${maxAttr}${hasValues ? ` value="${value}"` : ""}${required}>`;
+    if (type === "long_text") control = `<textarea name="${name}" rows="5"${placeholder}${describedBy}${maxAttr}${required}>${value}</textarea>`;
     if (type === "email" || type === "url" || type === "jam_link" || type === "number") control = `<input name="${name}" type="${type === "jam_link" ? "url" : type}"${placeholder}${describedBy}${type === "number" && Number.isFinite(field.validation_json?.min) ? ` min="${field.validation_json.min}"` : ""}${type === "number" && Number.isFinite(field.validation_json?.max) ? ` max="${field.validation_json.max}"` : ""}${hasValues ? ` value="${value}"` : ""}${required}>`;
     if (type.includes("selector") || ["dropdown", "radio", "multi_select"].includes(type)) {
       const choices = type === "project_selector" ? projects.map((project) => `<option value="${project.id}"${hasValues && String(project.id) === String(values[field.field_key]) ? " selected" : ""}>${escapeHtml(project.name)}</option>`).join("") : options;
@@ -1408,11 +1413,16 @@ export function formControls(fields: any[], projects: any[], values: Record<stri
   }).join("");
 }
 
+export function characterCounterScript(): string {
+  return `(()=>{document.querySelectorAll("input[maxlength],textarea[maxlength]").forEach(el=>{const counter=document.createElement("small");counter.className="char-counter";el.insertAdjacentElement("afterend",counter);const update=()=>{counter.textContent=el.value.length+"/"+el.maxLength};el.addEventListener("input",update);update()})})();`;
+}
+
 export function publicFormPage(form: any, fields: any[], projects: any[], nonce = "") {
   const controls = formControls(fields, projects, {}, "public", { uploadUrl: `/api/public/forms/${form.slug}/uploads`, disabled: form.settings_json?.allow_image_attachments === false });
   const fieldTypes = JSON.stringify(Object.fromEntries(fields.map((field) => [field.field_key, field.field_type])));
   return document(form.title, `<main class="public"><div style="display:flex;align-items:center;gap:8px;margin-bottom:10px">${logoMark("N", "sm")}<span style="font-size:13px;font-weight:700;color:var(--text2)">Nexus</span></div><div class="url-strip">/f/${escapeHtml(form.slug)}</div><form class="card" id="public-form"><div class="card-body"><div class="eyebrow">Feedback</div><h1>${escapeHtml(form.title)}</h1><p>${escapeHtml(form.description)}</p><div class="grid one">${controls}</div><br><button class="button primary" type="submit">Melding versturen</button><p class="error" role="alert"></p></div></form></main>`, `
     ${imageUploadScript()}
+    ${characterCounterScript()}
     let submitting=false,idempotencyKey=crypto.randomUUID();
     document.querySelector("#public-form").addEventListener("submit",async(event)=>{
       event.preventDefault();if(submitting)return;const form=event.currentTarget,submit=form.querySelector('button[type="submit"]'),error=form.querySelector(".error");error.textContent="";if(window.nexusImages.pending(form)){error.textContent="Wacht tot de uploads klaar zijn.";return}if(window.nexusImages.invalid(form))return;submitting=true;submit.disabled=true;const data=new FormData(form);const payload={};

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { formControls, publicFormPage } from "./ui.ts";
+import { characterCounterScript, formControls, publicFormPage } from "./ui.ts";
 
 describe("ticket submission form controls", () => {
   it("renders saved admin values without admin-only field types", () => {
@@ -19,7 +19,7 @@ describe("ticket submission form controls", () => {
     }, "admin");
 
     expect(html).toContain('name="source_url" type="url" value="https://example.test/report"');
-    expect(html).toContain('name="details" rows="5">Saved custom text</textarea>');
+    expect(html).toContain('name="details" rows="5" maxlength="10000">Saved custom text</textarea>');
     expect(html).toContain('<option value="High" selected>High</option>');
     expect(html).toContain('<option value="project-2" selected>Saved project</option>');
     expect(html).toContain('name="follow_up" type="checkbox" value="true" checked');
@@ -79,5 +79,61 @@ describe("ticket submission form controls", () => {
     const page = publicFormPage({ slug: "feedback", title: "Feedback", description: "" }, [], []);
     expect(page).toContain('if(response.status===400||response.status===422)idempotencyKey=crypto.randomUUID()');
     expect(page).not.toContain('if(!response.ok){idempotencyKey=crypto.randomUUID()');
+  });
+
+  it("includes the character counter script in publicFormPage", () => {
+    const page = publicFormPage({ slug: "feedback", title: "Feedback", description: "" }, [], []);
+    expect(page).toContain("char-counter");
+    expect(page).toContain("insertAdjacentElement");
+  });
+
+  it("caps the title field at 200 chars even if a larger max_length is configured", () => {
+    const html = formControls([
+      { field_key: "title", field_type: "short_text", label: "Title", validation_json: { max_length: 999 } },
+    ], [], {}, "admin");
+
+    expect(html).toContain('name="title" maxlength="200"');
+  });
+
+  it("defaults a long_text field with no validation_json to a 10000 char max", () => {
+    const html = formControls([
+      { field_key: "details", field_type: "long_text", label: "Details" },
+    ], [], {}, "admin");
+
+    expect(html).toContain('name="details" rows="5" maxlength="10000"');
+  });
+
+  it("respects a configured max_length for a long_text field", () => {
+    const html = formControls([
+      { field_key: "details", field_type: "long_text", label: "Details", validation_json: { max_length: 500 } },
+    ], [], {}, "admin");
+
+    expect(html).toContain('name="details" rows="5" maxlength="500"');
+  });
+
+  it("does not add maxlength to unrelated field types", () => {
+    const html = formControls([
+      { field_key: "source_url", field_type: "url", label: "Source URL" },
+    ], [], {}, "admin");
+
+    expect(html).not.toContain("maxlength");
+  });
+
+  it("renders maxlength=\"0\" for a long_text field with max_length: 0", () => {
+    const html = formControls([
+      { field_key: "details", field_type: "long_text", label: "Details", validation_json: { max_length: 0 } },
+    ], [], {}, "admin");
+
+    expect(html).toContain('name="details" rows="5" maxlength="0"');
+  });
+});
+
+describe("character counter script", () => {
+  it("returns a script that finds inputs and textareas with maxlength and adds character counter", () => {
+    const script = characterCounterScript();
+
+    expect(script).toContain("char-counter");
+    expect(script).toContain("insertAdjacentElement");
+    expect(script).toContain('input[maxlength],textarea[maxlength]');
   });
 });

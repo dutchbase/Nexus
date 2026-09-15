@@ -123,7 +123,7 @@ describe("ticket detail GET", () => {
     const body = (await tickets.render(new URL("http://test/admin/tickets/T-1"), session, {}))?.body ?? "";
 
     expect(body).toMatch(/name="title"[^>]*value="Saved title"/);
-    expect(body).toContain('name="detail" rows="5">Saved detail</textarea>');
+    expect(body).toContain('name="detail" rows="5" maxlength="10000">Saved detail</textarea>');
     expect(body).toMatch(/select name="choices" multiple[^>]*>.*option value="alpha" selected.*option value="beta" selected/s);
     expect(body).toContain('name="enabled" type="checkbox" value="true" checked');
     expect(body).not.toContain('name="internal"');
