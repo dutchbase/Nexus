@@ -8,6 +8,12 @@ describe("admin shell", () => {
     expect(html).toContain('fetch("/api/logout"');
     expect(html).not.toContain("worker-01 healthy");
   });
+
+  it("includes the character counter script", () => {
+    const html = adminPage("/admin/tickets", "Tickets", "", {}, "admin");
+    expect(html).toContain("char-counter");
+    expect(html).toContain("insertAdjacentElement");
+  });
 });
 
 describe("public form help", () => {

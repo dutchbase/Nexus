@@ -1,8 +1,8 @@
-import { escapeHtml } from "./ui.ts";
+import { escapeHtml, characterCounterScript } from "./ui.ts";
 import { imageUploadScript } from "./image-upload-control.ts";
 
 export function reporterPage(title: string, body: string, username: string, nonce: string): string {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · Nexus</title><link rel="stylesheet" href="/assets/design-tokens.css"></head><body><header class="header"><a href="/tickets"><strong>Nexus</strong></a><nav aria-label="Main navigation"><a href="/tickets">Tickets</a> <button class="button" type="button" data-logout>Log out</button></nav><span class="worker">${escapeHtml(username)}</span></header><main class="main">${body}</main><script nonce="${escapeHtml(nonce)}">${imageUploadScript()}${reporterScript()}</script></body></html>`;
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${escapeHtml(title)} · Nexus</title><link rel="stylesheet" href="/assets/design-tokens.css"></head><body><header class="header"><a href="/tickets"><strong>Nexus</strong></a><nav aria-label="Main navigation"><a href="/tickets">Tickets</a> <button class="button" type="button" data-logout>Log out</button></nav><span class="worker">${escapeHtml(username)}</span></header><main class="main">${body}</main><script nonce="${escapeHtml(nonce)}">${imageUploadScript()}${characterCounterScript()}${reporterScript()}</script></body></html>`;
 }
 
 export function reporterScript() {

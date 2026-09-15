@@ -130,6 +130,12 @@ test("the reporter shell exposes only ticket navigation and safe form behavior",
   expect(html).toContain('event.key!=="Tab"');
 });
 
+test("the reporter shell includes the character counter script", () => {
+  const html = reporterPage("Tickets", '<form data-ticket-form><input name="title"></form>', "reporter", "nonce-value");
+  expect(html).toContain("char-counter");
+  expect(html).toContain("insertAdjacentElement");
+});
+
 function deleteHarness(result: { status: number; ok: boolean } | Error) {
   const listeners: Record<string, (event: any) => Promise<void>> = {};
   const confirm = { disabled: false, addEventListener: (_: string, handler: any) => { listeners.confirm = handler; } };
