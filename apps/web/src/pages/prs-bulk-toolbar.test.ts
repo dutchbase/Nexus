@@ -59,3 +59,37 @@ test("omits the checkbox input for a closed PR row", async () => {
   expect(result!.body).not.toContain('data-pr-check="pr-closed-1"');
   expect(result!.body).toContain('data-pr-state="closed"');
 });
+
+test("renders icon-only quick action buttons for an open PR row", async () => {
+  mockList([{
+    id: "pr-open-1", number: 12, title: "Open PR", project_name: "Project", project_slug: "project",
+    state: "open", is_draft: false, merge_conflicts: false, last_synced_at: null,
+  }]);
+  const result = await prs.render(new URL("http://test/admin/pull-requests"), session, {});
+  expect(result!.body).toContain('data-pr-row-action="ai-review"');
+  expect(result!.body).toContain('data-pr-row-action="merge"');
+  expect(result!.body).toContain('data-pr-row-id="pr-open-1"');
+  expect(result!.body).toContain('title="Open on GitHub"');
+});
+
+test("omits quick action buttons for a merged PR row", async () => {
+  mockList([{
+    id: "pr-merged-1", number: 13, title: "Merged PR", project_name: "Project", project_slug: "project",
+    state: "merged", is_draft: false, merge_conflicts: false, last_synced_at: null,
+  }]);
+  const result = await prs.render(new URL("http://test/admin/pull-requests?tab=merged"), session, {});
+  expect(result!.body).not.toContain('data-pr-row-action="ai-review"');
+  expect(result!.body).not.toContain('data-pr-row-action="merge"');
+  expect(result!.body).toContain('title="Open on GitHub"');
+});
+
+test("omits quick action buttons for a closed PR row", async () => {
+  mockList([{
+    id: "pr-closed-1", number: 14, title: "Closed PR", project_name: "Project", project_slug: "project",
+    state: "closed", is_draft: false, merge_conflicts: false, last_synced_at: null,
+  }]);
+  const result = await prs.render(new URL("http://test/admin/pull-requests?tab=closed"), session, {});
+  expect(result!.body).not.toContain('data-pr-row-action="ai-review"');
+  expect(result!.body).not.toContain('data-pr-row-action="merge"');
+  expect(result!.body).toContain('title="Open on GitHub"');
+});
