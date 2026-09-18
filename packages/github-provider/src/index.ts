@@ -46,6 +46,7 @@ export type ProviderGitHubPolicyInputs = {
   requestedReviewers: Array<{ type: "user" | "team"; name: string }>;
   requiredChecks: Array<{ context: string; appId: number | null }>;
   checks: Array<{ context: string; appId: number | null; state: "success" | "pending" | "failure"; updatedAt: string }>;
+  workflowCheckState: "none" | "in_progress" | "success" | "failure";
   complete: boolean;
   incompleteReason?: string;
   fetchedAt: string;
@@ -321,6 +322,7 @@ export type CommitCheckStatus = {
   sha: string;
   checks: Array<{ context: string; appId: number | null; state: "success" | "pending" | "failure"; updatedAt: string }>;
   overallState: "success" | "pending" | "failure" | "none";
+  workflowState: "none" | "in_progress" | "success" | "failure";
   fetchedAt: string;
 };
 
@@ -351,7 +353,12 @@ export async function getCommitCheckStatus(owner: string, repository: string, sh
     : checks.some((c) => c.state === "failure") ? "failure"
     : checks.some((c) => c.state === "pending") ? "pending"
     : "success";
-  return { sha, checks, overallState, fetchedAt: new Date().toISOString() };
+  const workflowRuns = checkRunsResult.items.filter((check: any) => check.app?.slug === "github-actions");
+  const workflowState: CommitCheckStatus["workflowState"] = workflowRuns.length === 0 ? "none"
+    : workflowRuns.some((check: any) => check.status === "completed" && !["success", "skipped", "neutral"].includes(check.conclusion)) ? "failure"
+    : workflowRuns.some((check: any) => check.status !== "completed") ? "in_progress"
+    : "success";
+  return { sha, checks, overallState, workflowState, fetchedAt: new Date().toISOString() };
 }
 
 export async function getPullRequestPolicyInputs(owner: string, repository: string, number: number): Promise<ProviderGitHubPolicyInputs> {
@@ -379,6 +386,7 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
     ...(pullRequest.requested_reviewers ?? []).flatMap((reviewer) => reviewer.login ? [{ type: "user" as const, name: reviewer.login }] : []),
     ...(pullRequest.requested_teams ?? []).flatMap((team) => team.slug ? [{ type: "team" as const, name: team.slug }] : []),
   ];
+  const commitChecks = await getCommitCheckStatus(owner, repository, headSha);
   if (protection === null && rules.length === 0) return {
     pullRequest,
     protected: false,
@@ -387,12 +395,12 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
     requestedReviewers,
     requiredChecks: [],
     checks: [],
+    workflowCheckState: commitChecks.workflowState,
     complete: true,
     fetchedAt: new Date().toISOString(),
   };
   const reviewsResult = await listPages<any>(`${apiBaseUrl()}${repoPath}/pulls/${number}/reviews?per_page=100`, (page) => page);
   if (!reviewsResult.complete) throw new GitHubProviderError(reviewsResult.errorCode ?? "transient", "GitHub policy input fetch failed", undefined, reviewsResult.retryAt, reviewsResult.cursor ?? undefined);
-  const commitChecks = await getCommitCheckStatus(owner, repository, headSha);
   const reviewerPermissions = new Map(await Promise.all([...new Set(reviewsResult.items
     .filter((review: any) => ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(review.state?.toUpperCase()) && review.user?.login && review.user?.type !== "Bot")
     .map((review: any) => review.user.login as string))]
@@ -439,6 +447,7 @@ export async function getPullRequestPolicyInputs(owner: string, repository: stri
     requestedReviewers,
     requiredChecks,
     checks: commitChecks.checks,
+    workflowCheckState: commitChecks.workflowState,
     complete: unsupported.length === 0,
     ...(unsupported.length ? { incompleteReason: unsupported.join(",") } : {}),
     fetchedAt: new Date().toISOString(),

@@ -156,6 +156,7 @@ test("fetches paginated policy inputs and marks unsupported protection incomplet
         { context: "build", appId: 7, state: "success", updatedAt: "2026-08-04T11:00:00Z" },
         { context: "legacy-2", appId: null, state: "success", updatedAt: "2026-08-04T12:00:00Z" },
       ]),
+      workflowCheckState: "none",
       complete: false,
       incompleteReason: "code_owner_reviews_unsupported",
     });
@@ -185,6 +186,14 @@ test("treats a plan-restricted branch-protection 403 as no protection configured
       outgoing.end(JSON.stringify({ message: "Upgrade to GitHub Pro or make this repository public to enable this feature." }));
       return;
     }
+    if (url.includes("/check-runs")) {
+      outgoing.end(JSON.stringify({ check_runs: [{ name: "build", app: { slug: "github-actions" }, status: "completed", conclusion: "success", completed_at: "2026-08-04T11:00:00Z" }] }));
+      return;
+    }
+    if (url.includes("/commits/head-sha/status")) {
+      outgoing.end(JSON.stringify({ statuses: [] }));
+      return;
+    }
     outgoing.statusCode = 403;
     outgoing.end(JSON.stringify({ message: "Resource not accessible by integration" }));
   }, async () => {
@@ -194,6 +203,7 @@ test("treats a plan-restricted branch-protection 403 as no protection configured
       reviews: [],
       requestedReviewers: [{ type: "user", name: "bob" }, { type: "team", name: "platform" }],
       requiredChecks: [],
+      workflowCheckState: "success",
       checks: [],
       complete: true,
     });
@@ -201,6 +211,8 @@ test("treats a plan-restricted branch-protection 403 as no protection configured
   expect(urls).toEqual([
     "/repos/acme/widgets/pulls/42",
     "/repos/acme/widgets/branches/main/protection",
+    "/repos/acme/widgets/commits/head-sha/check-runs?per_page=100",
+    "/repos/acme/widgets/commits/head-sha/status?per_page=100",
   ]);
 });
 
@@ -255,6 +267,14 @@ test("surfaces the failing endpoint when reviews fetch returns 403", async () =>
     if (url.includes("/pulls/42/reviews")) {
       outgoing.statusCode = 403;
       outgoing.end("Resource not accessible by integration");
+      return;
+    }
+    if (url.includes("/check-runs")) {
+      outgoing.end(JSON.stringify({ check_runs: [] }));
+      return;
+    }
+    if (url.includes("/commits/head-sha/status")) {
+      outgoing.end(JSON.stringify({ statuses: [] }));
       return;
     }
     outgoing.statusCode = 404;
@@ -596,6 +616,74 @@ test("getCommitCheckStatus treats skipped and neutral checks as successful", asy
     const result = await getCommitCheckStatus("acme", "widgets", "a".repeat(40));
     expect(result.overallState).toBe("success");
     expect(result.checks.map((check) => check.state)).toEqual(["success", "success"]);
+  });
+});
+
+test("getCommitCheckStatus reports workflowState=none when no check-runs come from the github-actions app", async () => {
+  await withServer((incoming, outgoing) => {
+    outgoing.setHeader("content-type", "application/json");
+    if (incoming.url?.includes("/check-runs")) {
+      outgoing.end(JSON.stringify({ check_runs: [
+        { name: "codeql", app: { slug: "github-code-scanning" }, status: "completed", conclusion: "success", completed_at: "2026-08-04T11:00:00Z" },
+      ] }));
+      return;
+    }
+    outgoing.end(JSON.stringify({ statuses: [] }));
+  }, async () => {
+    const result = await getCommitCheckStatus("acme", "widgets", "a".repeat(40));
+    expect(result.workflowState).toBe("none");
+  });
+});
+
+test("getCommitCheckStatus reports workflowState=in_progress when a github-actions run is queued or running and none have failed", async () => {
+  await withServer((incoming, outgoing) => {
+    outgoing.setHeader("content-type", "application/json");
+    if (incoming.url?.includes("/check-runs")) {
+      outgoing.end(JSON.stringify({ check_runs: [
+        { name: "build", app: { slug: "github-actions" }, status: "in_progress", conclusion: null, started_at: "2026-08-04T11:00:00Z" },
+        { name: "lint", app: { slug: "github-actions" }, status: "queued", conclusion: null, created_at: "2026-08-04T11:00:00Z" },
+      ] }));
+      return;
+    }
+    outgoing.end(JSON.stringify({ statuses: [] }));
+  }, async () => {
+    const result = await getCommitCheckStatus("acme", "widgets", "a".repeat(40));
+    expect(result.workflowState).toBe("in_progress");
+  });
+});
+
+test("getCommitCheckStatus reports workflowState=success when all github-actions runs completed successfully, even if unrelated non-Actions checks failed", async () => {
+  await withServer((incoming, outgoing) => {
+    outgoing.setHeader("content-type", "application/json");
+    if (incoming.url?.includes("/check-runs")) {
+      outgoing.end(JSON.stringify({ check_runs: [
+        { name: "build", app: { slug: "github-actions" }, status: "completed", conclusion: "success", completed_at: "2026-08-04T11:00:00Z" },
+        { name: "codeql", app: { slug: "github-code-scanning" }, status: "completed", conclusion: "failure", completed_at: "2026-08-04T11:00:00Z" },
+      ] }));
+      return;
+    }
+    outgoing.end(JSON.stringify({ statuses: [] }));
+  }, async () => {
+    const result = await getCommitCheckStatus("acme", "widgets", "a".repeat(40));
+    expect(result.workflowState).toBe("success");
+    expect(result.overallState).toBe("failure");
+  });
+});
+
+test("getCommitCheckStatus reports workflowState=failure when any github-actions run failed, even if others succeeded", async () => {
+  await withServer((incoming, outgoing) => {
+    outgoing.setHeader("content-type", "application/json");
+    if (incoming.url?.includes("/check-runs")) {
+      outgoing.end(JSON.stringify({ check_runs: [
+        { name: "build", app: { slug: "github-actions" }, status: "completed", conclusion: "success", completed_at: "2026-08-04T11:00:00Z" },
+        { name: "lint", app: { slug: "github-actions" }, status: "completed", conclusion: "failure", completed_at: "2026-08-04T11:05:00Z" },
+      ] }));
+      return;
+    }
+    outgoing.end(JSON.stringify({ statuses: [] }));
+  }, async () => {
+    const result = await getCommitCheckStatus("acme", "widgets", "a".repeat(40));
+    expect(result.workflowState).toBe("failure");
   });
 });
 

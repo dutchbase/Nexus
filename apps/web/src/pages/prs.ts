@@ -242,6 +242,12 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
         error: { cls: "danger", label: "Error" },
       } as Record<string, { cls: string; label: string }>)[item.latest_ai_review_status ?? ""]
         ?? { cls: "muted", label: item.latest_ai_review_status ? escapeHtml(item.latest_ai_review_status) : "No review yet" };
+      const workflowBadge = ({
+        in_progress: { cls: "warn", label: "In progress" },
+        success: { cls: "ok", label: "Passed" },
+        failure: { cls: "danger", label: "Failed" },
+      } as Record<string, { cls: string; label: string }>)[item.workflow_check_state]
+        ?? { cls: "muted", label: "Not started" };
       const href = `/admin/pull-requests/${escapeHtml(item.project_slug)}/${escapeHtml(item.number)}`;
       // PRD G10-F03: pull_requests is a cache of GitHub state kept fresh by a
       // sync job; if that job stalls, the row otherwise looks exactly like a
@@ -254,7 +260,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
       const openActions = item.state === "open"
         ? `<button class="button" type="button" data-pr-row-action="ai-review" data-pr-row-id="${item.id}" aria-label="Start AI review for pull request #${escapeHtml(item.number)}" title="Start AI review">▶</button><button class="button" type="button" data-pr-row-action="merge" data-pr-row-id="${item.id}" aria-label="Approve and merge pull request #${escapeHtml(item.number)}" title="Approve &amp; merge">✓</button>`
         : "";
-      return `<div class="ticket-row prs-row" data-pr-id="${item.id}" data-pr-state="${escapeHtml(item.state)}" data-pr-draft="${item.is_draft ? "1" : "0"}"><a class="pr-row-link" href="${href}" aria-label="Open pull request #${escapeHtml(item.number)}"></a>${selectCell}<span class="mono" data-label="PR">#${escapeHtml(item.number)}</span><strong>${escapeHtml(item.title)}</strong><span data-label="Project">${escapeHtml(item.project_name)}</span><span class="status ${stateBadge.cls}" data-label="Merge status">${escapeHtml(stateBadge.label)}</span><span class="status ${aiBadge.cls}" data-label="AI status">${escapeHtml(aiBadge.label)}</span><span data-label="Conflicts">${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}${freshness.stale ? `<span class="status warn">Stale · ${escapeHtml(freshness.label)}</span>` : ""}</span><time data-label="Created">${item.created_at_provider ? escapeHtml(new Date(item.created_at_provider).toLocaleDateString("nl-NL")) : "—"}</time><div class="pr-actions"><a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer" aria-label="Open pull request #${escapeHtml(item.number)} on GitHub" title="Open on GitHub">↗</a>${openActions}</div></div>`;
+      return `<div class="ticket-row prs-row" data-pr-id="${item.id}" data-pr-state="${escapeHtml(item.state)}" data-pr-draft="${item.is_draft ? "1" : "0"}"><a class="pr-row-link" href="${href}" aria-label="Open pull request #${escapeHtml(item.number)}"></a>${selectCell}<span class="mono" data-label="PR">#${escapeHtml(item.number)}</span><strong>${escapeHtml(item.title)}</strong><span data-label="Project">${escapeHtml(item.project_name)}</span><span class="status ${stateBadge.cls}" data-label="Merge status">${escapeHtml(stateBadge.label)}</span><span class="status ${aiBadge.cls}" data-label="AI status">${escapeHtml(aiBadge.label)}</span><span class="status ${workflowBadge.cls}" data-label="Workflows">${escapeHtml(workflowBadge.label)}</span><span data-label="Conflicts">${item.merge_conflicts ? `<span class="status danger">Conflicts</span>` : ""}${freshness.stale ? `<span class="status warn">Stale · ${escapeHtml(freshness.label)}</span>` : ""}</span><time data-label="Created">${item.created_at_provider ? escapeHtml(new Date(item.created_at_provider).toLocaleDateString("nl-NL")) : "—"}</time><div class="pr-actions"><a class="button" href="${escapeHtml(item.url)}" target="_blank" rel="noreferrer" aria-label="Open pull request #${escapeHtml(item.number)} on GitHub" title="Open on GitHub">↗</a>${openActions}</div></div>`;
     }).join("");
     const tabs = [["all", "All"], ["open", "Open"], ["draft", "Draft"], ["merged", "Merged"], ["closed", "Closed"]] as const;
     const withTab = (value: string) => {
@@ -289,7 +295,7 @@ export async function render(url: URL, _session: Session, _metrics: Record<strin
           <button class="button primary" type="button" data-pr-bulk="merge">Approve &amp; merge</button>
           <button class="button" type="button" data-pr-clear-selection>Clear</button>
         </div>
-        <div class="list-head prs-head"><span class="pr-select"><input type="checkbox" data-pr-check-all aria-label="Select all pull requests"></span><span>PR</span><span>Title</span><span>Project</span><span>Merge Status</span><span>AI Status</span><span>Conflicts</span><span>Created</span><span>Actions</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No pull requests match these filters.</div>`}</section>
+        <div class="list-head prs-head"><span class="pr-select"><input type="checkbox" data-pr-check-all aria-label="Select all pull requests"></span><span>PR</span><span>Title</span><span>Project</span><span>Merge Status</span><span>AI Status</span><span>Workflows</span><span>Conflicts</span><span>Created</span><span>Actions</span></div>${rows || `<div style="padding:48px 20px;text-align:center;color:var(--text3);font-size:13.5px">No pull requests match these filters.</div>`}</section>
       <dialog data-pr-merge-preflight-dialog>
         <h3>Approve &amp; merge selected PRs</h3>
         <div data-pr-preflight-summary></div>

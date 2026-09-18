@@ -123,13 +123,15 @@ export async function syncPullRequest(
          current_policy_snapshot_id=$16,head_sha=$17,policy_complete=$18,policy_stale=false,
          policy_synced_at=$19,policy_last_attempted_at=$19,policy_error_code=NULL,policy_retry_after=NULL,
          requested_reviewers=$20::jsonb,policy_sync_token=NULL,
+         workflow_check_state=$22,
          last_synced_at=now(),updated_at=now()
        WHERE id=$1 AND policy_sync_token=$21::uuid`,
       [stored.id, remote.state, evaluated.reviewState, evaluated.checkState, false,
        remote.title, remote.user?.login ?? null, remote.head.ref, remote.base.ref, remote.updated_at,
        remote.merged_at ?? null, remote.closed_at ?? null, remote.merge_commit_sha ?? null,
        remote.body ?? null, remote.mergeable_state === "dirty", snapshot.id, remote.head.sha,
-       inputs.complete, inputs.fetchedAt, JSON.stringify(inputs.requestedReviewers), syncToken],
+       inputs.complete, inputs.fetchedAt, JSON.stringify(inputs.requestedReviewers), syncToken,
+       inputs.workflowCheckState],
     );
     if (updated.rowCount !== 1) throw new Error("pull-request sync superseded");
   });
