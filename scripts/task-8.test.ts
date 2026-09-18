@@ -171,11 +171,21 @@ describe("health-gated release deployment", () => {
     const result = await deploy();
 
     const installed = result.commands.indexOf("pnpm install --frozen-lockfile");
-    const verified = result.commands.indexOf("pnpm exec vitest run --config vitest.config.ts --reporter=verbose --no-file-parallelism --testTimeout=15000 test_db=unset restore_db=unset");
+    // The suite runs as 24 shards (each its own "pnpm exec vitest ... --shard=N/24"
+    // invocation) to bound memory per process — see deploy.sh's comment on the
+    // shard loop. Assert all 24 ran, in order, without pinning the exact command
+    // string of each (which would make this test as brittle as the shard count).
+    // result.commands is the raw newline-joined command log, not an array.
+    const shardCommandLines = result.commands.split("\n").filter((line: string) =>
+      line.startsWith("pnpm exec vitest run --config vitest.config.ts --reporter=verbose --no-file-parallelism --testTimeout=15000 --shard=")
+      && line.endsWith("test_db=unset restore_db=unset"));
+    expect(shardCommandLines).toEqual(Array.from({ length: 24 }, (_, index) =>
+      `pnpm exec vitest run --config vitest.config.ts --reporter=verbose --no-file-parallelism --testTimeout=15000 --shard=${index + 1}/24 test_db=unset restore_db=unset`));
+    const verified = result.commands.indexOf(shardCommandLines[0]);
     const verificationEvent = result.commands.indexOf("--set=stage=local_verification_passed");
     const migrated = result.commands.indexOf("pnpm --filter database migrate");
     expect(verified).toBeGreaterThan(installed);
-    expect(verificationEvent).toBeGreaterThan(verified);
+    expect(verificationEvent).toBeGreaterThan(result.commands.lastIndexOf(shardCommandLines[23]));
     expect(migrated).toBeGreaterThan(verificationEvent);
   });
 
