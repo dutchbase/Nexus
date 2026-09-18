@@ -31,6 +31,7 @@ const policyInputs = {
   requestedReviewers: [],
   requiredChecks: [],
   checks: [],
+  workflowCheckState: "none",
   complete: true,
   fetchedAt: "2026-08-04T12:00:00Z",
 };
@@ -62,6 +63,7 @@ test("syncs evaluated policy truth and points to its immutable snapshot atomical
   github.getPullRequestPolicyInputs.mockResolvedValue({
     ...policyInputs,
     requestedReviewers: [{ type: "team", name: "platform" }],
+    workflowCheckState: "success",
   });
 
   await syncPullRequest("pr-id");
@@ -70,8 +72,9 @@ test("syncs evaluated policy truth and points to its immutable snapshot atomical
   expect(database.pool.query.mock.calls[2][0]).toContain("INSERT INTO pull_request_policy_snapshots");
   expect(database.pool.query.mock.calls[3][0]).toContain("current_policy_snapshot_id");
   expect(database.pool.query.mock.calls[3][0]).toContain("requested_reviewers");
+  expect(database.pool.query.mock.calls[3][0]).toContain("workflow_check_state");
   expect(database.pool.query.mock.calls[3][1]).toContain('[{"type":"team","name":"platform"}]');
-  expect(database.pool.query.mock.calls[3][1]).toEqual(expect.arrayContaining(["snapshot-id", "not_required", "not_required", "head-sha"]));
+  expect(database.pool.query.mock.calls[3][1]).toEqual(expect.arrayContaining(["snapshot-id", "not_required", "not_required", "head-sha", "success"]));
 });
 
 test("retains the last snapshot and marks policy stale on a rate limit", async () => {
