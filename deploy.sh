@@ -200,6 +200,16 @@ env -u DCC_TEST_DATABASE_URL -u DCC_TEST_RESTORE_DATABASE_URL pnpm exec tsc --no
 # against that exact release checkout (.deploy-releases/a8eab24...): all 24
 # pass, worst shard 95 tests, comfortably under the ~230-test crash point
 # even if heavy files cluster.
+#
+# 2026-09-18 addendum: every one of these OOM crashes also wrote a multi-GB
+# core dump via apport (found 4 of them totaling 28GB in /var/lib/apport/coredump,
+# which had filled the host's disk to 100% — "No space left on device" showed
+# up in deploy.sh's own log). A full disk can itself trigger allocation
+# failures that look exactly like a V8 OOM, so disk exhaustion may have been
+# compounding or even causing some of these "OOM" failures, not just the
+# suite's real memory growth. ulimit -c 0 stops this verify step from ever
+# writing a core dump again, regardless of root cause.
+ulimit -c 0
 for shard in $(seq 1 24); do
   env -u DCC_TEST_DATABASE_URL -u DCC_TEST_RESTORE_DATABASE_URL NODE_OPTIONS='--max-old-space-size=3072' pnpm exec vitest run --config vitest.config.ts --reporter=verbose --no-file-parallelism --testTimeout=15000 --shard="$shard/24"
 done
