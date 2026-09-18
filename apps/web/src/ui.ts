@@ -1167,6 +1167,20 @@ export function adminPage(path: string, title: string, body: string, counts: Rec
           }finally{button.disabled=false}
         });
         preflightDialog?.querySelector("[data-close-dialog]")?.addEventListener("click",()=>preflightDialog.close());
+        document.addEventListener("click",async(event)=>{
+          const button=event.target.closest?.("[data-pr-row-action]");if(!button||button.disabled)return;
+          const action=button.dataset.prRowAction,id=button.dataset.prRowId;
+          if(action==="merge"&&!confirm("Approve and merge this pull request on GitHub? This cannot be undone from here."))return;
+          button.disabled=true;
+          try{
+            const response=await fetch("/api/admin/pull-requests/bulk",{method:"POST",headers:{"content-type":"application/json","x-csrf-token":csrf},body:JSON.stringify({action,ids:[id]})});
+            const result=await response.json();
+            if(!response.ok){alert(result.error);return}
+            const [item]=result.results;
+            if(item.outcome==="queued")location.reload();
+            else alert(item.reason||"Could not complete the action.");
+          }finally{button.disabled=false}
+        });
       `:""}
       ${/^\/admin\/pull-requests\/[^/]+(\/\d+)?$/.test(path)?`
         const csrf=sessionStorage.getItem("dccCsrf")||"";
