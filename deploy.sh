@@ -185,12 +185,19 @@ cd "$RELEASE"
 pnpm install --frozen-lockfile
 record_event "dependencies_installed"
 env -u DCC_TEST_DATABASE_URL -u DCC_TEST_RESTORE_DATABASE_URL pnpm exec tsc --noEmit
-# --no-file-parallelism runs the whole suite (1000+ tests) in one process, so
-# V8's default old-space ceiling (~4GB) can OOM it outright as the suite
-# grows — seen 2026-09-11 blocking every deploy attempt, and again on
-# 2026-09-18 after the suite grew further and hit the 8192MB ceiling set
-# that time. Raise it again with more headroom; system RAM here is >20GB.
-env -u DCC_TEST_DATABASE_URL -u DCC_TEST_RESTORE_DATABASE_URL NODE_OPTIONS='--max-old-space-size=14336' pnpm exec vitest run --config vitest.config.ts --reporter=verbose --no-file-parallelism --testTimeout=15000
+# --no-file-parallelism runs the whole suite (187 files, ~1300 tests) in one
+# long-lived process, and retained memory (module registries, mocks, pending
+# handles) climbs across files without being released between them — verified
+# 2026-09-18 in a clean `git worktree add --detach` checkout (so this is real
+# growth in the tracked suite, not stray files): it reliably OOMs around
+# ~230/1299 tests at 8.2GB RSS, reproducing at both an 8192MB and a 14336MB
+# --max-old-space-size ceiling, so raising the ceiling further just delays
+# the same crash rather than fixing it. Sharding into fresh processes instead
+# bounds memory per process to what one shard needs; verified shard 1/8 alone
+# completes cleanly in ~54s at a 4096MB ceiling in the same clean worktree.
+for shard in 1 2 3 4 5 6 7 8; do
+  env -u DCC_TEST_DATABASE_URL -u DCC_TEST_RESTORE_DATABASE_URL NODE_OPTIONS='--max-old-space-size=4096' pnpm exec vitest run --config vitest.config.ts --reporter=verbose --no-file-parallelism --testTimeout=15000 --shard="$shard/8"
+done
 record_event "local_verification_passed"
 pnpm --filter database migrate
 record_event "migrated"
