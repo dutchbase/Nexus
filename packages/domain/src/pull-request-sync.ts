@@ -92,11 +92,15 @@ export async function syncPullRequest(
   } catch (error) {
     if (error instanceof GitHubProviderError) {
       await assertOwned();
+      // ponytail: errors without a provider-supplied retryAt (e.g. 404 on a
+      // misconfigured project) left policy_retry_after NULL, so the row was
+      // re-selected and re-failed every maintenance pass with no backoff.
+      const retryAt = error.retryAt ?? new Date(Date.now() + 5 * 60 * 1000).toISOString();
       await pool.query(
         `UPDATE pull_requests SET policy_stale=true,policy_sync_token=NULL,
          policy_error_code=$2,policy_retry_after=$3,updated_at=now()
          WHERE id=$1 AND policy_sync_token=$4::uuid`,
-        [stored.id, error.code, error.retryAt ?? null, syncToken],
+        [stored.id, error.code, retryAt, syncToken],
       );
     }
     throw error;

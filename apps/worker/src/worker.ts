@@ -1841,6 +1841,12 @@ async function sweepOrphanedManagedWorktrees() {
       await pool.query("UPDATE agent_runs SET working_directory=NULL WHERE working_directory=$1", [dir]);
     } catch (error) {
       console.error(`worktree sweep failed for ${dir}: ${error instanceof Error ? error.message : error}`);
+      // ponytail: a path outside the current release's dataRoot belongs to an
+      // older deploy and can never become reachable again — deregister it too,
+      // or this row gets re-logged every pass forever across every future deploy.
+      if (error instanceof Error && error.message.includes("escapes controlled root")) {
+        await pool.query("UPDATE agent_runs SET working_directory=NULL WHERE working_directory=$1", [dir]);
+      }
     }
   }
 }
