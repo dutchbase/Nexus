@@ -175,7 +175,11 @@ function inlineMarkdown(value: string) {
 }
 
 export function renderMarkdown(content: string) {
-  const lines = content.split("\n"), output: string[] = [];
+  // CRLF content left a trailing \r on every line, which made the list-item
+  // full-line regex (using $) fail right after the same-line prefix regex
+  // had already matched — the loop then broke without ever advancing index,
+  // spinning forever on that one line. Normalize line endings first.
+  const lines = content.split(/\r\n|\r|\n/), output: string[] = [];
   for (let index = 0; index < lines.length;) {
     const line = lines[index];
     const fence = /^```([\w-]*)\s*$/.exec(line);

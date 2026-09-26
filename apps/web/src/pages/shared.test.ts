@@ -59,6 +59,10 @@ describe("review formatting", () => {
     expect(renderMarkdown("    - starts deep\n        - jumps deeper\n- root")).toBe("<ul><li>starts deep<ul><li>jumps deeper</li></ul></li><li>root</li></ul>");
   });
 
+  it("does not hang on CRLF line endings in a list (previously an infinite loop)", () => {
+    expect(renderMarkdown("# Title\r\n- first\r\n- second\r\n")).toBe("<h1>Title</h1><ul><li>first</li><li>second</li></ul>");
+  });
+
   it("bounds expensive diff alignment and returns a truthful fallback", () => {
     const before = Array.from({ length: 1001 }, (_, index) => `old-${index}`).join("\n");
     const after = Array.from({ length: 1001 }, (_, index) => `new-${index}`).join("\n");
